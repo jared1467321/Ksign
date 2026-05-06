@@ -98,7 +98,7 @@ extension Storage {
             "https://community-apps.sidestore.io/sidecommunity.json",
             "https://xitrix.github.io/iTorrent/AltStore.json",
 			"https://repository.apptesters.org",
-            "https://raw.githubusercontent.com/LiveContainer/LiveContainer/refs/heads/main/apps.json",
+            "https://github.com/LiveContainer/LiveContainer/releases/download/1.0/apps.json",
 			"https://ipa.cypwn.xyz/cypwn.json",
             "https://alt.crystall1ne.dev"
 		]

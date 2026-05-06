@@ -704,6 +704,17 @@
         }
       }
     },
+    "Add and manage certificates used for signing applications." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm và quản lý chứng chỉ ký ứng dụng."
+          }
+        }
+      }
+    },
     "Add Download" : {
       "localizations" : {
         "ar" : {
