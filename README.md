@@ -22,11 +22,11 @@ Go to [Releases](https://github.com/Nyasami/Ksign-public/releases) and download 
 
 ## Star History
 
-<a href="https://www.star-history.com/#Nyasami/Ksign-public&Timeline">
+<a href="https://www.star-history.com/?repos=nyasami%2Fksign&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Nyasami/Ksign-public&type=Timeline&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Nyasami/Ksign-public&type=Timeline" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Nyasami/Ksign-public&type=Timeline" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nyasami/ksign&type=date&theme=dark&legend=top-left&sealed_token=qF8r8F35jlacPKoDFdro6gYpDDUbVGloo-UPsBBqrAufefIWUZ7MY_TmH4j_UB2ailJBO_OYzkYV-jye9GlGJR-PfMID-XHRW52SHl--bD976zJlaiDwOA" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nyasami/ksign&type=date&legend=top-left&sealed_token=qF8r8F35jlacPKoDFdro6gYpDDUbVGloo-UPsBBqrAufefIWUZ7MY_TmH4j_UB2ailJBO_OYzkYV-jye9GlGJR-PfMID-XHRW52SHl--bD976zJlaiDwOA" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nyasami/ksign&type=date&legend=top-left&sealed_token=qF8r8F35jlacPKoDFdro6gYpDDUbVGloo-UPsBBqrAufefIWUZ7MY_TmH4j_UB2ailJBO_OYzkYV-jye9GlGJR-PfMID-XHRW52SHl--bD976zJlaiDwOA" />
  </picture>
 </a>
 
