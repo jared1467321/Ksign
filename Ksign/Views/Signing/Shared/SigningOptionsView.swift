@@ -167,9 +167,30 @@ struct SigningOptionsView: View {
                 isOn: $options.experiment_supportLiquidGlass,
                 temporaryValue: temporaryOptions?.experiment_supportLiquidGlass
             )
+			.onChange(of: options.experiment_supportLiquidGlass) { newValue in
+				if newValue {
+					options.experiment_disableLiquidGlass = false
+				}
+			}
         } footer: {
             Text(.localized("This option force converts apps to try to use the new liquid glass redesign iOS 26 introduced, this may not work for all applications due to differing frameworks."))
         }
+
+		Section {
+			_toggle(
+				.localized("Disable Liquid Glass"),
+				systemImage: "18.circle",
+				isOn: $options.experiment_disableLiquidGlass,
+				temporaryValue: temporaryOptions?.experiment_disableLiquidGlass
+			)
+			.onChange(of: options.experiment_disableLiquidGlass) { newValue in
+				if newValue {
+					options.experiment_supportLiquidGlass = false
+				}
+			}
+		} footer: {
+			Text(.localized("This option try to disable liquid glass on iOS 26 if the app support it (might not work for all apps)."))
+		}
     }
     
     @ViewBuilder

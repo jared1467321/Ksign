@@ -188,6 +188,7 @@ extension SigningHandler {
 		if options.removeSupportedDevices { infoDictionary.removeObject(forKey: "UISupportedDevices") }
 		if options.removeURLScheme { infoDictionary.removeObject(forKey: "CFBundleURLTypes") }
 		if options.experiment_supportLiquidGlass {infoDictionary.removeObject(forKey: "UIDesignRequiresCompatibility") }
+		if options.experiment_disableLiquidGlass { infoDictionary.setObject(true, forKey: "UIDesignRequiresCompatibility" as NSCopying) }	
 		
 		// these are for picker arrays, we check if the default option is named "Default" before applying
 		if options.appAppearance != Options.defaultOptions.appAppearance {
