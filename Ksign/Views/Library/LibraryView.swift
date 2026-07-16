@@ -152,8 +152,17 @@ struct LibraryView: View {
                 }
             }
 			.toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     EditButton()
+                    if _isEditMode.isEditing {
+                        Button {
+                            _toggleSelectAll()
+                        } label: {
+                            Text(_isAllSelectedInCurrentTab
+                                 ? String.localized("Deselect All")
+                                 : String.localized("Select All"))
+                        }
+                    }
                 }
                 if _isEditMode.isEditing {
 					ToolbarItemGroup(placement: .topBarTrailing) {
@@ -358,6 +367,34 @@ extension LibraryView {
 
 // MARK: - Extension: View (Edit Mode Functions)
 extension LibraryView {
+	// UUIDs of the apps currently visible in the active tab (respects the
+	// search filter, so "Select All" only grabs what the user can see).
+	private var _currentTabUUIDs: [String] {
+		if _selectedTab == 0 {
+			return _filteredImportedApps.compactMap { $0.uuid }
+		} else {
+			return _filteredSignedApps.compactMap { $0.uuid }
+		}
+	}
+	
+	private var _isAllSelectedInCurrentTab: Bool {
+		let uuids = _currentTabUUIDs
+		return !uuids.isEmpty && uuids.allSatisfy { _selectedApps.contains($0) }
+	}
+	
+	private func _toggleSelectAll() {
+		let uuids = _currentTabUUIDs
+		guard !uuids.isEmpty else { return }
+		
+		withAnimation(.spring(response: 0.4, dampingFraction: 0.8, blendDuration: 0)) {
+			if _isAllSelectedInCurrentTab {
+				uuids.forEach { _selectedApps.remove($0) }
+			} else {
+				_selectedApps.formUnion(uuids)
+			}
+		}
+	}
+	
 	private func _bulkDeleteSelectedApps() {
 		let appsToDelete = _selectedApps
 		
