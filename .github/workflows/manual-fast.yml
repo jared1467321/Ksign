@@ -1,0 +1,69 @@
+name: Manual Build (cached)
+
+# Manual-only: click "Run workflow" in the Actions tab. No automatic builds.
+# This version caches Swift packages and build output between runs, so only
+# your changed source files get recompiled instead of the whole project
+# (including heavy dependencies like Vapor / SwiftNIO) every time.
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Optional note for this build (shows up in the run title)"
+        required: false
+        default: ""
+      clean:
+        description: "Ignore caches and build from scratch"
+        type: boolean
+        required: false
+        default: false
+
+run-name: Manual Build ${{ inputs.note && format('— {0}', inputs.note) || '' }}
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # Zsign and IDeviceKit are submodules; the build fails without them.
+          submodules: recursive
+
+      # Resolved Swift Package sources. Keyed on Package.resolved so it only
+      # changes when the dependency versions change.
+      - name: Cache Swift packages
+        if: ${{ inputs.clean != true }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('Ksign.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      # Compiled build output (this is the big time saver — it holds the
+      # compiled dependencies and object files). Saved fresh each run and
+      # restored from the most recent one, so xcodebuild can build
+      # incrementally instead of from scratch.
+      - name: Cache DerivedData
+        if: ${{ inputs.clean != true }}
+        uses: actions/cache@v4
+        with:
+          path: DerivedData
+          key: deriveddata-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-
+
+      - name: Build
+        run: |
+          DERIVED_DATA="$PWD/DerivedData" make
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ksign-ipa
+          path: packages/Ksign.ipa
+          if-no-files-found: error
