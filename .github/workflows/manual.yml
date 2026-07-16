@@ -1,0 +1,37 @@
+name: Manual Build
+
+# Only runs when you click "Run workflow" in the Actions tab.
+# There is deliberately no `push:` trigger, so nothing builds automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Optional note for this build (shows up in the run title)"
+        required: false
+        default: ""
+
+run-name: Manual Build ${{ inputs.note && format('— {0}', inputs.note) || '' }}
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # Submodules are required: Zsign and IDeviceKit live as submodules
+          # and the build fails without them.
+          submodules: recursive
+
+      - name: Build
+        run: |
+          make
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ksign-ipa
+          path: packages/Ksign.ipa
+          if-no-files-found: error
