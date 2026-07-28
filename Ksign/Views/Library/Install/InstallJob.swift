@@ -353,6 +353,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
+		// The phase turning over is an event, and this is where it lands. The
+		// Dynamic Island used to sample it from the session's 0.4s tick instead,
+		// which pushed a system update whether or not anything had changed.
+		InstallSession.shared.jobPhaseChanged()
+
 		if case .ready = newStatus {
 			switch batchRole {
 			case .none:

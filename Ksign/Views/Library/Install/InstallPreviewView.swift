@@ -52,6 +52,14 @@ struct InstallPreviewView: View {
 			SafariRepresentableView(url: installer.pageEndpoint).ignoresSafeArea()
 		}
 		.onReceive(viewModel.$status) { newStatus in
+			// A single install reported nothing at all before this: the pill
+			// named "Install" and showed no bar and no phase, because every
+			// `report` call in the app was for `.bulkInstalls`. One app is still
+			// a batch of one.
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.report(.singleInstall, detail: viewModel.statusLabel)
+			}
+
 			if case .ready = newStatus {
 				if _serverMethod == 0 {
 					UIApplication.shared.open(URL(string: installer.iTunesLink)!)
@@ -78,6 +86,12 @@ struct InstallPreviewView: View {
             case .completed, .broken(_):
                 progressTask?.cancel()
                 progressTask = nil
+                if #available(iOS 16.2, *) {
+                    if case .completed = newStatus {
+                        KeepAliveActivityController.shared.report(.singleInstall, completed: 1, total: 1)
+                    }
+                    KeepAliveActivityController.shared.report(.singleInstall, detail: nil)
+                }
                 BackgroundAudioManager.shared.release(.singleInstall)
                 _cleanupArchive()
             default:
@@ -87,10 +101,21 @@ struct InstallPreviewView: View {
 		.onAppear(perform: _install)
 		.onAppear {
 			BackgroundAudioManager.shared.claim(.singleInstall)
+
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.report(.singleInstall, completed: 0, total: 1)
+			}
 		}
 		.onDisappear {
             progressTask?.cancel()
             progressTask = nil
+
+			// Withdraw rather than leave "1 of 1" sitting under whatever owns
+			// the keep-alive next.
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.clearReport(.singleInstall)
+			}
+
 			BackgroundAudioManager.shared.release(.singleInstall)
 			// Covers dismissal before a terminal status ever arrives.
 			_cleanupArchive()
