@@ -271,6 +271,12 @@ extension BulkSigningView {
 			// Seed the Dynamic Island bar at 0 of N before the first app, so
 			// it appears full-width-empty rather than popping into existence
 			// once the first app lands.
+			//
+			// This lands *before* anything claims the keep-alive, so if a pill
+			// from some earlier job happens to end in the gap the controller
+			// wipes its reports and this figure goes with it. Re-asserted at the
+			// top of every iteration below, which costs nothing — an identical
+			// report is dropped before it reaches the system.
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.report(.signing, completed: 0, total: configs.count)
 			}
@@ -282,6 +288,10 @@ extension BulkSigningView {
 			// state and produce a malformed code signature — the app
 			// installs but panics the device on launch.
 			for config in configs {
+				if #available(iOS 16.2, *) {
+					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
+				}
+
 				do {
 					try await _signOne(config, certificate: certificate)
 					successCount += 1
@@ -303,6 +313,16 @@ extension BulkSigningView {
 				// sub-progress within a single app.
 				if #available(iOS 16.2, *) {
 					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
+				}
+			}
+
+			// Withdraw the batch position now the batch is over. Left in place
+			// it outlives the work: `.signing` keeps a stale "36 of 36" for as
+			// long as the pill lives, and the next thing to sign a single app —
+			// which reports a phase but no count — inherits it.
+			if #available(iOS 16.2, *) {
+				await MainActor.run {
+					KeepAliveActivityController.shared.clearReport(.signing)
 				}
 			}
 
