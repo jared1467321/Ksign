@@ -236,6 +236,16 @@ final class InstallSession: ObservableObject {
 	}
 
 	func retry(_ job: InstallJob) {
+		// A batch that settled with failures still on screen has already handed
+		// the keep-alive back and cancelled the tick — see
+		// `_releaseIfNothingRunning`. Nothing else ever brings either of them
+		// back: `_startTicking` is only reached from `start(apps:)`. So a retry
+		// used to run with no background audio behind it (dying the moment the
+		// screen locked) and a progress bar that never moved again. Both are
+		// idempotent, so re-asserting them here is free on the common path.
+		BackgroundAudioManager.shared.claim(.bulkInstalls)
+		_startTicking()
+
 		guard _willBatch else {
 			// idevice / external server: re-prompt just this app.
 			job.retry()
@@ -383,6 +393,20 @@ final class InstallSession: ObservableObject {
 		// clears them when the next batch begins.
 		if #available(iOS 16.2, *) {
 			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
+
+			// …and then withdraw it, once the keep-alive's linger is over.
+			//
+			// Leaving the counters alone is right — "12 of 12" is what the pill
+			// shows while it winds down. But nothing was ever withdrawing this
+			// owner's *report*, and `start(apps:)` only clears it if another
+			// batch begins. Chain work the way the linger is designed for
+			// (download → import → sign → install) and a finished install's
+			// tally sat in the controller under the next job's name.
+			Task { @MainActor [weak self] in
+				try? await Task.sleep(nanoseconds: 6_000_000_000)
+				guard let self, self.jobs.isEmpty else { return }
+				KeepAliveActivityController.shared.clearReport(.bulkInstalls)
+			}
 		}
 	}
 
