@@ -222,12 +222,58 @@ final class KeepAliveActivityController {
 			return
 		}
 
-		// Nothing to say — don't spend a system update on it.
-		guard state != _lastState else { return }
-		_lastState = state
+		// Nothing to say — don't spend a system update on it. Compared against
+		// what's actually on screen *and* what's already queued to go, since
+		// `_lastState` is no longer written until delivery confirms.
+		guard state != _lastState, state != _pendingState else { return }
 
-		Task {
-			await activity.update(ActivityContent(state: state, staleDate: nil))
+		_pendingState = state
+		_drain()
+	}
+
+	// MARK: - Pushing
+
+	// The newest state waiting to go out. One slot, deliberately: if three
+	// states are produced while one update is in flight, only the last of them
+	// is worth sending.
+	private var _pendingState: KeepAliveAttributes.ContentState?
+
+	// Whether an `update()` is in flight. Only one at a time — `Task` is not
+	// FIFO, and two overlapping updates can land in the wrong order.
+	private var _pushInFlight = false
+
+	// Sends the pending state, then whatever arrived while it was sending.
+	//
+	// `_lastState` is recorded *after* `update()` returns rather than before it
+	// is called. Written up front, a dropped or reordered delivery left the
+	// controller believing the pill showed something it never showed — and
+	// because that record is what the dedupe compares against, nothing after it
+	// could ever correct the display.
+	private func _drain() {
+		guard !_pushInFlight,
+			  let activity = _activity,
+			  let next = _pendingState
+		else { return }
+
+		_pendingState = nil
+		_pushInFlight = true
+
+		Task { [weak self] in
+			await activity.update(ActivityContent(state: next, staleDate: nil))
+
+			await MainActor.run {
+				guard let self else { return }
+
+				self._pushInFlight = false
+				self._lastState = next
+
+				BackgroundAudioStatus.shared.record(
+					.island,
+					"pushed — \(next.countLabel ?? "no count") · \(next.summaryLine)"
+				)
+
+				self._drain()
+			}
 		}
 	}
 
@@ -309,7 +355,26 @@ final class KeepAliveActivityController {
 		// swallow reports that landed between publishes.
 		guard report != before else { return }
 
+		// Upstream half of the trace. One line per report that actually
+		// changed something, so a run can be read as: did seven counts arrive
+		// here, and did seven pushes leave `_drain`.
+		BackgroundAudioStatus.shared.record(.island, "report — \(key): \(Self._describe(report))")
+
 		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
+	}
+
+	private static func _describe(_ report: _Report) -> String {
+		var parts: [String] = []
+
+		if let completed = report.completed, let total = report.total {
+			parts.append("\(completed) of \(total)")
+		}
+
+		if let detail = report.detail, !detail.isEmpty {
+			parts.append(detail)
+		}
+
+		return parts.isEmpty ? "withdrawn" : parts.joined(separator: " · ")
 	}
 
 	// MARK: - Lifecycle
@@ -392,6 +457,7 @@ final class KeepAliveActivityController {
 		_lastOwners = []
 		_reports.removeAll()
 		_reportSeq.removeAll()
+		_pendingState = nil
 		_focusOwner = nil
 		_lastIsRunning = false
 		_lastOwnersInput = []
