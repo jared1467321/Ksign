@@ -314,6 +314,20 @@ final class InstallSession: ObservableObject {
 
 		isDrawerPresented = false
 
+		// Final tally, sent before the counters are zeroed below. The keep-alive
+		// lingers for a few seconds after the last release, and this is what it
+		// shows during that window — "12 of 12", the batch visibly finishing,
+		// rather than the bar vanishing one app short.
+		if #available(iOS 16.2, *), totalCount > 0 {
+			KeepAliveActivityController.shared.report(
+				.bulkInstalls,
+				completed: completedCount,
+				total: totalCount
+			)
+			KeepAliveActivityController.shared.report(.bulkInstalls, fraction: 1)
+			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
+		}
+
 		completedCount = 0
 		totalCount = 0
 		aggregateProgress = 0
@@ -425,13 +439,36 @@ final class InstallSession: ObservableObject {
 				BackgroundAudioManager.shared.ensureRunning()
 
 				// Apps finished out of apps queued, for the Dynamic Island bar.
-				// `aggregateProgress` is smoother but this is what the label
-				// next to the bar has to agree with.
+				//
+				// `completedCount` rather than `totalCount - jobs.count`: a row
+				// only leaves `jobs` 1.8 seconds after it finishes, so the
+				// derived version lagged a beat behind every install, and it
+				// counted failed rows — which stay on screen deliberately — as
+				// still in progress forever. `completedCount` is incremented
+				// the moment a job reaches `.completed`.
 				if #available(iOS 16.2, *), let session = self {
 					KeepAliveActivityController.shared.report(
 						.bulkInstalls,
-						completed: max(0, session.totalCount - session.jobs.count),
+						completed: session.completedCount,
 						total: session.totalCount
+					)
+
+					// The bar follows `aggregateProgress`, which already blends
+					// each job's `overallProgress` — recomputed a few lines up.
+					// The app count alone moves in whole steps, so a batch that
+					// spends most of its time inside one install looked frozen.
+					KeepAliveActivityController.shared.report(
+						.bulkInstalls,
+						fraction: session.totalCount > 0 ? session.aggregateProgress : nil
+					)
+
+					// The phase of whatever is actually running, using the same
+					// label the drawer shows: Packaging, Ready, Sending
+					// Manifest, Sending Payload, Installing.
+					let current = session.jobs.first { $0.phase == .running } ?? session.jobs.first
+					KeepAliveActivityController.shared.report(
+						.bulkInstalls,
+						detail: current?.viewModel.statusLabel
 					)
 				}
 
@@ -445,9 +482,11 @@ final class InstallSession: ObservableObject {
 		_tickTask?.cancel()
 		_tickTask = nil
 
-		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, completed: 0, total: nil)
-		}
+		// Deliberately does *not* withdraw the Dynamic Island counts. This runs
+		// the instant the last row retires, so clearing here meant the pill
+		// jumped from "11 of 12" straight to no bar and you never saw the batch
+		// land. `_finishIfIdle` publishes the final tally instead, and the
+		// controller drops it when the activity itself ends.
 	}
 
 	private func _recomputeProgress() {
