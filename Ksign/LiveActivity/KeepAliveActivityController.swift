@@ -61,6 +61,16 @@ final class KeepAliveActivityController {
 	// whatever the signer had just reported.
 	private var _counts: [String: (completed: Int, total: Int)] = [:]
 
+	// The most recent values handed to `sync`. Counts arrive on a completely
+	// different schedule from keep-alive publishes — an app finishing importing
+	// doesn't make the audio manager re-evaluate — so `report` needs to be able
+	// to rebuild and push the state by itself. Without these it could only
+	// write the number down and hope something else came along to send it,
+	// which is why the numbers froze once the app was backgrounded and
+	// evaluates got sparse.
+	private var _lastIsRunning = false
+	private var _lastOwnersInput: [String] = []
+
 	// A failed `request` usually means Live Activities are switched off for the
 	// app, which won't change mid-batch. Retrying at 2Hz would be pointless.
 	private var _nextAttempt = Date.distantPast
@@ -71,6 +81,12 @@ final class KeepAliveActivityController {
 	// MARK: - Driven by BackgroundAudioStatus
 
 	func sync(isRunning: Bool, owners: [String]) {
+		_lastIsRunning = isRunning
+		_lastOwnersInput = owners
+		_apply(isRunning: isRunning, owners: owners)
+	}
+
+	private func _apply(isRunning: Bool, owners: [String]) {
 		// Gate on the setting, so switching background audio off in Settings ›
 		// Features takes the pill with it rather than leaving one that reads
 		// "off" forever.
@@ -129,11 +145,23 @@ final class KeepAliveActivityController {
 	func report(_ owner: BackgroundAudioManager.Owner, completed: Int, total: Int?) {
 		let key = owner.displayName
 
+		let before = _counts[key]
+
 		if let total, total > 0 {
 			_counts[key] = (completed: completed, total: total)
 		} else {
 			_counts.removeValue(forKey: key)
 		}
+
+		// Nothing moved, or there's no pill to update. The `_activity` check
+		// also stops a seeded "0 of N" — reported before the keep-alive has
+		// been claimed — from being read as "nothing is running" and ending an
+		// activity that hasn't started yet.
+		guard _activity != nil else { return }
+		guard before?.completed != _counts[key]?.completed
+			|| before?.total != _counts[key]?.total else { return }
+
+		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
 	}
 
 	// MARK: - Lifecycle
@@ -179,6 +207,8 @@ final class KeepAliveActivityController {
 		_lastState = nil
 		_lastOwners = []
 		_counts.removeAll()
+		_lastIsRunning = false
+		_lastOwnersInput = []
 
 		BackgroundAudioStatus.shared.record(.island, "dismissed — nothing left holding the keep-alive")
 
