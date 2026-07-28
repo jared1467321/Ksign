@@ -353,11 +353,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
-		// The phase turning over is an event, and this is where it lands. The
-		// Dynamic Island used to sample it from the session's 0.4s tick instead,
-		// which pushed a system update whether or not anything had changed.
-		InstallSession.shared.jobPhaseChanged()
-
+		// Nothing is reported to the Dynamic Island from here. Phase transitions
+		// fire four or five times per app and the pill has a hard limit on how
+		// often it can be updated at all; spending that on "Sending Payload" left
+		// nothing for the count, which is the only figure worth showing. The
+		// session reports the tally when an app actually finishes.
 		if case .ready = newStatus {
 			switch batchRole {
 			case .none:

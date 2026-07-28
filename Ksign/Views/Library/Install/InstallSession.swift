@@ -25,18 +25,10 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var jobs: [InstallJob] = []
 
 	// The drawer prints "\(completedCount) of \(totalCount) installed" off these
-	// two, and has always got it right. So the pill reads them too — from their
-	// own `didSet`, which is the same moment the drawer's label changes.
-	//
-	// This replaces every hand-placed `report(...)` call that used to be dotted
-	// around the finish paths. There is no event to hook up wrong any more: if
-	// the drawer's number moves, the pill's number has already moved with it.
-	@Published private(set) var completedCount = 0 {
-		didSet { _mirrorCountToKeepAlive() }
-	}
-	@Published private(set) var totalCount = 0 {
-		didSet { _mirrorCountToKeepAlive() }
-	}
+	// two, and has always got it right. The pill shows the same pair — but not
+	// from a `didSet`, and not on every mutation of them. See `_reportTally`.
+	@Published private(set) var completedCount = 0
+	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
 
 	// Whether the drawer sheet is on screen. Dismissing it is now purely
@@ -152,6 +144,11 @@ final class InstallSession: ObservableObject {
 		// already in flight is a no-op rather than a second claim to balance.
 		BackgroundAudioManager.shared.claim(.bulkInstalls)
 
+		// One seed, after the whole batch is admitted, so the denominator is
+		// final. Previously every `totalCount += 1` pushed its own update, so a
+		// five-app batch opened with seven of them before a single app moved.
+		_reportTally()
+
 		isDrawerPresented = true
 		_startTicking()
 	}
@@ -178,8 +175,10 @@ final class InstallSession: ObservableObject {
 			return
 		}
 
-		// `didSet` on this is what moves the pill. Nothing else to do here.
 		completedCount += 1
+
+		// The one call per app. An app installed, the number moved, say so.
+		_reportTally()
 
 		_releaseIfNothingRunning()
 
@@ -225,6 +224,7 @@ final class InstallSession: ObservableObject {
 		// Keep the count honest: "4 of 7" with six rows showing is worse than
 		// no count at all.
 		totalCount = max(0, totalCount - 1)
+		_reportTally()
 
 		if webviewJob === job { webviewJob = nil }
 
@@ -316,27 +316,29 @@ final class InstallSession: ObservableObject {
 		_finishIfIdle()
 	}
 
-	private func _mirrorCountToKeepAlive() {
+	// The only thing the pill is ever told, and the only place it's told it.
+	//
+	// iOS budgets how often an app may update a Live Activity, and the widget is
+	// drawn out of process so there is no local redraw to fall back on when that
+	// budget runs out — updates are simply not delivered, silently, and the pill
+	// sits on whatever it last received. The drawer has no such limit, which is
+	// why it can be redrawn sixty times a second and the pill cannot.
+	//
+	// So this is called on the three events that genuinely move the number: the
+	// batch starting, an app finishing, a row being dropped. Nothing else. The
+	// per-phase reporting that used to sit in `InstallJob._handleStatus` spent
+	// four or five updates per app on text — Packaging, Ready, Sending Manifest,
+	// Sending Payload, Installing — and that text was inferred from
+	// `jobs.first(where: running)`, so with several jobs in flight it named a
+	// different app each time and was wrong as often as not. A five-app batch
+	// made seventeen update requests; it needs six.
+	private func _reportTally() {
 		guard #available(iOS 16.2, *) else { return }
 
 		KeepAliveActivityController.shared.report(
 			.bulkInstalls,
 			completed: completedCount,
 			total: totalCount
-		)
-	}
-
-	// The phase text is the one thing the drawer doesn't hold centrally — each
-	// row observes its own job for it — so it comes from the job instead, on
-	// the status change itself rather than off a timer.
-	func jobPhaseChanged() {
-		guard #available(iOS 16.2, *) else { return }
-
-		let current = jobs.first { $0.phase == .running } ?? jobs.first
-
-		KeepAliveActivityController.shared.report(
-			.bulkInstalls,
-			detail: current?.viewModel.statusLabel
 		)
 	}
 
@@ -351,10 +353,6 @@ final class InstallSession: ObservableObject {
 
 		BackgroundAudioManager.shared.release(.bulkInstalls)
 		_stopTicking()
-
-		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
-		}
 	}
 
 	private func _finishIfIdle() {
@@ -378,11 +376,19 @@ final class InstallSession: ObservableObject {
 
 		isDrawerPresented = false
 
-		// No final tally to send and nothing to zero. The counters already hold
-		// the finished figures, `didSet` already pushed them, and `start(apps:)`
-		// clears them when the next batch begins.
+		// No final tally to send: the last app's completion already sent it, and
+		// the counters deliberately keep their finished figures so "5 of 5" is
+		// what the pill shows while the keep-alive winds down.
+		//
+		// Withdrawn once the linger is over, though. Nothing else ever clears this
+		// owner's report, so left alone a finished tally outlives the batch and
+		// the next thing to share the pill inherits it.
 		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
+			Task { @MainActor [weak self] in
+				try? await Task.sleep(nanoseconds: 6_000_000_000)
+				guard let self, self.jobs.isEmpty else { return }
+				KeepAliveActivityController.shared.clearReport(.bulkInstalls)
+			}
 		}
 	}
 
