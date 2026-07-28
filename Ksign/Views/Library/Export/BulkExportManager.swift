@@ -51,6 +51,13 @@ final class BulkExportManager: ObservableObject {
 			completed: completed,
 			total: isExporting ? total : nil
 		)
+
+		// The app being zipped right now — the same string the on-screen
+		// overlay shows.
+		KeepAliveActivityController.shared.report(
+			.bulkExport,
+			detail: isExporting && !currentName.isEmpty ? currentName : nil
+		)
 	}
 
 	// MARK: - Lifecycle
