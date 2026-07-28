@@ -55,6 +55,12 @@ final class KeepAliveActivityController {
 	// before, because the keep-alive genuinely hasn't gone anywhere.
 	private var _lastOwners: [String] = []
 
+	// Batch position per owner, for the ones that count apps. Keyed by owner so
+	// two things running at once can't overwrite each other's numbers — the
+	// install tick fires several times a second and would otherwise flatten
+	// whatever the signer had just reported.
+	private var _counts: [String: (completed: Int, total: Int)] = [:]
+
 	// A failed `request` usually means Live Activities are switched off for the
 	// app, which won't change mid-batch. Retrying at 2Hz would be pointless.
 	private var _nextAttempt = Date.distantPast
@@ -89,7 +95,17 @@ final class KeepAliveActivityController {
 		// flickering to "winding down" between every app in a batch.
 		let display = owners.isEmpty ? _lastOwners : owners
 
-		let state = KeepAliveAttributes.ContentState(isRunning: isRunning, owners: display)
+		// Counts belong to whichever owner is actually being shown. If several
+		// things hold the keep-alive at once the pill names the first, so the
+		// bar has to follow the same one or the number and the name disagree.
+		let counts = display.first.flatMap { _counts[$0] }
+
+		let state = KeepAliveAttributes.ContentState(
+			isRunning: isRunning,
+			owners: display,
+			completed: counts?.completed,
+			total: counts?.total
+		)
 
 		guard let activity = _activity else {
 			_start(with: state)
@@ -102,6 +118,21 @@ final class KeepAliveActivityController {
 
 		Task {
 			await activity.update(ActivityContent(state: state, staleDate: nil))
+		}
+	}
+
+	// Called by whatever is doing the work. Pass nil for `total` when a batch
+	// finishes, so a stale "12 of 12" can't sit under the next owner's name.
+	//
+	// Cheap to call on a timer: the state comparison in `sync` drops anything
+	// that hasn't actually changed before it reaches the system.
+	func report(_ owner: BackgroundAudioManager.Owner, completed: Int, total: Int?) {
+		let key = owner.displayName
+
+		if let total, total > 0 {
+			_counts[key] = (completed: completed, total: total)
+		} else {
+			_counts.removeValue(forKey: key)
 		}
 	}
 
@@ -147,6 +178,7 @@ final class KeepAliveActivityController {
 		_activity = nil
 		_lastState = nil
 		_lastOwners = []
+		_counts.removeAll()
 
 		BackgroundAudioStatus.shared.record(.island, "dismissed — nothing left holding the keep-alive")
 

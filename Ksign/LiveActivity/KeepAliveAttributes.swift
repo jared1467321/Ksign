@@ -32,10 +32,27 @@ struct KeepAliveAttributes: ActivityAttributes {
 		// window after the last release.
 		var owners: [String]
 
+		// Batch position, when the owner knows one. Signing, bulk installs,
+		// bulk export and batch import all count apps, so they fill these in;
+		// anything else leaves them nil and the bar is simply absent rather
+		// than sitting at zero pretending to be stuck.
+		var completed: Int?
+		var total: Int?
+
 		// What the compact trailing slot shows. Kept short on purpose; there
 		// is very little room next to the camera.
 		var shortLabel: String {
 			owners.first ?? (isRunning ? "Awake" : "Idle")
+		}
+
+		// The compact trailing slot is only a few characters wide, so it shows
+		// the batch position when there is one — "3/12" beats "Signing" once
+		// you already know what you started.
+		var compactTrailingLabel: String {
+			if let total, total > 0, let completed {
+				return "\(min(completed, total))/\(total)"
+			}
+			return shortLabel
 		}
 
 		var summary: String {
@@ -46,6 +63,26 @@ struct KeepAliveAttributes: ActivityAttributes {
 
 		var statusText: String {
 			isRunning ? "Silent audio on" : "Silent audio off"
+		}
+
+		// Reassurance line. The whole reason this pill exists is that you've
+		// left the app and want to know it's still working, so say that.
+		var reassurance: String {
+			isRunning
+				? "ASign will finish in the background"
+				: "Not holding the app awake — work may pause"
+		}
+
+		// nil whenever there's nothing meaningful to draw: no counts, or a
+		// zero denominator.
+		var fraction: Double? {
+			guard let total, total > 0, let completed else { return nil }
+			return min(1, max(0, Double(completed) / Double(total)))
+		}
+
+		var countLabel: String? {
+			guard let total, total > 0, let completed else { return nil }
+			return "\(min(completed, total)) of \(total)"
 		}
 	}
 
