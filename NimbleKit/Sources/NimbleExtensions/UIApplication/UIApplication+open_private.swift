@@ -71,4 +71,31 @@ extension UIApplication {
 
         return nil
     }
+
+    /// Whether an app with this bundle identifier is currently installed.
+    ///
+    /// A level-triggered counterpart to `installProgress(for:)`, which is
+    /// edge-triggered: it reports a live install and says nothing at all once
+    /// one has finished. Anything relying purely on watching that value rise
+    /// and fall is stranded the moment it misses the rise.
+    /// - Parameter identifier: Bundle identifier
+    /// - Returns: True when the app is installed
+    static public func isAppInstalled(_ identifier: String) -> Bool {
+        let classNameBase64 = "TFNBcHBsaWNhdGlvbldvcmtzcGFjZQ==" // LSApplicationWorkspace
+        let defaultSelectorBase64 = "ZGVmYXVsdFdvcmtzcGFjZQ=="   // defaultWorkspace
+        let installedSelectorBase64 = "YXBwbGljYXRpb25Jc0luc3RhbGxlZDo=" // applicationIsInstalled:
+
+        guard
+            let className = String(data: Data(base64Encoded: classNameBase64)!, encoding: .utf8),
+            let defaultSelector = String(data: Data(base64Encoded: defaultSelectorBase64)!, encoding: .utf8),
+            let installedSelector = String(data: Data(base64Encoded: installedSelectorBase64)!, encoding: .utf8),
+            let workspaceClass = NSClassFromString(className) as? NSObject.Type,
+            let workspace = workspaceClass.perform(NSSelectorFromString(defaultSelector))?.takeUnretainedValue()
+        else { return false }
+
+        let selector = NSSelectorFromString(installedSelector)
+        guard workspace.responds(to: selector) else { return false }
+
+        return workspace.perform(selector, with: identifier) != nil
+    }
 }
