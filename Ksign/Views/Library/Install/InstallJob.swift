@@ -74,10 +74,6 @@ final class InstallJob: ObservableObject, Identifiable {
 	private var _holdsSlot = false
 	private var _started = false
 
-	// What was installed under this bundle id before we started, or nil if
-	// nothing was. The install is finished when this changes.
-	private var _versionBeforeInstall: String?
-
 	// Where `ArchiveHandler` built this job's .ipa, so it can be deleted once
 	// the install is genuinely over. Kept as a URL rather than the handler
 	// itself: the handler is built inside a detached task and isn't Sendable,
@@ -120,15 +116,6 @@ final class InstallJob: ObservableObject, Identifiable {
 	func start() {
 		guard !_started else { return }
 		_started = true
-
-		// Captured here rather than in the poller. The poller only begins once
-		// the payload has finished streaming, and iOS can have the app installed
-		// before its first sample — at which point a baseline taken there would
-		// already be the *new* version and could never change. Taken at admission
-		// there are seconds of archiving between this and anything landing.
-		if let identifier = app.identifier {
-			_versionBeforeInstall = UIApplication.installedVersionIdentity(for: identifier)
-		}
 
 		// Replaces `.onReceive(viewModel.$status)`. Weak self so a finished
 		// job isn't kept alive by its own subscription.
@@ -528,10 +515,9 @@ final class InstallJob: ObservableObject, Identifiable {
 		// slot was never handed back and `completedCount` never moved. Bringing
 		// the app forward un-throttled the loop, which is why it appeared to
 		// "sometimes work if you open the app for a second".
-		let baseline = _versionBeforeInstall
-
 		return Task.detached(priority: .userInitiated) {
 			var hasStarted = false
+			let startedAt = Date()
 
 			while !Task.isCancelled {
 				// nil and 0.0 are different answers and were being collapsed into
@@ -552,20 +538,21 @@ final class InstallJob: ObservableObject, Identifiable {
 					viewModel.installProgress = progress
 				}
 
-				// Seen it running, now it's gone. Fast path, and the only one
-				// that fires when an app is reinstalled at the same version.
+				// Seen it running, now it's gone: finished.
 				let finishedByEdge = hasStarted && rawProgress == nil
 
-				// The one that actually carries this. Nothing in flight for this
-				// bundle and what's on disk is no longer what was there when the
-				// job started — that's the install having landed, and it stays
-				// true no matter how many samples were missed getting here. An
-				// app still queued behind others in the same manifest reads its
-				// old version, so it can't complete early.
-				let finishedByVersion = rawProgress == nil
-					&& UIApplication.installedVersionIdentity(for: bundleID) != baseline
+				// Backstop for the edge being missed entirely — the loop being
+				// descheduled across the whole install, or the install landing
+				// before the first sample. Without it a missed edge strands the
+				// job forever, which is strictly worse than a late completion.
+				// The grace period keeps it from firing on an app that was
+				// already installed a moment ago, i.e. a reinstall or an update.
+				let finishedByPresence = !hasStarted
+					&& rawProgress == nil
+					&& Date().timeIntervalSince(startedAt) > 8
+					&& UIApplication.isAppInstalled(bundleID)
 
-				if finishedByEdge || finishedByVersion {
+				if finishedByEdge || finishedByPresence {
 					await MainActor.run {
 						viewModel.installProgress = 1.0
 						viewModel.status = .completed(.success(()))
