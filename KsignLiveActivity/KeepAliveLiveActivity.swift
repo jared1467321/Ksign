@@ -106,9 +106,11 @@ private struct _DetailView: View {
 					.tint(state.isRunning ? .green : .orange)
 			}
 
-			Text(state.summary)
+			// "Bulk installs · Sending Manifest"
+			Text(state.summaryLine)
 				.font(.caption.weight(.medium))
 				.lineLimit(1)
+				.contentTransition(.opacity)
 
 			Text(state.reassurance)
 				.font(.caption2)
