@@ -39,6 +39,17 @@ struct KeepAliveAttributes: ActivityAttributes {
 		var completed: Int?
 		var total: Int?
 
+		// A real 0–1 figure when the owner has one. Installs do —
+		// `aggregateProgress` already blends each job's `overallProgress` — and
+		// it's far better than the app count, which only moves in whole steps
+		// and so barely moves at all when one app takes most of the batch.
+		var progressFraction: Double?
+
+		// The phase the work is actually in, straight from the state the app
+		// already keeps: "Sending Manifest", "Installing", "Modifying". Nil when
+		// the owner has no phase worth naming.
+		var detail: String?
+
 		// What the compact trailing slot shows. Kept short on purpose; there
 		// is very little room next to the camera.
 		var shortLabel: String {
@@ -61,6 +72,13 @@ struct KeepAliveAttributes: ActivityAttributes {
 				: owners.joined(separator: ", ")
 		}
 
+		// "Bulk installs · Sending Manifest" — what's holding the keep-alive
+		// and what it's doing right now, on one line.
+		var summaryLine: String {
+			guard let detail, !detail.isEmpty else { return summary }
+			return "\(summary) · \(detail)"
+		}
+
 		var statusText: String {
 			isRunning ? "Silent audio on" : "Silent audio off"
 		}
@@ -73,9 +91,14 @@ struct KeepAliveAttributes: ActivityAttributes {
 				: "Not holding the app awake — work may pause"
 		}
 
-		// nil whenever there's nothing meaningful to draw: no counts, or a
-		// zero denominator.
+		// Prefer a real fraction; fall back to the app count only when that's
+		// all there is. nil means there's nothing meaningful to draw and the
+		// bar is left out entirely.
 		var fraction: Double? {
+			if let progressFraction {
+				return min(1, max(0, progressFraction))
+			}
+
 			guard let total, total > 0, let completed else { return nil }
 			return min(1, max(0, Double(completed) / Double(total)))
 		}

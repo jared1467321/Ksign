@@ -59,7 +59,17 @@ final class KeepAliveActivityController {
 	// two things running at once can't overwrite each other's numbers — the
 	// install tick fires several times a second and would otherwise flatten
 	// whatever the signer had just reported.
-	private var _counts: [String: (completed: Int, total: Int)] = [:]
+	// What each owner has told us about itself. Fields are merged rather than
+	// replaced, so the bulk signer can own the app count while `FR` owns the
+	// phase text and neither wipes the other.
+	private struct _Report: Equatable {
+		var completed: Int?
+		var total: Int?
+		var fraction: Double?
+		var detail: String?
+	}
+
+	private var _reports: [String: _Report] = [:]
 
 	// The most recent values handed to `sync`. Counts arrive on a completely
 	// different schedule from keep-alive publishes — an app finishing importing
@@ -111,16 +121,19 @@ final class KeepAliveActivityController {
 		// flickering to "winding down" between every app in a batch.
 		let display = owners.isEmpty ? _lastOwners : owners
 
-		// Counts belong to whichever owner is actually being shown. If several
-		// things hold the keep-alive at once the pill names the first, so the
-		// bar has to follow the same one or the number and the name disagree.
-		let counts = display.first.flatMap { _counts[$0] }
+		// Progress belongs to whichever owner is actually being shown. If
+		// several things hold the keep-alive at once the pill names the first,
+		// so the bar has to follow the same one or the numbers and the name
+		// disagree.
+		let report = display.first.flatMap { _reports[$0] }
 
 		let state = KeepAliveAttributes.ContentState(
 			isRunning: isRunning,
 			owners: display,
-			completed: counts?.completed,
-			total: counts?.total
+			completed: report?.completed,
+			total: report?.total,
+			progressFraction: report?.fraction,
+			detail: report?.detail
 		)
 
 		guard let activity = _activity else {
@@ -142,24 +155,55 @@ final class KeepAliveActivityController {
 	//
 	// Cheap to call on a timer: the state comparison in `sync` drops anything
 	// that hasn't actually changed before it reaches the system.
+	// Batch position. Pass nil for `total` to drop the count without disturbing
+	// the phase text.
 	func report(_ owner: BackgroundAudioManager.Owner, completed: Int, total: Int?) {
+		_merge(owner) {
+			if let total, total > 0 {
+				$0.completed = completed
+				$0.total = total
+			} else {
+				$0.completed = nil
+				$0.total = nil
+			}
+		}
+	}
+
+	// A real 0–1 figure, where the owner has one. Preferred over the app count
+	// for the bar, because it moves continuously instead of in whole apps.
+	func report(_ owner: BackgroundAudioManager.Owner, fraction: Double?) {
+		_merge(owner) { $0.fraction = fraction }
+	}
+
+	// The phase the work is in, using whatever label the app already computes
+	// for its own UI.
+	func report(_ owner: BackgroundAudioManager.Owner, detail: String?) {
+		_merge(owner) { $0.detail = detail }
+	}
+
+	// Everything this owner has said, withdrawn at once.
+	func clearReport(_ owner: BackgroundAudioManager.Owner) {
+		_merge(owner) { $0 = _Report() }
+	}
+
+	private func _merge(_ owner: BackgroundAudioManager.Owner, _ change: (inout _Report) -> Void) {
 		let key = owner.displayName
 
-		let before = _counts[key]
+		var report = _reports[key] ?? _Report()
+		let before = report
+		change(&report)
 
-		if let total, total > 0 {
-			_counts[key] = (completed: completed, total: total)
+		if report == _Report() {
+			_reports.removeValue(forKey: key)
 		} else {
-			_counts.removeValue(forKey: key)
+			_reports[key] = report
 		}
 
 		// Nothing moved, or there's no pill to update. The `_activity` check
 		// also stops a seeded "0 of N" — reported before the keep-alive has
 		// been claimed — from being read as "nothing is running" and ending an
 		// activity that hasn't started yet.
-		guard _activity != nil else { return }
-		guard before?.completed != _counts[key]?.completed
-			|| before?.total != _counts[key]?.total else { return }
+		guard report != before, _activity != nil else { return }
 
 		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
 	}
@@ -206,7 +250,7 @@ final class KeepAliveActivityController {
 		_activity = nil
 		_lastState = nil
 		_lastOwners = []
-		_counts.removeAll()
+		_reports.removeAll()
 		_lastIsRunning = false
 		_lastOwnersInput = []
 
