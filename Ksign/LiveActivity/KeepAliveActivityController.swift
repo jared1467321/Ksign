@@ -217,7 +217,16 @@ final class KeepAliveActivityController {
 			detail: report?.detail
 		)
 
-		guard let activity = _activity else {
+		guard _activity != nil else {
+			// There is a window inside `_drain` where the old activity has been
+			// detached and the replacement hasn't been requested yet. Starting a
+			// second one in that gap would leave two pills fighting over the
+			// same attributes type, so hand the state to the drain instead.
+			if _pushInFlight {
+				_pendingState = state
+				return
+			}
+
 			_start(with: state)
 			return
 		}
@@ -249,13 +258,23 @@ final class KeepAliveActivityController {
 	// and every one of them spent budget on a frame that was already on screen.
 	private var _inFlightState: KeepAliveAttributes.ContentState?
 
-	// Sends the pending state, then whatever arrived while it was sending.
+	// Ends the current activity and requests a fresh one carrying the new state,
+	// rather than calling `update()` on the existing one.
 	//
-	// `_lastState` is recorded *after* `update()` returns rather than before it
-	// is called. Written up front, a dropped or reordered delivery left the
-	// controller believing the pill showed something it never showed — and
-	// because that record is what the dedupe compares against, nothing after it
-	// could ever correct the display.
+	// This is deliberate and it is a diagnostic as much as a fix. Every
+	// `update()` in the logs was accepted — awaited, returned, no throw — and
+	// none of them ever reached the screen during an install. The only call that
+	// has *ever* painted reliably is `Activity.request`, which is what puts the
+	// first frame up. So this stops using the call that doesn't work and uses the
+	// one that does.
+	//
+	// If the count now moves, the problem was `update()` delivery specifically
+	// and this is the fix. If the re-request also fails to paint, the log will
+	// say so with an actual error — and that rules out update budgets entirely,
+	// because `request` is a different path with its own limits.
+	//
+	// Cost: the pill tears down and rebuilds on every count change, so expect a
+	// visible blink per app. Worth it to find out; not necessarily worth keeping.
 	private func _drain() {
 		guard !_pushInFlight,
 			  let activity = _activity,
@@ -266,23 +285,54 @@ final class KeepAliveActivityController {
 		_pushInFlight = true
 		_inFlightState = next
 
+		// Detached *before* the end call, so `_watchActivityState`'s identity
+		// guard fails and a teardown we asked for can't be mistaken for the user
+		// swiping the pill away — which would set `_nextAttempt` 30s out and stop
+		// the replacement being requested at all.
+		_activity = nil
+
 		Task { [weak self] in
-			await activity.update(ActivityContent(state: next, staleDate: nil))
+			await activity.end(nil, dismissalPolicy: .immediate)
 
 			await MainActor.run {
 				guard let self else { return }
 
 				self._pushInFlight = false
 				self._inFlightState = nil
-				self._lastState = next
 
-				BackgroundAudioStatus.shared.record(
-					.island,
-					"pushed — \(next.countLabel ?? "no count") · \(next.summaryLine)"
-				)
-
+				self._rerequest(next)
 				self._drain()
 			}
+		}
+	}
+
+	private func _rerequest(_ state: KeepAliveAttributes.ContentState) {
+		do {
+			_activity = try Activity.request(
+				attributes: KeepAliveAttributes(startedAt: Date()),
+				content: ActivityContent(state: state, staleDate: nil),
+				pushType: nil
+			)
+
+			_lastState = state
+			_nextAttempt = .distantPast
+
+			BackgroundAudioStatus.shared.record(
+				.island,
+				"re-requested — \(state.countLabel ?? "no count") · \(state.summaryLine)"
+			)
+
+			_watchActivityState()
+		} catch {
+			// The interesting failure. `update()` never told us anything; this
+			// will.
+			_lastState = nil
+			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
+
+			BackgroundAudioStatus.shared.record(
+				.island,
+				"re-request FAILED — \(error.localizedDescription)"
+			)
 		}
 	}
 
