@@ -356,9 +356,16 @@ final class KeepAliveActivityController {
 						self._lastPushedState = state
 						self._lastState = state
 
+						// The count is logged explicitly rather than via `summaryLine`,
+						// which only carries owners and detail. Without the number here
+						// the log can tell you a push happened but not what it said —
+						// which is the difference between "the app is wrong" and "iOS
+						// took the update and did nothing with it".
+						let count = "\(state.completed.map(String.init) ?? "–")/\(state.total.map(String.init) ?? "–")"
+
 						BackgroundAudioStatus.shared.record(
 							.island,
-							"\(changed ? "pushed" : "re-asserted") — \(state.summaryLine)"
+							"\(changed ? "pushed" : "re-asserted") — \(count) — \(state.summaryLine)"
 						)
 					}
 				}
