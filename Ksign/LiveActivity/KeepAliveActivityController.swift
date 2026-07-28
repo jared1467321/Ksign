@@ -302,11 +302,12 @@ final class KeepAliveActivityController {
 			}
 		}
 
-		// Nothing moved, or there's no pill to update. The `_activity` check
-		// also stops a seeded "0 of N" — reported before the keep-alive has
-		// been claimed — from being read as "nothing is running" and ending an
-		// activity that hasn't started yet.
-		guard report != before, _activity != nil else { return }
+		// The old `_activity != nil` half of this guard is gone. It was there to
+		// stop a seeded "0 of N" ending an activity that hadn't started, but
+		// `_apply` can't end anything on its own — `wanted` decides that, and it
+		// reads the keep-alive, not the report. All the guard did was silently
+		// swallow reports that landed between publishes.
+		guard report != before else { return }
 
 		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
 	}
