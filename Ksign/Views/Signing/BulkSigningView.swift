@@ -266,6 +266,14 @@ extension BulkSigningView {
 		Task {
 			var failures: [(name: String, error: Error)] = []
 			var successCount = 0
+			var processed = 0
+
+			// Seed the Dynamic Island bar at 0 of N before the first app, so
+			// it appears full-width-empty rather than popping into existence
+			// once the first app lands.
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.report(.signing, completed: 0, total: configs.count)
+			}
 
 			// Sign one app at a time. Each iteration waits for the
 			// previous app to fully finish (copy → modify → zsign → move)
@@ -287,6 +295,15 @@ extension BulkSigningView {
 				} catch {
 					failures.append((config.app.name ?? .localized("Unknown"), error))
 				}
+
+				processed += 1
+
+				// Reported per app rather than from a timer: "apps finished" is
+				// the only progress this loop has, since zsign gives no
+				// sub-progress within a single app.
+				if #available(iOS 16.2, *) {
+					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
+				}
 			}
 
 			// Report results and tear down once, after the whole queue
@@ -301,6 +318,13 @@ extension BulkSigningView {
 
 				NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSigningFinished"), object: nil)
 				_isSigning = false
+
+				// Withdraw the counts, so a finished "12 of 12" can't sit under
+				// the next owner's name if something else still holds the
+				// keep-alive.
+				if #available(iOS 16.2, *) {
+					KeepAliveActivityController.shared.report(.signing, completed: 0, total: nil)
+				}
 
 				// Hand the freshly-signed apps off to the bulk installer.
 				// The Library observes this and installs the newest
