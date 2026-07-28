@@ -82,10 +82,18 @@ class DownloadManager: NSObject, ObservableObject {
 
 	private var _importBatches: [UUID: Int] = [:]
 
+	// The size each batch started at. `_importBatches` only holds what's left
+	// to *start*, which is enough for the "+N" header but not for a bar — a bar
+	// needs a denominator that doesn't shrink as work begins.
+	private var _importTotals: [UUID: Int] = [:]
+
 	@MainActor
 	func beginImportBatch(count: Int) -> UUID {
 		let token = UUID()
-		if count > 0 { _importBatches[token] = count }
+		if count > 0 {
+			_importBatches[token] = count
+			_importTotals[token] = count
+		}
 		_recomputeQueuedImports()
 		return token
 	}
@@ -108,12 +116,40 @@ class DownloadManager: NSObject, ObservableObject {
 	@MainActor
 	func endImportBatch(_ token: UUID) {
 		guard _importBatches.removeValue(forKey: token) != nil else { return }
+		_importTotals.removeValue(forKey: token)
 		_recomputeQueuedImports()
 	}
 
 	@MainActor
 	private func _recomputeQueuedImports() {
 		queuedImportCount = _importBatches.values.reduce(0, +)
+		_reportImportProgress()
+	}
+
+	// Feeds the Dynamic Island bar during a batch import.
+	//
+	// "Finished" is the total minus what hasn't started yet minus what's
+	// running right now — `_importDepth` is exactly the number in flight, so
+	// this counts genuinely completed apps rather than started ones. Using
+	// started would read 35 of 35 while two were still extracting.
+	@MainActor
+	private func _reportImportProgress() {
+		guard #available(iOS 16.2, *) else { return }
+
+		let total = _importTotals.values.reduce(0, +)
+
+		// Batch fully drained: clear the denominators so the next one starts
+		// clean, and withdraw the figure.
+		if total == 0 || (_importBatches.isEmpty && _importDepth == 0) {
+			_importTotals.removeAll()
+			KeepAliveActivityController.shared.report(.importing, completed: 0, total: nil)
+			return
+		}
+
+		let remaining = _importBatches.values.reduce(0, +)
+		let completed = max(0, total - remaining - _importDepth)
+
+		KeepAliveActivityController.shared.report(.importing, completed: completed, total: total)
 	}
 
 	// MARK: - Import-in-progress flag
@@ -136,8 +172,15 @@ class DownloadManager: NSObject, ObservableObject {
 	@Published private var _importDepth = 0
 	var isImporting: Bool { _importDepth > 0 }
 
-	@MainActor func beginImport() { _importDepth += 1 }
-	@MainActor func endImport()   { _importDepth = max(0, _importDepth - 1) }
+	@MainActor func beginImport() {
+		_importDepth += 1
+		_reportImportProgress()
+	}
+
+	@MainActor func endImport() {
+		_importDepth = max(0, _importDepth - 1)
+		_reportImportProgress()
+	}
 	
     private var _session: URLSession!
     
