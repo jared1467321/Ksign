@@ -105,6 +105,52 @@ final class KeepAliveActivityController {
 	private var _nextAttempt = Date.distantPast
 	private static let _retryDelay: TimeInterval = 30
 
+	// MARK: - Paced pusher (bulk installs only)
+	//
+	// Everything below exists because `Activity.update(_:)` returns Void and
+	// does not throw. There is no receipt, no error and no ack — a push that
+	// the system declines to deliver is indistinguishable from one that landed.
+	// So there is no such thing as retrying a *failed* push; the only thing
+	// that works is periodically re-asserting the current truth, which is
+	// idempotent (if the last one landed the system sees no change) and
+	// therefore always safe.
+	//
+	// Scope: this path is used only while the pill is following `.bulkInstalls`.
+	// Signing, import, export, extraction and single-install keep the original
+	// immediate path in `_apply` unchanged — they work, and they are low volume.
+	//
+	// The state the pill *should* be showing. Overwritten rather than queued:
+	// if three counts arrive while a push is in flight we push once, with the
+	// newest, instead of falling three pushes behind reality.
+	private var _desiredState: KeepAliveAttributes.ContentState?
+
+	// The long-lived drain loop. Exactly one push is ever in flight, which is
+	// what makes ordering guaranteed — the old code spawned an unstructured
+	// `Task` per state change, and two of those could land in either order.
+	private var _pushTask: Task<Void, Never>?
+
+	// What was last actually handed to the system, and when. Distinct from
+	// `_lastState`, which the unchanged non-install path still owns.
+	private var _lastPushedState: KeepAliveAttributes.ContentState?
+	private var _lastPushAt = Date.distantPast
+
+	// Never push more often than this. Coalescing floor.
+	private static let _minPushInterval: TimeInterval = 3
+
+	// Re-assert the current state if nothing has been pushed in this long,
+	// even though it hasn't changed. This is the entire recovery mechanism:
+	// a dropped push is silently corrected by the next re-assert rather than
+	// freezing the pill for the rest of the batch.
+	private static let _maxStaleness: TimeInterval = 10
+
+	// How often the drain loop wakes to check whether a push is due. Cheap:
+	// it's a date comparison, and it only runs during a bulk install.
+	private static let _pushTick: TimeInterval = 0.25
+
+	private var _bulkInstallOwnerName: String {
+		BackgroundAudioManager.Owner.bulkInstalls.displayName
+	}
+
 	private init() { }
 
 	// MARK: - Queue confinement
@@ -217,123 +263,117 @@ final class KeepAliveActivityController {
 			detail: report?.detail
 		)
 
-		guard _activity != nil else {
-			// There is a window inside `_drain` where the old activity has been
-			// detached and the replacement hasn't been requested yet. Starting a
-			// second one in that gap would leave two pills fighting over the
-			// same attributes type, so hand the state to the drain instead.
-			if _pushInFlight {
-				_pendingState = state
-				return
-			}
+		// Is the pill currently following the bulk-install counter? Only that
+		// owner uses the paced pusher; everything else keeps the original
+		// immediate path below, unchanged.
+		let isBulkInstall = (focus == _bulkInstallOwnerName)
 
+		guard let activity = _activity else {
 			_start(with: state)
+
+			// A batch that starts at the same moment the activity is requested
+			// still needs the pusher running, or the first staleness re-assert
+			// never happens and a dropped push has nothing to correct it.
+			if isBulkInstall, _activity != nil {
+				_desiredState = state
+				_startPusherIfNeeded()
+			}
 			return
 		}
 
-		// Nothing to say — don't spend a system update on it. Compared against
-		// what's actually on screen *and* what's already queued to go, since
-		// `_lastState` is no longer written until delivery confirms.
-		guard state != _lastState, state != _pendingState, state != _inFlightState else { return }
+		guard isBulkInstall else {
+			// ── Unchanged path ──────────────────────────────────────────────
+			// Signing, import, export, extraction, single install. Same dedup
+			// guard, same assignment order, same fire-and-forget task as
+			// before. These already work; nothing here is different.
+			_stopPusher()
 
-		_pendingState = state
-		_drain()
+			// Nothing to say — don't spend a system update on it.
+			guard state != _lastState else { return }
+			_lastState = state
+
+			Task {
+				await activity.update(ActivityContent(state: state, staleDate: nil))
+			}
+			return
+		}
+
+		// ── Bulk installs ───────────────────────────────────────────────────
+		// Hand the state over and let the pusher decide when it goes out.
+		// Deliberately no dedup guard: an *unchanged* state is exactly what the
+		// staleness re-assert needs to be allowed to send again.
+		_desiredState = state
+		_startPusherIfNeeded()
 	}
 
-	// MARK: - Pushing
+	// MARK: - Paced pusher (bulk installs only)
 
-	// The newest state waiting to go out. One slot, deliberately: if three
-	// states are produced while one update is in flight, only the last of them
-	// is worth sending.
-	private var _pendingState: KeepAliveAttributes.ContentState?
+	// One long-lived loop, one push in flight at a time, always carrying the
+	// newest state. Replaces a fire-and-forget `Task` per state change, where
+	// two pushes could land in either order.
+	private func _startPusherIfNeeded() {
+		guard _pushTask == nil else { return }
 
-	// Whether an `update()` is in flight. Only one at a time — `Task` is not
-	// FIFO, and two overlapping updates can land in the wrong order.
-	private var _pushInFlight = false
-
-	// The state currently being delivered. Without it, an identical state
-	// arriving from `sync` while a push was in flight passed both checks —
-	// `_lastState` was still the old value and `_pendingState` had been taken —
-	// and got queued a second time. That was every duplicate push in the logs,
-	// and every one of them spent budget on a frame that was already on screen.
-	private var _inFlightState: KeepAliveAttributes.ContentState?
-
-	// Ends the current activity and requests a fresh one carrying the new state,
-	// rather than calling `update()` on the existing one.
-	//
-	// This is deliberate and it is a diagnostic as much as a fix. Every
-	// `update()` in the logs was accepted — awaited, returned, no throw — and
-	// none of them ever reached the screen during an install. The only call that
-	// has *ever* painted reliably is `Activity.request`, which is what puts the
-	// first frame up. So this stops using the call that doesn't work and uses the
-	// one that does.
-	//
-	// If the count now moves, the problem was `update()` delivery specifically
-	// and this is the fix. If the re-request also fails to paint, the log will
-	// say so with an actual error — and that rules out update budgets entirely,
-	// because `request` is a different path with its own limits.
-	//
-	// Cost: the pill tears down and rebuilds on every count change, so expect a
-	// visible blink per app. Worth it to find out; not necessarily worth keeping.
-	private func _drain() {
-		guard !_pushInFlight,
-			  let activity = _activity,
-			  let next = _pendingState
-		else { return }
-
-		_pendingState = nil
-		_pushInFlight = true
-		_inFlightState = next
-
-		// Detached *before* the end call, so `_watchActivityState`'s identity
-		// guard fails and a teardown we asked for can't be mistaken for the user
-		// swiping the pill away — which would set `_nextAttempt` 30s out and stop
-		// the replacement being requested at all.
-		_activity = nil
-
-		Task { [weak self] in
-			await activity.end(nil, dismissalPolicy: .immediate)
-
-			await MainActor.run {
+		_pushTask = Task { @MainActor [weak self] in
+			while !Task.isCancelled {
 				guard let self else { return }
 
-				self._pushInFlight = false
-				self._inFlightState = nil
+				// Nothing left to say: the batch ended, or focus moved to
+				// another owner. Stand down — `_startPusherIfNeeded` brings the
+				// loop back if bulk installs come round again.
+				guard let state = self._desiredState else {
+					self._pushTask = nil
+					return
+				}
 
-				self._rerequest(next)
-				self._drain()
+				// No activity yet (or it went away and is waiting out
+				// `_retryDelay`). Keep looping rather than exiting, so the
+				// pusher is still here when one exists again.
+				if let activity = self._activity {
+					let since = Date().timeIntervalSince(self._lastPushAt)
+					let changed = (state != self._lastPushedState)
+
+					// A changed state waits out the coalescing floor. An
+					// unchanged one waits out the staleness window and is then
+					// re-sent as-is.
+					let due = changed
+						? since >= Self._minPushInterval
+						: since >= Self._maxStaleness
+
+					if due {
+						// Stamped before the await, so a slow push can't let a
+						// second one through behind it.
+						self._lastPushAt = Date()
+
+						await activity.update(ActivityContent(state: state, staleDate: nil))
+
+						// Recorded *after* the await — this is what was actually
+						// handed to the system. The old code assigned
+						// `_lastState` before pushing, so a state that never
+						// arrived was deduped away permanently and the pill
+						// could only recover if some later change happened to
+						// get through. That's the freeze.
+						self._lastPushedState = state
+						self._lastState = state
+
+						BackgroundAudioStatus.shared.record(
+							.island,
+							"\(changed ? "pushed" : "re-asserted") — \(state.summaryLine)"
+						)
+					}
+				}
+
+				try? await Task.sleep(nanoseconds: UInt64(Self._pushTick * 1_000_000_000))
 			}
 		}
 	}
 
-	private func _rerequest(_ state: KeepAliveAttributes.ContentState) {
-		do {
-			_activity = try Activity.request(
-				attributes: KeepAliveAttributes(startedAt: Date()),
-				content: ActivityContent(state: state, staleDate: nil),
-				pushType: nil
-			)
-
-			_lastState = state
-			_nextAttempt = .distantPast
-
-			BackgroundAudioStatus.shared.record(
-				.island,
-				"re-requested — \(state.countLabel ?? "no count") · \(state.summaryLine)"
-			)
-
-			_watchActivityState()
-		} catch {
-			// The interesting failure. `update()` never told us anything; this
-			// will.
-			_lastState = nil
-			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
-
-			BackgroundAudioStatus.shared.record(
-				.island,
-				"re-request FAILED — \(error.localizedDescription)"
-			)
-		}
+	private func _stopPusher() {
+		_pushTask?.cancel()
+		_pushTask = nil
+		_desiredState = nil
+		_lastPushedState = nil
+		_lastPushAt = .distantPast
 	}
 
 	// Called by whatever is doing the work. Pass nil for `total` when a batch
@@ -414,26 +454,7 @@ final class KeepAliveActivityController {
 		// swallow reports that landed between publishes.
 		guard report != before else { return }
 
-		// Upstream half of the trace. One line per report that actually
-		// changed something, so a run can be read as: did seven counts arrive
-		// here, and did seven pushes leave `_drain`.
-		BackgroundAudioStatus.shared.record(.island, "report — \(key): \(Self._describe(report))")
-
 		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
-	}
-
-	private static func _describe(_ report: _Report) -> String {
-		var parts: [String] = []
-
-		if let completed = report.completed, let total = report.total {
-			parts.append("\(completed) of \(total)")
-		}
-
-		if let detail = report.detail, !detail.isEmpty {
-			parts.append(detail)
-		}
-
-		return parts.isEmpty ? "withdrawn" : parts.joined(separator: " · ")
 	}
 
 	// MARK: - Lifecycle
@@ -461,6 +482,11 @@ final class KeepAliveActivityController {
 			)
 
 			_lastState = state
+			// Seed the pusher's bookkeeping too, so a batch that has only
+			// just started doesn't immediately re-assert the state the
+			// activity was created with.
+			_lastPushedState = state
+			_lastPushAt = Date()
 			_nextAttempt = .distantPast
 
 			BackgroundAudioStatus.shared.record(.island, "showing — \(state.summary)")
@@ -498,6 +524,10 @@ final class KeepAliveActivityController {
 
 					self._activity = nil
 					self._lastState = nil
+					// A replacement activity starts blank, so nothing may be
+					// deduped against what the old one happened to be showing.
+					self._lastPushedState = nil
+					self._lastPushAt = .distantPast
 					self._nextAttempt = Date().addingTimeInterval(Self._retryDelay)
 
 					BackgroundAudioStatus.shared.record(.island, "went away on its own — will try again in \(Int(Self._retryDelay))s if work is still running")
@@ -514,10 +544,9 @@ final class KeepAliveActivityController {
 		_activity = nil
 		_lastState = nil
 		_lastOwners = []
+		_stopPusher()
 		_reports.removeAll()
 		_reportSeq.removeAll()
-		_pendingState = nil
-		_inFlightState = nil
 		_focusOwner = nil
 		_lastIsRunning = false
 		_lastOwnersInput = []
