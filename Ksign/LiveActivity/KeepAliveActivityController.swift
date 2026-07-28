@@ -225,7 +225,7 @@ final class KeepAliveActivityController {
 		// Nothing to say — don't spend a system update on it. Compared against
 		// what's actually on screen *and* what's already queued to go, since
 		// `_lastState` is no longer written until delivery confirms.
-		guard state != _lastState, state != _pendingState else { return }
+		guard state != _lastState, state != _pendingState, state != _inFlightState else { return }
 
 		_pendingState = state
 		_drain()
@@ -242,6 +242,13 @@ final class KeepAliveActivityController {
 	// FIFO, and two overlapping updates can land in the wrong order.
 	private var _pushInFlight = false
 
+	// The state currently being delivered. Without it, an identical state
+	// arriving from `sync` while a push was in flight passed both checks —
+	// `_lastState` was still the old value and `_pendingState` had been taken —
+	// and got queued a second time. That was every duplicate push in the logs,
+	// and every one of them spent budget on a frame that was already on screen.
+	private var _inFlightState: KeepAliveAttributes.ContentState?
+
 	// Sends the pending state, then whatever arrived while it was sending.
 	//
 	// `_lastState` is recorded *after* `update()` returns rather than before it
@@ -257,6 +264,7 @@ final class KeepAliveActivityController {
 
 		_pendingState = nil
 		_pushInFlight = true
+		_inFlightState = next
 
 		Task { [weak self] in
 			await activity.update(ActivityContent(state: next, staleDate: nil))
@@ -265,6 +273,7 @@ final class KeepAliveActivityController {
 				guard let self else { return }
 
 				self._pushInFlight = false
+				self._inFlightState = nil
 				self._lastState = next
 
 				BackgroundAudioStatus.shared.record(
@@ -458,6 +467,7 @@ final class KeepAliveActivityController {
 		_reports.removeAll()
 		_reportSeq.removeAll()
 		_pendingState = nil
+		_inFlightState = nil
 		_focusOwner = nil
 		_lastIsRunning = false
 		_lastOwnersInput = []
