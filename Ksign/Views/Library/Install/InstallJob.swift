@@ -505,25 +505,54 @@ final class InstallJob: ObservableObject, Identifiable {
 		guard let bundleID = app.identifier else { return nil }
 		let viewModel = self.viewModel
 
-		return Task.detached(priority: .background) {
+		// `.userInitiated`, not `.background`. This loop is the *only* thing
+		// that ever marks a server-method install finished, and `.background`
+		// QoS is throttled hard the moment the app leaves the foreground — the
+		// 100ms poll stretches to seconds or stalls outright, and a whole
+		// install can pass between two samples. Which is exactly the bug: with
+		// the phone locked, nothing here ever saw progress go above zero, so
+		// `hasStarted` stayed false, the completion branch never ran, the queue
+		// slot was never handed back and `completedCount` never moved. Bringing
+		// the app forward un-throttled the loop, which is why it appeared to
+		// "sometimes work if you open the app for a second".
+		return Task.detached(priority: .userInitiated) {
 			var hasStarted = false
+			let startedAt = Date()
 
 			while !Task.isCancelled {
-				let rawProgress = await UIApplication.installProgress(for: bundleID) ?? 0.0
+				// nil and 0.0 are different answers and were being collapsed into
+				// one: nil means no install is in flight for this bundle at all,
+				// 0.0 means one is in flight and hasn't moved yet. The falling
+				// edge below is only meaningful against nil.
+				let rawProgress = await UIApplication.installProgress(for: bundleID)
 
-				if rawProgress > 0 {
+				if let rawProgress, rawProgress > 0 {
 					hasStarted = true
 				}
 
 				let progress = hasStarted
-					? Self._normalizeInstallProgress(rawProgress)
+					? Self._normalizeInstallProgress(rawProgress ?? 0)
 					: 0.0
 
 				await MainActor.run {
 					viewModel.installProgress = progress
 				}
 
-				if hasStarted && rawProgress == 0 {
+				// Seen it running, now it's gone: finished.
+				let finishedByEdge = hasStarted && rawProgress == nil
+
+				// Backstop for the edge being missed entirely — the loop being
+				// descheduled across the whole install, or the install landing
+				// before the first sample. Without it a missed edge strands the
+				// job forever, which is strictly worse than a late completion.
+				// The grace period keeps it from firing on an app that was
+				// already installed a moment ago, i.e. a reinstall or an update.
+				let finishedByPresence = !hasStarted
+					&& rawProgress == nil
+					&& Date().timeIntervalSince(startedAt) > 8
+					&& UIApplication.isAppInstalled(bundleID)
+
+				if finishedByEdge || finishedByPresence {
 					await MainActor.run {
 						viewModel.installProgress = 1.0
 						viewModel.status = .completed(.success(()))
