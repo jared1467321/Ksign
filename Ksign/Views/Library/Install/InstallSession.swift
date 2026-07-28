@@ -24,8 +24,19 @@ final class InstallSession: ObservableObject {
 	// a failure doesn't quietly vanish.
 	@Published private(set) var jobs: [InstallJob] = []
 
-	@Published private(set) var completedCount = 0
-	@Published private(set) var totalCount = 0
+	// The drawer prints "\(completedCount) of \(totalCount) installed" off these
+	// two, and has always got it right. So the pill reads them too — from their
+	// own `didSet`, which is the same moment the drawer's label changes.
+	//
+	// This replaces every hand-placed `report(...)` call that used to be dotted
+	// around the finish paths. There is no event to hook up wrong any more: if
+	// the drawer's number moves, the pill's number has already moved with it.
+	@Published private(set) var completedCount = 0 {
+		didSet { _mirrorCountToKeepAlive() }
+	}
+	@Published private(set) var totalCount = 0 {
+		didSet { _mirrorCountToKeepAlive() }
+	}
 	@Published private(set) var aggregateProgress: Double = 0
 
 	// Whether the drawer sheet is on screen. Dismissing it is now purely
@@ -77,6 +88,14 @@ final class InstallSession: ObservableObject {
 		// into one and runs the group concurrently; idevice and the external
 		// server keep the default limit and prompt per app as before.
 		if jobs.isEmpty {
+			// Cleared here rather than at the end of the last batch. Zeroing
+			// these on finish would fire `didSet` and wipe the final "12 of 12"
+			// the moment it landed — the pill lingers for a few seconds after
+			// the last release and that tally is what it shows.
+			completedCount = 0
+			totalCount = 0
+			aggregateProgress = 0
+
 			let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
 			let server = UserDefaults.standard.integer(forKey: "Feather.serverMethod")
 			_willBatch = (method == 0 && server == 0)
@@ -133,11 +152,6 @@ final class InstallSession: ObservableObject {
 		// already in flight is a no-op rather than a second claim to balance.
 		BackgroundAudioManager.shared.claim(.bulkInstalls)
 
-		// Open the bar at 0 of N rather than letting it appear once the first
-		// app lands. Also picks up apps added to a batch already in flight,
-		// since `totalCount` has just grown.
-		_reportBatchPosition()
-
 		isDrawerPresented = true
 		_startTicking()
 	}
@@ -160,21 +174,14 @@ final class InstallSession: ObservableObject {
 
 		guard job.phase == .completed else {
 			// Failed jobs stay on screen — that's the only signal you get.
-			// They still move the bar, though: a failure is settled work, and
-			// leaving it out meant one failed app pinned the count at 11 of 12
-			// for the rest of the batch.
-			_reportBatchPosition()
-			_settleIfNothingRunning()
+			_releaseIfNothingRunning()
 			return
 		}
 
+		// `didSet` on this is what moves the pill. Nothing else to do here.
 		completedCount += 1
 
-		// This is the event you already had: a job reaching a terminal state
-		// and handing its queue slot back. It is the whole of the pill's
-		// progress now — no timer, one update per app.
-		_reportBatchPosition()
-		_settleIfNothingRunning()
+		_releaseIfNothingRunning()
 
 		// Let the completion animation land before the row disappears.
 		Task { @MainActor [weak self] in
@@ -309,28 +316,19 @@ final class InstallSession: ObservableObject {
 		_finishIfIdle()
 	}
 
-	// How many apps in this batch are settled — installed or failed. Failed rows
-	// stay in `jobs` on purpose, so they have to be counted here or the
-	// denominator is one the batch can never reach.
-	private var _settledCount: Int {
-		completedCount + jobs.filter { $0.phase == .failed }.count
-	}
-
-	// The pill's batch position. One call per settled app, from the events that
-	// already exist — never from a timer.
-	private func _reportBatchPosition() {
+	private func _mirrorCountToKeepAlive() {
 		guard #available(iOS 16.2, *) else { return }
 
 		KeepAliveActivityController.shared.report(
 			.bulkInstalls,
-			completed: _settledCount,
+			completed: completedCount,
 			total: totalCount
 		)
 	}
 
-	// Called by a job when its status changes phase, so "Sending Manifest" →
-	// "Installing" reaches the pill without anything polling for it. A handful
-	// of updates per app rather than two and a half a second.
+	// The phase text is the one thing the drawer doesn't hold centrally — each
+	// row observes its own job for it — so it comes from the job instead, on
+	// the status change itself rather than off a timer.
 	func jobPhaseChanged() {
 		guard #available(iOS 16.2, *) else { return }
 
@@ -342,24 +340,21 @@ final class InstallSession: ObservableObject {
 		)
 	}
 
-	// Everything has finished one way or the other, but failed rows are still on
-	// screen so `jobs` will never empty and `_finishIfIdle` will never run.
+	// Everything is settled but failed rows stay on screen, so `jobs` never
+	// empties and `_finishIfIdle` never runs. That's the same condition the
+	// drawer already tests to decide it's finished-with-failures.
 	//
-	// That was a real leak, not a cosmetic one: a single failed install meant
-	// `release(.bulkInstalls)` was never called, the silent audio ran until the
-	// app was killed, and the pill sat on its last count forever.
-	private func _settleIfNothingRunning() {
-		guard !jobs.isEmpty else { return }
-		guard jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
+	// Without this a single failed install meant `release(.bulkInstalls)` was
+	// never called and the silent audio ran until the app was killed.
+	private func _releaseIfNothingRunning() {
+		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
 
 		BackgroundAudioManager.shared.release(.bulkInstalls)
 		_stopTicking()
 
 		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, detail: nil)
+			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
 		}
-
-		_reportBatchPosition()
 	}
 
 	private func _finishIfIdle() {
@@ -383,26 +378,12 @@ final class InstallSession: ObservableObject {
 
 		isDrawerPresented = false
 
-		// Final tally, sent before the counters are zeroed below. The keep-alive
-		// lingers for a few seconds after the last release, and this is what it
-		// shows during that window — "12 of 12", the batch visibly finishing,
-		// rather than the bar vanishing one app short.
-		if #available(iOS 16.2, *), totalCount > 0 {
-			KeepAliveActivityController.shared.report(
-				.bulkInstalls,
-				completed: _settledCount,
-				total: totalCount
-			)
-			// No `fraction` any more. The bar is the app count, which is what
-			// the count text says too — the two used to be fed from different
-			// places and disagreed by up to the 1.8s retirement delay, so the
-			// bar read 11/12 underneath the words "12 of 12".
+		// No final tally to send and nothing to zero. The counters already hold
+		// the finished figures, `didSet` already pushed them, and `start(apps:)`
+		// clears them when the next batch begins.
+		if #available(iOS 16.2, *) {
 			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
 		}
-
-		completedCount = 0
-		totalCount = 0
-		aggregateProgress = 0
 	}
 
 	// MARK: - Batched prompts
@@ -510,16 +491,10 @@ final class InstallSession: ObservableObject {
 				// check on the common path, not a restart attempt every 0.4s.
 				BackgroundAudioManager.shared.ensureRunning()
 
-				// Deliberately nothing here for the Dynamic Island. This tick
-				// exists to redraw the drawer, which is on screen and can take
-				// it; the pill is drawn by the system out of process and cannot.
-				// Feeding it from here meant a fresh `ContentState` roughly
-				// every 400ms — `aggregateProgress` moves continuously, so the
-				// controller's "has anything changed" check never dropped a
-				// single one — and ActivityKit's update budget put a stop to it
-				// partway through every batch. The pill is fed from
-				// `jobDidFinish` and `_jobPhaseChanged` instead: the events that
-				// already mark a slot freeing up and a phase turning over.
+				// Nothing here for the pill. This tick redraws the drawer, which
+				// is on screen and can take 2.5 redraws a second; the pill is
+				// drawn out of process by the system and cannot. It's fed from
+				// `completedCount`/`totalCount`'s own `didSet` instead.
 
 				try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
 				if self == nil { break }
