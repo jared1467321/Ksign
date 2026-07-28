@@ -41,6 +41,18 @@ final class BulkExportManager: ObservableObject {
 		return min(1.0, Double(completed) / Double(total))
 	}
 
+	// Mirrors the batch position into the keep-alive's Dynamic Island bar.
+	// Counted per app, same as the on-screen overlay — the zip step for a
+	// single app has no sub-progress to offer.
+	private func _reportProgress() {
+		guard #available(iOS 16.2, *) else { return }
+		KeepAliveActivityController.shared.report(
+			.bulkExport,
+			completed: completed,
+			total: isExporting ? total : nil
+		)
+	}
+
 	// MARK: - Lifecycle
 
 	func start(apps: [AppInfoPresentable]) {
@@ -50,6 +62,7 @@ final class BulkExportManager: ObservableObject {
 		total = apps.count
 		isExporting = true
 		BackgroundAudioManager.shared.claim(.bulkExport)
+		_reportProgress()
 
 		Task { await _run(apps) }
 	}
@@ -65,6 +78,7 @@ final class BulkExportManager: ObservableObject {
 		readyToPick = false
 		_cleanupWorkDirs()
 		_reset()
+		_reportProgress()
 		BackgroundAudioManager.shared.release(.bulkExport)
 	}
 
@@ -99,6 +113,7 @@ final class BulkExportManager: ObservableObject {
 			}
 
 			completed += 1
+			_reportProgress()
 		}
 
 		isExporting = false
