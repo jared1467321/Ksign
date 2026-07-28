@@ -319,13 +319,6 @@ extension BulkSigningView {
 				NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSigningFinished"), object: nil)
 				_isSigning = false
 
-				// Withdraw the counts, so a finished "12 of 12" can't sit under
-				// the next owner's name if something else still holds the
-				// keep-alive.
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.report(.signing, completed: 0, total: nil)
-				}
-
 				// Hand the freshly-signed apps off to the bulk installer.
 				// The Library observes this and installs the newest
 				// `successCount` signed apps (the ones we just produced).
