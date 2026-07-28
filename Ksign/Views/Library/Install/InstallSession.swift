@@ -424,6 +424,17 @@ final class InstallSession: ObservableObject {
 				// check on the common path, not a restart attempt every 0.4s.
 				BackgroundAudioManager.shared.ensureRunning()
 
+				// Apps finished out of apps queued, for the Dynamic Island bar.
+				// `aggregateProgress` is smoother but this is what the label
+				// next to the bar has to agree with.
+				if #available(iOS 16.2, *), let session = self {
+					KeepAliveActivityController.shared.report(
+						.bulkInstalls,
+						completed: max(0, session.totalCount - session.jobs.count),
+						total: session.totalCount
+					)
+				}
+
 				try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
 				if self == nil { break }
 			}
@@ -433,6 +444,10 @@ final class InstallSession: ObservableObject {
 	private func _stopTicking() {
 		_tickTask?.cancel()
 		_tickTask = nil
+
+		if #available(iOS 16.2, *) {
+			KeepAliveActivityController.shared.report(.bulkInstalls, completed: 0, total: nil)
+		}
 	}
 
 	private func _recomputeProgress() {
