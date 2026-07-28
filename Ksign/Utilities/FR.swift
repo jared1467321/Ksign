@@ -78,11 +78,30 @@ enum FR {
 				handler.appCertificate = certificate
 			}
 			handler.appIcon = icon
-			
+
+			// Phase text for the Dynamic Island. Reported here rather than from
+			// the bulk signer so a single sign gets it too — `SigningHandler`
+			// publishes no progress of its own, and these three stages are the
+			// only thing that distinguishes a long zsign run from a hung one.
+			func stage(_ name: String?) async {
+				if #available(iOS 16.2, *) {
+					await MainActor.run {
+						KeepAliveActivityController.shared.report(.signing, detail: name)
+					}
+				}
+			}
+
 			do {
+				await stage("Copying")
 				try await handler.copy()
+
+				await stage("Modifying")
 				try await handler.modify()
+
+				await stage("Finishing")
                 try? await handler.clean()
+
+				await stage(nil)
 				
 				await TempMaintenance.shared.endOperation()
 				await MainActor.run {
@@ -90,6 +109,7 @@ enum FR {
 				}
 			} catch {
 				try? await handler.clean()
+				await stage(nil)
 				await TempMaintenance.shared.endOperation()
 				await MainActor.run {
 					completion(error)
