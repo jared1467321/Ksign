@@ -353,11 +353,25 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
-		// Nothing is reported to the Dynamic Island from here. Phase transitions
-		// fire four or five times per app and the pill has a hard limit on how
-		// often it can be updated at all; spending that on "Sending Payload" left
-		// nothing for the count, which is the only figure worth showing. The
-		// session reports the tally when an app actually finishes.
+		// The phase text used to be reported to the Dynamic Island from here,
+		// on every status emission of every job — none, ready, sendingManifest,
+		// sendingPayload, installing, completed. Six per app, times however
+		// many are running, and the string itself changed again each time the
+		// jobs array reordered as rows retired. A twelve-app batch was well
+		// north of seventy distinct states pushed to ActivityKit to deliver
+		// twelve numbers anyone cared about.
+		//
+		// Backgrounded, ActivityKit budgets local updates and drops the excess
+		// silently — `update` returns Void and doesn't throw — so the count
+		// updates were dropped at the same rate as the phase noise they were
+		// competing with. Same failure the `aggregateProgress` timer hit, noted
+		// in KeepAliveActivityController.
+		//
+		// The count is reported on its own from `completedCount`'s `didSet`,
+		// once per completed app, and that is the whole of what the pill shows
+		// during a bulk install now. The drawer still shows per-row phase text;
+		// it reads the job directly and never went through here.
+
 		if case .ready = newStatus {
 			switch batchRole {
 			case .none:
