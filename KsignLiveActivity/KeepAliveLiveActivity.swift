@@ -9,17 +9,20 @@ import WidgetKit
 
 // The Dynamic Island and Lock Screen presentations of the keep-alive.
 //
-// There is no progress here on purpose. This reports a state — the silent audio
-// is up, and here is what's holding it — the way a weather activity reports a
-// temperature. Nothing is ever "complete", so nothing pretends to be.
+// The bar only appears when the owner actually counts apps — signing, bulk
+// installs, bulk export and batch import all do. Anything else leaves it out
+// entirely rather than showing an empty bar, which reads as stuck rather than
+// as absent.
 //
-// The system requires all four presentations to exist. Compact is what you'll
-// normally see; minimal is what you get when something else is also running an
-// activity; expanded appears on long press.
+// Note there is no bar in the compact presentation, and there can't be: compact
+// leading and compact trailing are two separate views sitting either side of
+// the TrueDepth camera, so nothing can span the gap between them. The counts go
+// in the trailing slot instead, where there's room for "3/12".
 struct KeepAliveLiveActivity: Widget {
 	var body: some WidgetConfiguration {
 		ActivityConfiguration(for: KeepAliveAttributes.self) { context in
-			_LockScreenView(state: context.state)
+			_DetailView(state: context.state)
+				.padding()
 				.activityBackgroundTint(Color.black.opacity(0.55))
 				.activitySystemActionForegroundColor(.primary)
 		} dynamicIsland: { context in
@@ -27,35 +30,34 @@ struct KeepAliveLiveActivity: Widget {
 				DynamicIslandExpandedRegion(.leading) {
 					_Symbol(isRunning: context.state.isRunning)
 						.font(.title3)
-						.padding(.leading, 4)
+						.padding(.leading, 6)
 				}
 
 				DynamicIslandExpandedRegion(.trailing) {
 					Text(context.state.isRunning ? "Awake" : "Not awake")
 						.font(.caption)
 						.foregroundStyle(context.state.isRunning ? .green : .orange)
-						.padding(.trailing, 4)
+						.padding(.trailing, 6)
 				}
 
 				DynamicIslandExpandedRegion(.bottom) {
-					VStack(alignment: .leading, spacing: 3) {
-						Text(context.state.statusText)
-							.font(.subheadline.weight(.medium))
-
-						Text(context.state.summary)
-							.font(.caption)
-							.foregroundStyle(.secondary)
-							.lineLimit(2)
-					}
-					.frame(maxWidth: .infinity, alignment: .leading)
+					// The horizontal padding is load-bearing. Without it the
+					// leading edge of this region runs under the Island's
+					// rounded corner and the first character of the owner name
+					// gets sliced off — "Import" rendering as "'mport".
+					_DetailView(state: context.state)
+						.padding(.horizontal, 6)
+						.padding(.top, 2)
 				}
 			} compactLeading: {
 				_Symbol(isRunning: context.state.isRunning)
 			} compactTrailing: {
-				// Very little room next to the camera, so this is the single
-				// most useful word: who's holding it.
-				Text(context.state.shortLabel)
+				// Whichever is more useful in the very small space available:
+				// the batch position if there is one, otherwise who's holding
+				// the keep-alive.
+				Text(context.state.compactTrailingLabel)
 					.font(.caption2)
+					.monospacedDigit()
 					.lineLimit(1)
 					.foregroundStyle(.secondary)
 			} minimal: {
@@ -75,26 +77,45 @@ private struct _Symbol: View {
 	}
 }
 
-private struct _LockScreenView: View {
+// Shared by the expanded Island and the Lock Screen so the two can't drift.
+private struct _DetailView: View {
 	let state: KeepAliveAttributes.ContentState
 
 	var body: some View {
-		HStack(spacing: 12) {
-			_Symbol(isRunning: state.isRunning)
-				.font(.title2)
-
-			VStack(alignment: .leading, spacing: 3) {
+		VStack(alignment: .leading, spacing: 6) {
+			HStack(alignment: .firstTextBaseline) {
 				Text(state.statusText)
-					.font(.subheadline.weight(.medium))
+					.font(.subheadline.weight(.semibold))
 
-				Text(state.summary)
-					.font(.caption)
-					.foregroundStyle(.secondary)
-					.lineLimit(2)
+				Spacer(minLength: 8)
+
+				if let countLabel = state.countLabel {
+					Text(countLabel)
+						.font(.caption)
+						.monospacedDigit()
+						.foregroundStyle(.secondary)
+						// Counts tick upward one app at a time, so animate the
+						// digits rather than having them snap.
+						.contentTransition(.numericText())
+				}
 			}
 
-			Spacer(minLength: 0)
+			if let fraction = state.fraction {
+				ProgressView(value: fraction)
+					.progressViewStyle(.linear)
+					.tint(state.isRunning ? .green : .orange)
+			}
+
+			Text(state.summary)
+				.font(.caption.weight(.medium))
+				.lineLimit(1)
+
+			Text(state.reassurance)
+				.font(.caption2)
+				.foregroundStyle(.secondary)
+				.lineLimit(2)
+				.fixedSize(horizontal: false, vertical: true)
 		}
-		.padding()
+		.frame(maxWidth: .infinity, alignment: .leading)
 	}
 }
