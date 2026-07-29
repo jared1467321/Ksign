@@ -74,16 +74,19 @@ final class KeepAliveActivityController {
 	private var _lastPushedState: KeepAliveAttributes.ContentState?
 	private var _lastPushAt = Date.distantPast
 
-	// Phase, owner, count and completion transitions should feel immediate, but a
-	// tiny floor still coalesces bursts. Fraction-only movement is intentionally
-	// slower so a fast poller does not flood ActivityKit.
-	private static let _urgentPushInterval: TimeInterval = 0.35
-	private static let _progressPushInterval: TimeInterval = 3
+	// ActivityKit can silently stop repainting a long-lived local activity when
+	// it is updated too aggressively. Every push therefore has a meaningful
+	// global floor, even for count/owner/completion changes. Ordinary phase and
+	// percentage movement is coalesced more heavily so a long batch can survive
+	// from start to finish without exhausting the activity's practical render
+	// budget.
+	private static let _urgentPushInterval: TimeInterval = 3
+	private static let _progressPushInterval: TimeInterval = 8
 
-	// Fractions are quantized to whole percentage points before entering the
-	// state graph. A producer can sample frequently without creating a distinct
-	// ActivityKit state for microscopic changes.
-	private static let _progressStep = 0.01
+	// Fractions are quantized before entering the state graph. Producers may keep
+	// sampling at high frequency, but ActivityKit only sees movement in 3-point
+	// steps and the scheduler retains only the newest state between pushes.
+	private static let _progressStep = 0.03
 
 	// ActivityKit behaves most reliably for this app when the activity is born as
 	// the app leaves the foreground. Work can run for any length of time while the
@@ -238,21 +241,40 @@ final class KeepAliveActivityController {
 	) -> Bool {
 		guard let old else { return true }
 
+		// Owner and item-count changes are the compact island's primary signal, so
+		// keep them on the shorter cadence. They are still globally limited to one
+		// push every three seconds, which prevents fast batches from producing a
+		// burst for every individual phase and completion callback.
 		if old.isRunning != new.isRunning
 			|| old.owners != new.owners
 			|| old.completed != new.completed
-			|| old.total != new.total
-			|| old.detail != new.detail {
+			|| old.total != new.total {
 			return true
 		}
 
-		// A fraction appearing/disappearing or reaching completion should not wait
-		// behind the ordinary progress cadence.
+		// Terminal states should not sit behind the eight-second ordinary cadence.
+		// The three-second global floor still applies, so even completion/error
+		// transitions cannot create back-to-back ActivityKit writes.
+		if new.detail != old.detail, _isTerminalDetail(new.detail) {
+			return true
+		}
+
 		if old.progressFraction == nil || new.progressFraction == nil {
 			return old.progressFraction != new.progressFraction
 		}
 
 		return (old.progressFraction ?? 0) < 1 && (new.progressFraction ?? 0) >= 1
+	}
+
+	private func _isTerminalDetail(_ detail: String?) -> Bool {
+		guard let detail else { return false }
+		let normalized = detail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		return normalized == "completed"
+			|| normalized == "complete"
+			|| normalized == "error"
+			|| normalized == "failed"
+			|| normalized == "cancelled"
+			|| normalized == "canceled"
 	}
 
 	private func _enqueue(_ state: KeepAliveAttributes.ContentState, urgent: Bool) {
@@ -406,7 +428,7 @@ final class KeepAliveActivityController {
 	}
 
 	// A genuine 0...1 figure. Producers may call this frequently; values are
-	// quantized here and the serial scheduler applies the three-second cadence.
+	// quantized here and the serial scheduler applies the global pacing policy.
 	func report(_ owner: BackgroundAudioManager.Owner, fraction: Double?) {
 		_merge(owner) {
 			guard let fraction else {
@@ -419,7 +441,7 @@ final class KeepAliveActivityController {
 				$0.fraction = 1
 			} else {
 				let units = floor((clamped + 0.000_000_001) / Self._progressStep)
-				$0.fraction = min(1 - Self._progressStep, units * Self._progressStep)
+				$0.fraction = min(0.99, units * Self._progressStep)
 			}
 		}
 	}
