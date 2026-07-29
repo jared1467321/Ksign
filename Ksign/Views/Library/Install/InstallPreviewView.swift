@@ -22,7 +22,6 @@ struct InstallPreviewView: View {
     @AppStorage("Feather.installationMethod") private var _installationMethod: Int = 0
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@State private var _isWebviewPresenting = false
-    @State private var progressTask: Task<Void, Never>?
 	@State private var _activityCancellables = Set<AnyCancellable>()
 	// Where ArchiveHandler staged this install's .ipa. Nothing deleted it
 	// before, so every single-app install left a full-size archive in tmp
@@ -40,12 +39,18 @@ struct InstallPreviewView: View {
         let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
 		let viewModel = InstallerStatusViewModel(isIdevice: method == 1)
 		self._viewModel = StateObject(wrappedValue: viewModel)
+		let bundleID = app.identifier
 		self._installer = StateObject(
 			wrappedValue: try! ServerInstaller(
 				app: app,
 				viewModel: viewModel,
 				statusReporter: { status in
-					SingleInstallLiveActivityReporter.shared.updateStatus(status)
+					SingleInstallLiveActivityReporter.shared.handleServerStatus(
+						status,
+						bundleID: bundleID,
+						viewModel: viewModel,
+						isServerInstall: method == 0
+					)
 				}
 			)
 		)
@@ -70,22 +75,12 @@ struct InstallPreviewView: View {
 				}
 			}
 
-			// Server method only — idevice reports progress via its own callback.
-			if case .installing = newStatus, _installationMethod == 0, progressTask == nil {
-				progressTask = startInstallProgressPolling(
-					bundleID: app.identifier!,
-					viewModel: viewModel
-				)
-			}
-
 			if case .sendingPayload = newStatus, _serverMethod == 1 {
 				_isWebviewPresenting = false
 			}
 
 			switch newStatus {
 			case .completed, .broken(_):
-				progressTask?.cancel()
-				progressTask = nil
 				BackgroundAudioManager.shared.release(.singleInstall)
 				_cleanupArchive()
 			default:
@@ -99,8 +94,6 @@ struct InstallPreviewView: View {
 			_install()
 		}
 		.onDisappear {
-			progressTask?.cancel()
-			progressTask = nil
 			_activityCancellables.removeAll()
 			SingleInstallLiveActivityReporter.shared.end()
 			BackgroundAudioManager.shared.release(.singleInstall)
@@ -189,16 +182,6 @@ struct InstallPreviewView: View {
                             viewModel.status = .ready
                         }
                         
-                        if case .installing = await viewModel.status {
-                            let task = await startInstallProgressPolling(
-                                bundleID: app.identifier!,
-                                viewModel: viewModel
-                            )
-
-                            await MainActor.run {
-                                progressTask = task
-                            }
-                        }
                     }
                     else if await _installationMethod == 1 {
                         let handler = await InstallationProxy(viewModel: viewModel)
@@ -221,7 +204,6 @@ struct InstallPreviewView: View {
 					}
 				}
 			} catch {
-                await progressTask?.cancel()
 				SingleInstallLiveActivityReporter.shared.updateStatus(.broken(error))
 				await MainActor.run {
 					UIAlertController.showAlertWithOk(
@@ -237,59 +219,6 @@ struct InstallPreviewView: View {
 		}
 	}
 
-    private func startInstallProgressPolling(
-            bundleID: String,
-            viewModel: InstallerStatusViewModel
-        ) -> Task<Void, Never> {
-
-            Task.detached(priority: .userInitiated) {
-                var hasStarted = false
-                let startedAt = Date()
-
-                while !Task.isCancelled {
-                    // nil means no install is currently registered for this bundle;
-                    // zero means an install exists but has not advanced yet.
-                    let rawProgress = await UIApplication.installProgress(for: bundleID)
-
-                    if let rawProgress, rawProgress > 0 {
-                        hasStarted = true
-                    }
-
-                    let progress = hasStarted
-                        ? Self._normalizeInstallProgress(rawProgress ?? 0)
-                        : 0.0
-
-                    SingleInstallLiveActivityReporter.shared.updateInstall(progress)
-                    await MainActor.run {
-                        viewModel.installProgress = progress
-                    }
-
-                    // Normal completion is the falling edge from a visible install
-                    // to no registered install. The presence check catches an install
-                    // that completed entirely between two samples.
-                    let finishedByEdge = hasStarted && rawProgress == nil
-                    let finishedByPresence = !hasStarted
-                        && rawProgress == nil
-                        && Date().timeIntervalSince(startedAt) > 8
-                        && UIApplication.isAppInstalled(bundleID)
-
-                    if finishedByEdge || finishedByPresence {
-                        SingleInstallLiveActivityReporter.shared.finish()
-                        await MainActor.run {
-                            viewModel.installProgress = 1.0
-                            viewModel.status = .completed(.success(()))
-                        }
-                        break
-                    }
-
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
-                }
-            }
-        }
-
-        private static func _normalizeInstallProgress(_ rawProgress: Double) -> Double {
-            min(1.0, max(0.0, (rawProgress - 0.6) / 0.3))
-        }
 }
 
 // MARK: - Background-safe single-install Live Activity mirror
@@ -311,6 +240,7 @@ final class SingleInstallLiveActivityReporter {
 	private var _installProgress: Double = 0
 	private var _detail = "Packaging"
 	private var _completed = false
+	private let _serverMonitorID = UUID()
 
 	private init() { }
 
@@ -353,6 +283,45 @@ final class SingleInstallLiveActivityReporter {
 			self._installProgress = max(self._installProgress, clamped)
 			self._detail = "Installing"
 			self._publish()
+		}
+	}
+
+	func handleServerStatus(
+		_ status: InstallerStatusViewModel.InstallerStatus,
+		bundleID: String?,
+		viewModel: InstallerStatusViewModel,
+		isServerInstall: Bool
+	) {
+		updateStatus(status)
+		guard isServerInstall else { return }
+
+		switch status {
+		case .installing:
+			guard let bundleID else { return }
+			ServerInstallProgressMonitor.shared.start(
+				id: _serverMonitorID,
+				bundleID: bundleID,
+				onProgress: { progress in
+					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
+					DispatchQueue.main.async {
+						viewModel.installProgress = progress
+					}
+				},
+				onCompleted: {
+					let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
+					SingleInstallLiveActivityReporter.shared.updateStatus(completed)
+					DispatchQueue.main.async {
+						viewModel.installProgress = 1
+						viewModel.status = completed
+					}
+				}
+			)
+
+		case .completed, .broken:
+			ServerInstallProgressMonitor.shared.stop(id: _serverMonitorID)
+
+		default:
+			break
 		}
 	}
 
@@ -401,6 +370,8 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	func end() {
+		ServerInstallProgressMonitor.shared.stop(id: _serverMonitorID)
+
 		_queue.async {
 			guard self._active else { return }
 			self._active = false

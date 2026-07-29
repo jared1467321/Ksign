@@ -63,7 +63,6 @@ final class InstallJob: ObservableObject, Identifiable {
 	private let _serverMethod: Int
 
 	private var _cancellables = Set<AnyCancellable>()
-	private var _progressTask: Task<Void, Never>?
 	private var _installTask: Task<Void, Never>?
 
 	// MARK: Install queue
@@ -110,12 +109,56 @@ final class InstallJob: ObservableObject, Identifiable {
 		// palera.in to fetch, so it starts serving now.
 		let serves = _serverMethod != 0
 		let jobID = id
+		let method = _installationMethod
+		let bundleID = app.identifier
+		let statusModel = viewModel
+
 		installer = try ServerInstaller(
 			app: app,
 			viewModel: viewModel,
 			startsServer: serves,
 			statusReporter: { status in
 				BulkInstallLiveActivityReporter.shared.updateStatus(jobID: jobID, status: status)
+
+				// Start the server-method progress monitor from Vapor's worker
+				// callback itself. Previously this waited for the @MainActor status
+				// subscriber, which may not run until the app becomes active again.
+				guard method == 0 else { return }
+
+				switch status {
+				case .installing:
+					guard let bundleID else { return }
+					ServerInstallProgressMonitor.shared.start(
+						id: jobID,
+						bundleID: bundleID,
+						onProgress: { progress in
+							BulkInstallLiveActivityReporter.shared.updateInstall(
+								jobID: jobID,
+								progress: progress
+							)
+							DispatchQueue.main.async {
+								statusModel.installProgress = progress
+							}
+						},
+						onCompleted: {
+							let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
+							BulkInstallLiveActivityReporter.shared.updateStatus(
+								jobID: jobID,
+								status: completed
+							)
+							DispatchQueue.main.async {
+								statusModel.installProgress = 1
+								statusModel.status = completed
+							}
+						}
+					)
+
+				case .completed, .broken:
+					ServerInstallProgressMonitor.shared.stop(id: jobID)
+
+				default:
+					break
+				}
 			}
 		)
 	}
@@ -254,8 +297,7 @@ final class InstallJob: ObservableObject, Identifiable {
 		_batchHost = nil
 
 		// Clear anything left over from the previous attempt.
-		_progressTask?.cancel()
-		_progressTask = nil
+		ServerInstallProgressMonitor.shared.stop(id: id)
 		_installTask?.cancel()
 		_installTask = nil
 
@@ -331,8 +373,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			installer?.shutDown()
 		}
 		_batchHost = nil
-		_progressTask?.cancel()
-		_progressTask = nil
+		ServerInstallProgressMonitor.shared.stop(id: id)
 
 		if hasBuiltPackage {
 			// Server and package are still alive — no rebuild, no slot needed. Park
@@ -373,8 +414,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	func cancel() {
 		_installTask?.cancel()
 		_installTask = nil
-		_progressTask?.cancel()
-		_progressTask = nil
+		ServerInstallProgressMonitor.shared.stop(id: id)
 		_releaseSlotIfNeeded()
 		// Covers the case `.completed` doesn't: a failed job the user dismisses
 		// by hand, or the whole drawer being cleared mid-batch.
@@ -425,22 +465,13 @@ final class InstallJob: ObservableObject, Identifiable {
 			}
 		}
 
-		// Server method only. The idevice path already gets real progress from
-		// installation_proxy's callback, so running this too means two writers
-		// fighting over `installProgress` — and this loop's own completion
-		// guess can end the row early.
-		if case .installing = newStatus, _installationMethod == 0, _progressTask == nil {
-			_progressTask = _startInstallProgressPolling()
-		}
-
 		if case .sendingPayload = newStatus, _serverMethod == 1 {
 			InstallSession.shared.dismissWebview(for: self)
 		}
 
 		switch newStatus {
 		case .completed, .broken:
-			_progressTask?.cancel()
-			_progressTask = nil
+			ServerInstallProgressMonitor.shared.stop(id: id)
 			// This one was missed before. A job that failed while still queued
 			// left its task sitting in `acquire()`, which would later claim a
 			// slot for an already-dead job and quietly hold it.
@@ -561,89 +592,92 @@ final class InstallJob: ObservableObject, Identifiable {
 		}
 	}
 
-	private func _startInstallProgressPolling() -> Task<Void, Never>? {
-		guard let bundleID = app.identifier else { return nil }
-		let viewModel = self.viewModel
-		let jobID = self.id
+}
 
-		// `.userInitiated`, not `.background`. This loop is the *only* thing
-		// that ever marks a server-method install finished, and `.background`
-		// QoS is throttled hard the moment the app leaves the foreground — the
-		// 100ms poll stretches to seconds or stalls outright, and a whole
-		// install can pass between two samples. Which is exactly the bug: with
-		// the phone locked, nothing here ever saw progress go above zero, so
-		// `hasStarted` stayed false, the completion branch never ran, the queue
-		// slot was never handed back and `completedCount` never moved. Bringing
-		// the app forward un-throttled the loop, which is why it appeared to
-		// "sometimes work if you open the app for a second".
-		return Task.detached(priority: .userInitiated) {
-			var hasStarted = false
-			let startedAt = Date()
+// Polls LSApplicationWorkspace from a detached worker for server-method installs.
+// Starting this monitor is driven directly by ServerInstaller's Vapor callback,
+// not by SwiftUI or an @MainActor status observer.
+final class ServerInstallProgressMonitor {
+	static let shared = ServerInstallProgressMonitor()
 
-			while !Task.isCancelled {
-				// nil and 0.0 are different answers and were being collapsed into
-				// one: nil means no install is in flight for this bundle at all,
-				// 0.0 means one is in flight and hasn't moved yet. The falling
-				// edge below is only meaningful against nil.
-				let rawProgress = await UIApplication.installProgress(for: bundleID)
+	private let _queue = DispatchQueue(
+		label: "nya.asami.ksign.server-install-progress",
+		qos: .userInitiated
+	)
+	private struct _Entry {
+		let generation: UUID
+		let task: Task<Void, Never>
+	}
+	private var _tasks: [UUID: _Entry] = [:]
 
-				if let rawProgress, rawProgress > 0 {
-					hasStarted = true
-				}
+	private init() { }
 
-				let progress = hasStarted
-					? Self._normalizeInstallProgress(rawProgress ?? 0)
-					: 0.0
+	func start(
+		id: UUID,
+		bundleID: String,
+		onProgress: @escaping (Double) -> Void,
+		onCompleted: @escaping () -> Void
+	) {
+		_queue.async {
+			guard self._tasks[id] == nil else { return }
 
-				BulkInstallLiveActivityReporter.shared.updateInstall(
-					jobID: jobID,
-					progress: progress
-				)
+			let generation = UUID()
+			let task = Task.detached(priority: .userInitiated) { [weak self] in
+				var hasStarted = false
+				let startedAt = Date()
+				let wasInstalledAtStart = UIApplication.isAppInstalled(bundleID)
 
-				await MainActor.run {
-					viewModel.installProgress = progress
-				}
+				while !Task.isCancelled {
+					let rawProgress = UIApplication.installProgress(for: bundleID)
 
-				// Seen it running, now it's gone: finished.
-				let finishedByEdge = hasStarted && rawProgress == nil
-
-				// Backstop for the edge being missed entirely — the loop being
-				// descheduled across the whole install, or the install landing
-				// before the first sample. Without it a missed edge strands the
-				// job forever, which is strictly worse than a late completion.
-				// The grace period keeps it from firing on an app that was
-				// already installed a moment ago, i.e. a reinstall or an update.
-				let finishedByPresence = !hasStarted
-					&& rawProgress == nil
-					&& Date().timeIntervalSince(startedAt) > 8
-					&& UIApplication.isAppInstalled(bundleID)
-
-				if finishedByEdge || finishedByPresence {
-					BulkInstallLiveActivityReporter.shared.updateStatus(
-						jobID: jobID,
-						status: .completed(.success(()))
-					)
-					await MainActor.run {
-						viewModel.installProgress = 1.0
-						viewModel.status = .completed(.success(()))
+					if let rawProgress, rawProgress > 0 {
+						hasStarted = true
 					}
-					break
+
+					let progress = hasStarted
+						? Self._normalize(rawProgress ?? 0)
+						: 0
+					onProgress(progress)
+
+					let finishedByEdge = hasStarted && rawProgress == nil
+					let finishedByPresence = !wasInstalledAtStart
+						&& !hasStarted
+						&& rawProgress == nil
+						&& Date().timeIntervalSince(startedAt) > 8
+						&& UIApplication.isAppInstalled(bundleID)
+
+					if finishedByEdge || finishedByPresence {
+						onProgress(1)
+						onCompleted()
+						self?._remove(id: id, generation: generation)
+						return
+					}
+
+					try? await Task.sleep(nanoseconds: 100_000_000)
 				}
 
-				// Was 1ms. That's a private-API call plus a main-actor hop a
-				// thousand times a second, per installing app, to drive a bar
-				// that can't redraw faster than the display. 100ms is still
-				// far smoother than anyone can perceive.
-				try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+				self?._remove(id: id, generation: generation)
 			}
+
+			self._tasks[id] = _Entry(generation: generation, task: task)
 		}
 	}
 
-	// `nonisolated` because the class is @MainActor, which this static would
-	// otherwise inherit — and it's called from the detached polling task.
-	// It's pure arithmetic on a Double, so there's nothing to isolate.
-	nonisolated private static func _normalizeInstallProgress(_ rawProgress: Double) -> Double {
-		min(1.0, max(0.0, (rawProgress - 0.6) / 0.3))
+	func stop(id: UUID) {
+		_queue.async {
+			self._tasks.removeValue(forKey: id)?.task.cancel()
+		}
+	}
+
+	private func _remove(id: UUID, generation: UUID) {
+		_queue.async {
+			guard self._tasks[id]?.generation == generation else { return }
+			self._tasks.removeValue(forKey: id)
+		}
+	}
+
+	private static func _normalize(_ rawProgress: Double) -> Double {
+		min(1, max(0, (rawProgress - 0.6) / 0.3))
 	}
 }
 
