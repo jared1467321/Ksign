@@ -292,8 +292,21 @@ extension BulkSigningView {
 					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
 				}
 
+				let finishedCount = processed + 1
 				do {
-					try await _signOne(config, certificate: certificate)
+					try await _signOne(
+						config,
+						certificate: certificate,
+						backgroundCompletion: {
+							if #available(iOS 16.2, *) {
+								KeepAliveActivityController.shared.report(
+									.signing,
+									completed: finishedCount,
+									total: configs.count
+								)
+							}
+						}
+					)
 					successCount += 1
 
 					// Match the single-app flow: if "Remove app after
@@ -321,9 +334,7 @@ extension BulkSigningView {
 			// long as the pill lives, and the next thing to sign a single app —
 			// which reports a phase but no count — inherits it.
 			if #available(iOS 16.2, *) {
-				await MainActor.run {
-					KeepAliveActivityController.shared.clearReport(.signing)
-				}
+				KeepAliveActivityController.shared.clearReport(.signing)
 			}
 
 			// Report results and tear down once, after the whole queue
@@ -359,13 +370,18 @@ extension BulkSigningView {
 
 	// Bridges the callback-based FR.signPackageFile into async/await so
 	// each sign can be awaited sequentially in the loop above.
-	private func _signOne(_ config: AppSignConfig, certificate: CertificatePair?) async throws {
+	private func _signOne(
+		_ config: AppSignConfig,
+		certificate: CertificatePair?,
+		backgroundCompletion: @escaping () -> Void
+	) async throws {
 		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
 			FR.signPackageFile(
 				config.app,
 				using: config.options,
 				icon: config.icon,
-				certificate: certificate
+				certificate: certificate,
+				backgroundCompletion: { _ in backgroundCompletion() }
 			) { error in
 				if let error {
 					continuation.resume(throwing: error)
