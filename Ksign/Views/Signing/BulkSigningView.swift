@@ -263,82 +263,48 @@ extension BulkSigningView {
 		let certificate = _selectedCert()
 		let configs = _configs
 
-		Task {
+		Task.detached(priority: .userInitiated) {
 			var failures: [(name: String, error: Error)] = []
 			var successCount = 0
 			var processed = 0
 
-			// Seed the Dynamic Island bar at 0 of N before the first app, so
-			// it appears full-width-empty rather than popping into existence
-			// once the first app lands.
-			//
-			// This lands *before* anything claims the keep-alive, so if a pill
-			// from some earlier job happens to end in the gap the controller
-			// wipes its reports and this figure goes with it. Re-asserted at the
-			// top of every iteration below, which costs nothing — an identical
-			// report is dropped before it reaches the system.
+			// Seed the Dynamic Island bar before the first worker claims signing.
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.report(.signing, completed: 0, total: configs.count)
 			}
 
-			// Sign one app at a time. Each iteration waits for the
-			// previous app to fully finish (copy → modify → zsign → move)
-			// before starting the next, so zsign is never operating on
-			// two apps concurrently. Concurrent zsign runs share global
-			// state and produce a malformed code signature — the app
-			// installs but panics the device on launch.
+			// The batch coordinator itself must stay off MainActor. The signing worker
+			// already runs detached; previously the continuation resumed only through
+			// the UI completion callback, so the first app could finish in the
+			// background while the loop remained parked until foreground.
 			for config in configs {
 				if #available(iOS 16.2, *) {
 					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
 				}
 
-				let finishedCount = processed + 1
 				do {
-					try await _signOne(
+					try await Self._signOne(
 						config,
-						certificate: certificate,
-						backgroundCompletion: {
-							if #available(iOS 16.2, *) {
-								KeepAliveActivityController.shared.report(
-									.signing,
-									completed: finishedCount,
-									total: configs.count
-								)
-							}
-						}
+						certificate: certificate
 					)
 					successCount += 1
 
-					// Match the single-app flow: if "Remove app after
-					// signing" is enabled, drop the source IPA from the
-					// unsigned (Downloaded) list now that it's signed.
 					if config.options.removeApp, !config.app.isSigned {
-						Storage.shared.deleteApp(for: config.app)
+						await MainActor.run {
+							Storage.shared.deleteApp(for: config.app)
+						}
 					}
 				} catch {
 					failures.append((config.app.name ?? .localized("Unknown"), error))
 				}
 
 				processed += 1
-
-				// Reported per app rather than from a timer: "apps finished" is
-				// the only progress this loop has, since zsign gives no
-				// sub-progress within a single app.
 				if #available(iOS 16.2, *) {
 					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
 				}
 			}
 
-			// Withdraw the batch position now the batch is over. Left in place
-			// it outlives the work: `.signing` keeps a stale "36 of 36" for as
-			// long as the pill lives, and the next thing to sign a single app —
-			// which reports a phase but no count — inherits it.
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.clearReport(.signing)
-			}
 
-			// Report results and tear down once, after the whole queue
-			// is done — not once per app like the old fan-out did.
 			await MainActor.run {
 				if !failures.isEmpty {
 					let message = failures
@@ -350,9 +316,6 @@ extension BulkSigningView {
 				NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSigningFinished"), object: nil)
 				_isSigning = false
 
-				// Hand the freshly-signed apps off to the bulk installer.
-				// The Library observes this and installs the newest
-				// `successCount` signed apps (the ones we just produced).
 				if signAndInstall, successCount > 0 {
 					let count = successCount
 					DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -370,10 +333,9 @@ extension BulkSigningView {
 
 	// Bridges the callback-based FR.signPackageFile into async/await so
 	// each sign can be awaited sequentially in the loop above.
-	private func _signOne(
+	private static func _signOne(
 		_ config: AppSignConfig,
-		certificate: CertificatePair?,
-		backgroundCompletion: @escaping () -> Void
+		certificate: CertificatePair?
 	) async throws {
 		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
 			FR.signPackageFile(
@@ -381,13 +343,16 @@ extension BulkSigningView {
 				using: config.options,
 				icon: config.icon,
 				certificate: certificate,
-				backgroundCompletion: { _ in backgroundCompletion() }
-			) { error in
-				if let error {
-					continuation.resume(throwing: error)
-				} else {
-					continuation.resume()
+				backgroundCompletion: { error in
+					if let error {
+						continuation.resume(throwing: error)
+					} else {
+						continuation.resume()
+					}
 				}
+			) { _ in
+				// UI completion is intentionally not the batch gate. It may be
+				// delivered later when the app is foregrounded.
 			}
 		}
 	}
