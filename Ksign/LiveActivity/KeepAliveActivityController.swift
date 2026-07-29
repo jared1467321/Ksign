@@ -80,13 +80,13 @@ final class KeepAliveActivityController {
 	// percentage movement is coalesced more heavily so a long batch can survive
 	// from start to finish without exhausting the activity's practical render
 	// budget.
-	private static let _urgentPushInterval: TimeInterval = 10
-	private static let _progressPushInterval: TimeInterval = 20
+	private static let _urgentPushInterval: TimeInterval = 3
+	private static let _progressPushInterval: TimeInterval = 8
 
 	// Fractions are quantized before entering the state graph. Producers may keep
-	// sampling at high frequency, but ActivityKit only sees movement in 5-point
+	// sampling at high frequency, but ActivityKit only sees movement in 3-point
 	// steps and the scheduler retains only the newest state between pushes.
-	private static let _progressStep = 0.05
+	private static let _progressStep = 0.03
 
 	// ActivityKit behaves most reliably for this app when the activity is born as
 	// the app leaves the foreground. Work can run for any length of time while the
@@ -243,7 +243,7 @@ final class KeepAliveActivityController {
 
 		// Owner and item-count changes are the compact island's primary signal, so
 		// keep them on the shorter cadence. They are still globally limited to one
-		// push every ten seconds, which prevents fast batches from producing a
+		// push every three seconds, which prevents fast batches from producing a
 		// burst for every individual phase and completion callback.
 		if old.isRunning != new.isRunning
 			|| old.owners != new.owners
@@ -252,8 +252,8 @@ final class KeepAliveActivityController {
 			return true
 		}
 
-		// Terminal states should not sit behind the twenty-second ordinary cadence.
-		// The ten-second global floor still applies, so even completion/error
+		// Terminal states should not sit behind the eight-second ordinary cadence.
+		// The three-second global floor still applies, so even completion/error
 		// transitions cannot create back-to-back ActivityKit writes.
 		if new.detail != old.detail, _isTerminalDetail(new.detail) {
 			return true
