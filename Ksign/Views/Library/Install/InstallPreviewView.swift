@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 import NimbleViews
 import IDeviceSwift
 import OSLog
@@ -52,10 +53,6 @@ struct InstallPreviewView: View {
 			SafariRepresentableView(url: installer.pageEndpoint).ignoresSafeArea()
 		}
 		.onReceive(viewModel.$status) { newStatus in
-			// A single install reported nothing at all before this: the pill
-			// named "Install" and showed no bar and no phase, because every
-			// `report` call in the app was for `.bulkInstalls`. One app is still
-			// a batch of one.
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.report(.singleInstall, detail: viewModel.statusLabel)
 			}
@@ -88,9 +85,11 @@ struct InstallPreviewView: View {
                 progressTask = nil
                 if #available(iOS 16.2, *) {
                     if case .completed = newStatus {
+                        KeepAliveActivityController.shared.report(.singleInstall, fraction: 1)
                         KeepAliveActivityController.shared.report(.singleInstall, completed: 1, total: 1)
                     }
-                    KeepAliveActivityController.shared.report(.singleInstall, detail: nil)
+                    // Leave "Completed" or "Error" visible during the audio
+                    // manager's linger window. onDisappear withdraws the report.
                 }
                 BackgroundAudioManager.shared.release(.singleInstall)
                 _cleanupArchive()
@@ -98,20 +97,23 @@ struct InstallPreviewView: View {
                 break
             }
 		}
+		.onReceive(viewModel.$installProgress.removeDuplicates()) { progress in
+			guard #available(iOS 16.2, *) else { return }
+			KeepAliveActivityController.shared.report(.singleInstall, fraction: progress)
+		}
 		.onAppear(perform: _install)
 		.onAppear {
 			BackgroundAudioManager.shared.claim(.singleInstall)
 
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.report(.singleInstall, completed: 0, total: 1)
+				KeepAliveActivityController.shared.report(.singleInstall, fraction: 0)
 			}
 		}
 		.onDisappear {
             progressTask?.cancel()
             progressTask = nil
 
-			// Withdraw rather than leave "1 of 1" sitting under whatever owns
-			// the keep-alive next.
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.clearReport(.singleInstall)
 			}
@@ -214,46 +216,56 @@ struct InstallPreviewView: View {
 			}
 		}
 	}
+
     private func startInstallProgressPolling(
             bundleID: String,
             viewModel: InstallerStatusViewModel
         ) -> Task<Void, Never> {
 
-            Task.detached(priority: .background) {
+            Task.detached(priority: .userInitiated) {
                 var hasStarted = false
+                let startedAt = Date()
 
                 while !Task.isCancelled {
-                    let rawProgress = await UIApplication.installProgress(for: bundleID) ?? 0.0
+                    // nil means no install is currently registered for this bundle;
+                    // zero means an install exists but has not advanced yet.
+                    let rawProgress = await UIApplication.installProgress(for: bundleID)
 
-                    if rawProgress > 0 {
+                    if let rawProgress, rawProgress > 0 {
                         hasStarted = true
                     }
 
-                    let progress = await hasStarted
-                        ? _normalizeInstallProgress(rawProgress)
+                    let progress = hasStarted
+                        ? Self._normalizeInstallProgress(rawProgress ?? 0)
                         : 0.0
-
-                    Logger.misc.info("Install progress for \(bundleID): \(progress) - \(rawProgress) - \(viewModel.installProgress)")
 
                     await MainActor.run {
                         viewModel.installProgress = progress
                     }
 
-                    if hasStarted && rawProgress == 0 {
+                    // Normal completion is the falling edge from a visible install
+                    // to no registered install. The presence check catches an install
+                    // that completed entirely between two samples.
+                    let finishedByEdge = hasStarted && rawProgress == nil
+                    let finishedByPresence = !hasStarted
+                        && rawProgress == nil
+                        && Date().timeIntervalSince(startedAt) > 8
+                        && UIApplication.isAppInstalled(bundleID)
+
+                    if finishedByEdge || finishedByPresence {
                         await MainActor.run {
                             viewModel.installProgress = 1.0
                             viewModel.status = .completed(.success(()))
-                            print(viewModel.installProgress)
                         }
                         break
                     }
 
-                    try? await Task.sleep(nanoseconds: 1_000_000) // 1 ms
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
                 }
             }
         }
 
-        private func _normalizeInstallProgress(_ rawProgress: Double) -> Double {
+        private static func _normalizeInstallProgress(_ rawProgress: Double) -> Double {
             min(1.0, max(0.0, (rawProgress - 0.6) / 0.3))
         }
 }

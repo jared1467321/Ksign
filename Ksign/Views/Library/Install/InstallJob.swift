@@ -34,9 +34,9 @@ final class InstallJob: ObservableObject, Identifiable {
 	private(set) var installer: ServerInstaller?
 
 	// Coarse, discrete state for anything watching a *batch* rather than a
-	// single row. Deliberately not tied to `viewModel.installProgress`: that
-	// updates on a 1ms poll, and republishing it up to the session would
-	// redraw the whole drawer a thousand times a second.
+	// single row. Deliberately not tied directly to `viewModel.installProgress`:
+	// the session samples all jobs on its own 0.4-second cadence so one poller
+	// cannot redraw the entire drawer on every sample.
 	enum Phase: Equatable {
 		case queued, running, completed, failed
 	}
@@ -353,24 +353,12 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
-		// The phase text used to be reported to the Dynamic Island from here,
-		// on every status emission of every job — none, ready, sendingManifest,
-		// sendingPayload, installing, completed. Six per app, times however
-		// many are running, and the string itself changed again each time the
-		// jobs array reordered as rows retired. A twelve-app batch was well
-		// north of seventy distinct states pushed to ActivityKit to deliver
-		// twelve numbers anyone cared about.
-		//
-		// Backgrounded, ActivityKit budgets local updates and drops the excess
-		// silently — `update` returns Void and doesn't throw — so the count
-		// updates were dropped at the same rate as the phase noise they were
-		// competing with. Same failure the `aggregateProgress` timer hit, noted
-		// in KeepAliveActivityController.
-		//
-		// The count is reported on its own from `completedCount`'s `didSet`,
-		// once per completed app, and that is the whole of what the pill shows
-		// during a bulk install now. The drawer still shows per-row phase text;
-		// it reads the job directly and never went through here.
+		// Per-job ActivityKit reporting intentionally does not live here. Several
+		// jobs can emit the same transitions at once, which previously made them
+		// fight over the Dynamic Island and generated excessive updates.
+		// `InstallSession` samples all jobs, derives one representative batch phase
+		// and one aggregate fraction, and the controller serializes/coalesces the
+		// resulting ActivityKit updates. The drawer still reads each job directly.
 
 		if case .ready = newStatus {
 			switch batchRole {

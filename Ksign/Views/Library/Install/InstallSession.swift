@@ -178,7 +178,9 @@ final class InstallSession: ObservableObject {
 			return
 		}
 
-		// `didSet` on this is what moves the pill. Nothing else to do here.
+		// Capture the job's final 100% before the count transition. The count is an
+		// urgent ActivityKit update, so it will carry the newest fraction with it.
+		_recomputeProgress()
 		completedCount += 1
 
 		_releaseIfNothingRunning()
@@ -259,6 +261,7 @@ final class InstallSession: ObservableObject {
 	func togglePause() {
 		isPaused.toggle()
 		InstallQueueCoordinator.shared.setPaused(isPaused)
+		_mirrorProgressToKeepAlive()
 		// Resuming builds the next manifest from whatever's in the ready pool.
 		if !isPaused, _willBatch {
 			_admitBatchJobs()
@@ -326,13 +329,45 @@ final class InstallSession: ObservableObject {
 		)
 	}
 
-	// `jobPhaseChanged()` used to live here and push a phase string to the
-	// pill on every status change of every job. Removed: it was the bulk of
-	// the update volume and the reason the counts were being dropped when
-	// backgrounded. See the note at the top of `InstallJob._handleStatus`.
-	//
-	// The two `detail: "Completed"` reports below stay — they are two pushes
-	// at the very end of a batch, not a firehose during it.
+	// The session samples jobs frequently for its own drawer, but the ActivityKit
+	// controller quantizes and paces fraction-only updates. This restores real
+	// install movement without returning to the old update flood.
+	private func _mirrorProgressToKeepAlive() {
+		guard #available(iOS 16.2, *), totalCount > 0 else { return }
+
+		KeepAliveActivityController.shared.report(
+			.bulkInstalls,
+			fraction: aggregateProgress
+		)
+		KeepAliveActivityController.shared.report(
+			.bulkInstalls,
+			detail: _liveActivityDetail
+		)
+	}
+
+	// One representative phase for the whole batch. Multiple jobs may transition
+	// simultaneously; deriving the label here prevents them from fighting over
+	// the Dynamic Island text.
+	private var _liveActivityDetail: String? {
+		if isPaused { return "Paused" }
+
+		if jobs.contains(where: { if case .installing = $0.viewModel.status { return true }; return false }) {
+			return "Installing"
+		}
+		if jobs.contains(where: { if case .sendingPayload = $0.viewModel.status { return true }; return false }) {
+			return "Sending Payload"
+		}
+		if jobs.contains(where: { if case .sendingManifest = $0.viewModel.status { return true }; return false }) {
+			return "Sending Manifest"
+		}
+		if jobs.contains(where: { if case .ready = $0.viewModel.status { return true }; return false }) {
+			return "Waiting for Confirmation"
+		}
+		if jobs.contains(where: { $0.phase == .running }) { return "Packaging" }
+		if jobs.contains(where: { $0.phase == .queued }) { return "Queued" }
+		if !jobs.isEmpty { return "Completed" }
+		return nil
+	}
 
 	// Everything is settled but failed rows stay on screen, so `jobs` never
 	// empties and `_finishIfIdle` never runs. That's the same condition the
@@ -343,6 +378,7 @@ final class InstallSession: ObservableObject {
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
 
+		_recomputeProgress()
 		BackgroundAudioManager.shared.release(.bulkInstalls)
 		_stopTicking()
 
@@ -463,10 +499,9 @@ final class InstallSession: ObservableObject {
 
 	// MARK: - Aggregate progress
 
-	// Sampled on a timer rather than republished from the jobs. The server
-	// method's progress poller writes `installProgress` every millisecond; if
-	// that were forwarded up to here it would redraw the entire drawer — and
-	// whatever tab is behind it — a thousand times a second.
+	// Sampled on a timer rather than republished from every job callback. The
+	// server method polls more frequently than the drawer or ActivityKit needs,
+	// so the session publishes one aggregate snapshot every 0.4 seconds.
 	private func _startTicking() {
 		guard _tickTask == nil else { return }
 
@@ -484,11 +519,6 @@ final class InstallSession: ObservableObject {
 				// Idempotent and gated by its own backoff, so this is a cheap
 				// check on the common path, not a restart attempt every 0.4s.
 				BackgroundAudioManager.shared.ensureRunning()
-
-				// Nothing here for the pill. This tick redraws the drawer, which
-				// is on screen and can take 2.5 redraws a second; the pill is
-				// drawn out of process by the system and cannot. It's fed from
-				// `completedCount`/`totalCount`'s own `didSet` instead.
 
 				try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
 				if self == nil { break }
@@ -519,6 +549,7 @@ final class InstallSession: ObservableObject {
 		let inFlight = jobs.reduce(0.0) { $0 + $1.viewModel.overallProgress }
 
 		aggregateProgress = min(1.0, (finished + inFlight) / Double(totalCount))
+		_mirrorProgressToKeepAlive()
 	}
 
 	// MARK: - Webview (server method 1)
