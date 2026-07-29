@@ -31,10 +31,17 @@ class ServerInstaller: Identifiable, ObservableObject {
 	var app: AppInfoPresentable
 	@ObservedObject var viewModel: InstallerStatusViewModel
 	private var _server: Application?
+	private let _statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)?
 
-	init(app: AppInfoPresentable, viewModel: InstallerStatusViewModel, startsServer: Bool = true) throws {
+	init(
+		app: AppInfoPresentable,
+		viewModel: InstallerStatusViewModel,
+		startsServer: Bool = true,
+		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil
+	) throws {
 		self.app = app
 		self.viewModel = viewModel
+		self._statusReporter = statusReporter
 		if startsServer {
 			try startServing()
 		}
@@ -158,6 +165,10 @@ class ServerInstaller: Identifiable, ObservableObject {
 	// Pushes a status onto this app's row, on the main actor. Called for the
 	// host and, by the host, for each of its members.
 	func report(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
+		// The server receives these transitions on a Vapor/NIo worker queue.
+		// Mirror them to the Live Activity before publishing the UI model on main.
+		_statusReporter?(newStatus)
+
 		DispatchQueue.main.async {
 			self.viewModel.status = newStatus
 		}
