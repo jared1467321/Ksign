@@ -20,6 +20,7 @@ final class ArchiveHandler: NSObject {
 	
 	private var _app: AppInfoPresentable
 	private let _uniqueWorkDir: URL
+	private let _progressReporter: ((Double) -> Void)?
 	
 	// Exposed so whoever owns the install can delete this once the archive has
 	// actually been consumed. Nothing used to: every install left a full-size
@@ -28,9 +29,14 @@ final class ArchiveHandler: NSObject {
 	// the next cold start.
 	var workDir: URL { _uniqueWorkDir }
 	
-	init(app: AppInfoPresentable, viewModel: InstallerStatusViewModel) {
+	init(
+		app: AppInfoPresentable,
+		viewModel: InstallerStatusViewModel,
+		progressReporter: ((Double) -> Void)? = nil
+	) {
 		self.viewModel = viewModel
 		self._app = app
+		self._progressReporter = progressReporter
 		self._uniqueWorkDir = _fileManager.temporaryDirectory
 			.appendingPathComponent("FeatherInstall_\(_uuid)", isDirectory: true)
 		
@@ -104,7 +110,10 @@ final class ArchiveHandler: NSObject {
 				password: nil,
 				compression: ZipCompression.allCases[ArchiveHandler.getCompressionLevel()],
 				progress: { progress in
-					
+					// Activity progress is reported directly from the archiver's worker
+					// callback. SwiftUI still receives the same main-actor update below.
+					self._progressReporter?(progress)
+
 					Task { @MainActor in
 						self.viewModel.packageProgress = progress
 					}
