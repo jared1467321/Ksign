@@ -7,17 +7,6 @@ import ActivityKit
 import SwiftUI
 import WidgetKit
 
-// The Dynamic Island and Lock Screen presentations of the keep-alive.
-//
-// The bar only appears when the owner actually counts apps — signing, bulk
-// installs, bulk export and batch import all do. Anything else leaves it out
-// entirely rather than showing an empty bar, which reads as stuck rather than
-// as absent.
-//
-// Note there is no bar in the compact presentation, and there can't be: compact
-// leading and compact trailing are two separate views sitting either side of
-// the TrueDepth camera, so nothing can span the gap between them. The counts go
-// in the trailing slot instead, where there's room for "3/12".
 struct KeepAliveLiveActivity: Widget {
 	var body: some WidgetConfiguration {
 		ActivityConfiguration(for: KeepAliveAttributes.self) { context in
@@ -41,10 +30,6 @@ struct KeepAliveLiveActivity: Widget {
 				}
 
 				DynamicIslandExpandedRegion(.bottom) {
-					// The horizontal padding is load-bearing. Without it the
-					// leading edge of this region runs under the Island's
-					// rounded corner and the first character of the owner name
-					// gets sliced off — "Import" rendering as "'mport".
 					_DetailView(state: context.state)
 						.padding(.horizontal, 6)
 						.padding(.top, 2)
@@ -52,14 +37,21 @@ struct KeepAliveLiveActivity: Widget {
 			} compactLeading: {
 				_Symbol(isRunning: context.state.isRunning)
 			} compactTrailing: {
-				// Whichever is more useful in the very small space available:
-				// the batch position if there is one, otherwise who's holding
-				// the keep-alive.
-				Text(context.state.compactTrailingLabel)
-					.font(.caption2)
-					.monospacedDigit()
-					.lineLimit(1)
-					.foregroundStyle(.secondary)
+				Group {
+					if context.state.progressFraction != nil {
+						Text(context.state.compactTrailingLabel)
+					} else if context.state.detail != nil, let startedAt = context.state.detailStartedAt {
+						// A system-rendered timer keeps visibly advancing even when the
+						// current signing/import phase has no measurable sub-progress.
+						Text(timerInterval: startedAt...Date.distantFuture, countsDown: false)
+					} else {
+						Text(context.state.compactTrailingLabel)
+					}
+				}
+				.font(.caption2)
+				.monospacedDigit()
+				.lineLimit(1)
+				.foregroundStyle(.secondary)
 			} minimal: {
 				_Symbol(isRunning: context.state.isRunning)
 			}
@@ -77,7 +69,6 @@ private struct _Symbol: View {
 	}
 }
 
-// Shared by the expanded Island and the Lock Screen so the two can't drift.
 private struct _DetailView: View {
 	let state: KeepAliveAttributes.ContentState
 
@@ -89,13 +80,11 @@ private struct _DetailView: View {
 
 				Spacer(minLength: 8)
 
-				if let countLabel = state.countLabel {
-					Text(countLabel)
+				if let progressLabel = state.progressSummaryLabel {
+					Text(progressLabel)
 						.font(.caption)
 						.monospacedDigit()
 						.foregroundStyle(.secondary)
-						// Counts tick upward one app at a time, so animate the
-						// digits rather than having them snap.
 						.contentTransition(.numericText())
 				}
 			}
@@ -106,11 +95,22 @@ private struct _DetailView: View {
 					.tint(state.isRunning ? .green : .orange)
 			}
 
-			// "Bulk installs · Sending Manifest"
-			Text(state.summaryLine)
-				.font(.caption.weight(.medium))
-				.lineLimit(1)
-				.contentTransition(.opacity)
+			HStack(spacing: 8) {
+				Text(state.summaryLine)
+					.font(.caption.weight(.medium))
+					.lineLimit(1)
+					.contentTransition(.opacity)
+
+				Spacer(minLength: 4)
+
+				if state.detail != nil, let startedAt = state.detailStartedAt {
+					Text(timerInterval: startedAt...Date.distantFuture, countsDown: false)
+						.font(.caption2)
+						.monospacedDigit()
+						.foregroundStyle(.secondary)
+						.lineLimit(1)
+				}
+			}
 
 			Text(state.reassurance)
 				.font(.caption2)
