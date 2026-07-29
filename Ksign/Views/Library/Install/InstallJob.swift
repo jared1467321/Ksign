@@ -109,7 +109,15 @@ final class InstallJob: ObservableObject, Identifiable {
 		// serves everyone. External (server 1) still serves its own payload for
 		// palera.in to fetch, so it starts serving now.
 		let serves = _serverMethod != 0
-		installer = try ServerInstaller(app: app, viewModel: viewModel, startsServer: serves)
+		let jobID = id
+		installer = try ServerInstaller(
+			app: app,
+			viewModel: viewModel,
+			startsServer: serves,
+			statusReporter: { status in
+				BulkInstallLiveActivityReporter.shared.updateStatus(jobID: jobID, status: status)
+			}
+		)
 	}
 
 	// Replaces the view's `.onAppear`. Idempotent — a redraw can't restart it.
@@ -117,8 +125,40 @@ final class InstallJob: ObservableObject, Identifiable {
 		guard !_started else { return }
 		_started = true
 
-		// Replaces `.onReceive(viewModel.$status)`. Weak self so a finished
-		// job isn't kept alive by its own subscription.
+		// Mirror primitive progress on the publisher's own delivery queue before
+		// hopping to MainActor for the drawer. This subscription remains alive with
+		// the job even when no install view is currently being rendered.
+		let liveActivityJobID = id
+		viewModel.$status
+			.sink { status in
+				BulkInstallLiveActivityReporter.shared.updateStatus(
+					jobID: liveActivityJobID,
+					status: status
+				)
+			}
+			.store(in: &_cancellables)
+
+		viewModel.$packageProgress
+			.removeDuplicates()
+			.sink { progress in
+				BulkInstallLiveActivityReporter.shared.updatePackage(
+					jobID: liveActivityJobID,
+					progress: progress
+				)
+			}
+			.store(in: &_cancellables)
+
+		viewModel.$installProgress
+			.removeDuplicates()
+			.sink { progress in
+				BulkInstallLiveActivityReporter.shared.updateInstall(
+					jobID: liveActivityJobID,
+					progress: progress
+				)
+			}
+			.store(in: &_cancellables)
+
+		// UI state and queue coordination still belong on MainActor.
 		viewModel.$status
 			.receive(on: DispatchQueue.main)
 			.sink { [weak self] status in
@@ -466,10 +506,20 @@ final class InstallJob: ObservableObject, Identifiable {
 		let viewModel = self.viewModel
 		let method = _installationMethod
 		let installer = self.installer
+		let jobID = self.id
 
 		Task.detached {
 			do {
-				let handler = await ArchiveHandler(app: app, viewModel: viewModel)
+				let handler = await ArchiveHandler(
+					app: app,
+					viewModel: viewModel,
+					progressReporter: { progress in
+						BulkInstallLiveActivityReporter.shared.updatePackage(
+							jobID: jobID,
+							progress: progress
+						)
+					}
+				)
 				try await handler.move()
 
 				let workDir = await handler.workDir
@@ -480,6 +530,10 @@ final class InstallJob: ObservableObject, Identifiable {
 				}
 
 				if method == 0 {
+					BulkInstallLiveActivityReporter.shared.updateStatus(
+						jobID: jobID,
+						status: .ready
+					)
 					await MainActor.run {
 						installer?.packageUrl = packageUrl
 						viewModel.status = .ready
@@ -492,6 +546,10 @@ final class InstallJob: ObservableObject, Identifiable {
 					)
 				}
 			} catch {
+				BulkInstallLiveActivityReporter.shared.updateStatus(
+					jobID: jobID,
+					status: .broken(error)
+				)
 				// A failed install used to be indistinguishable from one still
 				// running. `.broken` also lets the status handler free the slot.
 				Logger.misc.error("Install failed for \(app.identifier ?? "?"): \(error.localizedDescription)")
@@ -506,6 +564,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	private func _startInstallProgressPolling() -> Task<Void, Never>? {
 		guard let bundleID = app.identifier else { return nil }
 		let viewModel = self.viewModel
+		let jobID = self.id
 
 		// `.userInitiated`, not `.background`. This loop is the *only* thing
 		// that ever marks a server-method install finished, and `.background`
@@ -536,6 +595,11 @@ final class InstallJob: ObservableObject, Identifiable {
 					? Self._normalizeInstallProgress(rawProgress ?? 0)
 					: 0.0
 
+				BulkInstallLiveActivityReporter.shared.updateInstall(
+					jobID: jobID,
+					progress: progress
+				)
+
 				await MainActor.run {
 					viewModel.installProgress = progress
 				}
@@ -555,6 +619,10 @@ final class InstallJob: ObservableObject, Identifiable {
 					&& UIApplication.isAppInstalled(bundleID)
 
 				if finishedByEdge || finishedByPresence {
+					BulkInstallLiveActivityReporter.shared.updateStatus(
+						jobID: jobID,
+						status: .completed(.success(()))
+					)
 					await MainActor.run {
 						viewModel.installProgress = 1.0
 						viewModel.status = .completed(.success(()))

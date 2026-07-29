@@ -88,6 +88,8 @@ final class InstallSession: ObservableObject {
 		// into one and runs the group concurrently; idevice and the external
 		// server keep the default limit and prompt per app as before.
 		if jobs.isEmpty {
+			BulkInstallLiveActivityReporter.shared.reset()
+
 			// Cleared here rather than at the end of the last batch. Zeroing
 			// these on finish would fire `didSet` and wipe the final "12 of 12"
 			// the moment it landed — the pill lingers for a few seconds after
@@ -118,7 +120,9 @@ final class InstallSession: ObservableObject {
 			// entirely — `start` would see it as a duplicate and skip, so the
 			// Install button would silently do nothing. Clear it out first.
 			if let stale = jobs.firstIndex(where: { $0.app.uuid == app.uuid && $0.phase == .failed }) {
-				jobs[stale].cancel()
+				let staleJob = jobs[stale]
+				staleJob.cancel()
+				BulkInstallLiveActivityReporter.shared.remove(staleJob.id)
 				jobs.remove(at: stale)
 				totalCount = max(0, totalCount - 1)
 			}
@@ -129,6 +133,7 @@ final class InstallSession: ObservableObject {
 			do {
 				let job = try InstallJob(app: app)
 				jobs.append(job)
+				BulkInstallLiveActivityReporter.shared.register(job.id)
 				totalCount += 1
 				// Batched jobs are released to build a group at a time (see
 				// `_admitBatchJobs`), so only a manifest's worth of servers is ever
@@ -223,6 +228,7 @@ final class InstallSession: ObservableObject {
 		withAnimation(.easeInOut(duration: 0.25)) {
 			_ = jobs.remove(at: index)
 		}
+		BulkInstallLiveActivityReporter.shared.remove(job.id)
 
 		// Keep the count honest: "4 of 7" with six rows showing is worse than
 		// no count at all.
@@ -261,7 +267,7 @@ final class InstallSession: ObservableObject {
 	func togglePause() {
 		isPaused.toggle()
 		InstallQueueCoordinator.shared.setPaused(isPaused)
-		_mirrorProgressToKeepAlive()
+		BulkInstallLiveActivityReporter.shared.setPaused(isPaused)
 		// Resuming builds the next manifest from whatever's in the ready pool.
 		if !isPaused, _willBatch {
 			_admitBatchJobs()
@@ -320,53 +326,10 @@ final class InstallSession: ObservableObject {
 	}
 
 	private func _mirrorCountToKeepAlive() {
-		guard #available(iOS 16.2, *) else { return }
-
-		KeepAliveActivityController.shared.report(
-			.bulkInstalls,
+		BulkInstallLiveActivityReporter.shared.setCounts(
 			completed: completedCount,
 			total: totalCount
 		)
-	}
-
-	// The session samples jobs frequently for its own drawer, but the ActivityKit
-	// controller quantizes and paces fraction-only updates. This restores real
-	// install movement without returning to the old update flood.
-	private func _mirrorProgressToKeepAlive() {
-		guard #available(iOS 16.2, *), totalCount > 0 else { return }
-
-		KeepAliveActivityController.shared.report(
-			.bulkInstalls,
-			fraction: aggregateProgress
-		)
-		KeepAliveActivityController.shared.report(
-			.bulkInstalls,
-			detail: _liveActivityDetail
-		)
-	}
-
-	// One representative phase for the whole batch. Multiple jobs may transition
-	// simultaneously; deriving the label here prevents them from fighting over
-	// the Dynamic Island text.
-	private var _liveActivityDetail: String? {
-		if isPaused { return "Paused" }
-
-		if jobs.contains(where: { if case .installing = $0.viewModel.status { return true }; return false }) {
-			return "Installing"
-		}
-		if jobs.contains(where: { if case .sendingPayload = $0.viewModel.status { return true }; return false }) {
-			return "Sending Payload"
-		}
-		if jobs.contains(where: { if case .sendingManifest = $0.viewModel.status { return true }; return false }) {
-			return "Sending Manifest"
-		}
-		if jobs.contains(where: { if case .ready = $0.viewModel.status { return true }; return false }) {
-			return "Waiting for Confirmation"
-		}
-		if jobs.contains(where: { $0.phase == .running }) { return "Packaging" }
-		if jobs.contains(where: { $0.phase == .queued }) { return "Queued" }
-		if !jobs.isEmpty { return "Completed" }
-		return nil
 	}
 
 	// Everything is settled but failed rows stay on screen, so `jobs` never
@@ -382,9 +345,7 @@ final class InstallSession: ObservableObject {
 		BackgroundAudioManager.shared.release(.bulkInstalls)
 		_stopTicking()
 
-		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
-		}
+		BulkInstallLiveActivityReporter.shared.finish()
 	}
 
 	private func _finishIfIdle() {
@@ -411,9 +372,7 @@ final class InstallSession: ObservableObject {
 		// No final tally to send and nothing to zero. The counters already hold
 		// the finished figures, `didSet` already pushed them, and `start(apps:)`
 		// clears them when the next batch begins.
-		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.report(.bulkInstalls, detail: "Completed")
-		}
+		BulkInstallLiveActivityReporter.shared.finish()
 	}
 
 	// MARK: - Batched prompts
@@ -549,7 +508,6 @@ final class InstallSession: ObservableObject {
 		let inFlight = jobs.reduce(0.0) { $0 + $1.viewModel.overallProgress }
 
 		aggregateProgress = min(1.0, (finished + inFlight) / Double(totalCount))
-		_mirrorProgressToKeepAlive()
 	}
 
 	// MARK: - Webview (server method 1)
@@ -563,5 +521,207 @@ final class InstallSession: ObservableObject {
 
 	func dismissWebview(for job: InstallJob) {
 		if webviewJob === job { webviewJob = nil }
+	}
+}
+
+// MARK: - Background-safe Live Activity aggregation
+
+// `InstallSession` is intentionally @MainActor because it drives SwiftUI. The
+// install workers are not: archiving, Vapor callbacks and install polling keep
+// producing useful information while the UI actor may be heavily throttled in
+// the background. This small mirror owns only primitive progress snapshots on
+// its own serial queue and feeds ActivityKit without waiting for the drawer.
+final class BulkInstallLiveActivityReporter {
+	static let shared = BulkInstallLiveActivityReporter()
+
+	private struct JobState {
+		var packageProgress: Double = 0
+		var installProgress: Double = 0
+		var detail: String = "Queued"
+		var completed = false
+		var failed = false
+
+		var fraction: Double {
+			if completed { return 1 }
+
+			// Packaging is a substantial part of an install, then the manifest /
+			// payload / installation portion owns the remainder. Keep failures at
+			// their last honest position rather than pretending they completed.
+			let package = min(1, max(0, packageProgress))
+			let install = min(1, max(0, installProgress))
+			return min(0.99, package * 0.45 + install * 0.55)
+		}
+	}
+
+	private let _queue = DispatchQueue(
+		label: "nya.asami.ksign.bulk-install-live-activity",
+		qos: .userInitiated
+	)
+
+	private var _jobs: [UUID: JobState] = [:]
+	private var _completed = 0
+	private var _total = 0
+	private var _paused = false
+	private var _active = false
+
+	private init() { }
+
+	func reset() {
+		_queue.async {
+			self._jobs.removeAll()
+			self._completed = 0
+			self._total = 0
+			self._paused = false
+			self._active = true
+
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.clearReport(.bulkInstalls)
+			}
+		}
+	}
+
+	func register(_ id: UUID) {
+		_queue.async {
+			self._active = true
+			if self._jobs[id] == nil {
+				self._jobs[id] = JobState()
+			}
+			self._publish()
+		}
+	}
+
+	func remove(_ id: UUID) {
+		_queue.async {
+			self._jobs.removeValue(forKey: id)
+			self._publish()
+		}
+	}
+
+	func setCounts(completed: Int, total: Int) {
+		_queue.async {
+			self._completed = max(0, min(completed, max(0, total)))
+			self._total = max(0, total)
+			self._active = self._active || total > 0
+			self._publish()
+		}
+	}
+
+	func setPaused(_ paused: Bool) {
+		_queue.async {
+			self._paused = paused
+			self._publish()
+		}
+	}
+
+	func updatePackage(jobID: UUID, progress: Double) {
+		_queue.async {
+			var state = self._jobs[jobID] ?? JobState()
+			state.packageProgress = max(state.packageProgress, min(1, max(0, progress)))
+			if state.detail == "Queued" { state.detail = "Packaging" }
+			self._jobs[jobID] = state
+			self._publish()
+		}
+	}
+
+	func updateInstall(jobID: UUID, progress: Double) {
+		_queue.async {
+			var state = self._jobs[jobID] ?? JobState()
+			let clamped = min(1, max(0, progress))
+
+			// Ignore the @Published property's initial zero. A real install update
+			// either follows the Installing status or has moved above zero.
+			guard clamped > 0 || state.detail == "Installing" else { return }
+
+			state.packageProgress = 1
+			state.installProgress = max(state.installProgress, clamped)
+			if state.detail != "Completed" && state.detail != "Error" {
+				state.detail = "Installing"
+			}
+			self._jobs[jobID] = state
+			self._publish()
+		}
+	}
+
+	func updateStatus(
+		jobID: UUID,
+		status: InstallerStatusViewModel.InstallerStatus
+	) {
+		let change: (detail: String, packageFinished: Bool, completed: Bool, failed: Bool)
+
+		switch status {
+		case .none:
+			change = ("Packaging", false, false, false)
+		case .ready:
+			change = ("Waiting for Confirmation", true, false, false)
+		case .sendingManifest:
+			change = ("Sending Manifest", true, false, false)
+		case .sendingPayload:
+			change = ("Sending Payload", true, false, false)
+		case .installing:
+			change = ("Installing", true, false, false)
+		case .completed:
+			change = ("Completed", true, true, false)
+		case .broken:
+			change = ("Error", false, false, true)
+		}
+
+		_queue.async {
+			var state = self._jobs[jobID] ?? JobState()
+			state.detail = change.detail
+			if change.packageFinished { state.packageProgress = 1 }
+			if change.completed {
+				state.packageProgress = 1
+				state.installProgress = 1
+				state.completed = true
+			}
+			state.failed = change.failed
+			self._jobs[jobID] = state
+			self._publish()
+		}
+	}
+
+	func finish() {
+		_queue.async {
+			guard self._active else { return }
+			self._paused = false
+			self._publish(forcedDetail: "Completed")
+		}
+	}
+
+	private func _publish(forcedDetail: String? = nil) {
+		guard _active, _total > 0 else { return }
+
+		let sum = _jobs.values.reduce(0.0) { $0 + $1.fraction }
+		let fraction = min(1, max(0, sum / Double(_total)))
+		let detail = forcedDetail ?? _representativeDetail
+
+		guard #available(iOS 16.2, *) else { return }
+		KeepAliveActivityController.shared.report(
+			.bulkInstalls,
+			completed: _completed,
+			total: _total
+		)
+		KeepAliveActivityController.shared.report(.bulkInstalls, fraction: fraction)
+		KeepAliveActivityController.shared.report(.bulkInstalls, detail: detail)
+	}
+
+	private var _representativeDetail: String {
+		if _paused { return "Paused" }
+
+		let details = Set(_jobs.values.map(\.detail))
+		for candidate in [
+			"Installing",
+			"Sending Payload",
+			"Sending Manifest",
+			"Waiting for Confirmation",
+			"Packaging",
+			"Queued",
+			"Error",
+			"Completed"
+		] where details.contains(candidate) {
+			return candidate
+		}
+
+		return "Queued"
 	}
 }

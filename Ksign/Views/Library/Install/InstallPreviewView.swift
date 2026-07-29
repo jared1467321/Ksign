@@ -23,6 +23,7 @@ struct InstallPreviewView: View {
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@State private var _isWebviewPresenting = false
     @State private var progressTask: Task<Void, Never>?
+	@State private var _activityCancellables = Set<AnyCancellable>()
 	// Where ArchiveHandler staged this install's .ipa. Nothing deleted it
 	// before, so every single-app install left a full-size archive in tmp
 	// until the next cold start.
@@ -39,7 +40,15 @@ struct InstallPreviewView: View {
         let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
 		let viewModel = InstallerStatusViewModel(isIdevice: method == 1)
 		self._viewModel = StateObject(wrappedValue: viewModel)
-		self._installer = StateObject(wrappedValue: try! ServerInstaller(app: app, viewModel: viewModel))
+		self._installer = StateObject(
+			wrappedValue: try! ServerInstaller(
+				app: app,
+				viewModel: viewModel,
+				statusReporter: { status in
+					SingleInstallLiveActivityReporter.shared.updateStatus(status)
+				}
+			)
+		)
 	}
 	
 	// MARK: Body
@@ -53,10 +62,6 @@ struct InstallPreviewView: View {
 			SafariRepresentableView(url: installer.pageEndpoint).ignoresSafeArea()
 		}
 		.onReceive(viewModel.$status) { newStatus in
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.report(.singleInstall, detail: viewModel.statusLabel)
-			}
-
 			if case .ready = newStatus {
 				if _serverMethod == 0 {
 					UIApplication.shared.open(URL(string: installer.iTunesLink)!)
@@ -64,66 +69,73 @@ struct InstallPreviewView: View {
 					_isWebviewPresenting = true
 				}
 			}
-            
-            // Server method only — idevice reports progress via its own callback.
-            if case .installing = newStatus, _installationMethod == 0 {
-                if progressTask == nil {
-                    progressTask = startInstallProgressPolling(
-                        bundleID: app.identifier!,
-                        viewModel: viewModel
-                    )
-                }
-            }
-			
+
+			// Server method only — idevice reports progress via its own callback.
+			if case .installing = newStatus, _installationMethod == 0, progressTask == nil {
+				progressTask = startInstallProgressPolling(
+					bundleID: app.identifier!,
+					viewModel: viewModel
+				)
+			}
+
 			if case .sendingPayload = newStatus, _serverMethod == 1 {
 				_isWebviewPresenting = false
 			}
-            
-            switch newStatus {
-            case .completed, .broken(_):
-                progressTask?.cancel()
-                progressTask = nil
-                if #available(iOS 16.2, *) {
-                    if case .completed = newStatus {
-                        KeepAliveActivityController.shared.report(.singleInstall, fraction: 1)
-                        KeepAliveActivityController.shared.report(.singleInstall, completed: 1, total: 1)
-                    }
-                    // Leave "Completed" or "Error" visible during the audio
-                    // manager's linger window. onDisappear withdraws the report.
-                }
-                BackgroundAudioManager.shared.release(.singleInstall)
-                _cleanupArchive()
-            default:
-                break
-            }
+
+			switch newStatus {
+			case .completed, .broken(_):
+				progressTask?.cancel()
+				progressTask = nil
+				BackgroundAudioManager.shared.release(.singleInstall)
+				_cleanupArchive()
+			default:
+				break
+			}
 		}
-		.onReceive(viewModel.$installProgress.removeDuplicates()) { progress in
-			guard #available(iOS 16.2, *) else { return }
-			KeepAliveActivityController.shared.report(.singleInstall, fraction: progress)
-		}
-		.onAppear(perform: _install)
 		.onAppear {
 			BackgroundAudioManager.shared.claim(.singleInstall)
-
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.report(.singleInstall, completed: 0, total: 1)
-				KeepAliveActivityController.shared.report(.singleInstall, fraction: 0)
-			}
+			SingleInstallLiveActivityReporter.shared.begin()
+			_startLiveActivityBridge()
+			_install()
 		}
 		.onDisappear {
-            progressTask?.cancel()
-            progressTask = nil
-
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.clearReport(.singleInstall)
-			}
-
+			progressTask?.cancel()
+			progressTask = nil
+			_activityCancellables.removeAll()
+			SingleInstallLiveActivityReporter.shared.end()
 			BackgroundAudioManager.shared.release(.singleInstall)
 			// Covers dismissal before a terminal status ever arrives.
 			_cleanupArchive()
 		}
 	}
 	
+	// These Combine subscriptions are owned by the install, not by a SwiftUI
+	// rendering pass. They receive idevice progress as well as server-method
+	// progress and forward only primitive values to the background-safe mirror.
+	private func _startLiveActivityBridge() {
+		_activityCancellables.removeAll()
+
+		viewModel.$status
+			.sink { status in
+				SingleInstallLiveActivityReporter.shared.updateStatus(status)
+			}
+			.store(in: &_activityCancellables)
+
+		viewModel.$packageProgress
+			.removeDuplicates()
+			.sink { progress in
+				SingleInstallLiveActivityReporter.shared.updatePackage(progress)
+			}
+			.store(in: &_activityCancellables)
+
+		viewModel.$installProgress
+			.removeDuplicates()
+			.sink { progress in
+				SingleInstallLiveActivityReporter.shared.updateInstall(progress)
+			}
+			.store(in: &_activityCancellables)
+	}
+
 	// Idempotent — dismissal and the terminal status both land here, and
 	// whichever arrives first wins.
 	private func _cleanupArchive() {
@@ -153,7 +165,13 @@ struct InstallPreviewView: View {
 
 		Task.detached {
 			do {
-				let handler = await ArchiveHandler(app: app, viewModel: viewModel)
+				let handler = await ArchiveHandler(
+					app: app,
+					viewModel: viewModel,
+					progressReporter: { progress in
+						SingleInstallLiveActivityReporter.shared.updatePackage(progress)
+					}
+				)
 				try await handler.move()
 				
 				let workDir = await handler.workDir
@@ -165,6 +183,7 @@ struct InstallPreviewView: View {
 				
 				if await !isSharing {
                     if await _installationMethod == 0 {
+                        SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
                         await MainActor.run {
                             installer.packageUrl = packageUrl
                             viewModel.status = .ready
@@ -203,6 +222,7 @@ struct InstallPreviewView: View {
 				}
 			} catch {
                 await progressTask?.cancel()
+				SingleInstallLiveActivityReporter.shared.updateStatus(.broken(error))
 				await MainActor.run {
 					UIAlertController.showAlertWithOk(
 						title: .localized("Install"),
@@ -239,6 +259,7 @@ struct InstallPreviewView: View {
                         ? Self._normalizeInstallProgress(rawProgress ?? 0)
                         : 0.0
 
+                    SingleInstallLiveActivityReporter.shared.updateInstall(progress)
                     await MainActor.run {
                         viewModel.installProgress = progress
                     }
@@ -253,6 +274,7 @@ struct InstallPreviewView: View {
                         && UIApplication.isAppInstalled(bundleID)
 
                     if finishedByEdge || finishedByPresence {
+                        SingleInstallLiveActivityReporter.shared.finish()
                         await MainActor.run {
                             viewModel.installProgress = 1.0
                             viewModel.status = .completed(.success(()))
@@ -268,4 +290,136 @@ struct InstallPreviewView: View {
         private static func _normalizeInstallProgress(_ rawProgress: Double) -> Double {
             min(1.0, max(0.0, (rawProgress - 0.6) / 0.3))
         }
+}
+
+// MARK: - Background-safe single-install Live Activity mirror
+
+// The view model remains UI-oriented, but the archiver, local server and
+// install-progress poller all have worker-thread callbacks. Mirroring those
+// primitive values here prevents the Live Activity from waiting for SwiftUI's
+// onReceive handlers to run after the app returns to the foreground.
+final class SingleInstallLiveActivityReporter {
+	static let shared = SingleInstallLiveActivityReporter()
+
+	private let _queue = DispatchQueue(
+		label: "nya.asami.ksign.single-install-live-activity",
+		qos: .userInitiated
+	)
+
+	private var _active = false
+	private var _packageProgress: Double = 0
+	private var _installProgress: Double = 0
+	private var _detail = "Packaging"
+	private var _completed = false
+
+	private init() { }
+
+	func begin() {
+		_queue.async {
+			self._active = true
+			self._packageProgress = 0
+			self._installProgress = 0
+			self._detail = "Packaging"
+			self._completed = false
+
+			guard #available(iOS 16.2, *) else { return }
+			KeepAliveActivityController.shared.clearReport(.singleInstall)
+			self._publish()
+		}
+	}
+
+	func updatePackage(_ progress: Double) {
+		_queue.async {
+			guard self._active, !self._completed else { return }
+			self._packageProgress = max(
+				self._packageProgress,
+				min(1, max(0, progress))
+			)
+			self._detail = "Packaging"
+			self._publish()
+		}
+	}
+
+	func updateInstall(_ progress: Double) {
+		_queue.async {
+			guard self._active, !self._completed else { return }
+			let clamped = min(1, max(0, progress))
+
+			// Ignore the @Published property's initial zero. A real install update
+			// either follows the Installing status or has moved above zero.
+			guard clamped > 0 || self._detail == "Installing" else { return }
+
+			self._packageProgress = 1
+			self._installProgress = max(self._installProgress, clamped)
+			self._detail = "Installing"
+			self._publish()
+		}
+	}
+
+	func updateStatus(_ status: InstallerStatusViewModel.InstallerStatus) {
+		let change: (detail: String, packageFinished: Bool, completed: Bool)
+
+		switch status {
+		case .none:
+			change = ("Packaging", false, false)
+		case .ready:
+			change = ("Waiting for Confirmation", true, false)
+		case .sendingManifest:
+			change = ("Sending Manifest", true, false)
+		case .sendingPayload:
+			change = ("Sending Payload", true, false)
+		case .installing:
+			change = ("Installing", true, false)
+		case .completed:
+			change = ("Completed", true, true)
+		case .broken:
+			change = ("Error", false, false)
+		}
+
+		_queue.async {
+			guard self._active else { return }
+			self._detail = change.detail
+			if change.packageFinished { self._packageProgress = 1 }
+			if change.completed {
+				self._packageProgress = 1
+				self._installProgress = 1
+				self._completed = true
+			}
+			self._publish()
+		}
+	}
+
+	func finish() {
+		_queue.async {
+			guard self._active else { return }
+			self._packageProgress = 1
+			self._installProgress = 1
+			self._detail = "Completed"
+			self._completed = true
+			self._publish()
+		}
+	}
+
+	func end() {
+		_queue.async {
+			guard self._active else { return }
+			self._active = false
+
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.clearReport(.singleInstall)
+			}
+		}
+	}
+
+	private func _publish() {
+		guard #available(iOS 16.2, *) else { return }
+
+		let fraction = _completed
+			? 1
+			: min(0.99, _packageProgress * 0.45 + _installProgress * 0.55)
+
+		KeepAliveActivityController.shared.report(.singleInstall, completed: _completed ? 1 : 0, total: 1)
+		KeepAliveActivityController.shared.report(.singleInstall, fraction: fraction)
+		KeepAliveActivityController.shared.report(.singleInstall, detail: _detail)
+	}
 }
