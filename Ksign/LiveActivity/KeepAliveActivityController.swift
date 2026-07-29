@@ -6,6 +6,7 @@
 import ActivityKit
 import Foundation
 import OSLog
+import UIKit
 
 // Starts, updates and ends the keep-alive Live Activity.
 //
@@ -84,7 +85,45 @@ final class KeepAliveActivityController {
 	// ActivityKit state for microscopic changes.
 	private static let _progressStep = 0.01
 
-	private init() { }
+	// ActivityKit behaves most reliably for this app when the activity is born as
+	// the app leaves the foreground. Work can run for any length of time while the
+	// app is visible; we retain the newest state here and create a fresh activity
+	// only from `willResignActive`. Returning to the foreground dismisses the
+	// visible activity without clearing the still-running operation.
+	private var _mayPresentActivity = false
+	private var _foregroundDeferralLogged = false
+	private var _lifecycleObservers: [NSObjectProtocol] = []
+
+	private init() {
+		let center = NotificationCenter.default
+
+		_lifecycleObservers.append(
+			center.addObserver(
+				forName: UIApplication.willResignActiveNotification,
+				object: nil,
+				queue: .main
+			) { [weak self] _ in
+				self?._willResignActive()
+			}
+		)
+
+		_lifecycleObservers.append(
+			center.addObserver(
+				forName: UIApplication.didBecomeActiveNotification,
+				object: nil,
+				queue: .main
+			) { [weak self] _ in
+				self?._didBecomeActive()
+			}
+		)
+	}
+
+	deinit {
+		let center = NotificationCenter.default
+		for observer in _lifecycleObservers {
+			center.removeObserver(observer)
+		}
+	}
 
 	// MARK: - Driven by BackgroundAudioStatus
 
@@ -158,6 +197,29 @@ final class KeepAliveActivityController {
 			detailStartedAt: report?.detailStartedAt
 		)
 
+		// While the app is active, retain the complete current state but do not
+		// create or update an ActivityKit activity. `willResignActive` calls back
+		// into `_apply` synchronously and starts a fresh activity with this truth.
+		guard _mayPresentActivity else {
+			_desiredState = state
+			_pendingUrgentPush = false
+
+			_scheduledPush?.cancel()
+			_scheduledPush = nil
+
+			if !_foregroundDeferralLogged {
+				_foregroundDeferralLogged = true
+				BackgroundAudioStatus.shared.record(
+					.island,
+					"waiting for background — latest state retained for \(state.summary)"
+				)
+			}
+
+			return
+		}
+
+		_foregroundDeferralLogged = false
+
 		// A newly requested activity already contains this state, so there is no
 		// reason to immediately update it again. If the request fails, retain the
 		// desired state and let the serial scheduler retry after the backoff.
@@ -211,7 +273,10 @@ final class KeepAliveActivityController {
 	}
 
 	private func _schedulePushIfNeeded() {
-		guard !_pushInFlight, _scheduledPush == nil, let desired = _desiredState else { return }
+		guard _mayPresentActivity,
+		      !_pushInFlight,
+		      _scheduledPush == nil,
+		      let desired = _desiredState else { return }
 
 		if desired == _lastPushedState {
 			_desiredState = nil
@@ -411,7 +476,64 @@ final class KeepAliveActivityController {
 
 	// MARK: - Lifecycle
 
+	// UIKit posts this notification on the main thread before the app completes
+	// its transition out of the foreground. Synchronizing with our private queue
+	// guarantees that all reports already submitted by the workers are folded into
+	// the initial state before `Activity.request` returns.
+	private func _willResignActive() {
+		_queue.sync {
+			guard !self._mayPresentActivity else { return }
+
+			self._mayPresentActivity = true
+			self._foregroundDeferralLogged = false
+
+			guard self._featureEnabled,
+			      self._lastIsRunning || !self._lastOwnersInput.isEmpty else { return }
+
+			BackgroundAudioStatus.shared.record(
+				.island,
+				"app leaving foreground — creating activity from latest state"
+			)
+
+			self._apply(
+				isRunning: self._lastIsRunning,
+				owners: self._lastOwnersInput
+			)
+		}
+	}
+
+	private func _didBecomeActive() {
+		_queue.async {
+			self._mayPresentActivity = false
+			self._dismissForForeground()
+		}
+	}
+
+	private func _dismissForForeground() {
+		guard let activity = _activity else {
+			_stopPusher()
+			return
+		}
+
+		_activity = nil
+		_stopPusher()
+		_nextAttempt = .distantPast
+
+		BackgroundAudioStatus.shared.record(
+			.island,
+			"dismissed — app returned to foreground; running work retained"
+		)
+
+		Task(priority: .utility) {
+			await activity.end(nil, dismissalPolicy: .immediate)
+		}
+	}
+
 	private func _start(with state: KeepAliveAttributes.ContentState) {
+		guard _mayPresentActivity else {
+			_desiredState = state
+			return
+		}
 		guard Date() >= _nextAttempt else {
 			_desiredState = state
 			_schedulePushIfNeeded()
@@ -495,6 +617,10 @@ final class KeepAliveActivityController {
 			_reportSeq.removeAll()
 			_focusOwner = nil
 			_lastOwners = []
+			_lastIsRunning = false
+			_lastOwnersInput = []
+			_nextAttempt = .distantPast
+			_foregroundDeferralLogged = false
 			return
 		}
 
@@ -506,6 +632,8 @@ final class KeepAliveActivityController {
 		_focusOwner = nil
 		_lastIsRunning = false
 		_lastOwnersInput = []
+		_nextAttempt = .distantPast
+		_foregroundDeferralLogged = false
 
 		BackgroundAudioStatus.shared.record(.island, "dismissed — nothing left holding the keep-alive")
 
