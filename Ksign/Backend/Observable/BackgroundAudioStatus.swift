@@ -104,17 +104,17 @@ final class BackgroundAudioStatus: ObservableObject {
 	// worse than no log. The callers may be holding the manager's lock, so this
 	// has to stay async — never sync — to avoid deadlocking against it.
 	func update(isRunning: Bool, owners: [String]) {
+		// Feed ActivityKit immediately from the manager's current worker queue.
+		// The visible badge still publishes on main, but Live Activity ownership
+		// must not sit behind a suspended or heavily-throttled UI run loop while
+		// the signing/install workers continue in the background.
+		if #available(iOS 16.2, *) {
+			KeepAliveActivityController.shared.sync(isRunning: isRunning, owners: owners)
+		}
+
 		DispatchQueue.main.async {
 			if self.isRunning != isRunning { self.isRunning = isRunning }
 			if self.owners != owners { self.owners = owners }
-
-			// The badge and the Dynamic Island pill are two views of one fact,
-			// so they're fed from one place. This is called on every evaluate —
-			// several times a second during an install — and the controller is
-			// responsible for reducing that to actual changes.
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.sync(isRunning: isRunning, owners: owners)
-			}
 		}
 	}
 
