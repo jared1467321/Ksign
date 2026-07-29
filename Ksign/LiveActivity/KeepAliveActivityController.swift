@@ -10,13 +10,21 @@ import OSLog
 // Starts, updates and ends the keep-alive Live Activity.
 //
 // Background execution is owned by `BackgroundAudioManager`; this controller
-// only mirrors the work that is already running into ActivityKit. All state is
-// confined to the main queue so reports from signing, importing and installing
-// cannot race each other.
+// only mirrors work that is already running into ActivityKit. Its state and
+// pacing run on a dedicated serial queue rather than the main actor. Signing,
+// archiving and install polling all continue on worker queues while the app is
+// backgrounded, so making ActivityKit delivery depend on the UI run loop can
+// leave updates queued until the app becomes active again.
 @available(iOS 16.2, *)
 final class KeepAliveActivityController {
 	static let shared = KeepAliveActivityController()
 
+	private let _queue = DispatchQueue(
+		label: "nya.asami.ksign.live-activity",
+		qos: .userInitiated
+	)
+
+	// Every mutable field below is confined to `_queue`.
 	private var _activity: Activity<KeepAliveAttributes>?
 
 	// The last owners that were actually holding something. During the audio
@@ -38,15 +46,16 @@ final class KeepAliveActivityController {
 
 	// Most-recent report wins when the current focus disappears. The focused
 	// owner remains sticky while it is still active so the bar cannot ping-pong
-	// between two simultaneous operations.
+	// between simultaneous operations.
 	private var _sequence: UInt64 = 0
 	private var _reportSeq: [String: UInt64] = [:]
 	private var _focusOwner: String?
 
 	// Reports and audio-state publications arrive independently. Keep the latest
-	// audio values so either path can rebuild the complete ActivityKit state.
+	// values so either path can rebuild the complete ActivityKit state.
 	private var _lastIsRunning = false
 	private var _lastOwnersInput: [String] = []
+	private var _featureEnabled = true
 
 	// A failed request normally means Live Activities are disabled or temporarily
 	// unavailable. Avoid retrying continuously while work is running.
@@ -56,42 +65,36 @@ final class KeepAliveActivityController {
 	// MARK: - Serialized ActivityKit delivery
 
 	// Producers may report as often as they need. Only the newest desired state
-	// is retained, and one task serially hands updates to ActivityKit. This avoids
-	// out-of-order fire-and-forget updates and prevents progress sampling from
-	// flooding the system.
+	// is retained, and exactly one Activity.update call is in flight at a time.
 	private var _desiredState: KeepAliveAttributes.ContentState?
 	private var _pendingUrgentPush = false
-	private var _pushTask: Task<Void, Never>?
+	private var _pushInFlight = false
+	private var _scheduledPush: DispatchWorkItem?
 	private var _lastPushedState: KeepAliveAttributes.ContentState?
 	private var _lastPushAt = Date.distantPast
 
 	// Phase, owner, count and completion transitions should feel immediate, but a
-	// tiny floor still coalesces bursts such as several jobs changing phase at the
-	// same time. Fraction-only movement is intentionally slower.
+	// tiny floor still coalesces bursts. Fraction-only movement is intentionally
+	// slower so a fast poller does not flood ActivityKit.
 	private static let _urgentPushInterval: TimeInterval = 0.35
 	private static let _progressPushInterval: TimeInterval = 3
 
 	// Fractions are quantized to whole percentage points before entering the
-	// state graph. The session can sample every 0.4 seconds without creating a
-	// distinct ActivityKit state for every microscopic change.
+	// state graph. A producer can sample frequently without creating a distinct
+	// ActivityKit state for microscopic changes.
 	private static let _progressStep = 0.01
 
 	private init() { }
 
-	// MARK: - Queue confinement
-
-	private func _onMain(_ work: @escaping () -> Void) {
-		if Thread.isMainThread {
-			work()
-		} else {
-			DispatchQueue.main.async(execute: work)
-		}
-	}
-
 	// MARK: - Driven by BackgroundAudioStatus
 
 	func sync(isRunning: Bool, owners: [String]) {
-		_onMain {
+		// Capture the switch at the call site. The controller does not mutate this
+		// setting and should not have to hop to the UI actor to read it later.
+		let enabled = OptionsManager.shared.options.backgroundAudio
+
+		_queue.async {
+			self._featureEnabled = enabled
 			self._lastIsRunning = isRunning
 			self._lastOwnersInput = owners
 			self._apply(isRunning: isRunning, owners: owners)
@@ -120,10 +123,7 @@ final class KeepAliveActivityController {
 	}
 
 	private func _apply(isRunning: Bool, owners: [String]) {
-		// The activity follows the existing feature switch. This does not alter or
-		// control the audio engine; it only decides whether the indicator is shown.
-		let enabled = OptionsManager.shared.options.backgroundAudio
-		let wanted = enabled && (isRunning || !owners.isEmpty)
+		let wanted = _featureEnabled && (isRunning || !owners.isEmpty)
 
 		guard wanted else {
 			_end()
@@ -160,13 +160,14 @@ final class KeepAliveActivityController {
 
 		// A newly requested activity already contains this state, so there is no
 		// reason to immediately update it again. If the request fails, retain the
-		// desired state and let the serialized task retry after the backoff.
+		// desired state and let the serial scheduler retry after the backoff.
 		if _activity == nil {
 			_start(with: state)
 			if _activity != nil { return }
 		}
 
-		_enqueue(state, urgent: _isUrgentTransition(from: _desiredState ?? _lastPushedState, to: state))
+		let prior = _desiredState ?? _lastPushedState
+		_enqueue(state, urgent: _isUrgentTransition(from: prior, to: state))
 	}
 
 	private func _isUrgentTransition(
@@ -198,93 +199,127 @@ final class KeepAliveActivityController {
 
 		_desiredState = state
 		_pendingUrgentPush = _pendingUrgentPush || urgent
-		_startPusherIfNeeded()
+
+		// If a progress update was waiting on the slower cadence and an urgent
+		// transition arrives, replace the scheduled wake-up with the earlier one.
+		if urgent, let scheduled = _scheduledPush {
+			scheduled.cancel()
+			_scheduledPush = nil
+		}
+
+		_schedulePushIfNeeded()
 	}
 
-	private func _startPusherIfNeeded() {
-		guard _pushTask == nil else { return }
+	private func _schedulePushIfNeeded() {
+		guard !_pushInFlight, _scheduledPush == nil, let desired = _desiredState else { return }
 
-		_pushTask = Task { @MainActor [weak self] in
-			while !Task.isCancelled {
-				guard let self else { return }
-				guard let desired = self._desiredState else {
-					self._pushTask = nil
-					return
-				}
+		if desired == _lastPushedState {
+			_desiredState = nil
+			_pendingUrgentPush = false
+			return
+		}
 
-				// If the activity disappeared or a request failed, retry the current
-				// truth after the existing backoff. No producer has to emit another
-				// report just to resurrect the indicator.
-				if self._activity == nil {
-					if Date() >= self._nextAttempt {
-						self._start(with: desired)
-					}
+		if _activity == nil {
+			if Date() >= _nextAttempt {
+				_start(with: desired)
+				if _activity != nil { return }
+			}
 
-					if self._activity == nil {
-						let delay = max(0.25, min(1.0, self._nextAttempt.timeIntervalSinceNow))
-						try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-						continue
-					}
+			let delay = max(0.25, min(1.0, _nextAttempt.timeIntervalSinceNow))
+			_schedule(after: delay)
+			return
+		}
 
-					// `_start` seeded the activity with the desired state.
-					if self._desiredState == nil { continue }
-				}
+		let minimumInterval = _pendingUrgentPush
+			? Self._urgentPushInterval
+			: Self._progressPushInterval
+		let remaining = minimumInterval - Date().timeIntervalSince(_lastPushAt)
 
-				guard let activity = self._activity,
-				      let state = self._desiredState else { continue }
+		if remaining > 0 {
+			_schedule(after: remaining)
+		} else {
+			_beginPush()
+		}
+	}
 
-				if state == self._lastPushedState {
-					self._desiredState = nil
-					self._pendingUrgentPush = false
-					continue
-				}
+	private func _schedule(after delay: TimeInterval) {
+		let item = DispatchWorkItem { [weak self] in
+			guard let self else { return }
+			self._scheduledPush = nil
+			self._schedulePushIfNeeded()
+		}
 
-				let minimumInterval = self._pendingUrgentPush
-					? Self._urgentPushInterval
-					: Self._progressPushInterval
-				let remaining = minimumInterval - Date().timeIntervalSince(self._lastPushAt)
+		_scheduledPush = item
+		_queue.asyncAfter(deadline: .now() + max(0.01, delay), execute: item)
+	}
 
-				if remaining > 0 {
-					try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-					continue
-				}
+	private func _beginPush() {
+		guard !_pushInFlight,
+		      let activity = _activity,
+		      let state = _desiredState else { return }
 
-				let activityID = activity.id
-				let stateBeingPushed = state
-				let wasUrgent = self._pendingUrgentPush
-				self._pendingUrgentPush = false
+		_pushInFlight = true
+		let activityID = activity.id
+		let stateBeingPushed = state
+		let wasUrgent = _pendingUrgentPush
+		_pendingUrgentPush = false
 
-				await activity.update(ActivityContent(state: stateBeingPushed, staleDate: nil))
+		// This task is intentionally created from the controller's worker queue and
+		// has no MainActor annotation. ActivityKit supports background updates; the
+		// delivery path must not wait for SwiftUI's run loop to become active again.
+		Task(priority: .userInitiated) { [weak self] in
+			await activity.update(ActivityContent(state: stateBeingPushed, staleDate: nil))
 
-				// Ignore completion from an activity that was replaced while the await
-				// was in flight.
-				guard self._activity?.id == activityID else { continue }
-
-				self._lastPushedState = stateBeingPushed
-				self._lastPushAt = Date()
-
-				if self._desiredState == stateBeingPushed {
-					self._desiredState = nil
-					self._pendingUrgentPush = false
-				}
-
-				let count = "\(stateBeingPushed.completed.map(String.init) ?? "–")/\(stateBeingPushed.total.map(String.init) ?? "–")"
-				let percent = stateBeingPushed.progressFraction
-					.map { " · \(Int(($0 * 100).rounded()))%" }
-					?? ""
-				BackgroundAudioStatus.shared.record(
-					.island,
-					"pushed\(wasUrgent ? "" : " progress") — \(count)\(percent) — \(stateBeingPushed.summaryLine)"
+			self?._queue.async {
+				self?._finishPush(
+					activityID: activityID,
+					state: stateBeingPushed,
+					wasUrgent: wasUrgent
 				)
 			}
 		}
 	}
 
+	private func _finishPush(
+		activityID: String,
+		state: KeepAliveAttributes.ContentState,
+		wasUrgent: Bool
+	) {
+		_pushInFlight = false
+
+		// Ignore completion from an activity that was replaced while the await was
+		// in flight. The newest desired state remains queued for the replacement.
+		guard _activity?.id == activityID else {
+			_schedulePushIfNeeded()
+			return
+		}
+
+		_lastPushedState = state
+		_lastPushAt = Date()
+
+		if _desiredState == state {
+			_desiredState = nil
+			_pendingUrgentPush = false
+		}
+
+		let count = "\(state.completed.map(String.init) ?? "–")/\(state.total.map(String.init) ?? "–")"
+		let percent = state.progressFraction
+			.map { " · \(Int(($0 * 100).rounded()))%" }
+			?? ""
+		BackgroundAudioStatus.shared.record(
+			.island,
+			"pushed\(wasUrgent ? "" : " progress") — \(count)\(percent) — \(state.summaryLine)"
+		)
+
+		_schedulePushIfNeeded()
+	}
+
 	private func _stopPusher() {
-		_pushTask?.cancel()
-		_pushTask = nil
+		_scheduledPush?.cancel()
+		_scheduledPush = nil
 		_desiredState = nil
 		_pendingUrgentPush = false
+		_pushInFlight = false
 		_lastPushedState = nil
 		_lastPushAt = .distantPast
 	}
@@ -306,7 +341,7 @@ final class KeepAliveActivityController {
 	}
 
 	// A genuine 0...1 figure. Producers may call this frequently; values are
-	// quantized here and the serialized pusher applies the three-second cadence.
+	// quantized here and the serial scheduler applies the three-second cadence.
 	func report(_ owner: BackgroundAudioManager.Owner, fraction: Double?) {
 		_merge(owner) {
 			guard let fraction else {
@@ -342,44 +377,53 @@ final class KeepAliveActivityController {
 	}
 
 	private func _merge(_ owner: BackgroundAudioManager.Owner, _ change: @escaping (inout _Report) -> Void) {
-		_onMain { self._mergeOnMain(owner, change) }
-	}
-
-	private func _mergeOnMain(_ owner: BackgroundAudioManager.Owner, _ change: (inout _Report) -> Void) {
 		let key = owner.displayName
-		var report = _reports[key] ?? _Report()
-		let before = report
-		change(&report)
 
-		guard report != before else { return }
+		_queue.async {
+			var report = self._reports[key] ?? _Report()
+			let before = report
+			change(&report)
 
-		if report == _Report() {
-			_reports.removeValue(forKey: key)
-			_reportSeq.removeValue(forKey: key)
-			if _focusOwner == key { _focusOwner = nil }
-		} else {
-			_reports[key] = report
-			_sequence += 1
-			_reportSeq[key] = _sequence
+			guard report != before else { return }
+
+			if report == _Report() {
+				self._reports.removeValue(forKey: key)
+				self._reportSeq.removeValue(forKey: key)
+				if self._focusOwner == key { self._focusOwner = nil }
+			} else {
+				self._reports[key] = report
+				self._sequence += 1
+				self._reportSeq[key] = self._sequence
+			}
+
+			// Several workflows seed their count before they claim the keep-alive.
+			// Retain that report until the next audio publication instead of treating
+			// the temporary absence of an owner as the end of an activity.
+			if self._activity == nil,
+			   !self._lastIsRunning,
+			   self._lastOwnersInput.isEmpty {
+				return
+			}
+
+			self._apply(isRunning: self._lastIsRunning, owners: self._lastOwnersInput)
 		}
-
-		// Several workflows seed their count before they claim the keep-alive.
-		// Retain that report until the next audio publication instead of treating
-		// the temporary absence of an owner as the end of an activity.
-		if _activity == nil, !_lastIsRunning, _lastOwnersInput.isEmpty { return }
-
-		_apply(isRunning: _lastIsRunning, owners: _lastOwnersInput)
 	}
 
 	// MARK: - Lifecycle
 
 	private func _start(with state: KeepAliveAttributes.ContentState) {
-		guard Date() >= _nextAttempt else { return }
+		guard Date() >= _nextAttempt else {
+			_desiredState = state
+			_schedulePushIfNeeded()
+			return
+		}
 
 		guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+			_desiredState = state
 			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
 			Logger.misc.error("Live Activities are disabled for this app — keep-alive pill can't be shown.")
 			BackgroundAudioStatus.shared.record(.island, "can't show — Live Activities are turned off for ASign")
+			_schedulePushIfNeeded()
 			return
 		}
 
@@ -402,9 +446,11 @@ final class KeepAliveActivityController {
 			BackgroundAudioStatus.shared.record(.island, "showing — \(state.summary)")
 			_watchActivityState()
 		} catch {
+			_desiredState = state
 			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
 			Logger.misc.error("Keep-alive Live Activity failed to start: \(error.localizedDescription)")
 			BackgroundAudioStatus.shared.record(.island, "failed to start — \(error.localizedDescription)")
+			_schedulePushIfNeeded()
 		}
 	}
 
@@ -412,11 +458,11 @@ final class KeepAliveActivityController {
 		guard let activity = _activity else { return }
 		let id = activity.id
 
-		Task { [weak self] in
+		Task(priority: .utility) { [weak self] in
 			for await state in activity.activityStateUpdates {
 				guard state == .dismissed || state == .ended else { continue }
 
-				await MainActor.run {
+				self?._queue.async {
 					guard let self, self._activity?.id == id else { return }
 
 					self._activity = nil
@@ -429,9 +475,12 @@ final class KeepAliveActivityController {
 						"went away on its own — will try again in \(Int(Self._retryDelay))s if work is still running"
 					)
 
-					// Rebuild the current truth now. The pusher retains it during the
-					// backoff and recreates the activity without requiring a new report.
-					self._apply(isRunning: self._lastIsRunning, owners: self._lastOwnersInput)
+					// Rebuild the current truth now. The scheduler retains it during
+					// the backoff and recreates the activity without another report.
+					self._apply(
+						isRunning: self._lastIsRunning,
+						owners: self._lastOwnersInput
+					)
 				}
 
 				break
@@ -460,7 +509,7 @@ final class KeepAliveActivityController {
 
 		BackgroundAudioStatus.shared.record(.island, "dismissed — nothing left holding the keep-alive")
 
-		Task {
+		Task(priority: .utility) {
 			await activity.end(nil, dismissalPolicy: .immediate)
 		}
 	}
