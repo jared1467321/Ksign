@@ -60,6 +60,7 @@ enum FR {
 		using options: Options,
 		icon: UIImage?,
 		certificate: CertificatePair?,
+		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
 		Task.detached {
@@ -79,45 +80,46 @@ enum FR {
 			}
 			handler.appIcon = icon
 
-			// Phase text for the Dynamic Island. Reported here rather than from
-			// the bulk signer so a single sign gets it too — `SigningHandler`
-			// publishes no progress of its own, and these three stages are the
-			// only thing that distinguishes a long zsign run from a hung one.
-			func stage(_ name: String?) async {
+			// These reports originate on the signing worker, not MainActor. The
+			// expanded Live Activity can therefore change phase while SwiftUI is
+			// backgrounded, and the compact island keeps showing the batch count.
+			func stage(_ name: String?) {
 				if #available(iOS 16.2, *) {
-					await MainActor.run {
-						KeepAliveActivityController.shared.report(.signing, detail: name)
-					}
+					KeepAliveActivityController.shared.report(.signing, detail: name)
 				}
 			}
 
 			do {
-				await stage("Copying")
+				stage("Copying")
 				try await handler.copy()
 
-				await stage("Modifying")
+				stage("Modifying")
 				try await handler.modify()
 
-				await stage("Finishing")
-                try? await handler.clean()
+				stage("Finishing")
+				try? await handler.clean()
 
-				await stage(nil)
-				
+				stage(nil)
 				await TempMaintenance.shared.endOperation()
+
+				// Batch count reporting happens before the UI callback so it cannot
+				// be delayed until the app returns to the foreground.
+				backgroundCompletion?(nil)
 				await MainActor.run {
 					completion(nil)
 				}
 			} catch {
 				try? await handler.clean()
-				await stage(nil)
+				stage(nil)
 				await TempMaintenance.shared.endOperation()
+				backgroundCompletion?(error)
 				await MainActor.run {
 					completion(error)
 				}
 			}
 		}
 	}
-	
+
 	static func handleCertificateFiles(
 		p12URL: URL,
 		provisionURL: URL,
