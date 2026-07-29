@@ -143,6 +143,7 @@ class DownloadManager: NSObject, ObservableObject {
 		if total == 0 || (_importBatches.isEmpty && _importDepth == 0) {
 			_importTotals.removeAll()
 			KeepAliveActivityController.shared.report(.importing, completed: 0, total: nil)
+			KeepAliveActivityController.shared.report(.importing, detail: nil)
 			return
 		}
 
@@ -150,6 +151,10 @@ class DownloadManager: NSObject, ObservableObject {
 		let completed = max(0, total - remaining - _importDepth)
 
 		KeepAliveActivityController.shared.report(.importing, completed: completed, total: total)
+		// The count only moves when an entire IPA finishes. Keep one stable phase
+		// label so the widget's elapsed timer continues advancing during a long
+		// extraction instead of looking frozen.
+		KeepAliveActivityController.shared.report(.importing, detail: "Importing")
 	}
 
 	// MARK: - Import-in-progress flag
