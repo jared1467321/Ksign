@@ -105,7 +105,7 @@ enum FR {
 				// Batch count reporting happens before the UI callback so it cannot
 				// be delayed until the app returns to the foreground.
 				backgroundCompletion?(nil)
-				await MainActor.run {
+				DispatchQueue.main.async {
 					completion(nil)
 				}
 			} catch {
@@ -113,7 +113,7 @@ enum FR {
 				stage(nil)
 				await TempMaintenance.shared.endOperation()
 				backgroundCompletion?(error)
-				await MainActor.run {
+				DispatchQueue.main.async {
 					completion(error)
 				}
 			}
