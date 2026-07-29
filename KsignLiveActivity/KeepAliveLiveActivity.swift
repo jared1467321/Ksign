@@ -37,17 +37,10 @@ struct KeepAliveLiveActivity: Widget {
 			} compactLeading: {
 				_Symbol(isRunning: context.state.isRunning)
 			} compactTrailing: {
-				Group {
-					if context.state.progressFraction != nil {
-						Text(context.state.compactTrailingLabel)
-					} else if context.state.detail != nil, let startedAt = context.state.detailStartedAt {
-						// A system-rendered timer keeps visibly advancing even when the
-						// current signing/import phase has no measurable sub-progress.
-						Text(timerInterval: startedAt...Date.distantFuture, countsDown: false)
-					} else {
-						Text(context.state.compactTrailingLabel)
-					}
-				}
+				// Keep the resting island compact: batch work shows n/n and installs
+				// show their percentage. The elapsed phase timer remains available in
+				// the expanded/Lock Screen presentation after a long press.
+				Text(context.state.compactTrailingLabel)
 				.font(.caption2)
 				.monospacedDigit()
 				.lineLimit(1)
