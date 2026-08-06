@@ -6,6 +6,7 @@
 //
 
 import Foundation.NSURL
+import OSLog
 import UIKit.UIImage
 import Zsign
 import NimbleJSON
@@ -205,35 +206,254 @@ enum FR {
 	}
 	
 	#if SERVER
+	private static let _sslPackFallbackURLs = [
+		"https://raw.githubusercontent.com/perki/backloop.dev/gh-pages/pack.json",
+	]
+	private static let _sslCertificateInstallQueue = DispatchQueue(
+		label: "dev.backloop.ksign.ssl-certificate-install"
+	)
+
+	private enum SSLCertificateUpdateError: LocalizedError {
+		case allDownloadsFailed([String])
+		case invalidPack(String)
+		case fileUpdateFailed(Error)
+
+		var errorDescription: String? {
+			switch self {
+			case .allDownloadsFailed(let failures):
+				return "Could not download a usable SSL certificate pack. "
+					+ failures.joined(separator: " | ")
+			case .invalidPack(let reason):
+				return "The downloaded SSL certificate pack is invalid: \(reason)"
+			case .fileUpdateFailed(let error):
+				return "The SSL certificate files could not be updated: \(error.localizedDescription)"
+			}
+		}
+	}
+
 	static func downloadSSLCertificates(
 		from urlString: String,
-		completion: @escaping (Bool) -> Void
+		completion: @escaping (Result<Void, Error>) -> Void
 	) {
-		let generator = UINotificationFeedbackGenerator()
-		generator.prepare()
-		
-		NBFetchService().fetch(from: urlString) { (result: Result<ServerPackModel, Error>) in
-			switch result {
-			case .success(let pack):
-				do {
-					let serverDir = URL.documentsDirectory.appendingPathComponent("App").appendingPathComponent("Server")
-					let pemURL = serverDir.appendingPathComponent("server.pem")
-					let crtURL = serverDir.appendingPathComponent("server.crt")
-					let commonNameURL = serverDir.appendingPathComponent("commonName.txt")
-					
-					try FileManager.default.createDirectoryIfNeeded(at: serverDir)
-					try pack.key.write(to: pemURL, atomically: true, encoding: .utf8)
-					try pack.cert.write(to: crtURL, atomically: true, encoding: .utf8)
-					try pack.info.domains.commonName.write(to: commonNameURL, atomically: true, encoding: .utf8)
-					
-					generator.notificationOccurred(.success)
-					completion(true)
-				} catch {
-					completion(false)
-				}
-			case .failure(_):
-				completion(false)
+		var seen = Set<String>()
+		let sources = ([urlString] + _sslPackFallbackURLs).filter {
+			seen.insert($0).inserted
+		}
+		let fetcher = NBFetchService()
+
+		func trySource(at index: Int, failures: [String]) {
+			guard index < sources.count else {
+				completion(.failure(SSLCertificateUpdateError.allDownloadsFailed(failures)))
+				return
 			}
+
+			let source = sources[index]
+			fetcher.fetch(from: source) { (result: Result<ServerPackModel, Error>) in
+				switch result {
+				case .success(let pack):
+					_sslCertificateInstallQueue.async {
+						do {
+							try _installSSLCertificatePack(pack)
+							Logger.misc.info(
+								"SSL certificate pack updated from \(source, privacy: .public)"
+							)
+							DispatchQueue.main.async {
+								UINotificationFeedbackGenerator().notificationOccurred(.success)
+							}
+							completion(.success(()))
+						} catch let error as SSLCertificateUpdateError {
+							switch error {
+							case .invalidPack:
+								let label = URL(string: source)?.host ?? source
+								let failure = "\(label): \(error.localizedDescription)"
+								Logger.misc.warning(
+									"SSL certificate source was unusable: \(failure, privacy: .public)"
+								)
+								trySource(at: index + 1, failures: failures + [failure])
+							default:
+								Logger.misc.error(
+									"SSL certificate update failed: \(error.localizedDescription, privacy: .public)"
+								)
+								completion(.failure(error))
+							}
+						} catch {
+							let wrapped = SSLCertificateUpdateError.fileUpdateFailed(error)
+							Logger.misc.error(
+								"SSL certificate update failed: \(wrapped.localizedDescription, privacy: .public)"
+							)
+							completion(.failure(wrapped))
+						}
+					}
+
+				case .failure(let error):
+					let label = URL(string: source)?.host ?? source
+					let failure = "\(label): \(error.localizedDescription)"
+					Logger.misc.warning(
+						"SSL certificate source failed: \(failure, privacy: .public)"
+					)
+					trySource(at: index + 1, failures: failures + [failure])
+				}
+			}
+		}
+
+		trySource(at: 0, failures: [])
+	}
+
+	private static func _installSSLCertificatePack(_ pack: ServerPackModel) throws {
+		let certificate = pack.cert.trimmingCharacters(in: .whitespacesAndNewlines)
+		let certificateAuthorities = pack.ca.trimmingCharacters(in: .whitespacesAndNewlines)
+		let privateKey = pack.key.trimmingCharacters(in: .whitespacesAndNewlines)
+		let commonName = pack.info.domains.commonName
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+
+		guard
+			certificate.contains("-----BEGIN CERTIFICATE-----"),
+			certificate.contains("-----END CERTIFICATE-----")
+		else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the leaf certificate is missing or malformed"
+			)
+		}
+
+		guard
+			certificateAuthorities.contains("-----BEGIN CERTIFICATE-----"),
+			certificateAuthorities.contains("-----END CERTIFICATE-----")
+		else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the CA/intermediate chain is missing"
+			)
+		}
+
+		guard
+			privateKey.contains("-----BEGIN PRIVATE KEY-----")
+				|| privateKey.contains("-----BEGIN RSA PRIVATE KEY-----"),
+			privateKey.contains("-----END PRIVATE KEY-----")
+				|| privateKey.contains("-----END RSA PRIVATE KEY-----")
+		else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the private key is missing or malformed"
+			)
+		}
+
+		guard !commonName.isEmpty else {
+			throw SSLCertificateUpdateError.invalidPack("the common name is empty")
+		}
+
+		let fullCertificateChain = certificate + "\n\n" + certificateAuthorities + "\n"
+		let certificateCount = fullCertificateChain
+			.components(separatedBy: "-----BEGIN CERTIFICATE-----")
+			.count - 1
+		guard certificateCount >= 2 else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the full certificate chain was not supplied"
+			)
+		}
+
+		let fileManager = FileManager.default
+		let serverDir = URL.documentsDirectory
+			.appendingPathComponent("App")
+			.appendingPathComponent("Server")
+		let stagingDir = serverDir.appendingPathComponent(
+			".ssl-update-\(UUID().uuidString)"
+		)
+		let backupDir = serverDir.appendingPathComponent(
+			".ssl-backup-\(UUID().uuidString)"
+		)
+
+		defer {
+			try? fileManager.removeItem(at: stagingDir)
+			try? fileManager.removeItem(at: backupDir)
+		}
+
+		do {
+			try fileManager.createDirectoryIfNeeded(at: serverDir)
+			try fileManager.createDirectory(
+				at: stagingDir,
+				withIntermediateDirectories: false
+			)
+			try fileManager.createDirectory(
+				at: backupDir,
+				withIntermediateDirectories: false
+			)
+
+			let stagedPEM = stagingDir.appendingPathComponent("server.pem")
+			let stagedCRT = stagingDir.appendingPathComponent("server.crt")
+			let stagedCommonName = stagingDir.appendingPathComponent("commonName.txt")
+
+			try (privateKey + "\n").write(
+				to: stagedPEM,
+				atomically: true,
+				encoding: .utf8
+			)
+			try fullCertificateChain.write(
+				to: stagedCRT,
+				atomically: true,
+				encoding: .utf8
+			)
+			try (commonName + "\n").write(
+				to: stagedCommonName,
+				atomically: true,
+				encoding: .utf8
+			)
+
+			try ServerInstaller.validateTLSIdentity(
+				certificateURL: stagedCRT,
+				privateKeyURL: stagedPEM
+			)
+
+			let replacements: [(staged: URL, destination: URL)] = [
+				(stagedPEM, serverDir.appendingPathComponent("server.pem")),
+				(stagedCRT, serverDir.appendingPathComponent("server.crt")),
+				(stagedCommonName, serverDir.appendingPathComponent("commonName.txt")),
+			]
+
+			try ServerInstaller.withTLSIdentityLock {
+				for replacement in replacements
+				where fileManager.fileExists(atPath: replacement.destination.path) {
+					try fileManager.copyItem(
+						at: replacement.destination,
+						to: backupDir.appendingPathComponent(
+							replacement.destination.lastPathComponent
+						)
+					)
+				}
+
+				do {
+					for replacement in replacements {
+						if fileManager.fileExists(atPath: replacement.destination.path) {
+							_ = try fileManager.replaceItemAt(
+								replacement.destination,
+								withItemAt: replacement.staged,
+								backupItemName: nil,
+								options: .usingNewMetadataOnly
+							)
+						} else {
+							try fileManager.moveItem(
+								at: replacement.staged,
+								to: replacement.destination
+							)
+						}
+					}
+				} catch {
+					for replacement in replacements {
+						try? fileManager.removeItem(at: replacement.destination)
+						let backup = backupDir.appendingPathComponent(
+							replacement.destination.lastPathComponent
+						)
+						if fileManager.fileExists(atPath: backup.path) {
+							try? fileManager.moveItem(
+								at: backup,
+								to: replacement.destination
+							)
+						}
+					}
+					throw error
+				}
+			}
+		} catch let error as SSLCertificateUpdateError {
+			throw error
+		} catch {
+			throw SSLCertificateUpdateError.fileUpdateFailed(error)
 		}
 	}
 	#endif
