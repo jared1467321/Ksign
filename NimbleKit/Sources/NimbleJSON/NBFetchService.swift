@@ -9,27 +9,29 @@ import Foundation
 
 // MARK: - Class
 public class NBFetchService {
-	
 	public enum NBFetchServiceError: Error, LocalizedError {
 		case invalidURL
 		case networkError(Error)
+		case httpError(statusCode: Int)
 		case noData
-		case parsingError(Any)
-		
+		case parsingError(Error)
+
 		public var errorDescription: String? {
 			switch self {
 			case .invalidURL:
 				return "The URL is invalid."
 			case .networkError(let error):
 				return "Network error: \(error.localizedDescription)"
+			case .httpError(let statusCode):
+				return "The server returned HTTP \(statusCode)."
 			case .noData:
 				return "No data received."
 			case .parsingError(let error):
-				return "Failed to parse data: \(error)"
+				return "Failed to parse data: \(error.localizedDescription)"
 			}
 		}
 	}
-	
+
 	public init() {}
 }
 
@@ -43,52 +45,48 @@ extension NBFetchService {
 			completion(.failure(NBFetchServiceError.invalidURL))
 			return
 		}
-		
+
 		fetch(from: url, completion: completion)
 	}
-	
+
 	public func fetch<T: Decodable>(
 		from url: URL,
 		completion: @escaping (Result<T, Error>) -> Void
 	) {
-		DispatchQueue.global(qos: .userInitiated).async {
-			let task = URLSession.shared.dataTask(with: url) { data, response, error in
-				if let error = error {
-					completion(.failure(NBFetchServiceError.networkError(error)))
-					return
-				}
-				
-				guard let data = data else {
-					completion(.failure(NBFetchServiceError.noData))
-					return
-				}
-				
-				do {
-					let decoder = JSONDecoder()
-					let decodedData = try decoder.decode(T.self, from: data)
-					completion(.success(decodedData))
-				} catch let decodingError as DecodingError {
-					if case .dataCorrupted(let context) = decodingError {
-						
-						if let underlyingError = context.underlyingError as NSError? {
-							
-                            if let debugDesc = underlyingError.userInfo["NSDebugDescription"] {
-                                print(debugDesc)
-                                completion(.failure(NBFetchServiceError.parsingError(debugDesc)))
-                            } else {
-                                print(decodingError)
-                                completion(.failure(NBFetchServiceError.parsingError(decodingError)))
-                            }
-						}
-					}
-					
-				} catch {
-                    print(error)
-					completion(.failure(NBFetchServiceError.parsingError(error)))
-				}
+		var request = URLRequest(
+			url: url,
+			cachePolicy: .reloadIgnoringLocalCacheData,
+			timeoutInterval: 30
+		)
+		request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+		let task = URLSession.shared.dataTask(with: request) { data, response, error in
+			if let error {
+				completion(.failure(NBFetchServiceError.networkError(error)))
+				return
 			}
-			
-			task.resume()
+
+			if
+				let response = response as? HTTPURLResponse,
+				!(200...299).contains(response.statusCode)
+			{
+				completion(.failure(NBFetchServiceError.httpError(statusCode: response.statusCode)))
+				return
+			}
+
+			guard let data else {
+				completion(.failure(NBFetchServiceError.noData))
+				return
+			}
+
+			do {
+				let decodedData = try JSONDecoder().decode(T.self, from: data)
+				completion(.success(decodedData))
+			} catch {
+				completion(.failure(NBFetchServiceError.parsingError(error)))
+			}
 		}
+
+		task.resume()
 	}
 }
