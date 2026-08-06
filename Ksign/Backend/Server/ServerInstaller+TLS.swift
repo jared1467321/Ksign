@@ -16,6 +16,7 @@ import SystemConfiguration.CaptiveNetwork
 // MARK: - Class extension: TLS/Setup
 extension ServerInstaller {
 	// MARK: Setup
+	private static let tlsIdentityLock = NSLock()
 	private static let env: Environment = {
 		var env = try! Environment.detect()
 		try! LoggingSystem.bootstrap(from: &env)
@@ -43,7 +44,7 @@ extension ServerInstaller {
 	}
 	
 	// MARK: Files/IP
-	static let sni: String = {
+	static var sni: String {
 		let localhost = "127.0.0.1"
 		
 		if getServerMethod() == 1 {
@@ -53,33 +54,76 @@ extension ServerInstaller {
 		} else {
 			return readCommonName() ?? localhost
 		}
-	}()
+	}
 	
 	static func tls() throws -> TLSConfiguration? {
-		guard
-			let crt = getUrl("server", ext: "crt"),
-			let pem = getUrl("server", ext: "pem")
-		else {
-			return nil
+		try withTLSIdentityLock {
+			guard
+				let crt = getUrl("server", ext: "crt"),
+				let pem = getUrl("server", ext: "pem")
+			else {
+				return nil
+			}
+
+			return try makeTLSConfiguration(
+				certificateURL: crt,
+				privateKeyURL: pem
+			)
 		}
-		
-		return try TLSConfiguration.makeServerConfiguration(
-			certificateChain: NIOSSLCertificate.fromPEMFile(crt.path).map {
+	}
+
+	/// Coordinates readers with the three-file certificate replacement so a
+	/// server can never load a new key with an old certificate (or vice versa).
+	static func withTLSIdentityLock<T>(_ operation: () throws -> T) rethrows -> T {
+		tlsIdentityLock.lock()
+		defer { tlsIdentityLock.unlock() }
+		return try operation()
+	}
+
+	/// Parses the complete PEM chain and private key and asks NIOSSL to build a
+	/// server context. Building the context verifies that the staged identity is
+	/// usable before it is allowed to replace the currently working files.
+	static func validateTLSIdentity(
+		certificateURL: URL,
+		privateKeyURL: URL
+	) throws {
+		_ = try NIOSSLContext(
+			configuration: makeTLSConfiguration(
+				certificateURL: certificateURL,
+				privateKeyURL: privateKeyURL
+			)
+		)
+	}
+
+	private static func makeTLSConfiguration(
+		certificateURL: URL,
+		privateKeyURL: URL
+	) throws -> TLSConfiguration {
+		try TLSConfiguration.makeServerConfiguration(
+			certificateChain: NIOSSLCertificate.fromPEMFile(certificateURL.path).map {
 				NIOSSLCertificateSource.certificate($0)
 			},
 			privateKey: .privateKey(
-				try NIOSSLPrivateKey(file: pem.path, format: .pem)
+				try NIOSSLPrivateKey(file: privateKeyURL.path, format: .pem)
 			)
 		)
 	}
 	
 	static func readCommonName() -> String? {
-		guard let url = getUrl("commonName", ext: "txt") else {
-			return nil
+		withTLSIdentityLock {
+			guard let url = getUrl("commonName", ext: "txt") else {
+				return nil
+			}
+
+			guard let value = try? String(contentsOf: url, encoding: .utf8)
+				.trimmingCharacters(in: .whitespacesAndNewlines),
+				!value.isEmpty
+			else {
+				return nil
+			}
+
+			return value
 		}
-		
-		return try? String(contentsOf: url, encoding: .utf8)
-			.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 }
 
