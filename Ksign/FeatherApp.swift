@@ -177,13 +177,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             }
             
             let destinationURL = serverDirectory.appendingPathComponent(fileName)
-            
-            try? fileManager.removeItem(at: destinationURL)
-            
+
+            // The bundled identity is only a bootstrap fallback. Preserve a newer
+            // certificate pack that was already downloaded successfully.
+            guard !fileManager.fileExists(atPath: destinationURL.path) else {
+                continue
+            }
+
             do {
                 try fileManager.copyItem(at: bundleURL, to: destinationURL)
             } catch {
-                print("Error copying \(fileName): \(error)")
+                Logger.misc.error("Error copying \(fileName): \(error.localizedDescription)")
             }
         }
     }
@@ -242,11 +246,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     private func _downloadSSLCertificates() {
         let serverURL = "https://backloop.dev/pack.json"
         
-        FR.downloadSSLCertificates(from: serverURL) { success in
-            if success {
-                print("SSL certificates downloaded successfully")
-            } else {
-                print("Failed to download SSL certificates")
+        FR.downloadSSLCertificates(from: serverURL) { result in
+            switch result {
+            case .success:
+                Logger.misc.info("SSL certificates downloaded successfully")
+            case .failure(let error):
+                // The staged updater preserves the existing working identity when
+                // either download source is temporarily unavailable.
+                Logger.misc.error("Failed to update SSL certificates: \(error.localizedDescription)")
             }
         }
     }
