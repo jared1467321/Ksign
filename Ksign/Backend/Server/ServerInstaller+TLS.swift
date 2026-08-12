@@ -57,7 +57,19 @@ extension ServerInstaller {
 	}
 	
 	static func tls() throws -> TLSConfiguration? {
-		try withTLSIdentityLock {
+		#if SERVER
+		if FR.isActiveSSLCertificateBlocked() {
+			throw NSError(
+				domain: "dev.ksign.ssl",
+				code: -1,
+				userInfo: [
+					NSLocalizedDescriptionKey: "The active SSL certificate has been revoked and is blocked. Update SSL certificates before using Fully Local installation."
+				]
+			)
+		}
+		#endif
+
+		return try withTLSIdentityLock {
 			guard
 				let crt = getUrl("server", ext: "crt"),
 				let pem = getUrl("server", ext: "pem")
