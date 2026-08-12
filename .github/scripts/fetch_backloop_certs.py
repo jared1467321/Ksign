@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Fetch and validate the backloop.dev TLS identity used by the iOS app build."""
+"""Fetch, rank, and validate the backloop.dev TLS identity used by the iOS app build."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -20,6 +22,16 @@ DEFAULT_SOURCES = (
 )
 
 
+@dataclass(frozen=True)
+class CertificateCandidate:
+    source: str
+    full_chain: str
+    private_key: str
+    common_name: str
+    not_before: datetime
+    not_after: datetime
+
+
 def fail(message: str) -> NoReturn:
     raise RuntimeError(message)
 
@@ -31,27 +43,20 @@ def require_string(pack: dict[str, Any], key: str) -> str:
     return value
 
 
-def fetch_pack(sources: tuple[str, ...]) -> tuple[dict[str, Any], str]:
-    failures: list[str] = []
-    for source in sources:
-        try:
-            request = Request(
-                source,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "Ksign-build/1.0",
-                },
-            )
-            with urlopen(request, timeout=30) as response:
-                payload = response.read()
-            decoded = json.loads(payload.decode("utf-8"))
-            if not isinstance(decoded, dict):
-                fail("the JSON root is not an object")
-            return decoded, source
-        except Exception as error:
-            failures.append(f"{source}: {error}")
-
-    fail("unable to download the backloop.dev certificate pack:\n  " + "\n  ".join(failures))
+def download_pack(source: str) -> dict[str, Any]:
+    request = Request(
+        source,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Ksign-build/1.0",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = response.read()
+    decoded = json.loads(payload.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        fail("the JSON root is not an object")
+    return decoded
 
 
 def normalize_pem(value: str) -> str:
@@ -104,12 +109,49 @@ def run_checked(command: list[str], *, input_data: Optional[bytes] = None) -> by
     return result.stdout
 
 
-def validate_with_openssl(directory: Path) -> None:
+def require_openssl() -> str:
     openssl = shutil.which("openssl")
     if openssl is None:
-        print("warning: openssl not found; PEM marker validation only", file=sys.stderr)
-        return
+        fail(
+            "openssl is required to validate certificate/key pairing and compare "
+            "X.509 validity dates"
+        )
+    return openssl
 
+
+def parse_openssl_date(value: str) -> datetime:
+    value = value.strip()
+    if value.endswith(" GMT"):
+        value = value[:-4]
+    try:
+        return datetime.strptime(value, "%b %d %H:%M:%S %Y").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        fail(f"could not parse OpenSSL certificate date {value!r}: {error}")
+
+
+def certificate_dates(crt: Path) -> tuple[datetime, datetime]:
+    openssl = require_openssl()
+    output = run_checked([openssl, "x509", "-in", str(crt), "-noout", "-dates"])
+    values: dict[str, str] = {}
+    for line in output.decode("utf-8", errors="replace").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+
+    if "notBefore" not in values or "notAfter" not in values:
+        fail("openssl did not return both notBefore and notAfter")
+
+    not_before = parse_openssl_date(values["notBefore"])
+    not_after = parse_openssl_date(values["notAfter"])
+    if not_after <= not_before:
+        fail("the certificate validity interval is inverted")
+    return not_before, not_after
+
+
+def validate_with_openssl(directory: Path) -> tuple[datetime, datetime]:
+    openssl = require_openssl()
     crt = directory / "server.crt"
     key = directory / "server.pem"
     certificate_blocks = re.findall(
@@ -134,22 +176,172 @@ def validate_with_openssl(directory: Path) -> None:
     if cert_public_key.strip() != key_public_key.strip():
         fail("the downloaded certificate and private key do not match")
 
+    return certificate_dates(crt)
 
-def write_atomically(
-    output_dir: Path,
-    full_chain: str,
-    private_key: str,
-    common_name: str,
-) -> None:
+
+def validate_candidate(pack: dict[str, Any], source: str) -> CertificateCandidate:
+    full_chain, private_key, common_name = build_files(pack)
+    with tempfile.TemporaryDirectory(prefix="backloop-candidate-") as temp_name:
+        temp_dir = Path(temp_name)
+        (temp_dir / "server.crt").write_text(full_chain, encoding="utf-8")
+        (temp_dir / "server.pem").write_text(private_key, encoding="utf-8")
+        not_before, not_after = validate_with_openssl(temp_dir)
+
+    now = datetime.now(timezone.utc)
+    if now < not_before:
+        fail(f"certificate is not valid until {not_before.isoformat()}")
+    if now >= not_after:
+        fail(f"certificate expired at {not_after.isoformat()}")
+
+    return CertificateCandidate(
+        source=source,
+        full_chain=full_chain,
+        private_key=private_key,
+        common_name=common_name,
+        not_before=not_before,
+        not_after=not_after,
+    )
+
+
+def fetch_candidates(
+    sources: tuple[str, ...],
+) -> tuple[list[CertificateCandidate], list[str]]:
+    candidates: list[CertificateCandidate] = []
+    failures: list[str] = []
+
+    for source in sources:
+        try:
+            pack = download_pack(source)
+            candidate = validate_candidate(pack, source)
+            candidates.append(candidate)
+            print(
+                "accepted TLS candidate from "
+                f"{source}: notBefore={candidate.not_before.isoformat()}, "
+                f"notAfter={candidate.not_after.isoformat()}"
+            )
+        except Exception as error:
+            failures.append(f"{source}: {error}")
+
+    return candidates, failures
+
+
+def newest_candidate(candidates: list[CertificateCandidate]) -> CertificateCandidate:
+    if not candidates:
+        fail("no usable certificate candidates were supplied")
+
+    def preferred(lhs: CertificateCandidate, rhs: CertificateCandidate) -> CertificateCandidate:
+        lhs_dominates = (
+            lhs.not_before >= rhs.not_before
+            and lhs.not_after >= rhs.not_after
+            and (lhs.not_before > rhs.not_before or lhs.not_after > rhs.not_after)
+        )
+        rhs_dominates = (
+            rhs.not_before >= lhs.not_before
+            and rhs.not_after >= lhs.not_after
+            and (rhs.not_before > lhs.not_before or rhs.not_after > lhs.not_after)
+        )
+        if lhs_dominates:
+            return lhs
+        if rhs_dominates:
+            return rhs
+
+        # If issuance and expiration move in opposite directions, prefer the
+        # longer-lived identity rather than sacrificing expiration just for a
+        # later notBefore date.
+        if lhs.not_after != rhs.not_after:
+            return lhs if lhs.not_after > rhs.not_after else rhs
+        if lhs.not_before != rhs.not_before:
+            return lhs if lhs.not_before > rhs.not_before else rhs
+        return lhs if lhs.source <= rhs.source else rhs
+
+    winner = candidates[0]
+    for candidate in candidates[1:]:
+        winner = preferred(winner, candidate)
+    return winner
+
+
+def first_certificate(text: str) -> str | None:
+    match = re.search(
+        r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+        text,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        return None
+    return match.group(0).strip() + "\n"
+
+
+def existing_identity(output_dir: Path) -> tuple[str, datetime, datetime] | None:
+    crt = output_dir / "server.crt"
+    if not crt.exists():
+        return None
+
+    try:
+        key = output_dir / "server.pem"
+        if not key.exists():
+            return None
+
+        text = crt.read_text(encoding="utf-8")
+        leaf = first_certificate(text)
+        if leaf is None:
+            return None
+
+        openssl = require_openssl()
+        run_checked([openssl, "pkey", "-in", str(key), "-noout"])
+        cert_public_key = run_checked(
+            [openssl, "x509", "-in", str(crt), "-pubkey", "-noout"]
+        )
+        key_public_key = run_checked([openssl, "pkey", "-in", str(key), "-pubout"])
+        if cert_public_key.strip() != key_public_key.strip():
+            fail("the existing certificate and private key do not match")
+
+        not_before, not_after = certificate_dates(crt)
+        return leaf, not_before, not_after
+    except Exception as error:
+        print(
+            f"warning: could not inspect existing TLS identity; it may be replaced: {error}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def should_install(output_dir: Path, candidate: CertificateCandidate) -> bool:
+    installed = existing_identity(output_dir)
+    if installed is None:
+        return True
+
+    installed_leaf, installed_not_before, installed_not_after = installed
+    candidate_leaf = first_certificate(candidate.full_chain)
+    if candidate_leaf == installed_leaf:
+        return False
+
+    if (
+        candidate.not_before < installed_not_before
+        or candidate.not_after < installed_not_after
+    ):
+        print(
+            "refusing TLS certificate downgrade: "
+            f"installed notBefore={installed_not_before.isoformat()}, "
+            f"notAfter={installed_not_after.isoformat()}; "
+            f"candidate notBefore={candidate.not_before.isoformat()}, "
+            f"notAfter={candidate.not_after.isoformat()}",
+            file=sys.stderr,
+        )
+        return False
+
+    return True
+
+
+def write_atomically(output_dir: Path, candidate: CertificateCandidate) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="backloop-certs-",
         dir=output_dir.parent,
     ) as temp_name:
         temp_dir = Path(temp_name)
-        (temp_dir / "server.crt").write_text(full_chain, encoding="utf-8")
-        (temp_dir / "server.pem").write_text(private_key, encoding="utf-8")
-        (temp_dir / "commonName.txt").write_text(common_name, encoding="utf-8")
+        (temp_dir / "server.crt").write_text(candidate.full_chain, encoding="utf-8")
+        (temp_dir / "server.pem").write_text(candidate.private_key, encoding="utf-8")
+        (temp_dir / "commonName.txt").write_text(candidate.common_name, encoding="utf-8")
         validate_with_openssl(temp_dir)
 
         for name in ("server.crt", "server.pem", "commonName.txt"):
@@ -162,17 +354,34 @@ def main(argv: list[str]) -> int:
         return 2
 
     output_dir = Path(argv[1]).resolve()
-    sources = tuple(argv[2:]) or DEFAULT_SOURCES
+    sources = tuple(dict.fromkeys(argv[2:] or DEFAULT_SOURCES))
 
     try:
-        pack, source = fetch_pack(sources)
-        full_chain, private_key, common_name = build_files(pack)
-        write_atomically(output_dir, full_chain, private_key, common_name)
+        candidates, failures = fetch_candidates(sources)
+        if not candidates:
+            fail(
+                "unable to download a usable backloop.dev certificate pack:\n  "
+                + "\n  ".join(failures)
+            )
+
+        candidate = newest_candidate(candidates)
+        if should_install(output_dir, candidate):
+            write_atomically(output_dir, candidate)
+            print(
+                "backloop.dev certificate identity updated from "
+                f"{candidate.source} "
+                f"(notBefore={candidate.not_before.isoformat()}, "
+                f"notAfter={candidate.not_after.isoformat()})"
+            )
+        else:
+            print(
+                "backloop.dev certificate identity left unchanged; the installed "
+                "identity is the same or newer"
+            )
     except Exception as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    print(f"backloop.dev certificate identity updated from {source}")
     return 0
 
 
