@@ -12,6 +12,9 @@ import Zsign
 import NimbleJSON
 import AltSourceKit
 import IDeviceSwift
+#if SERVER
+import NIOSSL
+#endif
 
 enum FR {
 	static func handlePackageFile(
@@ -213,6 +216,28 @@ enum FR {
 		label: "dev.backloop.ksign.ssl-certificate-install"
 	)
 
+	private struct SSLCertificateMaterial {
+		let leafCertificate: String
+		let fullCertificateChain: String
+		let privateKey: String
+		let commonName: String
+		let issuerCommonName: String
+		let notBefore: Date
+		let notAfter: Date
+	}
+
+	private struct SSLCertificateCandidate {
+		let source: String
+		let pack: ServerPackModel
+		let material: SSLCertificateMaterial
+	}
+
+	private struct InstalledSSLCertificateInfo {
+		let leafCertificate: String
+		let notBefore: Date
+		let notAfter: Date
+	}
+
 	private enum SSLCertificateUpdateError: LocalizedError {
 		case allDownloadsFailed([String])
 		case invalidPack(String)
@@ -241,9 +266,49 @@ enum FR {
 		}
 		let fetcher = NBFetchService()
 
-		func trySource(at index: Int, failures: [String]) {
+		func finish(
+			candidates: [SSLCertificateCandidate],
+			failures: [String]
+		) {
+			_sslCertificateInstallQueue.async {
+				guard let winner = _newestSSLCertificateCandidate(in: candidates) else {
+					completion(.failure(SSLCertificateUpdateError.allDownloadsFailed(failures)))
+					return
+				}
+
+				do {
+					if _shouldInstallSSLCertificate(winner.material) {
+						try _installSSLCertificatePack(winner.pack)
+						Logger.misc.info("SSL certificate pack updated from \(winner.source, privacy: .public); issuer=\(winner.material.issuerCommonName, privacy: .public), notBefore=\(_formatSSLDate(winner.material.notBefore), privacy: .public), notAfter=\(_formatSSLDate(winner.material.notAfter), privacy: .public)")
+						DispatchQueue.main.async {
+							UINotificationFeedbackGenerator().notificationOccurred(.success)
+						}
+					} else {
+						Logger.misc.info("SSL certificate update skipped; installed identity is the same or newer than \(winner.source, privacy: .public)")
+					}
+					completion(.success(()))
+				} catch {
+					let wrapped: Error
+					if let updateError = error as? SSLCertificateUpdateError {
+						wrapped = updateError
+					} else {
+						wrapped = SSLCertificateUpdateError.fileUpdateFailed(error)
+					}
+					Logger.misc.error(
+						"SSL certificate update failed: \(wrapped.localizedDescription, privacy: .public)"
+					)
+					completion(.failure(wrapped))
+				}
+			}
+		}
+
+		func trySource(
+			at index: Int,
+			candidates: [SSLCertificateCandidate],
+			failures: [String]
+		) {
 			guard index < sources.count else {
-				completion(.failure(SSLCertificateUpdateError.allDownloadsFailed(failures)))
+				finish(candidates: candidates, failures: failures)
 				return
 			}
 
@@ -253,35 +318,29 @@ enum FR {
 				case .success(let pack):
 					_sslCertificateInstallQueue.async {
 						do {
-							try _installSSLCertificatePack(pack)
-							Logger.misc.info(
-								"SSL certificate pack updated from \(source, privacy: .public)"
+							let material = try _validateSSLCertificatePack(pack)
+							let candidate = SSLCertificateCandidate(
+								source: source,
+								pack: pack,
+								material: material
 							)
-							DispatchQueue.main.async {
-								UINotificationFeedbackGenerator().notificationOccurred(.success)
-							}
-							completion(.success(()))
-						} catch let error as SSLCertificateUpdateError {
-							switch error {
-							case .invalidPack:
-								let label = URL(string: source)?.host ?? source
-								let failure = "\(label): \(error.localizedDescription)"
-								Logger.misc.warning(
-									"SSL certificate source was unusable: \(failure, privacy: .public)"
-								)
-								trySource(at: index + 1, failures: failures + [failure])
-							default:
-								Logger.misc.error(
-									"SSL certificate update failed: \(error.localizedDescription, privacy: .public)"
-								)
-								completion(.failure(error))
-							}
+							Logger.misc.info("SSL certificate candidate accepted from \(source, privacy: .public); issuer=\(material.issuerCommonName, privacy: .public), notBefore=\(_formatSSLDate(material.notBefore), privacy: .public), notAfter=\(_formatSSLDate(material.notAfter), privacy: .public)")
+							trySource(
+								at: index + 1,
+								candidates: candidates + [candidate],
+								failures: failures
+							)
 						} catch {
-							let wrapped = SSLCertificateUpdateError.fileUpdateFailed(error)
-							Logger.misc.error(
-								"SSL certificate update failed: \(wrapped.localizedDescription, privacy: .public)"
+							let label = URL(string: source)?.host ?? source
+							let failure = "\(label): \(error.localizedDescription)"
+							Logger.misc.warning(
+								"SSL certificate source was unusable: \(failure, privacy: .public)"
 							)
-							completion(.failure(wrapped))
+							trySource(
+								at: index + 1,
+								candidates: candidates,
+								failures: failures + [failure]
+							)
 						}
 					}
 
@@ -291,19 +350,98 @@ enum FR {
 					Logger.misc.warning(
 						"SSL certificate source failed: \(failure, privacy: .public)"
 					)
-					trySource(at: index + 1, failures: failures + [failure])
+					trySource(
+						at: index + 1,
+						candidates: candidates,
+						failures: failures + [failure]
+					)
 				}
 			}
 		}
 
-		trySource(at: 0, failures: [])
+		trySource(at: 0, candidates: [], failures: [])
 	}
 
-	private static func _installSSLCertificatePack(_ pack: ServerPackModel) throws {
+	private static func _newestSSLCertificateCandidate(
+		in candidates: [SSLCertificateCandidate]
+	) -> SSLCertificateCandidate? {
+		candidates.max { lhs, rhs in
+			let lhsDominates = lhs.material.notBefore >= rhs.material.notBefore
+				&& lhs.material.notAfter >= rhs.material.notAfter
+				&& (lhs.material.notBefore > rhs.material.notBefore
+					|| lhs.material.notAfter > rhs.material.notAfter)
+			let rhsDominates = rhs.material.notBefore >= lhs.material.notBefore
+				&& rhs.material.notAfter >= lhs.material.notAfter
+				&& (rhs.material.notBefore > lhs.material.notBefore
+					|| rhs.material.notAfter > lhs.material.notAfter)
+
+			if lhsDominates { return false }
+			if rhsDominates { return true }
+
+			// If the candidates are incomparable (for example, a later issuance
+			// that expires sooner), keep the one with the longer remaining
+			// validity instead of trading a distant expiration for a newer date.
+			if lhs.material.notAfter != rhs.material.notAfter {
+				return lhs.material.notAfter < rhs.material.notAfter
+			}
+			if lhs.material.notBefore != rhs.material.notBefore {
+				return lhs.material.notBefore < rhs.material.notBefore
+			}
+			return lhs.source > rhs.source
+		}
+	}
+
+	private static func _validateSSLCertificatePack(
+		_ pack: ServerPackModel
+	) throws -> SSLCertificateMaterial {
+		let material = try _sslCertificateMaterial(from: pack)
+		let fileManager = FileManager.default
+		let validationDir = fileManager.temporaryDirectory.appendingPathComponent(
+			"ksign-ssl-validation-\(UUID().uuidString)"
+		)
+		defer { try? fileManager.removeItem(at: validationDir) }
+
+		do {
+			try fileManager.createDirectory(
+				at: validationDir,
+				withIntermediateDirectories: true
+			)
+			let certificateURL = validationDir.appendingPathComponent("server.crt")
+			let privateKeyURL = validationDir.appendingPathComponent("server.pem")
+			try material.fullCertificateChain.write(
+				to: certificateURL,
+				atomically: true,
+				encoding: .utf8
+			)
+			try material.privateKey.write(
+				to: privateKeyURL,
+				atomically: true,
+				encoding: .utf8
+			)
+			try ServerInstaller.validateTLSIdentity(
+				certificateURL: certificateURL,
+				privateKeyURL: privateKeyURL
+			)
+			return material
+		} catch let error as SSLCertificateUpdateError {
+			throw error
+		} catch {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the certificate chain and private key do not form a usable TLS identity: "
+					+ error.localizedDescription
+			)
+		}
+	}
+
+	private static func _sslCertificateMaterial(
+		from pack: ServerPackModel
+	) throws -> SSLCertificateMaterial {
 		let certificate = pack.cert.trimmingCharacters(in: .whitespacesAndNewlines)
 		let certificateAuthorities = pack.ca.trimmingCharacters(in: .whitespacesAndNewlines)
 		let privateKey = pack.key.trimmingCharacters(in: .whitespacesAndNewlines)
 		let commonName = pack.info.domains.commonName
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+		let issuerCommonName = pack.info.issuer.commonName
 			.trimmingCharacters(in: .whitespacesAndNewlines)
 
 		guard
@@ -338,6 +476,30 @@ enum FR {
 		guard !commonName.isEmpty else {
 			throw SSLCertificateUpdateError.invalidPack("the common name is empty")
 		}
+		guard !issuerCommonName.isEmpty else {
+			throw SSLCertificateUpdateError.invalidPack("the issuer common name is empty")
+		}
+
+		let normalizedLeafCertificate = certificate + "\n"
+		guard let certificateValidity = _certificateValidity(fromPEMCertificate: normalizedLeafCertificate) else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the leaf certificate validity dates could not be read"
+			)
+		}
+		let notBefore = certificateValidity.notBefore
+		let notAfter = certificateValidity.notAfter
+
+		let now = Date()
+		guard now >= notBefore else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the certificate is not valid until \(_formatSSLDate(notBefore))"
+			)
+		}
+		guard now < notAfter else {
+			throw SSLCertificateUpdateError.invalidPack(
+				"the certificate expired at \(_formatSSLDate(notAfter))"
+			)
+		}
 
 		let fullCertificateChain = certificate + "\n\n" + certificateAuthorities + "\n"
 		let certificateCount = fullCertificateChain
@@ -349,6 +511,115 @@ enum FR {
 			)
 		}
 
+		return SSLCertificateMaterial(
+			leafCertificate: normalizedLeafCertificate,
+			fullCertificateChain: fullCertificateChain,
+			privateKey: privateKey + "\n",
+			commonName: commonName,
+			issuerCommonName: issuerCommonName,
+			notBefore: notBefore,
+			notAfter: notAfter
+		)
+	}
+
+	private static func _formatSSLDate(_ date: Date) -> String {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime]
+		return formatter.string(from: date)
+	}
+
+	private static func _shouldInstallSSLCertificate(
+		_ candidate: SSLCertificateMaterial
+	) -> Bool {
+		guard let installed = _installedSSLCertificateInfo() else {
+			return true
+		}
+
+		if installed.leafCertificate == candidate.leafCertificate {
+			return false
+		}
+
+		if candidate.notBefore < installed.notBefore
+			|| candidate.notAfter < installed.notAfter {
+			Logger.misc.warning("Refusing SSL certificate downgrade; installed notBefore=\(_formatSSLDate(installed.notBefore), privacy: .public), notAfter=\(_formatSSLDate(installed.notAfter), privacy: .public); candidate notBefore=\(_formatSSLDate(candidate.notBefore), privacy: .public), notAfter=\(_formatSSLDate(candidate.notAfter), privacy: .public)")
+			return false
+		}
+
+		return true
+	}
+
+	private static func _installedSSLCertificateInfo() -> InstalledSSLCertificateInfo? {
+		ServerInstaller.withTLSIdentityLock {
+			guard
+				let certificateURL = ServerInstaller.getUrl("server", ext: "crt"),
+				let privateKeyURL = ServerInstaller.getUrl("server", ext: "pem"),
+				let certificateText = try? String(contentsOf: certificateURL, encoding: .utf8),
+				let leafCertificate = _firstPEMCertificate(in: certificateText),
+				let validity = _certificateValidity(fromPEMCertificate: leafCertificate)
+			else {
+				return nil
+			}
+
+			do {
+				try ServerInstaller.validateTLSIdentity(
+					certificateURL: certificateURL,
+					privateKeyURL: privateKeyURL
+				)
+			} catch {
+				Logger.misc.warning("Installed SSL identity is unusable; allowing replacement: \(error.localizedDescription, privacy: .public)")
+				return nil
+			}
+
+			return InstalledSSLCertificateInfo(
+				leafCertificate: leafCertificate,
+				notBefore: validity.notBefore,
+				notAfter: validity.notAfter
+			)
+		}
+	}
+
+	private static func _certificateValidity(
+		fromPEMCertificate certificatePEM: String
+	) -> (notBefore: Date, notAfter: Date)? {
+		guard let certificate = try? NIOSSLCertificate(
+			bytes: Array(certificatePEM.utf8),
+			format: .pem
+		) else {
+			return nil
+		}
+
+		let notBefore = Date(
+			timeIntervalSince1970: TimeInterval(certificate.notValidBefore)
+		)
+		let notAfter = Date(
+			timeIntervalSince1970: TimeInterval(certificate.notValidAfter)
+		)
+		guard notAfter > notBefore else {
+			return nil
+		}
+
+		return (notBefore, notAfter)
+	}
+
+	private static func _firstPEMCertificate(in text: String) -> String? {
+		let beginMarker = "-----BEGIN CERTIFICATE-----"
+		let endMarker = "-----END CERTIFICATE-----"
+		guard
+			let begin = text.range(of: beginMarker),
+			let end = text.range(
+				of: endMarker,
+				range: begin.lowerBound..<text.endIndex
+			)
+		else {
+			return nil
+		}
+
+		return String(text[begin.lowerBound..<end.upperBound])
+			.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+	}
+
+	private static func _installSSLCertificatePack(_ pack: ServerPackModel) throws {
+		let material = try _sslCertificateMaterial(from: pack)
 		let fileManager = FileManager.default
 		let serverDir = URL.documentsDirectory
 			.appendingPathComponent("App")
@@ -380,17 +651,17 @@ enum FR {
 			let stagedCRT = stagingDir.appendingPathComponent("server.crt")
 			let stagedCommonName = stagingDir.appendingPathComponent("commonName.txt")
 
-			try (privateKey + "\n").write(
+			try material.privateKey.write(
 				to: stagedPEM,
 				atomically: true,
 				encoding: .utf8
 			)
-			try fullCertificateChain.write(
+			try material.fullCertificateChain.write(
 				to: stagedCRT,
 				atomically: true,
 				encoding: .utf8
 			)
-			try (commonName + "\n").write(
+			try (material.commonName + "\n").write(
 				to: stagedCommonName,
 				atomically: true,
 				encoding: .utf8
