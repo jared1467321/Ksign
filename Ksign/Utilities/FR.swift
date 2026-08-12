@@ -5,16 +5,15 @@
 //  Created by samara on 22.04.2025.
 //
 
-import Foundation.NSURL
+import Foundation
+import CryptoKit
+import Security
 import OSLog
 import UIKit.UIImage
 import Zsign
 import NimbleJSON
 import AltSourceKit
 import IDeviceSwift
-#if SERVER
-import NIOSSL
-#endif
 
 enum FR {
 	static func handlePackageFile(
@@ -209,47 +208,104 @@ enum FR {
 	}
 	
 	#if SERVER
-	private static let _sslPackFallbackURLs = [
-		"https://raw.githubusercontent.com/perki/backloop.dev/gh-pages/pack.json",
-	]
 	private static let _sslCertificateInstallQueue = DispatchQueue(
-		label: "dev.backloop.ksign.ssl-certificate-install"
+		label: "dev.ksign.ssl-certificate-install"
 	)
+	private static let _sslRevokedFingerprintsDefaultsKey =
+		"dev.ksign.ssl.revoked-fingerprints"
 
-	private struct SSLCertificateMaterial {
-		let leafCertificate: String
-		let fullCertificateChain: String
+	private enum SSLCertificateProvider {
+		case pack(label: String, url: String)
+		case pemPair(
+			label: String,
+			certificateURL: String,
+			privateKeyURL: String,
+			hostname: String
+		)
+
+		var label: String {
+			switch self {
+			case .pack(let label, _), .pemPair(let label, _, _, _):
+				return label
+			}
+		}
+
+		var identity: String {
+			switch self {
+			case .pack(_, let url):
+				return "pack:\(url)"
+			case .pemPair(_, let certificateURL, let privateKeyURL, _):
+				return "pem:\(certificateURL)|\(privateKeyURL)"
+			}
+		}
+	}
+
+	private struct SSLIdentityCandidate {
+		let certificateChain: String
 		let privateKey: String
 		let commonName: String
-		let issuerCommonName: String
-		let notBefore: Date
-		let notAfter: Date
+		let sourceLabel: String
 	}
 
-	private struct SSLCertificateCandidate {
-		let source: String
-		let pack: ServerPackModel
-		let material: SSLCertificateMaterial
+	private enum SSLAppleTrustResult {
+		case trusted
+		case revoked(String)
+		case revocationUnknown(String)
+		case rejected(String)
 	}
 
-	private struct InstalledSSLCertificateInfo {
-		let leafCertificate: String
-		let notBefore: Date
-		let notAfter: Date
+	private enum SSLCertSpotterResult {
+		case good
+		case revoked(String)
+		case unknown(String)
+	}
+
+	private struct CertSpotterIssuance: Decodable {
+		let id: String
+		let certSHA256: String
+		let revoked: Bool?
+		let revocation: Revocation?
+
+		private enum CodingKeys: String, CodingKey {
+			case id
+			case certSHA256 = "cert_sha256"
+			case revoked
+			case revocation
+		}
+
+		struct Revocation: Decodable {
+			let time: String?
+			let reason: Int?
+			let checkedAt: String?
+
+			private enum CodingKeys: String, CodingKey {
+				case time, reason
+				case checkedAt = "checked_at"
+			}
+		}
 	}
 
 	private enum SSLCertificateUpdateError: LocalizedError {
 		case allDownloadsFailed([String])
 		case invalidPack(String)
+		case revokedCertificate(String)
+		case trustFailed(String)
+		case revocationUnknown(String)
 		case fileUpdateFailed(Error)
 
 		var errorDescription: String? {
 			switch self {
 			case .allDownloadsFailed(let failures):
-				return "Could not download a usable SSL certificate pack. "
+				return "Could not find a usable SSL certificate. "
 					+ failures.joined(separator: " | ")
 			case .invalidPack(let reason):
-				return "The downloaded SSL certificate pack is invalid: \(reason)"
+				return "The downloaded SSL certificate is invalid: \(reason)"
+			case .revokedCertificate(let reason):
+				return "The SSL certificate is revoked: \(reason)"
+			case .trustFailed(let reason):
+				return "iOS rejected the SSL certificate: \(reason)"
+			case .revocationUnknown(let reason):
+				return "The SSL certificate revocation status could not be confirmed: \(reason)"
 			case .fileUpdateFailed(let error):
 				return "The SSL certificate files could not be updated: \(error.localizedDescription)"
 			}
@@ -260,366 +316,585 @@ enum FR {
 		from urlString: String,
 		completion: @escaping (Result<Void, Error>) -> Void
 	) {
-		var seen = Set<String>()
-		let sources = ([urlString] + _sslPackFallbackURLs).filter {
-			seen.insert($0).inserted
-		}
-		let fetcher = NBFetchService()
+		let providers = _sslCertificateProviders(requestedPackURL: urlString)
 
-		func finish(
-			candidates: [SSLCertificateCandidate],
-			failures: [String]
-		) {
-			_sslCertificateInstallQueue.async {
-				guard let winner = _newestSSLCertificateCandidate(in: candidates) else {
-					completion(.failure(SSLCertificateUpdateError.allDownloadsFailed(failures)))
-					return
-				}
-
-				do {
-					if _shouldInstallSSLCertificate(winner.material) {
-						try _installSSLCertificatePack(winner.pack)
-						Logger.misc.info("SSL certificate pack updated from \(winner.source, privacy: .public); issuer=\(winner.material.issuerCommonName, privacy: .public), notBefore=\(_formatSSLDate(winner.material.notBefore), privacy: .public), notAfter=\(_formatSSLDate(winner.material.notAfter), privacy: .public)")
-						DispatchQueue.main.async {
-							UINotificationFeedbackGenerator().notificationOccurred(.success)
-						}
-					} else {
-						Logger.misc.info("SSL certificate update skipped; installed identity is the same or newer than \(winner.source, privacy: .public)")
-					}
-					completion(.success(()))
-				} catch {
-					let wrapped: Error
-					if let updateError = error as? SSLCertificateUpdateError {
-						wrapped = updateError
-					} else {
-						wrapped = SSLCertificateUpdateError.fileUpdateFailed(error)
-					}
-					Logger.misc.error(
-						"SSL certificate update failed: \(wrapped.localizedDescription, privacy: .public)"
-					)
-					completion(.failure(wrapped))
-				}
-			}
-		}
-
-		func trySource(
-			at index: Int,
-			candidates: [SSLCertificateCandidate],
-			failures: [String]
-		) {
-			guard index < sources.count else {
-				finish(candidates: candidates, failures: failures)
+		func tryProvider(at index: Int, failures: [String]) {
+			guard index < providers.count else {
+				completion(.failure(SSLCertificateUpdateError.allDownloadsFailed(failures)))
 				return
 			}
 
-			let source = sources[index]
-			fetcher.fetch(from: source) { (result: Result<ServerPackModel, Error>) in
-				switch result {
-				case .success(let pack):
+			let provider = providers[index]
+			_fetchSSLCandidate(from: provider) { fetchResult in
+				switch fetchResult {
+				case .failure(let error):
+					let failure = "\(provider.label): \(error.localizedDescription)"
+					Logger.misc.warning(
+						"SSL certificate provider failed: \(failure, privacy: .public)"
+					)
+					tryProvider(at: index + 1, failures: failures + [failure])
+
+				case .success(let candidate):
 					_sslCertificateInstallQueue.async {
 						do {
-							let material = try _validateSSLCertificatePack(pack)
-							let candidate = SSLCertificateCandidate(
-								source: source,
-								pack: pack,
-								material: material
-							)
-							Logger.misc.info("SSL certificate candidate accepted from \(source, privacy: .public); issuer=\(material.issuerCommonName, privacy: .public), notBefore=\(_formatSSLDate(material.notBefore), privacy: .public), notAfter=\(_formatSSLDate(material.notAfter), privacy: .public)")
-							trySource(
-								at: index + 1,
-								candidates: candidates + [candidate],
-								failures: failures
-							)
+							try _validateCandidateTLS(candidate)
 						} catch {
-							let label = URL(string: source)?.host ?? source
-							let failure = "\(label): \(error.localizedDescription)"
+							let failure = "\(provider.label): \(error.localizedDescription)"
 							Logger.misc.warning(
-								"SSL certificate source was unusable: \(failure, privacy: .public)"
+								"SSL certificate provider was unusable: \(failure, privacy: .public)"
 							)
-							trySource(
-								at: index + 1,
-								candidates: candidates,
-								failures: failures + [failure]
-							)
+							tryProvider(at: index + 1, failures: failures + [failure])
+							return
+						}
+
+						_assessSSLCandidate(candidate) { assessment in
+							switch assessment {
+							case .failure(let error):
+								let failure = "\(provider.label): \(error.localizedDescription)"
+								Logger.misc.warning(
+									"SSL certificate provider was rejected: \(failure, privacy: .public)"
+								)
+								tryProvider(at: index + 1, failures: failures + [failure])
+
+							case .success:
+								_sslCertificateInstallQueue.async {
+									do {
+										try _installSSLCertificateIdentity(candidate)
+										Logger.misc.info(
+											"SSL certificate identity is usable and active from \(provider.label, privacy: .public)"
+										)
+										DispatchQueue.main.async {
+											UINotificationFeedbackGenerator().notificationOccurred(.success)
+										}
+										completion(.success(()))
+									} catch {
+										let wrapped = SSLCertificateUpdateError.fileUpdateFailed(error)
+										Logger.misc.error(
+											"SSL certificate update failed: \(wrapped.localizedDescription, privacy: .public)"
+										)
+										completion(.failure(wrapped))
+									}
+								}
+							}
 						}
 					}
+			}
+		}
+		}
 
+		// Re-check the identity already on disk before contacting providers. If
+		// its CA has revoked it since the last launch, persist the fingerprint so
+		// ServerInstaller will refuse to use the dead identity immediately.
+		_sslCertificateInstallQueue.async {
+			_refreshInstalledRevocationBlock()
+			tryProvider(at: 0, failures: [])
+		}
+	}
+
+	/// Called by ServerInstaller before TLS startup. A fingerprint that has ever
+	/// been positively identified as revoked is never tried again, even if the
+	/// same certificate remains on disk or a provider republishes it.
+	static func isActiveSSLCertificateBlocked() -> Bool {
+		guard let installed = _installedSSLCandidate(),
+			let fingerprint = try? _leafFingerprint(from: installed.certificateChain)
+		else {
+			return false
+		}
+		return _isRevokedFingerprint(fingerprint)
+	}
+
+	private static func _sslCertificateProviders(
+		requestedPackURL: String
+	) -> [SSLCertificateProvider] {
+		var providers: [SSLCertificateProvider] = [
+			.pemPair(
+				label: "127-0-0-1.dev",
+				certificateURL: "https://raw.githubusercontent.com/appcove/127-0-0-1.dev/main/cert.pem",
+				privateKeyURL: "https://raw.githubusercontent.com/appcove/127-0-0-1.dev/main/key.pem",
+				hostname: "127-0-0-1.dev"
+			),
+		]
+
+		let requested = requestedPackURL.trimmingCharacters(in: .whitespacesAndNewlines)
+		if !requested.isEmpty {
+			providers.append(.pack(label: "Backloop primary", url: requested))
+		}
+		providers.append(
+			.pack(
+				label: "Backloop GitHub fallback",
+				url: "https://raw.githubusercontent.com/perki/backloop.dev/gh-pages/pack.json"
+			)
+		)
+
+		var seen = Set<String>()
+		return providers.filter { seen.insert($0.identity).inserted }
+	}
+
+	private static func _fetchSSLCandidate(
+		from provider: SSLCertificateProvider,
+		completion: @escaping (Result<SSLIdentityCandidate, Error>) -> Void
+	) {
+		switch provider {
+		case .pack(let label, let url):
+			NBFetchService().fetch(from: url) { (result: Result<ServerPackModel, Error>) in
+				switch result {
+				case .success(let pack):
+					do {
+						completion(.success(try _candidate(from: pack, sourceLabel: label)))
+					} catch {
+						completion(.failure(error))
+					}
 				case .failure(let error):
-					let label = URL(string: source)?.host ?? source
-					let failure = "\(label): \(error.localizedDescription)"
-					Logger.misc.warning(
-						"SSL certificate source failed: \(failure, privacy: .public)"
-					)
-					trySource(
-						at: index + 1,
-						candidates: candidates,
-						failures: failures + [failure]
-					)
+					completion(.failure(error))
+				}
+			}
+
+		case .pemPair(let label, let certificateURL, let privateKeyURL, let hostname):
+			_fetchText(from: certificateURL) { certificateResult in
+				switch certificateResult {
+				case .failure(let error):
+					completion(.failure(error))
+				case .success(let certificateChain):
+					_fetchText(from: privateKeyURL) { keyResult in
+						switch keyResult {
+						case .failure(let error):
+							completion(.failure(error))
+						case .success(let privateKey):
+							do {
+								let candidate = SSLIdentityCandidate(
+									certificateChain: certificateChain.trimmingCharacters(in: .whitespacesAndNewlines) + "\n",
+									privateKey: privateKey.trimmingCharacters(in: .whitespacesAndNewlines) + "\n",
+									commonName: hostname,
+									sourceLabel: label
+								)
+								try _validateIdentityShape(candidate)
+								completion(.success(candidate))
+							} catch {
+								completion(.failure(error))
+							}
+						}
+					}
 				}
 			}
 		}
-
-		trySource(at: 0, candidates: [], failures: [])
 	}
 
-	private static func _newestSSLCertificateCandidate(
-		in candidates: [SSLCertificateCandidate]
-	) -> SSLCertificateCandidate? {
-		candidates.max { lhs, rhs in
-			let lhsDominates = lhs.material.notBefore >= rhs.material.notBefore
-				&& lhs.material.notAfter >= rhs.material.notAfter
-				&& (lhs.material.notBefore > rhs.material.notBefore
-					|| lhs.material.notAfter > rhs.material.notAfter)
-			let rhsDominates = rhs.material.notBefore >= lhs.material.notBefore
-				&& rhs.material.notAfter >= lhs.material.notAfter
-				&& (rhs.material.notBefore > lhs.material.notBefore
-					|| rhs.material.notAfter > lhs.material.notAfter)
-
-			if lhsDominates { return false }
-			if rhsDominates { return true }
-
-			// If the candidates are incomparable (for example, a later issuance
-			// that expires sooner), keep the one with the longer remaining
-			// validity instead of trading a distant expiration for a newer date.
-			if lhs.material.notAfter != rhs.material.notAfter {
-				return lhs.material.notAfter < rhs.material.notAfter
-			}
-			if lhs.material.notBefore != rhs.material.notBefore {
-				return lhs.material.notBefore < rhs.material.notBefore
-			}
-			return lhs.source > rhs.source
+	private static func _fetchText(
+		from urlString: String,
+		completion: @escaping (Result<String, Error>) -> Void
+	) {
+		guard let url = URL(string: urlString) else {
+			completion(.failure(SSLCertificateUpdateError.invalidPack("invalid provider URL")))
+			return
 		}
+
+		var request = URLRequest(url: url)
+		request.timeoutInterval = 20
+		request.setValue("Ksign/SSL-Certificate-Manager", forHTTPHeaderField: "User-Agent")
+
+		URLSession.shared.dataTask(with: request) { data, response, error in
+			if let error {
+				completion(.failure(error))
+				return
+			}
+			if let http = response as? HTTPURLResponse,
+				!(200...299).contains(http.statusCode) {
+				completion(.failure(NSError(
+					domain: NSURLErrorDomain,
+					code: http.statusCode,
+					userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+				)))
+				return
+			}
+			guard let data, let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+				completion(.failure(SSLCertificateUpdateError.invalidPack("provider returned empty data")))
+				return
+			}
+			completion(.success(value))
+		}.resume()
 	}
 
-	private static func _validateSSLCertificatePack(
-		_ pack: ServerPackModel
-	) throws -> SSLCertificateMaterial {
-		let material = try _sslCertificateMaterial(from: pack)
-		let fileManager = FileManager.default
-		let validationDir = fileManager.temporaryDirectory.appendingPathComponent(
-			"ksign-ssl-validation-\(UUID().uuidString)"
-		)
-		defer { try? fileManager.removeItem(at: validationDir) }
-
-		do {
-			try fileManager.createDirectory(
-				at: validationDir,
-				withIntermediateDirectories: true
-			)
-			let certificateURL = validationDir.appendingPathComponent("server.crt")
-			let privateKeyURL = validationDir.appendingPathComponent("server.pem")
-			try material.fullCertificateChain.write(
-				to: certificateURL,
-				atomically: true,
-				encoding: .utf8
-			)
-			try material.privateKey.write(
-				to: privateKeyURL,
-				atomically: true,
-				encoding: .utf8
-			)
-			try ServerInstaller.validateTLSIdentity(
-				certificateURL: certificateURL,
-				privateKeyURL: privateKeyURL
-			)
-			return material
-		} catch let error as SSLCertificateUpdateError {
-			throw error
-		} catch {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the certificate chain and private key do not form a usable TLS identity: "
-					+ error.localizedDescription
-			)
-		}
-	}
-
-	private static func _sslCertificateMaterial(
-		from pack: ServerPackModel
-	) throws -> SSLCertificateMaterial {
+	private static func _candidate(
+		from pack: ServerPackModel,
+		sourceLabel: String
+	) throws -> SSLIdentityCandidate {
 		let certificate = pack.cert.trimmingCharacters(in: .whitespacesAndNewlines)
 		let certificateAuthorities = pack.ca.trimmingCharacters(in: .whitespacesAndNewlines)
 		let privateKey = pack.key.trimmingCharacters(in: .whitespacesAndNewlines)
 		let commonName = pack.info.domains.commonName
 			.trimmingCharacters(in: .whitespacesAndNewlines)
-		let issuerCommonName = pack.info.issuer.commonName
-			.trimmingCharacters(in: .whitespacesAndNewlines)
 
-		guard
-			certificate.contains("-----BEGIN CERTIFICATE-----"),
-			certificate.contains("-----END CERTIFICATE-----")
-		else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the leaf certificate is missing or malformed"
-			)
-		}
+		let candidate = SSLIdentityCandidate(
+			certificateChain: certificate + "\n\n" + certificateAuthorities + "\n",
+			privateKey: privateKey + "\n",
+			commonName: commonName,
+			sourceLabel: sourceLabel
+		)
+		try _validateIdentityShape(candidate)
+		return candidate
+	}
 
-		guard
-			certificateAuthorities.contains("-----BEGIN CERTIFICATE-----"),
-			certificateAuthorities.contains("-----END CERTIFICATE-----")
-		else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the CA/intermediate chain is missing"
-			)
-		}
-
-		guard
-			privateKey.contains("-----BEGIN PRIVATE KEY-----")
-				|| privateKey.contains("-----BEGIN RSA PRIVATE KEY-----"),
-			privateKey.contains("-----END PRIVATE KEY-----")
-				|| privateKey.contains("-----END RSA PRIVATE KEY-----")
-		else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the private key is missing or malformed"
-			)
-		}
-
-		guard !commonName.isEmpty else {
-			throw SSLCertificateUpdateError.invalidPack("the common name is empty")
-		}
-		guard !issuerCommonName.isEmpty else {
-			throw SSLCertificateUpdateError.invalidPack("the issuer common name is empty")
-		}
-
-		let normalizedLeafCertificate = certificate + "\n"
-		guard let certificateValidity = _certificateValidity(fromPEMCertificate: normalizedLeafCertificate) else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the leaf certificate validity dates could not be read"
-			)
-		}
-		let notBefore = certificateValidity.notBefore
-		let notAfter = certificateValidity.notAfter
-
-		let now = Date()
-		guard now >= notBefore else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the certificate is not valid until \(_formatSSLDate(notBefore))"
-			)
-		}
-		guard now < notAfter else {
-			throw SSLCertificateUpdateError.invalidPack(
-				"the certificate expired at \(_formatSSLDate(notAfter))"
-			)
-		}
-
-		let fullCertificateChain = certificate + "\n\n" + certificateAuthorities + "\n"
-		let certificateCount = fullCertificateChain
+	private static func _validateIdentityShape(_ candidate: SSLIdentityCandidate) throws {
+		let certificateCount = candidate.certificateChain
 			.components(separatedBy: "-----BEGIN CERTIFICATE-----")
 			.count - 1
 		guard certificateCount >= 2 else {
 			throw SSLCertificateUpdateError.invalidPack(
-				"the full certificate chain was not supplied"
+				"the leaf certificate plus intermediate chain were not supplied"
+			)
+		}
+		guard candidate.certificateChain.contains("-----END CERTIFICATE-----") else {
+			throw SSLCertificateUpdateError.invalidPack("the certificate PEM is malformed")
+		}
+		let hasSupportedKeyHeader =
+			candidate.privateKey.contains("-----BEGIN PRIVATE KEY-----")
+			|| candidate.privateKey.contains("-----BEGIN RSA PRIVATE KEY-----")
+			|| candidate.privateKey.contains("-----BEGIN EC PRIVATE KEY-----")
+		let hasSupportedKeyFooter =
+			candidate.privateKey.contains("-----END PRIVATE KEY-----")
+			|| candidate.privateKey.contains("-----END RSA PRIVATE KEY-----")
+			|| candidate.privateKey.contains("-----END EC PRIVATE KEY-----")
+		guard hasSupportedKeyHeader, hasSupportedKeyFooter else {
+			throw SSLCertificateUpdateError.invalidPack("the private key PEM is malformed")
+		}
+		guard !candidate.commonName.isEmpty else {
+			throw SSLCertificateUpdateError.invalidPack("the common name is empty")
+		}
+	}
+
+	private static func _validateCandidateTLS(_ candidate: SSLIdentityCandidate) throws {
+		let fileManager = FileManager.default
+		let directory = fileManager.temporaryDirectory.appendingPathComponent(
+			"ksign-ssl-check-\(UUID().uuidString)",
+			isDirectory: true
+		)
+		defer { try? fileManager.removeItem(at: directory) }
+
+		try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+		let crt = directory.appendingPathComponent("server.crt")
+		let key = directory.appendingPathComponent("server.pem")
+		try candidate.certificateChain.write(to: crt, atomically: true, encoding: .utf8)
+		try candidate.privateKey.write(to: key, atomically: true, encoding: .utf8)
+		try ServerInstaller.validateTLSIdentity(certificateURL: crt, privateKeyURL: key)
+	}
+
+	private static func _assessSSLCandidate(
+		_ candidate: SSLIdentityCandidate,
+		completion: @escaping (Result<Void, Error>) -> Void
+	) {
+		do {
+			let fingerprint = try _leafFingerprint(from: candidate.certificateChain)
+			if _isRevokedFingerprint(fingerprint) {
+				completion(.failure(SSLCertificateUpdateError.revokedCertificate(
+					"fingerprint \(fingerprint) was previously confirmed revoked"
+				)))
+				return
+			}
+
+			switch try _evaluateAppleTrust(candidate) {
+			case .trusted:
+				completion(.success(()))
+
+			case .revoked(let reason):
+				_blockRevokedFingerprint(fingerprint, reason: reason)
+				completion(.failure(SSLCertificateUpdateError.revokedCertificate(reason)))
+
+			case .revocationUnknown(let reason):
+				_checkCertSpotter(
+					fingerprint: fingerprint,
+					domain: _baseDomain(for: candidate.commonName)
+				) { result in
+					switch result {
+					case .good:
+						Logger.misc.info(
+							"Apple revocation response was incomplete; Cert Spotter reports certificate \(fingerprint, privacy: .public) not revoked"
+						)
+						completion(.success(()))
+					case .revoked(let certSpotterReason):
+						_blockRevokedFingerprint(fingerprint, reason: certSpotterReason)
+						completion(.failure(SSLCertificateUpdateError.revokedCertificate(certSpotterReason)))
+					case .unknown(let certSpotterReason):
+						completion(.failure(SSLCertificateUpdateError.revocationUnknown(
+							"\(reason); Cert Spotter: \(certSpotterReason)"
+						)))
+					}
+				}
+
+			case .rejected(let reason):
+				// A generic trust failure is not permanently blacklisted. Ask Cert
+				// Spotter only to determine whether revocation was the underlying
+				// cause, then reject this candidate for the current update either way.
+				_checkCertSpotter(
+					fingerprint: fingerprint,
+					domain: _baseDomain(for: candidate.commonName)
+				) { result in
+					if case .revoked(let certSpotterReason) = result {
+						_blockRevokedFingerprint(fingerprint, reason: certSpotterReason)
+						completion(.failure(SSLCertificateUpdateError.revokedCertificate(certSpotterReason)))
+					} else {
+						completion(.failure(SSLCertificateUpdateError.trustFailed(reason)))
+					}
+				}
+			}
+		} catch {
+			completion(.failure(error))
+		}
+	}
+
+	private static func _evaluateAppleTrust(
+		_ candidate: SSLIdentityCandidate
+	) throws -> SSLAppleTrustResult {
+		let certificateData = try _certificateDERs(from: candidate.certificateChain)
+		let certificates = certificateData.compactMap {
+			SecCertificateCreateWithData(nil, $0 as CFData)
+		}
+		guard certificates.count == certificateData.count, !certificates.isEmpty else {
+			throw SSLCertificateUpdateError.invalidPack("Security.framework could not parse the certificate chain")
+		}
+
+		let hostname = _validationHostname(for: candidate.commonName)
+		let sslPolicy = SecPolicyCreateSSL(true, hostname as CFString)
+		let revocationFlags = kSecRevocationUseAnyAvailableMethod
+			| kSecRevocationRequirePositiveResponse
+		guard let revocationPolicy = SecPolicyCreateRevocation(revocationFlags) else {
+			throw SSLCertificateUpdateError.revocationUnknown("could not create the iOS revocation policy")
+		}
+
+		let policies: [SecPolicy] = [sslPolicy, revocationPolicy]
+		var trust: SecTrust?
+		let createStatus = SecTrustCreateWithCertificates(
+			certificates as CFArray,
+			policies as CFArray,
+			&trust
+		)
+		guard createStatus == errSecSuccess, let trust else {
+			throw SSLCertificateUpdateError.trustFailed(
+				"SecTrustCreateWithCertificates failed with OSStatus \(createStatus)"
 			)
 		}
 
-		return SSLCertificateMaterial(
-			leafCertificate: normalizedLeafCertificate,
-			fullCertificateChain: fullCertificateChain,
-			privateKey: privateKey + "\n",
-			commonName: commonName,
-			issuerCommonName: issuerCommonName,
-			notBefore: notBefore,
-			notAfter: notAfter
-		)
-	}
-
-	private static func _formatSSLDate(_ date: Date) -> String {
-		let formatter = ISO8601DateFormatter()
-		formatter.formatOptions = [.withInternetDateTime]
-		return formatter.string(from: date)
-	}
-
-	private static func _shouldInstallSSLCertificate(
-		_ candidate: SSLCertificateMaterial
-	) -> Bool {
-		guard let installed = _installedSSLCertificateInfo() else {
-			return true
+		_ = SecTrustSetNetworkFetchAllowed(trust, true)
+		var trustError: CFError?
+		if SecTrustEvaluateWithError(trust, &trustError) {
+			return .trusted
 		}
 
-		if installed.leafCertificate == candidate.leafCertificate {
-			return false
-		}
+		let message = trustError.map { CFErrorCopyDescription($0) as String }
+			?? "unknown trust evaluation failure"
+		let code = trustError.map { OSStatus(CFErrorGetCode($0)) }
 
-		if candidate.notBefore < installed.notBefore
-			|| candidate.notAfter < installed.notAfter {
-			Logger.misc.warning("Refusing SSL certificate downgrade; installed notBefore=\(_formatSSLDate(installed.notBefore), privacy: .public), notAfter=\(_formatSSLDate(installed.notAfter), privacy: .public); candidate notBefore=\(_formatSSLDate(candidate.notBefore), privacy: .public), notAfter=\(_formatSSLDate(candidate.notAfter), privacy: .public)")
-			return false
+		if code == errSecCertificateRevoked {
+			return .revoked(message)
 		}
-
-		return true
+		if code == errSecIncompleteCertRevocationCheck {
+			return .revocationUnknown(message)
+		}
+		return .rejected(message)
 	}
 
-	private static func _installedSSLCertificateInfo() -> InstalledSSLCertificateInfo? {
+	private static func _refreshInstalledRevocationBlock() {
+		guard let installed = _installedSSLCandidate(),
+			let fingerprint = try? _leafFingerprint(from: installed.certificateChain),
+			!_isRevokedFingerprint(fingerprint)
+		else {
+			return
+		}
+
+		do {
+			if case .revoked(let reason) = try _evaluateAppleTrust(installed) {
+				_blockRevokedFingerprint(fingerprint, reason: reason)
+				Logger.misc.error(
+					"Installed SSL certificate \(fingerprint, privacy: .public) is revoked and has been blocked"
+				)
+			}
+		} catch {
+			Logger.misc.warning(
+				"Could not re-check installed SSL certificate revocation: \(error.localizedDescription, privacy: .public)"
+			)
+		}
+	}
+
+	private static func _installedSSLCandidate() -> SSLIdentityCandidate? {
 		ServerInstaller.withTLSIdentityLock {
 			guard
-				let certificateURL = ServerInstaller.getUrl("server", ext: "crt"),
-				let privateKeyURL = ServerInstaller.getUrl("server", ext: "pem"),
-				let certificateText = try? String(contentsOf: certificateURL, encoding: .utf8),
-				let leafCertificate = _firstPEMCertificate(in: certificateText),
-				let validity = _certificateValidity(fromPEMCertificate: leafCertificate)
+				let crtURL = ServerInstaller.getUrl("server", ext: "crt"),
+				let keyURL = ServerInstaller.getUrl("server", ext: "pem"),
+				let commonNameURL = ServerInstaller.getUrl("commonName", ext: "txt"),
+				let certificateChain = try? String(contentsOf: crtURL, encoding: .utf8),
+				let privateKey = try? String(contentsOf: keyURL, encoding: .utf8),
+				let commonName = try? String(contentsOf: commonNameURL, encoding: .utf8)
+					.trimmingCharacters(in: .whitespacesAndNewlines),
+				!commonName.isEmpty
 			else {
 				return nil
 			}
 
-			do {
-				try ServerInstaller.validateTLSIdentity(
-					certificateURL: certificateURL,
-					privateKeyURL: privateKeyURL
-				)
-			} catch {
-				Logger.misc.warning("Installed SSL identity is unusable; allowing replacement: \(error.localizedDescription, privacy: .public)")
-				return nil
+			return SSLIdentityCandidate(
+				certificateChain: certificateChain,
+				privateKey: privateKey,
+				commonName: commonName,
+				sourceLabel: "installed identity"
+			)
+		}
+	}
+
+	private static func _certificateDERs(from pem: String) throws -> [Data] {
+		let begin = "-----BEGIN CERTIFICATE-----"
+		let end = "-----END CERTIFICATE-----"
+		var certificates: [Data] = []
+		var remainder = pem[...]
+
+		while let beginRange = remainder.range(of: begin) {
+			remainder = remainder[beginRange.upperBound...]
+			guard let endRange = remainder.range(of: end) else {
+				throw SSLCertificateUpdateError.invalidPack("unterminated certificate PEM block")
+			}
+			let body = remainder[..<endRange.lowerBound]
+			let base64 = body.filter { !$0.isWhitespace }
+			guard let data = Data(base64Encoded: String(base64)) else {
+				throw SSLCertificateUpdateError.invalidPack("certificate PEM contains invalid base64")
+			}
+			certificates.append(data)
+			remainder = remainder[endRange.upperBound...]
+		}
+
+		guard !certificates.isEmpty else {
+			throw SSLCertificateUpdateError.invalidPack("no certificates were found")
+		}
+		return certificates
+	}
+
+	private static func _leafFingerprint(from pem: String) throws -> String {
+		guard let leaf = try _certificateDERs(from: pem).first else {
+			throw SSLCertificateUpdateError.invalidPack("the leaf certificate is missing")
+		}
+		return SHA256.hash(data: leaf)
+			.map { String(format: "%02x", $0) }
+			.joined()
+	}
+
+	private static func _validationHostname(for commonName: String) -> String {
+		let value = commonName.trimmingCharacters(in: .whitespacesAndNewlines)
+		if value.hasPrefix("*.") {
+			return "ksign." + String(value.dropFirst(2))
+		}
+		return value
+	}
+
+	private static func _baseDomain(for commonName: String) -> String {
+		let value = commonName.trimmingCharacters(in: .whitespacesAndNewlines)
+		return value.hasPrefix("*.") ? String(value.dropFirst(2)) : value
+	}
+
+	private static func _revokedFingerprints() -> Set<String> {
+		Set(UserDefaults.standard.stringArray(forKey: _sslRevokedFingerprintsDefaultsKey) ?? [])
+	}
+
+	private static func _isRevokedFingerprint(_ fingerprint: String) -> Bool {
+		_revokedFingerprints().contains(fingerprint.lowercased())
+	}
+
+	private static func _blockRevokedFingerprint(_ fingerprint: String, reason: String) {
+		let normalized = fingerprint.lowercased()
+		var blocked = _revokedFingerprints()
+		guard blocked.insert(normalized).inserted else { return }
+		UserDefaults.standard.set(Array(blocked).sorted(), forKey: _sslRevokedFingerprintsDefaultsKey)
+		Logger.misc.error(
+			"Blocked revoked SSL certificate fingerprint \(normalized, privacy: .public): \(reason, privacy: .public)"
+		)
+	}
+
+	private static func _checkCertSpotter(
+		fingerprint: String,
+		domain: String,
+		completion: @escaping (SSLCertSpotterResult) -> Void
+	) {
+		func fetchPage(after: String?, page: Int) {
+			guard page < 8 else {
+				completion(.unknown("matching issuance was not found within the pagination limit"))
+				return
 			}
 
-			return InstalledSSLCertificateInfo(
-				leafCertificate: leafCertificate,
-				notBefore: validity.notBefore,
-				notAfter: validity.notAfter
-			)
+			var components = URLComponents(string: "https://api.certspotter.com/v1/issuances")!
+			var items = [
+				URLQueryItem(name: "domain", value: domain),
+				URLQueryItem(name: "include_subdomains", value: "true"),
+				URLQueryItem(name: "match_wildcards", value: "true"),
+				URLQueryItem(name: "expand", value: "revocation"),
+			]
+			if let after { items.append(URLQueryItem(name: "after", value: after)) }
+			components.queryItems = items
+
+			guard let url = components.url else {
+				completion(.unknown("could not construct Cert Spotter URL"))
+				return
+			}
+			var request = URLRequest(url: url)
+			request.timeoutInterval = 12
+			request.setValue("Ksign/SSL-Certificate-Manager", forHTTPHeaderField: "User-Agent")
+
+			URLSession.shared.dataTask(with: request) { data, response, error in
+				if let error {
+					completion(.unknown(error.localizedDescription))
+					return
+				}
+				if let http = response as? HTTPURLResponse,
+					!(200...299).contains(http.statusCode) {
+					completion(.unknown("HTTP \(http.statusCode)"))
+					return
+				}
+				guard let data else {
+					completion(.unknown("empty response"))
+					return
+				}
+
+				do {
+					let issuances = try JSONDecoder().decode([CertSpotterIssuance].self, from: data)
+					if let issuance = issuances.first(where: {
+						$0.certSHA256.caseInsensitiveCompare(fingerprint) == .orderedSame
+					}) {
+						switch issuance.revoked {
+						case .some(true):
+							let time = issuance.revocation?.time ?? "unknown time"
+							let reason = issuance.revocation?.reason.map(String.init) ?? "unknown"
+							completion(.revoked("Cert Spotter reports revocation at \(time), reason code \(reason)"))
+						case .some(false):
+							guard
+								let checkedAt = issuance.revocation?.checkedAt,
+								let checkedDate = ISO8601DateFormatter().date(from: checkedAt)
+							else {
+								completion(.unknown("Cert Spotter did not provide a revocation-check timestamp"))
+								return
+							}
+							let age = Date().timeIntervalSince(checkedDate)
+							guard age >= -600, age <= 24 * 60 * 60 else {
+								completion(.unknown("Cert Spotter's non-revoked status is stale (checked \(checkedAt))"))
+								return
+							}
+							completion(.good)
+						case .none:
+							completion(.unknown("Cert Spotter has no revocation status for the matching issuance"))
+						}
+						return
+					}
+
+					guard let lastID = issuances.last?.id, !issuances.isEmpty else {
+						completion(.unknown("certificate is not present in Cert Spotter results"))
+						return
+					}
+					fetchPage(after: lastID, page: page + 1)
+				} catch {
+					completion(.unknown("invalid Cert Spotter response: \(error.localizedDescription)"))
+				}
+			}.resume()
 		}
+
+		fetchPage(after: nil, page: 0)
 	}
 
-	private static func _certificateValidity(
-		fromPEMCertificate certificatePEM: String
-	) -> (notBefore: Date, notAfter: Date)? {
-		guard let certificate = try? NIOSSLCertificate(
-			bytes: Array(certificatePEM.utf8),
-			format: .pem
-		) else {
-			return nil
-		}
+	private static func _installSSLCertificateIdentity(_ candidate: SSLIdentityCandidate) throws {
+		try _validateIdentityShape(candidate)
 
-		let notBefore = Date(
-			timeIntervalSince1970: TimeInterval(certificate.notValidBefore)
-		)
-		let notAfter = Date(
-			timeIntervalSince1970: TimeInterval(certificate.notValidAfter)
-		)
-		guard notAfter > notBefore else {
-			return nil
-		}
-
-		return (notBefore, notAfter)
-	}
-
-	private static func _firstPEMCertificate(in text: String) -> String? {
-		let beginMarker = "-----BEGIN CERTIFICATE-----"
-		let endMarker = "-----END CERTIFICATE-----"
-		guard
-			let begin = text.range(of: beginMarker),
-			let end = text.range(
-				of: endMarker,
-				range: begin.lowerBound..<text.endIndex
-			)
-		else {
-			return nil
-		}
-
-		return String(text[begin.lowerBound..<end.upperBound])
-			.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
-	}
-
-	private static func _installSSLCertificatePack(_ pack: ServerPackModel) throws {
-		let material = try _sslCertificateMaterial(from: pack)
 		let fileManager = FileManager.default
 		let serverDir = URL.documentsDirectory
 			.appendingPathComponent("App")
@@ -638,30 +913,16 @@ enum FR {
 
 		do {
 			try fileManager.createDirectoryIfNeeded(at: serverDir)
-			try fileManager.createDirectory(
-				at: stagingDir,
-				withIntermediateDirectories: false
-			)
-			try fileManager.createDirectory(
-				at: backupDir,
-				withIntermediateDirectories: false
-			)
+			try fileManager.createDirectory(at: stagingDir, withIntermediateDirectories: false)
+			try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: false)
 
 			let stagedPEM = stagingDir.appendingPathComponent("server.pem")
 			let stagedCRT = stagingDir.appendingPathComponent("server.crt")
 			let stagedCommonName = stagingDir.appendingPathComponent("commonName.txt")
 
-			try material.privateKey.write(
-				to: stagedPEM,
-				atomically: true,
-				encoding: .utf8
-			)
-			try material.fullCertificateChain.write(
-				to: stagedCRT,
-				atomically: true,
-				encoding: .utf8
-			)
-			try (material.commonName + "\n").write(
+			try candidate.privateKey.write(to: stagedPEM, atomically: true, encoding: .utf8)
+			try candidate.certificateChain.write(to: stagedCRT, atomically: true, encoding: .utf8)
+			try (candidate.commonName + "\n").write(
 				to: stagedCommonName,
 				atomically: true,
 				encoding: .utf8
@@ -671,6 +932,13 @@ enum FR {
 				certificateURL: stagedCRT,
 				privateKeyURL: stagedPEM
 			)
+
+			let fingerprint = try _leafFingerprint(from: candidate.certificateChain)
+			guard !_isRevokedFingerprint(fingerprint) else {
+				throw SSLCertificateUpdateError.revokedCertificate(
+					"fingerprint \(fingerprint) is blocked"
+				)
+			}
 
 			let replacements: [(staged: URL, destination: URL)] = [
 				(stagedPEM, serverDir.appendingPathComponent("server.pem")),
@@ -683,9 +951,7 @@ enum FR {
 				where fileManager.fileExists(atPath: replacement.destination.path) {
 					try fileManager.copyItem(
 						at: replacement.destination,
-						to: backupDir.appendingPathComponent(
-							replacement.destination.lastPathComponent
-						)
+						to: backupDir.appendingPathComponent(replacement.destination.lastPathComponent)
 					)
 				}
 
@@ -699,23 +965,15 @@ enum FR {
 								options: .usingNewMetadataOnly
 							)
 						} else {
-							try fileManager.moveItem(
-								at: replacement.staged,
-								to: replacement.destination
-							)
+							try fileManager.moveItem(at: replacement.staged, to: replacement.destination)
 						}
 					}
 				} catch {
 					for replacement in replacements {
 						try? fileManager.removeItem(at: replacement.destination)
-						let backup = backupDir.appendingPathComponent(
-							replacement.destination.lastPathComponent
-						)
+						let backup = backupDir.appendingPathComponent(replacement.destination.lastPathComponent)
 						if fileManager.fileExists(atPath: backup.path) {
-							try? fileManager.moveItem(
-								at: backup,
-								to: replacement.destination
-							)
+							try? fileManager.moveItem(at: backup, to: replacement.destination)
 						}
 					}
 					throw error
