@@ -24,6 +24,7 @@ struct DownloadItemRow: View {
     var selectable: Bool = true
     var importIpaToLibrary: (DownloadItem) -> Void
     var exportToFiles: (DownloadItem) -> Void
+    var cryptCheck: (DownloadItem) -> Void
     var deleteItem: (DownloadItem) -> Void
 
     @State private var showingConfirmationDialog = false
@@ -36,6 +37,7 @@ struct DownloadItemRow: View {
         selectable: Bool = true,
         importIpaToLibrary: @escaping (DownloadItem) -> Void,
         exportToFiles: @escaping (DownloadItem) -> Void,
+        cryptCheck: @escaping (DownloadItem) -> Void,
         deleteItem: @escaping (DownloadItem) -> Void
     ) {
         self.item = item
@@ -45,6 +47,7 @@ struct DownloadItemRow: View {
         self.selectable = selectable
         self.importIpaToLibrary = importIpaToLibrary
         self.exportToFiles = exportToFiles
+        self.cryptCheck = cryptCheck
         self.deleteItem = deleteItem
     }
 
@@ -179,6 +182,14 @@ struct DownloadItemRow: View {
             exportToFiles(item)
         } label: {
             Label(.localized("Export to Files App"), systemImage: "square.and.arrow.up.fill")
+        }
+
+        if item.isFinished {
+            Button {
+                cryptCheck(item)
+            } label: {
+                Label("Crypt Check", systemImage: "lock.open")
+            }
         }
         
         Button(role: .destructive) {
