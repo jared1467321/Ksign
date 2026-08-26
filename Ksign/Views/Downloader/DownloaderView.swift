@@ -20,6 +20,8 @@ struct DownloaderView: View {
     @State private var shareItems: [Any] = []
     @State private var showDocumentPicker = false
     @State private var fileToExport: URL?
+    @State private var cryptCheckReportURL: URL?
+    @State private var cryptCheckRunning = false
     @State private var _searchText = ""
 
     @State private var _isEditMode: EditMode = .inactive
@@ -76,6 +78,7 @@ struct DownloaderView: View {
                                 selectable: false,
                                 importIpaToLibrary: { item in importIpaToLibrary(item) },
                                 exportToFiles: { item in exportToFiles(item) },
+                                cryptCheck: { item in runCryptCheck(item) },
                                 deleteItem: { item in deleteItem(item) }
                             )
                         }
@@ -91,6 +94,7 @@ struct DownloaderView: View {
                             onToggleSelection: { _toggleSelection(for: item) },
                             importIpaToLibrary: { item in importIpaToLibrary(item) },
                             exportToFiles: { item in exportToFiles(item) },
+                            cryptCheck: { item in runCryptCheck(item) },
                             deleteItem: { item in deleteItem(item) }
                         )
                     }
@@ -98,7 +102,12 @@ struct DownloaderView: View {
             }
             .listStyle(.plain)
             .overlay {
-                if downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
+                if cryptCheckRunning {
+                    ProgressView("Running Crypt Check…")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                } else if downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No downloaded IPAs"), systemImage: "square.and.arrow.down.fill")
@@ -174,6 +183,9 @@ struct DownloaderView: View {
             }
             .fullScreenCover(item: $webViewURL) { url in
                 webViewSheet(url: url)
+            }
+            .fullScreenCover(item: $cryptCheckReportURL) { url in
+                CryptCheckReportView(reportURL: url)
             }
             .sheet(isPresented: $showDocumentPicker) {
                 documentPickerSheet
@@ -317,6 +329,30 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
     func exportToFiles(_ item: DownloadItem) {
         fileToExport = item.localPath
         showDocumentPicker = true
+    }
+
+    func runCryptCheck(_ item: DownloadItem) {
+        guard item.isFinished, !cryptCheckRunning else { return }
+        let ipaURL = item.localPath
+        cryptCheckRunning = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let reportURL = try CryptCheckAnalyzer.generateReport(for: ipaURL)
+                DispatchQueue.main.async {
+                    cryptCheckRunning = false
+                    cryptCheckReportURL = reportURL
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    cryptCheckRunning = false
+                    UIAlertController.showAlertWithOk(
+                        title: "Crypt Check",
+                        message: error.localizedDescription
+                    )
+                }
+            }
+        }
     }
     
     func deleteItem(_ item: DownloadItem) {
