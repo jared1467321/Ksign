@@ -79,6 +79,7 @@ enum CryptCheckAnalyzer {
 
         var entries: [ReportEntry] = []
         let fileManager = FileManager.default
+        let hasDecryptedBy = mainInfoPlistHasDecryptedBy(in: archive)
 
         for entry in archive {
             guard case .file = entry.type else { continue }
@@ -117,7 +118,11 @@ enum CryptCheckAnalyzer {
             throw CryptCheckError.noMachOBinaries
         }
 
-        let html = makeHTML(entries: entries, source: ipaURL.lastPathComponent)
+        let html = makeHTML(
+            entries: entries,
+            source: ipaURL.lastPathComponent,
+            hasDecryptedBy: hasDecryptedBy
+        )
         let reportDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("CryptCheckReports", isDirectory: true)
         try fileManager.createDirectory(at: reportDirectory, withIntermediateDirectories: true)
@@ -129,6 +134,41 @@ enum CryptCheckAnalyzer {
             .appendingPathComponent("cryptcheck_\(base)_\(stamp).html")
         try html.write(to: reportURL, atomically: true, encoding: .utf8)
         return reportURL
+    }
+
+    private static func mainInfoPlistHasDecryptedBy(in archive: Archive) -> Bool {
+        for entry in archive {
+            guard case .file = entry.type else { continue }
+
+            let components = entry.path.split(separator: "/", omittingEmptySubsequences: true)
+            guard
+                components.count == 3,
+                components[0] == "Payload",
+                components[1].hasSuffix(".app"),
+                components[2] == "Info.plist"
+            else { continue }
+
+            do {
+                var data = Data()
+                _ = try archive.extract(entry, consumer: { chunk in
+                    data.append(chunk)
+                })
+
+                if let plist = try PropertyListSerialization.propertyList(
+                    from: data,
+                    options: [],
+                    format: nil
+                ) as? [String: Any], plist["DecryptedBy"] != nil {
+                    return true
+                }
+            } catch {
+                // A missing or unreadable Info.plist should not prevent the
+                // Mach-O report from being generated.
+                continue
+            }
+        }
+
+        return false
     }
 
     // MARK: - Mach-O parsing
@@ -460,7 +500,7 @@ enum CryptCheckAnalyzer {
 
     // MARK: - HTML report
 
-    private static func makeHTML(entries: [ReportEntry], source: String) -> String {
+    private static func makeHTML(entries: [ReportEntry], source: String, hasDecryptedBy: Bool) -> String {
         let now = displayTimestamp()
         var decryptedCount = 0
         var encryptedCount = 0
@@ -528,8 +568,11 @@ enum CryptCheckAnalyzer {
             padding:22px 16px calc(60px + env(safe-area-inset-bottom));
             -webkit-text-size-adjust:100%;
           }
-          .header { border-bottom:1px solid var(--border); padding-bottom:18px; margin-bottom:22px; }
+          .header { position:relative; border-bottom:1px solid var(--border); padding:0 40px 18px 0; margin-bottom:22px; }
           .header h1 { margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:1.28rem; color:var(--cyan); }
+          .decrypted-by-marker { position:absolute; top:0; right:0; font:800 1.65rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+          .decrypted-by-present { color:var(--green); }
+          .decrypted-by-absent { color:var(--red); }
           .sub { color:var(--dim); font-size:.78rem; margin-top:5px; }
           .source { color:var(--text); font-size:.86rem; margin-top:8px; word-break:break-all; }
           .summary { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-bottom:26px; overflow:visible; }
@@ -579,6 +622,11 @@ enum CryptCheckAnalyzer {
         <body>
           <div class="header">
             <h1>&#x1F510; cryptcheck</h1>
+            <div
+              class="decrypted-by-marker \(hasDecryptedBy ? "decrypted-by-present" : "decrypted-by-absent")"
+              title="DecryptedBy \(hasDecryptedBy ? "present" : "absent")"
+              aria-label="DecryptedBy \(hasDecryptedBy ? "present" : "absent")"
+            >\(hasDecryptedBy ? "&#x2713;" : "&#x2715;")</div>
             <div class="sub">\(escapeHTML(now))</div>
             <div class="source">\(escapeHTML(source))</div>
           </div>
