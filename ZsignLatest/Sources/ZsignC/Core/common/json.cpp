@@ -2519,17 +2519,117 @@ bool jpreader::_decode_string(ptoken& token, string& strdec)
 	strdec.clear();
 	strdec.reserve(size_t(pend - pcursor));
 
+	// XML property-list strings are XML character data.  The old parser copied
+	// that text verbatim, so a value such as "Debit &amp; Credit" was returned as
+	// the literal filename "Debit &amp; Credit" instead of "Debit & Credit".
+	// CFBundleExecutable then pointed zsign at a path that did not exist.
+	// Decode the five predefined XML entities plus numeric character references
+	// in one pass.  Unknown/malformed entities are preserved literally rather
+	// than being double-decoded or silently discarded.
+	auto appendCodePoint = [&strdec](uint32_t codePoint) -> bool {
+		// XML 1.0 valid character range (the common plist subset).  Reject NUL,
+		// disallowed controls, UTF-16 surrogates, and values beyond Unicode.
+		if (!(codePoint == 0x09 || codePoint == 0x0A || codePoint == 0x0D ||
+			(codePoint >= 0x20 && codePoint <= 0xD7FF) ||
+			(codePoint >= 0xE000 && codePoint <= 0xFFFD) ||
+			(codePoint >= 0x10000 && codePoint <= 0x10FFFF))) {
+			return false;
+		}
+
+		if (codePoint <= 0x7F) {
+			strdec.push_back((char)codePoint);
+		} else if (codePoint <= 0x7FF) {
+			strdec.push_back((char)(0xC0 | (codePoint >> 6)));
+			strdec.push_back((char)(0x80 | (codePoint & 0x3F)));
+		} else if (codePoint <= 0xFFFF) {
+			strdec.push_back((char)(0xE0 | (codePoint >> 12)));
+			strdec.push_back((char)(0x80 | ((codePoint >> 6) & 0x3F)));
+			strdec.push_back((char)(0x80 | (codePoint & 0x3F)));
+		} else {
+			strdec.push_back((char)(0xF0 | (codePoint >> 18)));
+			strdec.push_back((char)(0x80 | ((codePoint >> 12) & 0x3F)));
+			strdec.push_back((char)(0x80 | ((codePoint >> 6) & 0x3F)));
+			strdec.push_back((char)(0x80 | (codePoint & 0x3F)));
+		}
+		return true;
+	};
+
 	while (pcursor != pend) {
-		const char* chunk_start = pcursor;
-		while (pcursor != pend && *pcursor != '\n' && *pcursor != '\r' && *pcursor != '\t') {
+		// Preserve the parser's historical behavior of ignoring literal XML
+		// formatting whitespace inside scalar tokens.
+		if (*pcursor == '\n' || *pcursor == '\r' || *pcursor == '\t') {
 			++pcursor;
+			continue;
 		}
-		if (pcursor != chunk_start) {
-			strdec.append(chunk_start, (size_t)(pcursor - chunk_start));
+
+		if (*pcursor != '&') {
+			strdec.push_back(*pcursor++);
+			continue;
 		}
-		if (pcursor != pend) {
-			++pcursor;
+
+		const char* entityBegin = pcursor;
+		const char* entityEnd = pcursor + 1;
+		while (entityEnd != pend && *entityEnd != ';' && *entityEnd != '&') {
+			++entityEnd;
 		}
+		if (entityEnd == pend || *entityEnd != ';') {
+			// Not a complete entity reference; keep the '&' literally.
+			strdec.push_back(*pcursor++);
+			continue;
+		}
+
+		const char* nameBegin = entityBegin + 1;
+		const size_t nameLength = (size_t)(entityEnd - nameBegin);
+		bool decoded = true;
+
+		if (nameLength == 3 && 0 == memcmp(nameBegin, "amp", 3)) {
+			strdec.push_back('&');
+		} else if (nameLength == 2 && 0 == memcmp(nameBegin, "lt", 2)) {
+			strdec.push_back('<');
+		} else if (nameLength == 2 && 0 == memcmp(nameBegin, "gt", 2)) {
+			strdec.push_back('>');
+		} else if (nameLength == 4 && 0 == memcmp(nameBegin, "quot", 4)) {
+			strdec.push_back('"');
+		} else if (nameLength == 4 && 0 == memcmp(nameBegin, "apos", 4)) {
+			strdec.push_back('\'');
+		} else if (nameLength >= 2 && nameBegin[0] == '#') {
+			const char* digit = nameBegin + 1;
+			const char* digitEnd = entityEnd;
+			uint32_t base = 10;
+			if (digit != digitEnd && (*digit == 'x' || *digit == 'X')) {
+				base = 16;
+				++digit;
+			}
+
+			uint32_t value = 0;
+			bool valid = (digit != digitEnd);
+			for (; valid && digit != digitEnd; ++digit) {
+				uint32_t n = 0;
+				if (*digit >= '0' && *digit <= '9') {
+					n = (uint32_t)(*digit - '0');
+				} else if (base == 16 && *digit >= 'a' && *digit <= 'f') {
+					n = (uint32_t)(*digit - 'a' + 10);
+				} else if (base == 16 && *digit >= 'A' && *digit <= 'F') {
+					n = (uint32_t)(*digit - 'A' + 10);
+				} else {
+					valid = false;
+					break;
+				}
+				if (n >= base || value > (0x10FFFFu - n) / base) {
+					valid = false;
+					break;
+				}
+				value = value * base + n;
+			}
+			decoded = valid && appendCodePoint(value);
+		} else {
+			decoded = false;
+		}
+
+		if (!decoded) {
+			strdec.append(entityBegin, (size_t)(entityEnd - entityBegin + 1));
+		}
+		pcursor = entityEnd + 1;
 	}
 	return true;
 }
