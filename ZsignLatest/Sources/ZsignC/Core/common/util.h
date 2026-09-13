@@ -18,6 +18,7 @@ public:
 	static uint16_t		Swap(uint16_t value);
 	static uint32_t		Swap(uint32_t value);
 	static uint64_t		Swap(uint64_t value);
+	static size_t		GetWorkerCount(size_t taskCount, size_t maxWorkers = 6);
 };
 
 #define LE(x) ZUtil::Swap(x)

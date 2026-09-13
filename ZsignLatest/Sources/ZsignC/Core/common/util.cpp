@@ -123,6 +123,40 @@ string& ZUtil::StringTrim(string& str)
 	return str;
 }
 
+
+size_t ZUtil::GetWorkerCount(size_t taskCount, size_t maxWorkers)
+{
+	if (taskCount <= 1) {
+		return taskCount;
+	}
+
+	if (maxWorkers == 0) {
+		maxWorkers = 1;
+	}
+
+	// Keep the default conservative for iPhone thermals/memory pressure.
+	// ZSIGN_WORKERS can tune the engine without changing the public API, but
+	// is intentionally clamped so a bad environment value cannot create an
+	// unbounded number of worker threads.
+	size_t workers = 0;
+	const char* szWorkers = getenv("ZSIGN_WORKERS");
+	if (NULL != szWorkers && '\0' != szWorkers[0]) {
+		char* end = NULL;
+		unsigned long requested = strtoul(szWorkers, &end, 10);
+		if (end != szWorkers && requested > 0) {
+			workers = (size_t)requested;
+		}
+	}
+
+	if (0 == workers) {
+		unsigned int hardware = std::thread::hardware_concurrency();
+		workers = (hardware > 0) ? std::min<size_t>((size_t)hardware, 4) : 4;
+	}
+
+	workers = std::max<size_t>(1, std::min(workers, maxWorkers));
+	return std::min(workers, taskCount);
+}
+
 const char* ZUtil::GetBaseName(const char* path)
 {
 #ifdef _WIN32
