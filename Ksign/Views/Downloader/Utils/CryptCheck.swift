@@ -35,15 +35,20 @@ enum CryptCheckAnalyzer {
     private static let fatMagic64: UInt32 = 0xCAFEBABF
     private static let fatCigam64: UInt32 = 0xBFBAFECA
 
+    private static let lcSegment: UInt32 = 0x01
+    private static let lcIDDylib: UInt32 = 0x0D
+    private static let lcSegment64: UInt32 = 0x19
     private static let lcEncryptionInfo: UInt32 = 0x21
     private static let lcEncryptionInfo64: UInt32 = 0x2C
-    private static let lcIDDylib: UInt32 = 0x0D
+    private static let lcMain: UInt32 = 0x80000028
 
     private static let allMagics: Set<UInt32> = [
         mhMagic32, mhCigam32, mhMagic64, mhCigam64,
         fatMagic, fatCigam, fatMagic64, fatCigam64,
     ]
 
+    // Preserve the existing obvious-resource exclusions. Everything else is
+    // magic-probed, so speedups do not depend on trusting a filename extension.
     private static let skippedExtensions: Set<String> = [
         "plist", "png", "jpg", "jpeg", "gif", "car", "nib", "storyboardc",
         "strings", "js", "css", "html", "json", "xml", "mom", "momd", "map",
@@ -52,24 +57,62 @@ enum CryptCheckAnalyzer {
         "signature", "xcprivacy",
     ]
 
+    // Keep binaries in RAM when that is comfortably cheap for the device. Very
+    // large binaries spill to a temporary memory map, avoiding jetsam without
+    // penalizing high-memory devices that are faster scanning resident bytes.
+    private static var memoryResidentThreshold: UInt64 {
+        let minimum: UInt64 = 128 * 1024 * 1024
+        let maximum: UInt64 = 1024 * 1024 * 1024
+        let adaptive = ProcessInfo.processInfo.physicalMemory / 8
+        return min(maximum, max(minimum, adaptive))
+    }
+    private static let archiveBufferSize = 1024 * 1024
+    private static let previewWindowSize: UInt64 = 4096
+
+    private enum PrefixProbeComplete: Error {
+        case done
+    }
+
     private struct Slice {
         let cpu: String
+        let isARM64: Bool
         let is64Bit: Bool
-        let cryptOffset: UInt32
-        let cryptSize: UInt32
-        let cryptID: UInt32
+        let cpuSubtype: UInt32
+        let sliceOffset: UInt64
+        let sliceSize: UInt64
+
+        let cryptOffset: UInt64?
+        let cryptSize: UInt64?
+        let cryptID: UInt32?
+        let bytesAnalyzed: UInt64
         let entropy: Double
         let nullPercent: Double
         let printablePercent: Double
-        let status: String
-        let sample: Data
+        let stringCount: UInt64
+        let status: String?
+        let preview: Data
+        let previewBaseOffset: UInt64
         let dylibID: String?
+        let rangeIssue: String?
+
+        let textSize: UInt64
+        let entryOffset: UInt64?
     }
 
     private struct ReportEntry {
         let name: String
-        let size: Int
+        let size: UInt64
         let slices: [Slice]
+    }
+
+    private struct RegionAnalysis {
+        let bytesAnalyzed: UInt64
+        let entropy: Double
+        let nullPercent: Double
+        let printablePercent: Double
+        let stringCount: UInt64
+        let preview: Data
+        let previewBaseOffset: UInt64
     }
 
     static func generateReport(for ipaURL: URL) throws -> URL {
@@ -82,19 +125,20 @@ enum CryptCheckAnalyzer {
         let hasDecryptedBy = mainInfoPlistHasDecryptedBy(in: archive)
 
         for entry in archive {
-            guard case .file = entry.type else { continue }
+            guard case .file = entry.type, entry.uncompressedSize >= 4 else { continue }
 
             let path = entry.path
             let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
             if skippedExtensions.contains(ext) { continue }
 
             do {
-                var data = Data()
-                _ = try archive.extract(entry, consumer: { chunk in
-                    data.append(chunk)
-                })
+                // The old implementation inflated every candidate file completely
+                // before learning whether it was Mach-O. A four-byte early-abort
+                // probe makes file-heavy Python/shell apps dramatically cheaper.
+                let prefix = try readEntryPrefix(entry, from: archive, byteCount: 4)
+                guard isMachO(prefix) else { continue }
 
-                guard isMachO(data) else { continue }
+                let slices = try analyzeArchiveEntry(entry, from: archive)
 
                 var displayName = path
                 if let payloadRange = displayName.range(of: "Payload/") {
@@ -103,13 +147,13 @@ enum CryptCheckAnalyzer {
                 entries.append(
                     ReportEntry(
                         name: displayName,
-                        size: data.count,
-                        slices: analyzeMachO(data)
+                        size: entry.uncompressedSize,
+                        slices: slices
                     )
                 )
             } catch {
-                // Match the Python script's behavior: a single unreadable archive
-                // entry should not prevent the rest of the IPA from being checked.
+                // A single unreadable entry should not prevent the rest of the IPA
+                // from being checked.
                 continue
             }
         }
@@ -136,6 +180,70 @@ enum CryptCheckAnalyzer {
         return reportURL
     }
 
+    private static func readEntryPrefix(
+        _ entry: Entry,
+        from archive: Archive,
+        byteCount: Int
+    ) throws -> Data {
+        guard byteCount > 0 else { return Data() }
+
+        var prefix = Data()
+        prefix.reserveCapacity(byteCount)
+
+        do {
+            _ = try archive.extract(
+                entry,
+                bufferSize: byteCount,
+                skipCRC32: true,
+                consumer: { chunk in
+                    let remaining = byteCount - prefix.count
+                    if remaining > 0 {
+                        prefix.append(contentsOf: chunk.prefix(remaining))
+                    }
+                    if prefix.count >= byteCount {
+                        throw PrefixProbeComplete.done
+                    }
+                }
+            )
+        } catch PrefixProbeComplete.done {
+            // Expected: abort decompression as soon as the magic bytes are read.
+        }
+
+        return prefix
+    }
+
+    private static func analyzeArchiveEntry(_ entry: Entry, from archive: Archive) throws -> [Slice] {
+        let size = entry.uncompressedSize
+
+        if size <= memoryResidentThreshold, size <= UInt64(Int.max) {
+            var data = Data()
+            data.reserveCapacity(Int(size))
+            _ = try archive.extract(
+                entry,
+                bufferSize: archiveBufferSize,
+                skipCRC32: true,
+                consumer: { data.append($0) }
+            )
+            return analyzeMachO(data)
+        }
+
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("CryptCheckScan", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let temporaryURL = directory.appendingPathComponent(UUID().uuidString, isDirectory: false)
+        defer { try? fileManager.removeItem(at: temporaryURL) }
+
+        _ = try archive.extract(
+            entry,
+            to: temporaryURL,
+            bufferSize: archiveBufferSize,
+            skipCRC32: true
+        )
+        let mapped = try Data(contentsOf: temporaryURL, options: [.mappedIfSafe])
+        return analyzeMachO(mapped)
+    }
+
     private static func mainInfoPlistHasDecryptedBy(in archive: Archive) -> Bool {
         for entry in archive {
             guard case .file = entry.type else { continue }
@@ -150,9 +258,15 @@ enum CryptCheckAnalyzer {
 
             do {
                 var data = Data()
-                _ = try archive.extract(entry, consumer: { chunk in
-                    data.append(chunk)
-                })
+                if entry.uncompressedSize <= UInt64(Int.max) {
+                    data.reserveCapacity(Int(entry.uncompressedSize))
+                }
+                _ = try archive.extract(
+                    entry,
+                    bufferSize: 64 * 1024,
+                    skipCRC32: true,
+                    consumer: { data.append($0) }
+                )
 
                 if let plist = try PropertyListSerialization.propertyList(
                     from: data,
@@ -162,8 +276,6 @@ enum CryptCheckAnalyzer {
                     return true
                 }
             } catch {
-                // A missing or unreadable Info.plist should not prevent the
-                // Mach-O report from being generated.
                 continue
             }
         }
@@ -178,10 +290,13 @@ enum CryptCheckAnalyzer {
         if [fatMagic, fatCigam, fatMagic64, fatCigam64].contains(magic) {
             return parseFat(data)
         }
-        if let slice = parseEncryptionInfo(data, base: 0) {
-            return [slice]
-        }
-        return []
+
+        guard let slice = parseMachOSlice(
+            data,
+            sliceOffset: 0,
+            sliceSize: UInt64(data.count)
+        ) else { return [] }
+        return [slice]
     }
 
     private static func parseFat(_ data: Data) -> [Slice] {
@@ -203,28 +318,52 @@ enum CryptCheckAnalyzer {
         }
 
         guard let count = u32(data, at: 4, bigEndian: bigEndian) else { return [] }
+        let archSize = isFat64 ? 32 : 20
         var headerOffset = 8
         var slices: [Slice] = []
+        let dataSize = UInt64(data.count)
 
         for _ in 0..<Int(count) {
+            guard headerOffset >= 0, headerOffset <= data.count - archSize else { break }
+
             let sliceOffset: UInt64?
+            let sliceSize: UInt64?
             if isFat64 {
                 sliceOffset = u64(data, at: headerOffset + 8, bigEndian: bigEndian)
-                headerOffset += 32
+                sliceSize = u64(data, at: headerOffset + 16, bigEndian: bigEndian)
             } else {
                 sliceOffset = u32(data, at: headerOffset + 8, bigEndian: bigEndian).map(UInt64.init)
-                headerOffset += 20
+                sliceSize = u32(data, at: headerOffset + 12, bigEndian: bigEndian).map(UInt64.init)
             }
+            headerOffset += archSize
 
-            guard let rawOffset = sliceOffset, rawOffset <= UInt64(Int.max) else { continue }
-            if let slice = parseEncryptionInfo(data, base: Int(rawOffset)) {
+            guard let rawOffset = sliceOffset, let rawSize = sliceSize else { continue }
+            guard rawOffset <= dataSize, rawSize <= dataSize - rawOffset else { continue }
+
+            if let slice = parseMachOSlice(
+                data,
+                sliceOffset: rawOffset,
+                sliceSize: rawSize
+            ) {
                 slices.append(slice)
             }
         }
         return slices
     }
 
-    private static func parseEncryptionInfo(_ data: Data, base: Int) -> Slice? {
+    private static func parseMachOSlice(
+        _ data: Data,
+        sliceOffset: UInt64,
+        sliceSize: UInt64
+    ) -> Slice? {
+        guard
+            sliceOffset <= UInt64(Int.max),
+            sliceSize <= UInt64(Int.max),
+            sliceOffset <= UInt64(data.count),
+            sliceSize <= UInt64(data.count) - sliceOffset
+        else { return nil }
+
+        let base = Int(sliceOffset)
         guard let magic = u32(data, at: base, bigEndian: false) else { return nil }
 
         let is64Bit: Bool
@@ -242,109 +381,354 @@ enum CryptCheckAnalyzer {
             return nil
         }
 
+        let headerSize = is64Bit ? 32 : 28
+        guard sliceSize >= UInt64(headerSize) else { return nil }
         guard
             let cpuValue = u32(data, at: base + 4, bigEndian: bigEndian),
-            let commandCount = u32(data, at: base + 16, bigEndian: bigEndian)
+            let cpuSubtype = u32(data, at: base + 8, bigEndian: bigEndian),
+            let commandCount = u32(data, at: base + 16, bigEndian: bigEndian),
+            let commandsSize = u32(data, at: base + 20, bigEndian: bigEndian)
         else { return nil }
 
-        var commandOffset = base + (is64Bit ? 32 : 28)
-        var encryptionSlice: Slice?
+        let commandsStart64 = sliceOffset + UInt64(headerSize)
+        let commandsSize64 = UInt64(commandsSize)
+        guard
+            commandsStart64 <= sliceOffset + sliceSize,
+            commandsSize64 <= sliceOffset + sliceSize - commandsStart64,
+            commandsStart64 <= UInt64(Int.max),
+            commandsStart64 + commandsSize64 <= UInt64(Int.max)
+        else { return nil }
+
+        var commandOffset = Int(commandsStart64)
+        let commandsEnd = Int(commandsStart64 + commandsSize64)
+        var encryption: (offset: UInt64, size: UInt64, id: UInt32)?
         var dylibID: String?
+        var textSize: UInt64 = 0
+        var entryOffset: UInt64?
 
         for _ in 0..<Int(commandCount) {
+            guard commandOffset <= commandsEnd - 8 else { break }
             guard
                 let command = u32(data, at: commandOffset, bigEndian: bigEndian),
                 let commandSizeRaw = u32(data, at: commandOffset + 4, bigEndian: bigEndian)
             else { break }
 
             let commandSize = Int(commandSizeRaw)
-            guard commandSize >= 8, commandOffset <= data.count - 8 else { break }
+            guard commandSize >= 8, commandSize <= commandsEnd - commandOffset else { break }
+            let commandEnd = commandOffset + commandSize
 
             if command == lcEncryptionInfo || command == lcEncryptionInfo64 {
-                guard
-                    let cryptOffset = u32(data, at: commandOffset + 8, bigEndian: bigEndian),
-                    let cryptSize = u32(data, at: commandOffset + 12, bigEndian: bigEndian),
-                    let cryptID = u32(data, at: commandOffset + 16, bigEndian: bigEndian)
-                else {
-                    commandOffset += commandSize
-                    continue
+                let minimum = command == lcEncryptionInfo64 ? 24 : 20
+                if commandSize >= minimum,
+                   let cryptOffset = u32(data, at: commandOffset + 8, bigEndian: bigEndian),
+                   let cryptSize = u32(data, at: commandOffset + 12, bigEndian: bigEndian),
+                   let cryptID = u32(data, at: commandOffset + 16, bigEndian: bigEndian) {
+                    encryption = (UInt64(cryptOffset), UInt64(cryptSize), cryptID)
                 }
-
-                let regionStart64 = UInt64(base) + UInt64(cryptOffset)
-                let sample: Data
-                if regionStart64 <= UInt64(data.count), regionStart64 <= UInt64(Int.max) {
-                    let regionStart = Int(regionStart64)
-                    let requestedEnd = regionStart64 + UInt64(cryptSize)
-                    let regionEnd = Int(min(UInt64(data.count), min(requestedEnd, UInt64(Int.max))))
-                    if regionStart < regionEnd {
-                        sample = data.subdata(in: regionStart..<min(regionEnd, regionStart + 4096))
-                    } else {
-                        sample = Data()
-                    }
-                } else {
-                    sample = Data()
-                }
-
-                let entropyValue = entropy(sample)
-                let nullValue = nullPercent(sample)
-                let printableValue = printablePercent(sample)
-                let status: String
-
-                if cryptID != 0 {
-                    status = "ENCRYPTED"
-                } else if cryptSize == 0 || sample.isEmpty {
-                    status = "DECRYPTED"
-                } else if entropyValue > 7.9 && nullValue < 1.0 {
-                    status = "ENCRYPTED"
-                } else if entropyValue > 7.5 && nullValue < 2.0 {
-                    status = "LIKELY ENC"
-                } else if entropyValue < 7.0 || nullValue > 5.0 {
-                    status = "DECRYPTED"
-                } else {
-                    status = "LIKELY ENC"
-                }
-
-                encryptionSlice = Slice(
-                    cpu: cpuName(cpuValue),
-                    is64Bit: is64Bit,
-                    cryptOffset: cryptOffset,
-                    cryptSize: cryptSize,
-                    cryptID: cryptID,
-                    entropy: entropyValue,
-                    nullPercent: nullValue,
-                    printablePercent: printableValue,
-                    status: status,
-                    sample: sample,
-                    dylibID: nil
-                )
-            } else if command == lcIDDylib,
+            } else if command == lcIDDylib, commandSize >= 24,
                       let nameOffsetRaw = u32(data, at: commandOffset + 8, bigEndian: bigEndian) {
-                let nameStart = commandOffset + Int(nameOffsetRaw)
-                if nameStart >= 0, nameStart < data.count {
-                    let bytes = [UInt8](data[nameStart..<data.count])
-                    let end = bytes.firstIndex(of: 0) ?? bytes.count
-                    dylibID = String(decoding: bytes[..<end], as: UTF8.self)
+                let nameOffset = Int(nameOffsetRaw)
+                if nameOffset >= 0, nameOffset < commandSize {
+                    let nameStart = commandOffset + nameOffset
+                    if nameStart < commandEnd {
+                        dylibID = cString(data, from: nameStart, limit: commandEnd)
+                    }
                 }
+            } else if command == lcMain, commandSize >= 24,
+                      let rawEntryOffset = u64(data, at: commandOffset + 8, bigEndian: bigEndian) {
+                entryOffset = rawEntryOffset
+            } else if command == lcSegment64, is64Bit, commandSize >= 72 {
+                textSize = saturatingAdd(
+                    textSize,
+                    parseTextSize64(
+                        data,
+                        commandOffset: commandOffset,
+                        commandSize: commandSize,
+                        bigEndian: bigEndian
+                    )
+                )
+            } else if command == lcSegment, !is64Bit, commandSize >= 56 {
+                textSize = saturatingAdd(
+                    textSize,
+                    parseTextSize32(
+                        data,
+                        commandOffset: commandOffset,
+                        commandSize: commandSize,
+                        bigEndian: bigEndian
+                    )
+                )
             }
 
-            if commandSize > data.count - commandOffset { break }
-            commandOffset += commandSize
+            commandOffset = commandEnd
         }
 
-        guard let slice = encryptionSlice else { return nil }
+        let cpu = cpuName(cpuValue, subtype: cpuSubtype)
+        let isARM64 = cpuValue == 16_777_228
+
+        guard let encryption else {
+            return Slice(
+                cpu: cpu,
+                isARM64: isARM64,
+                is64Bit: is64Bit,
+                cpuSubtype: cpuSubtype,
+                sliceOffset: sliceOffset,
+                sliceSize: sliceSize,
+                cryptOffset: nil,
+                cryptSize: nil,
+                cryptID: nil,
+                bytesAnalyzed: 0,
+                entropy: 0,
+                nullPercent: 0,
+                printablePercent: 0,
+                stringCount: 0,
+                status: nil,
+                preview: Data(),
+                previewBaseOffset: 0,
+                dylibID: dylibID,
+                rangeIssue: nil,
+                textSize: textSize,
+                entryOffset: entryOffset
+            )
+        }
+
+        let cryptOffset = encryption.offset
+        let cryptSize = encryption.size
+        var rangeIssue: String?
+        var available: UInt64 = 0
+
+        if cryptOffset > sliceSize {
+            rangeIssue = "cryptoff exceeds the Mach-O slice boundary"
+        } else {
+            available = sliceSize - cryptOffset
+            if cryptSize > available {
+                rangeIssue = "cryptoff + cryptsize exceeds the Mach-O slice boundary"
+            }
+        }
+
+        let analysisLength = min(cryptSize, available)
+        let absoluteStart = sliceOffset + min(cryptOffset, sliceSize)
+        let analysis = analyzeRegion(data, start: absoluteStart, length: analysisLength)
+
+        let status: String
+        if rangeIssue != nil {
+            status = "INCONCLUSIVE"
+        } else if encryption.id != 0 {
+            status = "ENCRYPTED"
+        } else if cryptSize == 0 {
+            status = "DECRYPTED"
+        } else if analysis.entropy > 7.9 && analysis.nullPercent < 1.0 {
+            // cryptid=0 is authoritative metadata; high-entropy content is a
+            // diagnostic warning rather than proof that FairPlay is still active.
+            status = "LIKELY ENC"
+        } else if analysis.entropy > 7.5 && analysis.nullPercent < 2.0 {
+            status = "LIKELY ENC"
+        } else {
+            status = "DECRYPTED"
+        }
+
         return Slice(
-            cpu: slice.cpu,
-            is64Bit: slice.is64Bit,
-            cryptOffset: slice.cryptOffset,
-            cryptSize: slice.cryptSize,
-            cryptID: slice.cryptID,
-            entropy: slice.entropy,
-            nullPercent: slice.nullPercent,
-            printablePercent: slice.printablePercent,
-            status: slice.status,
-            sample: slice.sample,
-            dylibID: dylibID
+            cpu: cpu,
+            isARM64: isARM64,
+            is64Bit: is64Bit,
+            cpuSubtype: cpuSubtype,
+            sliceOffset: sliceOffset,
+            sliceSize: sliceSize,
+            cryptOffset: cryptOffset,
+            cryptSize: cryptSize,
+            cryptID: encryption.id,
+            bytesAnalyzed: analysis.bytesAnalyzed,
+            entropy: analysis.entropy,
+            nullPercent: analysis.nullPercent,
+            printablePercent: analysis.printablePercent,
+            stringCount: analysis.stringCount,
+            status: status,
+            preview: analysis.preview,
+            previewBaseOffset: analysis.previewBaseOffset,
+            dylibID: dylibID,
+            rangeIssue: rangeIssue,
+            textSize: textSize,
+            entryOffset: entryOffset
         )
+    }
+
+    private static func parseTextSize64(
+        _ data: Data,
+        commandOffset: Int,
+        commandSize: Int,
+        bigEndian: Bool
+    ) -> UInt64 {
+        guard let sectionCount = u32(data, at: commandOffset + 64, bigEndian: bigEndian) else { return 0 }
+        let sectionSize = 80
+        let sectionsStart = commandOffset + 72
+        let commandEnd = commandOffset + commandSize
+        var total: UInt64 = 0
+
+        let availableSections = max(0, (commandEnd - sectionsStart) / sectionSize)
+        let count = min(Int(sectionCount), availableSections)
+        for index in 0..<count {
+            let sectionOffset = sectionsStart + index * sectionSize
+            let sectionName = fixedString(data, at: sectionOffset, length: 16)
+            guard sectionName == "__text" else { continue }
+            if let size = u64(data, at: sectionOffset + 40, bigEndian: bigEndian) {
+                total = saturatingAdd(total, size)
+            }
+        }
+        return total
+    }
+
+    private static func parseTextSize32(
+        _ data: Data,
+        commandOffset: Int,
+        commandSize: Int,
+        bigEndian: Bool
+    ) -> UInt64 {
+        guard let sectionCount = u32(data, at: commandOffset + 48, bigEndian: bigEndian) else { return 0 }
+        let sectionSize = 68
+        let sectionsStart = commandOffset + 56
+        let commandEnd = commandOffset + commandSize
+        var total: UInt64 = 0
+
+        let availableSections = max(0, (commandEnd - sectionsStart) / sectionSize)
+        let count = min(Int(sectionCount), availableSections)
+        for index in 0..<count {
+            let sectionOffset = sectionsStart + index * sectionSize
+            let sectionName = fixedString(data, at: sectionOffset, length: 16)
+            guard sectionName == "__text" else { continue }
+            if let size = u32(data, at: sectionOffset + 36, bigEndian: bigEndian) {
+                total = saturatingAdd(total, UInt64(size))
+            }
+        }
+        return total
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        UInt64.max - lhs < rhs ? UInt64.max : lhs + rhs
+    }
+
+    private static func analyzeRegion(_ data: Data, start: UInt64, length: UInt64) -> RegionAnalysis {
+        guard
+            length > 0,
+            start <= UInt64(Int.max),
+            length <= UInt64(Int.max),
+            start <= UInt64(data.count),
+            length <= UInt64(data.count) - start
+        else {
+            return RegionAnalysis(
+                bytesAnalyzed: 0,
+                entropy: 0,
+                nullPercent: 0,
+                printablePercent: 0,
+                stringCount: 0,
+                preview: Data(),
+                previewBaseOffset: 0
+            )
+        }
+
+        let startIndex = Int(start)
+        let byteCount = Int(length)
+
+        // Fast path for null-padded ranges. It is exact, and for ordinary code
+        // it exits almost immediately on the first non-zero byte.
+        let firstNonNull: UInt64? = data.withUnsafeBytes { rawBuffer in
+            guard let rawBase = rawBuffer.baseAddress else { return nil }
+            let bytes = rawBase.assumingMemoryBound(to: UInt8.self).advanced(by: startIndex)
+            var index = 0
+            while index < byteCount {
+                if bytes[index] != 0 { return UInt64(index) }
+                index += 1
+            }
+            return nil
+        }
+
+        if firstNonNull == nil {
+            let previewLength = min(previewWindowSize, length)
+            let preview: Data
+            if previewLength > 0 {
+                preview = data.subdata(in: startIndex..<(startIndex + Int(previewLength)))
+            } else {
+                preview = Data()
+            }
+            return RegionAnalysis(
+                bytesAnalyzed: length,
+                entropy: 0,
+                nullPercent: 100.0,
+                printablePercent: 0,
+                stringCount: 0,
+                preview: preview,
+                previewBaseOffset: 0
+            )
+        }
+
+        var frequencies = [UInt64](repeating: 0, count: 256)
+
+        // One exact linear pass over the declared crypt range. All aggregate
+        // metrics come from the histogram, avoiding extra per-byte classification
+        // branches while still covering 100% of cryptsize.
+        data.withUnsafeBytes { rawBuffer in
+            guard let rawBase = rawBuffer.baseAddress else { return }
+            let bytes = rawBase.assumingMemoryBound(to: UInt8.self).advanced(by: startIndex)
+
+            frequencies.withUnsafeMutableBufferPointer { freq in
+                var index = 0
+                while index < byteCount {
+                    freq[Int(bytes[index])] &+= 1
+                    index += 1
+                }
+            }
+        }
+
+        let total = Double(length)
+        let nulls = frequencies[0]
+        var printable: UInt64 = 0
+        for value in 0x20...0x7E {
+            printable &+= frequencies[value]
+        }
+
+        var entropyValue = 0.0
+        for frequency in frequencies where frequency > 0 {
+            let p = Double(frequency) / total
+            entropyValue -= p * log2(p)
+        }
+        if entropyValue == 0 { entropyValue = 0 } // normalize floating-point -0.0
+
+        let previewBase = (firstNonNull! / 12) * 12
+        let previewLength = min(previewWindowSize, length - min(previewBase, length))
+        let previewStart = start + previewBase
+        let preview: Data
+        if previewLength > 0,
+           previewStart <= UInt64(Int.max),
+           previewLength <= UInt64(Int.max) {
+            let begin = Int(previewStart)
+            let end = begin + Int(previewLength)
+            preview = data.subdata(in: begin..<end)
+        } else {
+            preview = Data()
+        }
+
+        return RegionAnalysis(
+            bytesAnalyzed: length,
+            entropy: entropyValue,
+            nullPercent: Double(nulls) / total * 100.0,
+            printablePercent: Double(printable) / total * 100.0,
+            stringCount: UInt64(countStrings(preview)),
+            preview: preview,
+            previewBaseOffset: previewBase
+        )
+    }
+
+    private static func countStrings(_ data: Data, minimumLength: Int = 4) -> Int {
+        var count = 0
+        var run = 0
+        for byte in data {
+            if byte >= 0x20 && byte <= 0x7E {
+                run += 1
+            } else {
+                if run >= minimumLength { count += 1 }
+                run = 0
+            }
+        }
+        if run >= minimumLength { count += 1 }
+        return count
     }
 
     private static func isMachO(_ data: Data) -> Bool {
@@ -355,85 +739,79 @@ enum CryptCheckAnalyzer {
             || (little.map { allMagics.contains($0) } ?? false)
     }
 
-    private static func cpuName(_ value: UInt32) -> String {
+    private static func cpuName(_ value: UInt32, subtype: UInt32) -> String {
         switch value {
-        case 7: return "x86"
-        case 12: return "ARM"
-        case 16_777_223: return "x86_64"
-        case 16_777_228: return "ARM64"
-        default: return "?\(value)"
+        case 7:
+            return "x86"
+        case 12:
+            return "ARM"
+        case 16_777_223:
+            return "x86_64"
+        case 16_777_228:
+            switch subtype & 0x00FF_FFFF {
+            case 1: return "ARM64v8"
+            case 2: return "ARM64e"
+            default: return "ARM64"
+            }
+        default:
+            return "?\(value)"
         }
     }
 
     private static func u32(_ data: Data, at offset: Int, bigEndian: Bool) -> UInt32? {
         guard offset >= 0, offset <= data.count - 4 else { return nil }
-        let bytes = [UInt8](data[offset..<(offset + 4)])
+        let b0 = UInt32(data[offset])
+        let b1 = UInt32(data[offset + 1])
+        let b2 = UInt32(data[offset + 2])
+        let b3 = UInt32(data[offset + 3])
         if bigEndian {
-            return (UInt32(bytes[0]) << 24)
-                | (UInt32(bytes[1]) << 16)
-                | (UInt32(bytes[2]) << 8)
-                | UInt32(bytes[3])
+            return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
         }
-        return UInt32(bytes[0])
-            | (UInt32(bytes[1]) << 8)
-            | (UInt32(bytes[2]) << 16)
-            | (UInt32(bytes[3]) << 24)
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     private static func u64(_ data: Data, at offset: Int, bigEndian: Bool) -> UInt64? {
         guard offset >= 0, offset <= data.count - 8 else { return nil }
-        let bytes = [UInt8](data[offset..<(offset + 8)])
         var value: UInt64 = 0
         if bigEndian {
-            for byte in bytes { value = (value << 8) | UInt64(byte) }
+            for index in 0..<8 {
+                value = (value << 8) | UInt64(data[offset + index])
+            }
         } else {
-            for byte in bytes.reversed() { value = (value << 8) | UInt64(byte) }
+            for index in stride(from: 7, through: 0, by: -1) {
+                value = (value << 8) | UInt64(data[offset + index])
+            }
         }
         return value
     }
 
-    // MARK: - Sample analysis
-
-    private static func entropy(_ data: Data) -> Double {
-        guard !data.isEmpty else { return 0 }
-        var frequencies = Array(repeating: 0, count: 256)
-        for byte in data { frequencies[Int(byte)] += 1 }
-        let count = Double(data.count)
-        return -frequencies.reduce(0.0) { result, frequency in
-            guard frequency > 0 else { return result }
-            let p = Double(frequency) / count
-            return result + p * log2(p)
+    private static func fixedString(_ data: Data, at offset: Int, length: Int) -> String {
+        guard offset >= 0, length >= 0, offset <= data.count - length else { return "" }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(length)
+        for index in 0..<length {
+            let byte = data[offset + index]
+            if byte == 0 { break }
+            bytes.append(byte)
         }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
-    private static func nullPercent(_ data: Data) -> Double {
-        guard !data.isEmpty else { return 0 }
-        let nulls = data.reduce(0) { $0 + ($1 == 0 ? 1 : 0) }
-        return Double(nulls) / Double(data.count) * 100.0
-    }
-
-    private static func printablePercent(_ data: Data) -> Double {
-        guard !data.isEmpty else { return 0 }
-        let printable = data.reduce(0) { count, byte in
-            count + ((0x20...0x7E).contains(byte) ? 1 : 0)
+    private static func cString(_ data: Data, from offset: Int, limit: Int) -> String? {
+        guard offset >= 0, limit >= offset, limit <= data.count else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(min(128, limit - offset))
+        var index = offset
+        while index < limit {
+            let byte = data[index]
+            if byte == 0 { break }
+            bytes.append(byte)
+            index += 1
         }
-        return Double(printable) / Double(data.count) * 100.0
+        return String(decoding: bytes, as: UTF8.self)
     }
 
-    private static func countStrings(_ data: Data, minimumLength: Int = 4) -> Int {
-        var count = 0
-        var run = 0
-        for byte in data {
-            if (0x20...0x7E).contains(byte) {
-                run += 1
-            } else {
-                if run >= minimumLength { count += 1 }
-                run = 0
-            }
-        }
-        if run >= minimumLength { count += 1 }
-        return count
-    }
+    // MARK: - Preview analysis
 
     private static let opLabels: [String: String] = [
         "BL": "function calls",
@@ -513,7 +891,8 @@ enum CryptCheckAnalyzer {
         for entry in entries {
             allNames.append(entry.name)
             for slice in entry.slices {
-                switch slice.status {
+                guard let status = slice.status else { continue }
+                switch status {
                 case "ENCRYPTED":
                     encryptedCount += 1
                     appendUnique(entry.name, to: &encryptedNames)
@@ -521,7 +900,7 @@ enum CryptCheckAnalyzer {
                     decryptedCount += 1
                     appendUnique(entry.name, to: &decryptedNames)
                 default:
-                    if slice.status.contains("LIKELY") {
+                    if status.contains("LIKELY") {
                         likelyCount += 1
                         appendUnique(entry.name, to: &likelyNames)
                     }
@@ -676,24 +1055,53 @@ enum CryptCheckAnalyzer {
     }
 
     private static func sliceHTML(_ slice: Slice, index: Int) -> String {
-        let mapping = arm64Map(slice.sample)
+        let architectureMeta = "slice +0x\(String(slice.sliceOffset, radix: 16, uppercase: true)) &nbsp;&middot;&nbsp; \(formattedInteger(slice.sliceSize)) bytes"
+        var codeMeta: [String] = []
+        if slice.textSize > 0 {
+            codeMeta.append("__text \(formattedInteger(slice.textSize)) bytes")
+        }
+        if let entryOffset = slice.entryOffset {
+            codeMeta.append("entryoff 0x\(String(entryOffset, radix: 16, uppercase: true))")
+        }
+        let codeMetaHTML = codeMeta.isEmpty
+            ? ""
+            : "<div class=\"stats\">\(codeMeta.joined(separator: " &nbsp;&middot;&nbsp; "))</div>"
+
+        guard
+            let cryptOffset = slice.cryptOffset,
+            let cryptSize = slice.cryptSize,
+            let cryptID = slice.cryptID,
+            let status = slice.status
+        else {
+            let installName: String
+            if let dylibID = slice.dylibID, !dylibID.isEmpty {
+                installName = "<br><span class=\"dim\">install name: \(escapeHTML(dylibID))</span>"
+            } else {
+                installName = ""
+            }
+            return """
+            <div class="slice">
+              <div class="slice-head">Slice \(index + 1): \(escapeHTML(slice.cpu)) (\(slice.is64Bit ? "64" : "32")-bit)</div>
+              <div class="meta"><span>\(architectureMeta)</span></div>
+              \(codeMetaHTML)
+              <div class="no-enc">No LC_ENCRYPTION_INFO\(installName)</div>
+            </div>
+            """
+        }
+
+        let mapping = slice.isARM64 ? arm64Map(slice.preview) : (counts: [:], positions: [:])
         let totalARM = mapping.counts.values.reduce(0, +)
-        let strings = countStrings(slice.sample)
-        let isStub = slice.status == "DECRYPTED"
-            && totalARM == 0
-            && strings == 0
-            && (slice.nullPercent > 95.0 || slice.sample.isEmpty)
 
         let tagClass: String
         let icon: String
-        switch slice.status {
+        switch status {
         case "DECRYPTED": tagClass = "status-dec"; icon = "&#x2705;"
         case "ENCRYPTED": tagClass = "status-enc"; icon = "&#x1F512;"
         default: tagClass = "status-likely"; icon = "&#x26A0;&#xFE0F;"
         }
 
         let instructionHTML: String
-        if totalARM > 0 && slice.status == "DECRYPTED" {
+        if totalARM > 0 && status == "DECRYPTED" {
             let rows = mapping.counts
                 .sorted { lhs, rhs in
                     lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
@@ -710,40 +1118,80 @@ enum CryptCheckAnalyzer {
 
         let verdict: String
         let verdictClass: String
-        if slice.status == "DECRYPTED" {
-            if isStub {
-                verdictClass = "verdict-stub"
-                if let dylibID = slice.dylibID, !dylibID.isEmpty {
-                    verdict = "Stub framework (null-padded)<br><span class=\"dim\">install name: \(escapeHTML(dylibID))</span>"
-                } else {
-                    verdict = "Stub framework (null-padded)"
-                }
-            } else {
-                verdictClass = "verdict-ok"
-                verdict = "Real code"
-            }
-        } else if slice.status == "ENCRYPTED" {
-            verdictClass = "verdict-enc"
-            verdict = "Ciphertext"
-        } else {
+        if let rangeIssue = slice.rangeIssue {
             verdictClass = "verdict-unk"
-            verdict = "Inconclusive"
+            verdict = "Invalid crypt range<br><span class=\"dim\">\(escapeHTML(rangeIssue))</span>"
+        } else if status == "ENCRYPTED" {
+            verdictClass = "verdict-enc"
+            verdict = "FairPlay encryption active (cryptid \(cryptID))"
+        } else if status.contains("LIKELY") {
+            verdictClass = "verdict-unk"
+            verdict = "cryptid is 0, but the full crypt range is ciphertext-like"
+        } else if cryptSize > 0 && slice.nullPercent > 99.5 {
+            verdictClass = "verdict-stub"
+            var details: [String] = ["Crypt range is null-padded"]
+            if slice.textSize > 0 {
+                details.append("declared __text: \(formattedInteger(slice.textSize)) bytes")
+            }
+            if let dylibID = slice.dylibID, !dylibID.isEmpty {
+                details.append("install name: \(escapeHTML(dylibID))")
+            }
+            verdict = details.enumerated().map { offset, value in
+                offset == 0 ? value : "<span class=\"dim\">\(value)</span>"
+            }.joined(separator: "<br>")
+        } else {
+            verdictClass = "verdict-ok"
+            verdict = "Decrypted crypt range"
         }
 
         let entropyWidth = max(0, min(100, slice.entropy / 8.0 * 100.0))
-        var stats = String(format: "Null %.1f%% &nbsp;&middot;&nbsp; Print %.1f%%", slice.nullPercent, slice.printablePercent)
-        if totalARM > 0 { stats += " &nbsp;&middot;&nbsp; ARM64 x\(totalARM)" }
-        if strings > 0 { stats += " &nbsp;&middot;&nbsp; Strings x\(strings)" }
+        let coverage: Double
+        if cryptSize == 0 {
+            coverage = 100.0
+        } else {
+            coverage = min(100.0, Double(slice.bytesAnalyzed) / Double(cryptSize) * 100.0)
+        }
+
+        var stats = String(
+            format: "Coverage %.2f%% &nbsp;&middot;&nbsp; Null %.1f%% &nbsp;&middot;&nbsp; Print %.1f%%",
+            coverage,
+            slice.nullPercent,
+            slice.printablePercent
+        )
+        if totalARM > 0 {
+            stats += " &nbsp;&middot;&nbsp; Preview ARM64-like x\(totalARM)"
+        }
+        if slice.stringCount > 0 {
+            stats += " &nbsp;&middot;&nbsp; Preview strings \(formattedInteger(slice.stringCount))"
+        }
+
+        let previewHTML: String
+        if slice.preview.isEmpty {
+            previewHTML = ""
+        } else {
+            let previewOffset = slice.previewBaseOffset > 0
+                ? " (+0x\(String(slice.previewBaseOffset, radix: 16, uppercase: true)) into crypt range)"
+                : ""
+            previewHTML = """
+            <details class="hex-details">
+              <summary>Hex preview\(previewOffset)</summary>
+              <pre class="hex">\(hexPreviewHTML(slice.preview, positions: mapping.positions, baseOffset: slice.previewBaseOffset))</pre>
+            </details>
+            """
+        }
 
         return """
         <div class="slice">
           <div class="slice-head">Slice \(index + 1): \(escapeHTML(slice.cpu)) (\(slice.is64Bit ? "64" : "32")-bit)</div>
-          <div class="tag \(tagClass)">\(icon) \(escapeHTML(slice.status))</div>
+          <div class="tag \(tagClass)">\(icon) \(escapeHTML(status))</div>
           <div class="meta">
-            <span>cryptid \(slice.cryptID)</span>
-            <span>offset 0x\(String(slice.cryptOffset, radix: 16, uppercase: true))</span>
-            <span>size 0x\(String(slice.cryptSize, radix: 16, uppercase: true))</span>
+            <span>cryptid \(cryptID)</span>
+            <span>offset 0x\(String(cryptOffset, radix: 16, uppercase: true))</span>
+            <span>size 0x\(String(cryptSize, radix: 16, uppercase: true))</span>
+            <span>analyzed \(formattedInteger(slice.bytesAnalyzed)) / \(formattedInteger(cryptSize)) bytes</span>
+            <span>\(architectureMeta)</span>
           </div>
+          \(codeMetaHTML)
           <div class="entropy-row">
             <div class="entropy-bar"><div class="entropy-fill" style="width:\(String(format: "%.1f", entropyWidth))%"></div></div>
             <span class="entropy-val">\(String(format: "%.2f", slice.entropy)) / 8.0</span>
@@ -751,15 +1199,12 @@ enum CryptCheckAnalyzer {
           <div class="stats">\(stats)</div>
           \(instructionHTML)
           <div class="verdict \(verdictClass)">&#x2192; \(verdict)</div>
-          <details class="hex-details">
-            <summary>Hex preview</summary>
-            <pre class="hex">\(hexPreviewHTML(slice.sample, positions: mapping.positions))</pre>
-          </details>
+          \(previewHTML)
         </div>
         """
     }
 
-    private static func hexPreviewHTML(_ data: Data, positions: [Int: String]) -> String {
+    private static func hexPreviewHTML(_ data: Data, positions: [Int: String], baseOffset: UInt64) -> String {
         let bytes = [UInt8](data)
         guard !bytes.isEmpty else { return "" }
         let bytesPerLine = 12
@@ -777,9 +1222,14 @@ enum CryptCheckAnalyzer {
         }
 
         var lines: [String] = []
-        if skip > 0 {
-            lines.append("<span class=\"dim\">(+0x\(String(skip, radix: 16, uppercase: true)), skipped \(skip) null bytes)</span>")
+        let effectiveOffset = baseOffset + UInt64(skip)
+        if effectiveOffset > 0 {
+            let note = skip > 0
+                ? "crypt range +0x\(String(effectiveOffset, radix: 16, uppercase: true)); skipped \(skip) leading null bytes in preview"
+                : "crypt range +0x\(String(effectiveOffset, radix: 16, uppercase: true))"
+            lines.append("<span class=\"dim\">(\(note))</span>")
         }
+
 
         for rowStart in stride(from: 0, to: selected.count, by: bytesPerLine) {
             let row = Array(selected[rowStart..<min(rowStart + bytesPerLine, selected.count)])
@@ -874,6 +1324,13 @@ enum CryptCheckAnalyzer {
 
     private static func appendUnique(_ name: String, to names: inout [String]) {
         if !names.contains(name) { names.append(name) }
+    }
+
+    private static func formattedInteger(_ value: UInt64) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
     private static func formattedInteger(_ value: Int) -> String {
