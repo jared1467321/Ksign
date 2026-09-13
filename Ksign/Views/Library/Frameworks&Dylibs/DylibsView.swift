@@ -8,7 +8,7 @@
 import SwiftUI
 import NimbleExtensions
 import NimbleViews
-import ZsignSwift
+import Zsign
 
 struct DylibsView: View {
     var app: AppInfoPresentable
