@@ -10,7 +10,7 @@ import CryptoKit
 import Security
 import OSLog
 import UIKit.UIImage
-import Zsign
+import ZsignC
 import NimbleJSON
 import AltSourceKit
 import IDeviceSwift
