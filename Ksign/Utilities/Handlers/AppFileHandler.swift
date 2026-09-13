@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Zip
+import ASignArchiveKit
 import ZIPFoundation
 import SwiftUI
 import SWCompression
@@ -23,7 +23,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 	private let _download: Download?
 
 	// Last whole-percent value forwarded to the main thread during extraction.
-	// The Zip callbacks fire far more often than the UI can use; without this
+	// Archive callbacks can fire far more often than the UI can use; without this
 	// gate, hopping to the main actor on every tick floods it and freezes the
 	// app for the whole extraction. Touched only from the single extraction
 	// thread, so a plain Int is fine.
@@ -57,19 +57,18 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		// touched or removed here; this handler only owns its work directory.
 		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
 		
-		Zip.addCustomFileExtension("ipa")
-		Zip.addCustomFileExtension("tipa")
-		
 		let download = self._download
-		let library = UserDefaults.standard.string(forKey: "Feather.extractionLibrary") ?? "Zip"
+		let library = ArchiveExtractionLibrary.normalized(
+			UserDefaults.standard.string(forKey: "Feather.extractionLibrary")
+		)
 		
 		try await withCheckedThrowingContinuation { continuation in
 			DispatchQueue.global(qos: .utility).async {
 				do {
-					if library == "ZIPFoundation" {
+					if library == ArchiveExtractionLibrary.zipFoundation {
 						try self._ZIPFoundation(download: download)
 					} else {
-						try self._Zip(download: download)
+						try self._MiniZip(download: download)
 					}
 					self.uniqueWorkDirPayload = self._uniqueWorkDir.appendingPathComponent("Payload")
 					continuation.resume()
@@ -81,12 +80,10 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		}
 	}
 	
-	private func _Zip(download: Download?) throws {
-		try Zip.unzipFile(
+	private func _MiniZip(download: Download?) throws {
+		try ASignArchive.extract(
 			_ipa,
-			destination: _uniqueWorkDir,
-			overwrite: true,
-			password: nil,
+			to: _uniqueWorkDir,
 			progress: { progress in
 				guard let download = download else { return }
 				// Only forward when the whole-percent value actually changes.
@@ -208,7 +205,7 @@ enum ImportedFileHandlerError: Error, CustomStringConvertible {
 		case .extractionFailed:
 			return "Failed to extract the archive. The file may be corrupted."
 		case .zipLibraryNotAvailable:
-			return "Zip library is not available on this platform."
+			return "The archive library is not available on this platform."
 		}
 	}
 }

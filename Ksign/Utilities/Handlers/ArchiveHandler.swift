@@ -7,7 +7,7 @@
 
 import Foundation
 import UIKit.UIApplication
-import Zip
+import ASignArchiveKit
 import SwiftUI
 import IDeviceSwift
 
@@ -104,20 +104,24 @@ final class ArchiveHandler: NSObject {
 			let zipUrl = self._uniqueWorkDir.appendingPathComponent("Archive.zip")
 			let ipaUrl = self._uniqueWorkDir.appendingPathComponent("Archive.ipa")
 			
-			try await Zip.zipFiles(
-				paths: [payloadUrl],
-				zipFilePath: zipUrl,
-				password: nil,
-				compression: ZipCompression.allCases[ArchiveHandler.getCompressionLevel()],
+			let compression = ASignArchiveCompression(
+				rawValue: ArchiveHandler.getCompressionLevel()
+			) ?? .none
+
+			try ASignArchive.create(
+				from: payloadUrl,
+				at: zipUrl,
+				compression: compression,
 				progress: { progress in
-					// Activity progress is reported directly from the archiver's worker
+					// Activity progress is reported directly from minizip-ng's worker
 					// callback. SwiftUI still receives the same main-actor update below.
 					self._progressReporter?(progress)
 
 					Task { @MainActor in
 						self.viewModel.packageProgress = progress
 					}
-				})
+				}
+			)
 			
 			try FileManager.default.moveItem(at: zipUrl, to: ipaUrl)
 			return ipaUrl
