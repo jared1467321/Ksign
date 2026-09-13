@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Zip
+import ASignArchiveKit
 import SWCompression
 import ArArchiveKit
 import ZIPFoundation
@@ -89,9 +89,14 @@ class ExtractionService {
                 try? FileManager.default.removeItem(at: zipFilePath)
                 try? FileManager.default.removeItem(at: ipaFilePath)
                 
-                try Zip.zipFiles(paths: [payloadDir], zipFilePath: zipFilePath, password: nil, progress: { zipProgress in
-                    progressCallback?(0.4 + (zipProgress * 0.5))
-                })
+                try ASignArchive.create(
+                    from: payloadDir,
+                    at: zipFilePath,
+                    compression: .standard,
+                    progress: { zipProgress in
+                        progressCallback?(0.4 + (zipProgress * 0.5))
+                    }
+                )
                 
                 progressCallback?(0.95)
                 
@@ -117,33 +122,29 @@ class ExtractionService {
     ) throws {
         let library = _selectedExtractionLibrary()
         switch library {
-        case "ZIPFoundation":
+        case ArchiveExtractionLibrary.zipFoundation:
             try _ZIPFoundation(fileURL, to: destinationURL, progressCallback: progressCallback)
         default:
-            try _Zip(fileURL, to: destinationURL, progressCallback: progressCallback)
+            try _MiniZip(fileURL, to: destinationURL, progressCallback: progressCallback)
         }
     }
     
     private static func _selectedExtractionLibrary() -> String {
-        return UserDefaults.standard.string(forKey: "Feather.extractionLibrary") ?? "Zip"
+        ArchiveExtractionLibrary.normalized(
+            UserDefaults.standard.string(forKey: "Feather.extractionLibrary")
+        )
     }
     
-    private static func _Zip(
+    private static func _MiniZip(
         _ fileURL: URL,
         to destinationURL: URL,
         progressCallback: ((Double) -> Void)?
     ) throws {
-        Zip.addCustomFileExtension("ipa")
-        if let progressCallback = progressCallback {
-            try Zip.unzipFile(fileURL, destination: destinationURL, overwrite: true, password: nil, progress: progressCallback)
-        } else {
-            try Zip.unzipFile(
-                fileURL,
-                destination: destinationURL,
-                overwrite: true,
-                password: nil
-            )
-        }
+        try ASignArchive.extract(
+            fileURL,
+            to: destinationURL,
+            progress: progressCallback
+        )
     }
     
     private static func _ZIPFoundation(
