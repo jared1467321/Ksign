@@ -66,6 +66,10 @@ struct Options: Codable, Equatable {
 	var displayNames: [String: String]
 	/// Array of files (`.dylib`, `.deb` ) to extract and inject
 	var injectionFiles: [URL]
+	/// Filenames (in the Tweaks folder) that are injected into *every* app
+	/// signed — the "Default Tweaks" profile. Optional so older saved options
+	/// that predate this field still decode instead of resetting to defaults.
+	var defaultInjectionDylibs: [String]?
 	/// Mach-o load paths to remove (i.e. `@executable_path/demo1.dylib`)
 	var disInjectionFiles: [String]
 	/// App files to remove from (i.e. `Frameworks/CydiaSubstrate.framework`)
@@ -98,7 +102,7 @@ struct Options: Codable, Equatable {
     var onlyModify: Bool
 	/// If Ksign copy things should start in the last used location instead of Documents dir
 	var useLastExportLocation: Bool?
-	/// If Ksign should use Zip or ZIPFoundation
+	/// If Ksign should use minizip-ng or ZIPFoundation
 	var extractionLibrary: String?
     /// Modifies app to support liquid glass
     var experiment_supportLiquidGlass: Bool
@@ -133,6 +137,7 @@ struct Options: Codable, Equatable {
 		identifiers: [:],
 		displayNames: [:],
 		injectionFiles: [],
+		defaultInjectionDylibs: [],
 		disInjectionFiles: [],
 		removeFiles: [],
 		fileSharing: false,
@@ -149,7 +154,7 @@ struct Options: Codable, Equatable {
 		removeApp: false,
         onlyModify: false,
 		useLastExportLocation: false,
-		extractionLibrary: "Zip",
+		extractionLibrary: ArchiveExtractionLibrary.miniZip,
         experiment_supportLiquidGlass: false,
 		experiment_disableLiquidGlass: false,
         experiment_replaceSubstrateWithEllekit: false,
@@ -164,7 +169,7 @@ struct Options: Codable, Equatable {
 		injectFolder: .frameworks
 	)
 	// extraction library values
-	static let extractionLibraryValues = ["Zip", "ZIPFoundation"]
+	static let extractionLibraryValues = [ArchiveExtractionLibrary.miniZip, ArchiveExtractionLibrary.zipFoundation]
 	// duplicate values are not recommended!
 	/// Default values for `appAppearance`
 	static let appAppearanceValues = ["Default", "Light", "Dark"]
@@ -184,6 +189,36 @@ struct Options: Codable, Equatable {
 	enum InjectFolder: String, Codable, CaseIterable, LocalizedDescribable {
 		case root = "/"
 		case frameworks = "/Frameworks/"
+	}
+}
+
+// MARK: - Default Tweaks
+extension Options {
+	/// Returns a copy of these options with the enabled Default Tweaks profile
+	/// dylibs merged into `injectionFiles` (resolved against the Tweaks folder,
+	/// de-duped by filename, skipping anything missing on disk).
+	///
+	/// Call this when a signing session is created so the default selection is
+	/// already part of `injectionFiles`. That makes the per-app Tweaks screen
+	/// show them as enabled — and, because they're real session entries rather
+	/// than something forced in later, lets them be toggled off for a single
+	/// app without affecting the saved default profile.
+	func mergingDefaultTweaks() -> Options {
+		guard let names = defaultInjectionDylibs, !names.isEmpty else { return self }
+
+		var copy = self
+		var seen = Set(copy.injectionFiles.map { $0.lastPathComponent })
+		let tweaksDir = FileManager.default.tweaks
+
+		for name in names {
+			guard !seen.contains(name) else { continue }
+			let url = tweaksDir.appendingPathComponent(name)
+			guard FileManager.default.fileExists(atPath: url.path) else { continue }
+			copy.injectionFiles.append(url)
+			seen.insert(name)
+		}
+
+		return copy
 	}
 }
 
