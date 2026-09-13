@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Zip
+import ASignArchiveKit
 import ZIPFoundation
 import SwiftUI
 import SWCompression
@@ -18,9 +18,16 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 	private let _uniqueWorkDir: URL
 	var uniqueWorkDirPayload: URL?
 
-	private var _ipa: URL
+	private let _ipa: URL
 	private let _install: Bool
 	private let _download: Download?
+
+	// Last whole-percent value forwarded to the main thread during extraction.
+	// Archive callbacks can fire far more often than the UI can use; without this
+	// gate, hopping to the main actor on every tick floods it and freezes the
+	// app for the whole extraction. Touched only from the single extraction
+	// thread, so a plain Int is fine.
+	private var _lastReportedPercent = -1
 	
 	init(
 		file ipa: URL,
@@ -37,32 +44,31 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		print("Import initiated for: \(_ipa.lastPathComponent) with ID: \(_uuid)")
 	}
 	
-	func copy() async throws {
+	func extract() async throws {
+		// There used to be a `copy()` step here that duplicated the whole .ipa
+		// into this work directory before unzipping it. Nothing needed that:
+		// both unzip paths below only ever read the archive, and they read it
+		// from wherever it already is. On a 400MB import it was 400MB written
+		// and then deleted again.
+		//
+		// The two sources are a Files-app URL — whose security scope is opened
+		// in `FeatherApp._handleURL` and never closed, so it stays readable —
+		// and a finished download already sitting in the container. Neither is
+		// touched or removed here; this handler only owns its work directory.
 		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
 		
-		let destinationURL = _uniqueWorkDir.appendingPathComponent(_ipa.lastPathComponent)
-
-		try _fileManager.removeFileIfNeeded(at: destinationURL)
-		
-		try _fileManager.copyItem(at: _ipa, to: destinationURL)
-		_ipa = destinationURL
-		print("[\(_uuid)] File copied to: \(_ipa.path)")
-	}
-	
-	func extract() async throws {
-		Zip.addCustomFileExtension("ipa")
-		Zip.addCustomFileExtension("tipa")
-		
 		let download = self._download
-		let library = UserDefaults.standard.string(forKey: "Feather.extractionLibrary") ?? "Zip"
+		let library = ArchiveExtractionLibrary.normalized(
+			UserDefaults.standard.string(forKey: "Feather.extractionLibrary")
+		)
 		
 		try await withCheckedThrowingContinuation { continuation in
 			DispatchQueue.global(qos: .utility).async {
 				do {
-					if library == "ZIPFoundation" {
+					if library == ArchiveExtractionLibrary.zipFoundation {
 						try self._ZIPFoundation(download: download)
 					} else {
-						try self._Zip(download: download)
+						try self._MiniZip(download: download)
 					}
 					self.uniqueWorkDirPayload = self._uniqueWorkDir.appendingPathComponent("Payload")
 					continuation.resume()
@@ -74,19 +80,21 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		}
 	}
 	
-	private func _Zip(download: Download?) throws {
-		try Zip.unzipFile(
+	private func _MiniZip(download: Download?) throws {
+		try ASignArchive.extract(
 			_ipa,
-			destination: _uniqueWorkDir,
-			overwrite: true,
-			password: nil,
+			to: _uniqueWorkDir,
 			progress: { progress in
-				if let download = download {
-					DispatchQueue.main.async {
-						download.unpackageProgress = progress
-                        if #available(iOS 26.0, *) {
-                            BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-                        }
+				guard let download = download else { return }
+				// Only forward when the whole-percent value actually changes.
+				// Collapses thousands of main-thread hops into ~100.
+				let percent = Int(progress * 100)
+				guard percent != self._lastReportedPercent else { return }
+				self._lastReportedPercent = percent
+				DispatchQueue.main.async {
+					download.unpackageProgress = progress
+					if #available(iOS 26.0, *) {
+						BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
 					}
 				}
 			}
@@ -101,11 +109,15 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		for (index, entry) in entries.enumerated() {
 			let progress = Double(index) / Double(totalEntries)
 			if let download = download {
-				DispatchQueue.main.async {
-					download.unpackageProgress = progress
-                    if #available(iOS 26.0, *) {
-                        BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-                    }
+				let percent = Int(progress * 100)
+				if percent != _lastReportedPercent {
+					_lastReportedPercent = percent
+					DispatchQueue.main.async {
+						download.unpackageProgress = progress
+						if #available(iOS 26.0, *) {
+							BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
+						}
+					}
 				}
 			}
 			let destinationPath = _uniqueWorkDir.appendingPathComponent(entry.path)
@@ -146,14 +158,23 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		
 		let bundle = Bundle(url: appUrl)
 		
-		Storage.shared.addImported(
-			uuid: _uuid,
-			appName: bundle?.name,
-			appIdentifier: bundle?.bundleIdentifier,
-			appVersion: bundle?.version,
-			appIcon: bundle?.iconFileName
-		) { _ in
-			print("[\(self._uuid)] Added to database")
+		// `addImported` now hops onto the Core Data context's own queue, so it
+		// returns before the row actually exists. Awaiting it here keeps the
+		// old ordering: `FR.handlePackageFile` doesn't report success — and
+		// the download row doesn't disappear — until the app is really in the
+		// library. Without this the UI could get ahead of the database on a
+		// busy main thread.
+		await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+			Storage.shared.addImported(
+				uuid: _uuid,
+				appName: bundle?.name,
+				appIdentifier: bundle?.bundleIdentifier,
+				appVersion: bundle?.version,
+				appIcon: bundle?.iconFileName
+			) { _ in
+				print("[\(self._uuid)] Added to database")
+				continuation.resume()
+			}
 		}
 	}
 	
@@ -184,7 +205,7 @@ enum ImportedFileHandlerError: Error, CustomStringConvertible {
 		case .extractionFailed:
 			return "Failed to extract the archive. The file may be corrupted."
 		case .zipLibraryNotAvailable:
-			return "Zip library is not available on this platform."
+			return "The archive library is not available on this platform."
 		}
 	}
 }
