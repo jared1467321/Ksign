@@ -2,22 +2,35 @@
 //  ZipCompression+cases.swift
 //  Feather
 //
-//  Created by samara on 22.04.2025.
+//  Archive compression/settings compatibility for minizip-ng.
 //
 
-import Zip
+import Foundation
+import ASignArchiveKit
 
-extension ZipCompression {
-	static var allCases: [ZipCompression] {
-		return [.NoCompression, .BestSpeed, .DefaultCompression, .BestCompression]
-	}
-	
+extension ASignArchiveCompression {
 	var label: String {
 		switch self {
-		case .NoCompression: return "None"
-		case .BestSpeed: return "Speed"
-		case .DefaultCompression: return "Default"
-		case .BestCompression: return "Best"
+		case .none: return "None"
+		case .speed: return "Speed"
+		case .standard: return "Default"
+		case .best: return "Best"
 		}
+	}
+}
+
+enum ArchiveExtractionLibrary {
+	static let miniZip = "minizip-ng"
+	static let zipFoundation = "ZIPFoundation"
+	static let legacyZip = "Zip"
+
+	static func normalized(_ value: String?) -> String {
+		value == zipFoundation ? zipFoundation : miniZip
+	}
+
+	static func migrateStoredPreference() {
+		let defaults = UserDefaults.standard
+		guard defaults.string(forKey: "Feather.extractionLibrary") == legacyZip else { return }
+		defaults.set(miniZip, forKey: "Feather.extractionLibrary")
 	}
 }
