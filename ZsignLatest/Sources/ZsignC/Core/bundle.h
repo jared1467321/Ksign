@@ -46,6 +46,8 @@ private:
 
 private:
 	bool FindAppFolder(const string& strFolder, string& strAppFolder);
+	bool BuildFileIndex();
+	void EnsureIndexedFile(const string& strFile);
 	bool GetObjectsToSign(const string& strFolder, jvalue& jvInfo);
 	bool GetSignFolderInfo(const string& strFolder, jvalue& jvNode, bool bGetName = false);
 
@@ -61,6 +63,8 @@ private:
 	vector<string>	m_arrInjectDylibs;
 	vector<string>	m_arrInjectDylibNames;
 	set<string>		m_setRemoveDylibs;
+	vector<string>	m_indexedFiles;
+	vector<string>	m_indexedFolders;
 
 private:
 	void ApplyAppModifications();

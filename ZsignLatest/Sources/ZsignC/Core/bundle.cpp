@@ -83,86 +83,122 @@ bool ZBundle::GetSignFolderInfo(const string& strFolder, jvalue& jvNode, bool bG
 	return true;
 }
 
+bool ZBundle::BuildFileIndex()
+{
+	m_indexedFiles.clear();
+	m_indexedFolders.clear();
+
+	return ZFile::EnumFolder(m_strAppFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
+		if (bFolder) {
+			m_indexedFolders.push_back(strPath);
+		} else {
+			m_indexedFiles.push_back(strPath);
+		}
+		return false;
+	});
+}
+
+void ZBundle::EnsureIndexedFile(const string& strFile)
+{
+	if (std::find(m_indexedFiles.begin(), m_indexedFiles.end(), strFile) == m_indexedFiles.end()) {
+		m_indexedFiles.push_back(strFile);
+	}
+}
+
 bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 {
-	vector<string> allBundles;
-	
-	std::function<void(const string&)> findAllBundles = [&](const string& currentPath) {
-		ZFile::EnumFolder(currentPath.c_str(), false, NULL, [&](bool bFolder, const string& strPath) {
-			if (bFolder) {
-				if (ZFile::IsPathSuffix(strPath, ".app") ||
-					ZFile::IsPathSuffix(strPath, ".appex") ||
-					ZFile::IsPathSuffix(strPath, ".framework") ||
-					ZFile::IsPathSuffix(strPath, ".xctest")) {
-					allBundles.push_back(strPath);
-					findAllBundles(strPath);
-				} else {
-					findAllBundles(strPath);
-				}
-			}
+	// The app tree is indexed once and reused by both object discovery and
+	// CodeResources generation. This replaces multiple full recursive walks.
+	if (m_indexedFiles.empty() && m_indexedFolders.empty()) {
+		if (!BuildFileIndex()) {
 			return false;
-		});
-	};
-	
-	findAllBundles(strFolder);
-	
+		}
+	}
+
+	vector<string> allBundles;
+	for (const string& strPath : m_indexedFolders) {
+		if (ZFile::IsPathSuffix(strPath, ".app") ||
+			ZFile::IsPathSuffix(strPath, ".appex") ||
+			ZFile::IsPathSuffix(strPath, ".framework") ||
+			ZFile::IsPathSuffix(strPath, ".xctest")) {
+			allBundles.push_back(strPath);
+		}
+	}
+
+	// Keep the existing dependency rule: nested bundles are always signed
+	// before their parents. Equal-depth entries retain the index traversal
+	// order, matching the original depth-first discovery behavior.
 	sort(allBundles.begin(), allBundles.end(), [](const string& a, const string& b) {
 		size_t depthA = count(a.begin(), a.end(), '/');
 		size_t depthB = count(b.begin(), b.end(), '/');
-		// deeper paths first
 		return depthA > depthB;
 	});
-	
+
 	for (const string& bundlePath : allBundles) {
 		jvalue jvNode;
 		if (GetSignFolderInfo(bundlePath, jvNode)) {
 			jvInfo["folders"].push_back(jvNode);
 		}
 	}
-	
-	ZFile::EnumFolder(strFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-		if (bFolder || string::npos != strPath.find(".dSYM") ||
+
+	for (const string& strPath : m_indexedFiles) {
+		if (string::npos != strPath.find(".dSYM") ||
 			string::npos != strPath.find("_WatchKitStub")) {
-			return false;
+			continue;
 		}
+
 		bool bMachO = false;
-		{
-			FILE* fp = NULL;
+		FILE* fp = NULL;
 #ifdef _WIN32
-			fopen_s(&fp, strPath.c_str(), "rb");
+		fopen_s(&fp, strPath.c_str(), "rb");
 #else
-			fp = fopen(strPath.c_str(), "rb");
+		fp = fopen(strPath.c_str(), "rb");
 #endif
-			if (fp) {
-				uint32_t magic = 0;
-				if (1 == fread(&magic, sizeof(magic), 1, fp)) {
-					bMachO = (magic == MH_MAGIC || magic == MH_CIGAM ||
-							  magic == MH_MAGIC_64 || magic == MH_CIGAM_64 ||
-							  magic == FAT_MAGIC || magic == FAT_CIGAM);
-				}
-				fclose(fp);
+		if (fp) {
+			uint32_t magic = 0;
+			if (1 == fread(&magic, sizeof(magic), 1, fp)) {
+				bMachO = (magic == MH_MAGIC || magic == MH_CIGAM ||
+						  magic == MH_MAGIC_64 || magic == MH_CIGAM_64 ||
+						  magic == FAT_MAGIC || magic == FAT_CIGAM);
 			}
+			fclose(fp);
 		}
+
 		if (bMachO) {
 			jvInfo["files"].push_back(strPath.substr(m_strAppFolder.size() + 1));
 		}
-		return false;
-	});
+	}
 
 	return true;
 }
 
 bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 {
-	set<string> setFiles;
-	ZFile::EnumFolder(strFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-		if (!bFolder) {
-			string strNode = strPath.substr(strFolder.size() + 1);
-			ZUtil::StringReplace(strNode, "\\", "/");
-			setFiles.insert(strNode);
+	if (m_indexedFiles.empty() && m_indexedFolders.empty()) {
+		if (!BuildFileIndex()) {
+			return false;
 		}
-		return false;
-	});
+	}
+
+	set<string> setFiles;
+	const string strPrefix = strFolder + "/";
+
+	// Reuse the single app-tree index instead of recursively walking the bundle
+	// for every nested signing node. Files created during signing (notably
+	// nested CodeResources and profiles) are appended to the index as they are
+	// produced, while removed files are filtered here by existence.
+	for (const string& strPath : m_indexedFiles) {
+		if (strPath.size() <= strPrefix.size() || 0 != strPath.compare(0, strPrefix.size(), strPrefix)) {
+			continue;
+		}
+		if (!ZFile::IsFileExists(strPath.c_str())) {
+			continue;
+		}
+
+		string strNode = strPath.substr(strPrefix.size());
+		ZUtil::StringReplace(strNode, "\\", "/");
+		setFiles.insert(strNode);
+	}
 
 	jvalue jvInfo;
 	jvInfo.read_plist_from_file("%s/Info.plist", strFolder.c_str());
@@ -175,12 +211,17 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 	setFiles.erase("_CodeSignature/CodeResources");
 	setFiles.erase(strBundleExe);
-	
-	jvCodeRes.clear();
-	jvCodeRes["files"] = jvalue(jvalue::E_OBJECT);
-	jvCodeRes["files2"] = jvalue(jvalue::E_OBJECT);
 
-	for (string strKey : setFiles) {
+	struct ResourceHash
+	{
+		string key;
+		string sha1;
+		string sha256;
+	};
+
+	vector<ResourceHash> hashes;
+	hashes.reserve(setFiles.size());
+	for (const string& strKey : setFiles) {
 		if (m_bRemoveProvision && strKey == "embedded.mobileprovision") {
 			string strProvFile = strFolder + "/embedded.mobileprovision";
 			remove(strProvFile.c_str());
@@ -188,11 +229,48 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 			continue;
 		}
 
-		string strFile = strFolder + "/" + strKey;
-		string strSHA1Base64;
-		string strSHA256Base64;
-		ZSHA::SHABase64File(strFile.c_str(), strSHA1Base64, strSHA256Base64);
+		ResourceHash item;
+		item.key = strKey;
+		hashes.push_back(std::move(item));
+	}
 
+	// File hashing is independent. Hash in parallel into fixed result slots,
+	// then commit to the plist serially in the same sorted-key order as before.
+	// This keeps CodeResources byte-for-byte stable while using multiple cores.
+	const size_t workerCount = (hashes.size() >= 8) ? ZUtil::GetWorkerCount(hashes.size()) : 1;
+	if (workerCount <= 1) {
+		for (ResourceHash& item : hashes) {
+			string strFile = strFolder + "/" + item.key;
+			ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
+		}
+	} else {
+		atomic<size_t> next(0);
+		vector<thread> workers;
+		workers.reserve(workerCount);
+		for (size_t worker = 0; worker < workerCount; worker++) {
+			workers.emplace_back([&]() {
+				for (;;) {
+					size_t index = next.fetch_add(1, std::memory_order_relaxed);
+					if (index >= hashes.size()) {
+						break;
+					}
+					ResourceHash& item = hashes[index];
+					string strFile = strFolder + "/" + item.key;
+					ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
+				}
+			});
+		}
+		for (thread& worker : workers) {
+			worker.join();
+		}
+	}
+
+	jvCodeRes.clear();
+	jvCodeRes["files"] = jvalue(jvalue::E_OBJECT);
+	jvCodeRes["files2"] = jvalue(jvalue::E_OBJECT);
+
+	for (ResourceHash& item : hashes) {
+		string strKey = item.key;
 #ifdef _WIN32
 		strKey = ic.A2U8(strKey);
 #endif
@@ -211,16 +289,16 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 		if (!bomit1) {
 			if (string::npos != strKey.rfind(".lproj/")) {
-				jvCodeRes["files"][strKey]["hash"] = "data:" + strSHA1Base64;
+				jvCodeRes["files"][strKey]["hash"] = "data:" + item.sha1;
 				jvCodeRes["files"][strKey]["optional"] = true;
 			} else {
-				jvCodeRes["files"][strKey] = "data:" + strSHA1Base64;
+				jvCodeRes["files"][strKey] = "data:" + item.sha1;
 			}
 		}
 
 		if (!bomit2) {
-			jvCodeRes["files2"][strKey]["hash"] = "data:" + strSHA1Base64;
-			jvCodeRes["files2"][strKey]["hash2"] = "data:" + strSHA256Base64;
+			jvCodeRes["files2"][strKey]["hash"] = "data:" + item.sha1;
+			jvCodeRes["files2"][strKey]["hash2"] = "data:" + item.sha256;
 			if (string::npos != strKey.rfind(".lproj/")) {
 				jvCodeRes["files2"][strKey]["optional"] = true;
 			}
@@ -415,6 +493,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 					ZLog::ErrorV(">>> Can't write embedded.mobileprovision!\n");
 					return false;
 				}
+				EnsureIndexedFile(strBaseFolder + "/embedded.mobileprovision");
 				bForceSign = true;
 				break;
 			}
@@ -465,6 +544,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 		ZLog::ErrorV("\tWriting CodeResources failed! %s\n", strCodeResFile.c_str());
 		return false;
 	}
+	EnsureIndexedFile(strCodeResFile);
 
 	if (!macho.Sign(m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData)) {
 		return false;
@@ -788,6 +868,8 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 {
 	m_bForceSign = bForce;
 	m_pSignAsset = pSignAsset;
+	m_indexedFiles.clear();
+	m_indexedFolders.clear();
 	m_bWeakInject = bWeakInject;
 	m_bRemoveProvision = bRemoveProvision;
 	m_setRemoveDylibs.clear();
@@ -850,6 +932,10 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 
 	jvalue jvRoot;
 	if (m_bForceSign) {
+		if (!BuildFileIndex()) {
+			ZLog::ErrorV(">>> Can't index app folder! %s\n", m_strAppFolder.c_str());
+			return false;
+		}
 		jvRoot["path"] = "/";
 		jvRoot["root"] = m_strAppFolder;
 		if (!GetSignFolderInfo(m_strAppFolder, jvRoot, true)) {

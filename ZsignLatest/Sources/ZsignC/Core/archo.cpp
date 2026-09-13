@@ -2,8 +2,7 @@
 #include "json.h"
 #include "archo.h"
 #include "signing.h"
-
-uint64_t ZArchO::s_uExecSegLimit = 0;
+#include <openssl/sha.h>
 
 ZArchO::ZArchO()
 {
@@ -22,6 +21,7 @@ ZArchO::ZArchO()
 	m_pCodeSignSegment = NULL;
 	m_pLinkEditSegment = NULL;
 	m_uLoadCommandsFreeSpace = 0;
+	m_uExecSegLimit = 0;
 }
 
 bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
@@ -51,7 +51,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command* seglc = (segment_command*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section* sect = (section*)((pLoadCommand + sizeof(segment_command)) + sizeof(section) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -71,7 +71,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command_64* seglc = (segment_command_64*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section_64* sect = (section_64*)((pLoadCommand + sizeof(segment_command_64)) + sizeof(section_64) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -324,6 +324,68 @@ void ZArchO::PrintInfo()
 	ZLog::Print("------------------------------------------------------------------\n");
 }
 
+static void BuildCodeSlotHashes(uint8_t* pCodeBase,
+	uint32_t uCodeLength,
+	bool bNeedSHA1,
+	bool bNeedSHA256,
+	string& strSHA1Slots,
+	string& strSHA256Slots)
+{
+	const uint32_t uPageSize = 1u << 12;
+	const uint32_t uCodeSlots = (uCodeLength + uPageSize - 1) / uPageSize;
+	if (0 == uCodeSlots || (!bNeedSHA1 && !bNeedSHA256)) {
+		return;
+	}
+
+	if (bNeedSHA1) {
+		strSHA1Slots.resize((size_t)uCodeSlots * 20);
+	}
+	if (bNeedSHA256) {
+		strSHA256Slots.resize((size_t)uCodeSlots * 32);
+	}
+
+	auto hashSlot = [&](uint32_t slot) {
+		const uint32_t offset = slot * uPageSize;
+		const uint32_t length = std::min<uint32_t>(uPageSize, uCodeLength - offset);
+		if (bNeedSHA1) {
+			uint8_t hash1[20];
+			::SHA1(pCodeBase + offset, length, hash1);
+			memcpy(&strSHA1Slots[(size_t)slot * 20], hash1, sizeof(hash1));
+		}
+		if (bNeedSHA256) {
+			uint8_t hash256[32];
+			::SHA256(pCodeBase + offset, length, hash256);
+			memcpy(&strSHA256Slots[(size_t)slot * 32], hash256, sizeof(hash256));
+		}
+	};
+
+	const size_t workerCount = (uCodeLength >= 512 * 1024 && uCodeSlots >= 64) ? ZUtil::GetWorkerCount(uCodeSlots) : 1;
+	if (workerCount <= 1) {
+		for (uint32_t slot = 0; slot < uCodeSlots; slot++) {
+			hashSlot(slot);
+		}
+		return;
+	}
+
+	atomic<uint32_t> next(0);
+	vector<thread> workers;
+	workers.reserve(workerCount);
+	for (size_t worker = 0; worker < workerCount; worker++) {
+		workers.emplace_back([&]() {
+			for (;;) {
+				uint32_t slot = next.fetch_add(1, std::memory_order_relaxed);
+				if (slot >= uCodeSlots) {
+					break;
+				}
+				hashSlot(slot);
+			}
+		});
+	}
+	for (thread& worker : workers) {
+		worker.join();
+	}
+}
+
 bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset, 
 	bool bForce, 
 	const string& strBundleId, 
@@ -342,32 +404,30 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
 	ZSign::SlotBuildDerEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : "", strDerEntitlementsSlot);
 
+	auto BuildSpecialSlotHashes = [&](const string& strData, string& strSHA1, string& strSHA256) {
+		if (strData.empty()) {
+			if (!pSignAsset->m_bSHA256Only) {
+				strSHA1.append(20, 0);
+			}
+			strSHA256.append(32, 0);
+		} else if (pSignAsset->m_bSHA256Only) {
+			ZSHA::SHA256(strData, strSHA256);
+		} else {
+			ZSHA::SHA(strData, strSHA1, strSHA256);
+		}
+	};
+
 	string strRequirementsSlotSHA1;
 	string strRequirementsSlotSHA256;
-	if (strRequirementsSlot.empty()) { //empty
-		strRequirementsSlotSHA1.append(20, 0);
-		strRequirementsSlotSHA256.append(32, 0);
-	} else {
-		ZSHA::SHA(strRequirementsSlot, strRequirementsSlotSHA1, strRequirementsSlotSHA256);
-	}
+	BuildSpecialSlotHashes(strRequirementsSlot, strRequirementsSlotSHA1, strRequirementsSlotSHA256);
 
 	string strEntitlementsSlotSHA1;
 	string strEntitlementsSlotSHA256;
-	if (strEntitlementsSlot.empty()) { //empty
-		strEntitlementsSlotSHA1.append(20, 0);
-		strEntitlementsSlotSHA256.append(32, 0);
-	} else {
-		ZSHA::SHA(strEntitlementsSlot, strEntitlementsSlotSHA1, strEntitlementsSlotSHA256);
-	}
+	BuildSpecialSlotHashes(strEntitlementsSlot, strEntitlementsSlotSHA1, strEntitlementsSlotSHA256);
 
 	string strDerEntitlementsSlotSHA1;
 	string strDerEntitlementsSlotSHA256;
-	if (strDerEntitlementsSlot.empty()) { //empty
-		strDerEntitlementsSlotSHA1.append(20, 0);
-		strDerEntitlementsSlotSHA256.append(32, 0);
-	} else {
-		ZSHA::SHA(strDerEntitlementsSlot, strDerEntitlementsSlotSHA1, strDerEntitlementsSlotSHA256);
-	}
+	BuildSpecialSlotHashes(strDerEntitlementsSlot, strDerEntitlementsSlotSHA1, strDerEntitlementsSlotSHA256);
 
 	uint8_t* pCodeSlots1Data = NULL;
 	uint8_t* pCodeSlots256Data = NULL;
@@ -375,6 +435,34 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	uint32_t uCodeSlots256DataLength = 0;
 	if (!bForce) {
 		ZSign::GetCodeSignatureExistsCodeSlotsData(m_pSignBase, pCodeSlots1Data, uCodeSlots1DataLength, pCodeSlots256Data, uCodeSlots256DataLength);
+	}
+
+	// Build missing code-page hashes once. Dual-hash signatures now calculate
+	// SHA-1 and SHA-256 in the same page pass instead of traversing the Mach-O
+	// twice, and independent pages are processed by a bounded worker pool.
+	const uint32_t uPageSize = 1u << 12;
+	const uint32_t uCodeSlots = (m_uCodeLength + uPageSize - 1) / uPageSize;
+	const uint32_t uExpectedSHA1Length = uCodeSlots * 20;
+	const uint32_t uExpectedSHA256Length = uCodeSlots * 32;
+	const bool bHaveSHA1Slots = !pSignAsset->m_bSHA256Only && NULL != pCodeSlots1Data && uCodeSlots1DataLength == uExpectedSHA1Length;
+	const bool bHaveSHA256Slots = NULL != pCodeSlots256Data && uCodeSlots256DataLength == uExpectedSHA256Length;
+
+	string strComputedSHA1Slots;
+	string strComputedSHA256Slots;
+	BuildCodeSlotHashes(m_pBase,
+		m_uCodeLength,
+		!pSignAsset->m_bSHA256Only && !bHaveSHA1Slots,
+		!bHaveSHA256Slots,
+		strComputedSHA1Slots,
+		strComputedSHA256Slots);
+
+	if (!pSignAsset->m_bSHA256Only && !bHaveSHA1Slots) {
+		pCodeSlots1Data = (uint8_t*)strComputedSHA1Slots.data();
+		uCodeSlots1DataLength = (uint32_t)strComputedSHA1Slots.size();
+	}
+	if (!bHaveSHA256Slots) {
+		pCodeSlots256Data = (uint8_t*)strComputedSHA256Slots.data();
+		uCodeSlots256DataLength = (uint32_t)strComputedSHA256Slots.size();
 	}
 
 	uint64_t uExecSegFlags = 0;
@@ -410,7 +498,7 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 			m_uCodeLength,
 			pCodeSlots1Data,
 			uCodeSlots1DataLength,
-			s_uExecSegLimit,
+			m_uExecSegLimit,
 			uExecSegFlags,
 			strBundleId,
 			pSignAsset->m_strTeamId,
@@ -432,7 +520,7 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		m_uCodeLength,
 		pCodeSlots256Data,
 		uCodeSlots256DataLength,
-		s_uExecSegLimit,
+		m_uExecSegLimit,
 		uExecSegFlags,
 		strBundleId,
 		pSignAsset->m_strTeamId,
@@ -578,8 +666,12 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 	string strCodeResourcesSHA1;
 	string strCodeResourcesSHA256;
 	if (strCodeResourcesData.empty()) {
-		strCodeResourcesSHA1.append(20, 0);
+		if (!pSignAsset->m_bSHA256Only) {
+			strCodeResourcesSHA1.append(20, 0);
+		}
 		strCodeResourcesSHA256.append(32, 0);
+	} else if (pSignAsset->m_bSHA256Only) {
+		ZSHA::SHA256(strCodeResourcesData, strCodeResourcesSHA256);
 	} else {
 		ZSHA::SHA(strCodeResourcesData, strCodeResourcesSHA1, strCodeResourcesSHA256);
 	}
