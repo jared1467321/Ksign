@@ -6,30 +6,30 @@
 //
 
 import SwiftUI
-import Zip
+import ASignArchiveKit
 import NimbleViews
 
 struct ArchiveView: View {
-	// Was `.DefaultCompression`, which was never what actually happened.
+	// The old UI defaulted to standard compression, which was never what actually happened.
 	// `@AppStorage` only writes its default once the control is touched, and
 	// `ArchiveHandler.getCompressionLevel()` reads the key with
-	// `UserDefaults.integer(forKey:)` — which returns 0, i.e. `.NoCompression`,
+	// `UserDefaults.integer(forKey:)` — which returns 0, i.e. no compression,
 	// for a key that was never written. So this screen claimed "Default"
 	// while installs were archiving uncompressed. Uncompressed is the right
 	// behaviour for a payload going over loopback or USB, so the label moves
 	// to match the behaviour rather than the other way round.
-	@AppStorage("Feather.compressionLevel") private var _compressionLevel: Int = ZipCompression.NoCompression.rawValue
+	@AppStorage("Feather.compressionLevel") private var _compressionLevel: Int = ASignArchiveCompression.none.rawValue
 	@AppStorage("Feather.useShareSheetForArchiving") private var _useShareSheet: Bool = true
 	@AppStorage("Feather.useLastExportLocation") private var _useLastExportLocation: Bool = false
-	@AppStorage("Feather.extractionLibrary") private var _extractionLibrary: String = "Zip"
+	@AppStorage("Feather.extractionLibrary") private var _extractionLibrary: String = ArchiveExtractionLibrary.miniZip
     
     var body: some View {
 		NBList(.localized("Archive & Extraction")) {
 			Section {
 				Picker(.localized("Compression Level"), systemImage: "archivebox", selection: $_compressionLevel) {
-					ForEach(ZipCompression.allCases, id: \.rawValue) { level in
+					ForEach(ASignArchiveCompression.allCases, id: \.rawValue) { level in
 						// Tagged with the raw value, not the case. The binding is an
-						// `Int`, so tagging with `ZipCompression` meant no tag ever
+						// `Int`, so tagging with the enum itself meant no tag ever
 						// matched the selection and the picker couldn't be changed.
 						Text(level.label).tag(level.rawValue)
 					}
@@ -55,8 +55,12 @@ struct ArchiveView: View {
                     }
                 }
             } footer: {
-                Text(.localized("Choose which library to use for extracting archives. ZIPFoundation is recommended for large files or when Zip is not working."))
+                Text("minizip-ng is the default archive engine. ZIPFoundation remains available as an alternative compatibility engine.")
             }
+		}
+		.onAppear {
+			ArchiveExtractionLibrary.migrateStoredPreference()
+			_extractionLibrary = ArchiveExtractionLibrary.normalized(_extractionLibrary)
 		}
     }
 }
