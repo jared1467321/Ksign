@@ -17,7 +17,7 @@
 		3346F8492DC6D64800C7D508 /* NimbleJSON in Frameworks */ = {isa = PBXBuildFile; productRef = 3346F8482DC6D64800C7D508 /* NimbleJSON */; };
 		33693A082DC8BF5B00730215 /* AltSourceKit in Frameworks */ = {isa = PBXBuildFile; productRef = 33693A072DC8BF5B00730215 /* AltSourceKit */; };
 		336D43982DB7454A00206400 /* MobileCoreServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 336D43972DB7454A00206400 /* MobileCoreServices.framework */; };
-		3371F7322DA9ECDD00281AC6 /* Zip in Frameworks */ = {isa = PBXBuildFile; productRef = 3371F7312DA9ECDD00281AC6 /* Zip */; };
+		A51000012F5A000000000001 /* ASignArchiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = A51000022F5A000000000002 /* ASignArchiveKit */; };
 		33CF13392DB5ACFB0021D4C5 /* SWCompression in Frameworks */ = {isa = PBXBuildFile; productRef = 33CF13382DB5ACFB0021D4C5 /* SWCompression */; };
 		C42CC1AD2F4370F20064A4A2 /* IDevice in Frameworks */ = {isa = PBXBuildFile; productRef = C42CC1AC2F4370F20064A4A2 /* IDevice */; };
 		C42CC1AF2F4370F20064A4A2 /* IDeviceSwift in Frameworks */ = {isa = PBXBuildFile; productRef = C42CC1AE2F4370F20064A4A2 /* IDeviceSwift */; };
@@ -119,7 +119,7 @@
 				330F69012DC03DF500D8C35D /* NimbleExtensions in Frameworks */,
 				33CF13392DB5ACFB0021D4C5 /* SWCompression in Frameworks */,
 				33693A082DC8BF5B00730215 /* AltSourceKit in Frameworks */,
-				3371F7322DA9ECDD00281AC6 /* Zip in Frameworks */,
+				A51000012F5A000000000001 /* ASignArchiveKit in Frameworks */,
 				330F69032DC03DF500D8C35D /* NimbleViews in Frameworks */,
 				3305BBAC2DB8944200660D45 /* Vapor in Frameworks */,
 				3346F83B2DC6C6D100C7D508 /* NukeUI in Frameworks */,
@@ -208,7 +208,7 @@
 			);
 			name = Ksign;
 			packageProductDependencies = (
-				3371F7312DA9ECDD00281AC6 /* Zip */,
+				A51000022F5A000000000002 /* ASignArchiveKit */,
 				33CF13382DB5ACFB0021D4C5 /* SWCompression */,
 				3305BBAB2DB8944200660D45 /* Vapor */,
 				330F68FB2DBF7C8600D8C35D /* NimbleExtensions */,
@@ -303,7 +303,7 @@
 			mainGroup = 3379C1B02DA869A1004372DA;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				3371F6F52DA9EBA500281AC6 /* XCRemoteSwiftPackageReference "Zip" */,
+				A51000032F5A000000000003 /* XCLocalSwiftPackageReference "ASignArchiveKit" */,
 				33CF13372DB5ACFB0021D4C5 /* XCRemoteSwiftPackageReference "SWCompression" */,
 				3305BBAA2DB8944200660D45 /* XCRemoteSwiftPackageReference "vapor" */,
 				330F68FF2DC03DF400D8C35D /* XCLocalSwiftPackageReference "NimbleKit" */,
@@ -807,6 +807,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		A51000032F5A000000000003 /* XCLocalSwiftPackageReference "ASignArchiveKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ASignArchiveKit;
+		};
 		330F68FF2DC03DF400D8C35D /* XCLocalSwiftPackageReference "NimbleKit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = NimbleKit;
@@ -840,14 +844,6 @@
 			requirement = {
 				kind = exactVersion;
 				version = 12.8.0;
-			};
-		};
-		3371F6F52DA9EBA500281AC6 /* XCRemoteSwiftPackageReference "Zip" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/marmelroy/Zip";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.2;
 			};
 		};
 		339776052DC9D05C00642FFB /* XCRemoteSwiftPackageReference "LicensePlist" */ = {
@@ -923,10 +919,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = AltSourceKit;
 		};
-		3371F7312DA9ECDD00281AC6 /* Zip */ = {
+		A51000022F5A000000000002 /* ASignArchiveKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 3371F6F52DA9EBA500281AC6 /* XCRemoteSwiftPackageReference "Zip" */;
-			productName = Zip;
+			productName = ASignArchiveKit;
 		};
 		339776062DC9D0F800642FFB /* LicensePlistBuildTool */ = {
 			isa = XCSwiftPackageProductDependency;
