@@ -6,11 +6,10 @@
 //
 
 import Foundation
-import ZsignSwift
+import Zsign
 import UIKit
 
 final class ZsignHandler {
-    var hadError: Error?
 	private var _appUrl: URL
 	private var _options: Options
 	private var _certificate: CertificatePair?
@@ -43,7 +42,7 @@ final class ZsignHandler {
 			throw SigningFileHandlerError.missingCertifcate
 		}
 		
-        let _ = Zsign.sign(
+        guard Zsign.sign(
             appPath: _appUrl.relativePath,
             provisionPath: Storage.shared.getFile(.provision, from: cert)?.path ?? "",
             p12Path: Storage.shared.getFile(.certificate, from: cert)?.path ?? "",
@@ -52,26 +51,24 @@ final class ZsignHandler {
             customIdentifier: _options.appIdentifier ?? "",
             customName: _options.appName ?? "",
             customVersion: _options.appVersion ?? "",
-            removeProvision: !_options.removeProvisioning,
-            completion: { _, error in
-                self.hadError = error
-            }
-        )
+            removeProvision: !_options.removeProvisioning
+        ) else {
+            throw SigningFileHandlerError.signFailed
+        }
     }
 	
 	func adhocSign() async throws {
-        let _ = Zsign.sign(
+        guard Zsign.sign(
 			appPath: _appUrl.relativePath,
 			entitlementsPath: _options.appEntitlementsFile?.path ?? "",
 			customIdentifier: _options.appIdentifier ?? "",
 			customName: _options.appName ?? "",
 			customVersion: _options.appVersion ?? "",
 			adhoc: true,
-            removeProvision: !_options.removeProvisioning,
-            completion: { _, error in
-                self.hadError = error
-            }
-        )
+            removeProvision: !_options.removeProvisioning
+        ) else {
+            throw SigningFileHandlerError.signFailed
+        }
              
 	}
 }
