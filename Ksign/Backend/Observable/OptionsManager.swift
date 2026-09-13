@@ -102,7 +102,7 @@ struct Options: Codable, Equatable {
     var onlyModify: Bool
 	/// If Ksign copy things should start in the last used location instead of Documents dir
 	var useLastExportLocation: Bool?
-	/// If Ksign should use Zip or ZIPFoundation
+	/// If Ksign should use minizip-ng or ZIPFoundation
 	var extractionLibrary: String?
     /// Modifies app to support liquid glass
     var experiment_supportLiquidGlass: Bool
@@ -154,7 +154,7 @@ struct Options: Codable, Equatable {
 		removeApp: false,
         onlyModify: false,
 		useLastExportLocation: false,
-		extractionLibrary: "Zip",
+		extractionLibrary: ArchiveExtractionLibrary.miniZip,
         experiment_supportLiquidGlass: false,
 		experiment_disableLiquidGlass: false,
         experiment_replaceSubstrateWithEllekit: false,
@@ -169,7 +169,7 @@ struct Options: Codable, Equatable {
 		injectFolder: .frameworks
 	)
 	// extraction library values
-	static let extractionLibraryValues = ["Zip", "ZIPFoundation"]
+	static let extractionLibraryValues = [ArchiveExtractionLibrary.miniZip, ArchiveExtractionLibrary.zipFoundation]
 	// duplicate values are not recommended!
 	/// Default values for `appAppearance`
 	static let appAppearanceValues = ["Default", "Light", "Dark"]
