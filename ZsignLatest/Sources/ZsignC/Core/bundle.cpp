@@ -105,6 +105,44 @@ void ZBundle::EnsureIndexedFile(const string& strFile)
 	}
 }
 
+static bool IsPathWithinFolder(const string& strPath, const string& strFolder)
+{
+	if (strPath.size() < strFolder.size() || 0 != strPath.compare(0, strFolder.size(), strFolder)) {
+		return false;
+	}
+	if (strPath.size() == strFolder.size()) {
+		return true;
+	}
+	char ch = strPath[strFolder.size()];
+	return ('/' == ch || '\\' == ch);
+}
+
+static bool IsMobileInstallationWatchPlaceholderBundle(const string& strBundlePath)
+{
+	if (!ZFile::IsPathSuffix(strBundlePath, ".app") && !ZFile::IsPathSuffix(strBundlePath, ".appex")) {
+		return false;
+	}
+
+	// TestFlight/App Store delivery can contain synthetic watch bundles under
+	// com.apple.WatchPlaceholder. Their Info.plist deliberately names a
+	// CFBundleExecutable (usually "Executable") even though no Mach-O exists.
+	// Require both the container path and Apple's MI placeholder marker so a
+	// genuinely broken ordinary app/extension still fails signing normally.
+	string strNormalizedPath = strBundlePath;
+	replace(strNormalizedPath.begin(), strNormalizedPath.end(), '\\', '/');
+	const string strWatchPlaceholder = "com.apple.WatchPlaceholder/";
+	if (string::npos == strNormalizedPath.find("/" + strWatchPlaceholder) &&
+		0 != strNormalizedPath.rfind(strWatchPlaceholder, 0)) {
+		return false;
+	}
+
+	jvalue jvInfo;
+	if (!jvInfo.read_plist_from_file("%s/Info.plist", strBundlePath.c_str())) {
+		return false;
+	}
+	return jvInfo.has("CF_MIPlaceholderConstructorVersion");
+}
+
 bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 {
 	// The app tree is indexed once and reused by both object discovery and
@@ -115,8 +153,29 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 		}
 	}
 
+	vector<string> placeholderBundles;
+	for (const string& strPath : m_indexedFolders) {
+		if (IsMobileInstallationWatchPlaceholderBundle(strPath)) {
+			placeholderBundles.push_back(strPath);
+			string strRelativePath = strPath.substr(m_strAppFolder.size() + 1);
+			ZLog::PrintV(">>> Skip MobileInstallation Watch placeholder: %s\n", strRelativePath.c_str());
+		}
+	}
+
+	auto isInsidePlaceholder = [&](const string& strPath) {
+		for (const string& strPlaceholder : placeholderBundles) {
+			if (IsPathWithinFolder(strPath, strPlaceholder)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
 	vector<string> allBundles;
 	for (const string& strPath : m_indexedFolders) {
+		if (isInsidePlaceholder(strPath)) {
+			continue;
+		}
 		if (ZFile::IsPathSuffix(strPath, ".app") ||
 			ZFile::IsPathSuffix(strPath, ".appex") ||
 			ZFile::IsPathSuffix(strPath, ".framework") ||
@@ -142,6 +201,11 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 	}
 
 	for (const string& strPath : m_indexedFiles) {
+		// Preserve MobileInstallation watch placeholders byte-for-byte as parent
+		// resources. They are metadata bundles, not independently signable code.
+		if (isInsidePlaceholder(strPath)) {
+			continue;
+		}
 		if (string::npos != strPath.find(".dSYM") ||
 			string::npos != strPath.find("_WatchKitStub")) {
 			continue;
