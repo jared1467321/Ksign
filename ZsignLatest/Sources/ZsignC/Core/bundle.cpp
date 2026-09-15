@@ -3,6 +3,36 @@
 #include "macho.h"
 #include "sys/stat.h"
 #include "sys/types.h"
+#ifndef _WIN32
+#include <unistd.h>
+#include <limits.h>
+#endif
+
+static bool GetSymbolicLinkTarget(const string& strPath, string& strTarget)
+{
+#ifdef _WIN32
+	(void)strPath;
+	strTarget.clear();
+	return false;
+#else
+	struct stat st = { 0 };
+	if (0 != lstat(strPath.c_str(), &st) || !S_ISLNK(st.st_mode)) {
+		strTarget.clear();
+		return false;
+	}
+
+	size_t bufferSize = (st.st_size > 0) ? (size_t)st.st_size + 1 : (size_t)PATH_MAX + 1;
+	vector<char> buffer(bufferSize, 0);
+	ssize_t length = readlink(strPath.c_str(), buffer.data(), buffer.size() - 1);
+	if (length < 0) {
+		strTarget.clear();
+		return false;
+	}
+
+	strTarget.assign(buffer.data(), (size_t)length);
+	return true;
+#endif
+}
 
 ZBundle::ZBundle()
 {
@@ -211,6 +241,11 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 			continue;
 		}
 
+		string strLinkTarget;
+		if (GetSymbolicLinkTarget(strPath, strLinkTarget)) {
+			continue;
+		}
+
 		bool bMachO = false;
 		FILE* fp = NULL;
 #ifdef _WIN32
@@ -255,7 +290,8 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		if (strPath.size() <= strPrefix.size() || 0 != strPath.compare(0, strPrefix.size(), strPrefix)) {
 			continue;
 		}
-		if (!ZFile::IsFileExists(strPath.c_str())) {
+		string strLinkTarget;
+		if (!ZFile::IsFileExists(strPath.c_str()) && !GetSymbolicLinkTarget(strPath, strLinkTarget)) {
 			continue;
 		}
 
@@ -281,6 +317,8 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		string key;
 		string sha1;
 		string sha256;
+		bool isSymlink = false;
+		string symlinkTarget;
 	};
 
 	vector<ResourceHash> hashes;
@@ -295,6 +333,8 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 		ResourceHash item;
 		item.key = strKey;
+		string strFile = strFolder + "/" + strKey;
+		item.isSymlink = GetSymbolicLinkTarget(strFile, item.symlinkTarget);
 		hashes.push_back(std::move(item));
 	}
 
@@ -304,6 +344,9 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	const size_t workerCount = (hashes.size() >= 8) ? ZUtil::GetWorkerCount(hashes.size()) : 1;
 	if (workerCount <= 1) {
 		for (ResourceHash& item : hashes) {
+			if (item.isSymlink) {
+				continue;
+			}
 			string strFile = strFolder + "/" + item.key;
 			ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
 		}
@@ -319,6 +362,9 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 						break;
 					}
 					ResourceHash& item = hashes[index];
+					if (item.isSymlink) {
+						continue;
+					}
 					string strFile = strFolder + "/" + item.key;
 					ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
 				}
@@ -349,6 +395,18 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 		if (ZFile::IsPathSuffix(strKey, ".DS_Store") || "Info.plist" == strKey || "PkgInfo" == strKey) {
 			bomit2 = true;
+		}
+
+		if (item.isSymlink) {
+			// Apple's V2 resource envelope seals the symbolic link itself, not the
+			// bytes reached by following it. V1 only contains regular files.
+			if (!bomit2) {
+				jvCodeRes["files2"][strKey]["symlink"] = item.symlinkTarget;
+				if (string::npos != strKey.rfind(".lproj/")) {
+					jvCodeRes["files2"][strKey]["optional"] = true;
+				}
+			}
+			continue;
 		}
 
 		if (!bomit1) {
