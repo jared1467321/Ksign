@@ -73,6 +73,14 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var maxConcurrentIPAVaultDownloads = 3
     private var ipavaultStreamsPerFile = 5
 
+    // Live Activity batch accounting is intentionally separate from
+    // `pendingIPAVaultDownloads` / `activeIPAVaultDownloadIDs`. Those collections
+    // only describe work that has not finished yet, while the compact island needs
+    // a stable denominator and a count of IPAs that made it all the way through
+    // assembly and into Downloads.
+    private var ipavaultActivityItemIDs: Set<String> = []
+    private var completedIPAVaultActivityItemIDs: Set<String> = []
+
     private var ipavaultChunksRootURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("KsignIPAVault", isDirectory: true)
@@ -209,6 +217,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                         totalBytes: file.size
                     )
                 )
+                self.ipavaultActivityItemIDs.insert(item.id.uuidString)
             }
 
             self.updateIPAVaultKeepAliveState()
@@ -252,9 +261,22 @@ class IPADownloadManager: NSObject, ObservableObject {
         let hasWork = !pendingIPAVaultDownloads.isEmpty || !activeIPAVaultDownloadIDs.isEmpty
 
         if hasWork {
-            BackgroundAudioManager.shared.claim(.ipaVaultDownloads)
-
             if #available(iOS 16.2, *) {
+                // Seed the report before claiming audio. `claim` immediately mirrors
+                // its owners into ActivityKit, so doing this first guarantees the
+                // activity is born with a compact n/n label instead of briefly
+                // falling back to the long owner name ("IPA Vault downloads").
+                let total = ipavaultActivityItemIDs.count
+                let completed = completedIPAVaultActivityItemIDs
+                    .intersection(ipavaultActivityItemIDs)
+                    .count
+
+                KeepAliveActivityController.shared.report(
+                    .ipaVaultDownloads,
+                    completed: completed,
+                    total: total > 0 ? total : nil
+                )
+
                 let isFinishing = !activeIPAVaultDownloadIDs.isEmpty &&
                     activeIPAVaultDownloadIDs.allSatisfy { ipavaultJobs[$0]?.assembling == true }
                 KeepAliveActivityController.shared.report(
@@ -262,11 +284,18 @@ class IPADownloadManager: NSObject, ObservableObject {
                     detail: isFinishing ? "Finishing IPA Vault downloads" : "Downloading from IPA Vault"
                 )
             }
+
+            BackgroundAudioManager.shared.claim(.ipaVaultDownloads)
         } else {
             if #available(iOS 16.2, *) {
                 KeepAliveActivityController.shared.clearReport(.ipaVaultDownloads)
             }
             BackgroundAudioManager.shared.release(.ipaVaultDownloads)
+
+            // The report has been withdrawn, so the next independently queued IPA
+            // Vault batch must start at 0/n rather than inheriting the prior batch.
+            ipavaultActivityItemIDs.removeAll()
+            completedIPAVaultActivityItemIDs.removeAll()
         }
     }
     
@@ -301,6 +330,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         if let index = pendingIPAVaultDownloads.firstIndex(where: { $0.itemID == itemID }) {
             pendingIPAVaultDownloads.remove(at: index)
             downloadItems.removeAll { $0.id.uuidString == itemID }
+            ipavaultActivityItemIDs.remove(itemID)
+            completedIPAVaultActivityItemIDs.remove(itemID)
             pumpIPAVaultDownloadQueue()
             updateIPAVaultKeepAliveState()
             return true
@@ -314,6 +345,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
         activeIPAVaultDownloadIDs.remove(itemID)
         downloadItems.removeAll { $0.id.uuidString == itemID }
+        ipavaultActivityItemIDs.remove(itemID)
+        completedIPAVaultActivityItemIDs.remove(itemID)
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultKeepAliveState()
@@ -600,6 +633,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 item.bytesDownloaded = job.totalBytes
                 downloadItems[index] = item
 
+                completedIPAVaultActivityItemIDs.insert(itemID)
                 ipavaultJobs.removeValue(forKey: itemID)
                 activeIPAVaultDownloadIDs.remove(itemID)
                 try? FileManager.default.removeItem(at: job.directory)
@@ -625,6 +659,8 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         activeIPAVaultDownloadIDs.remove(itemID)
         downloadItems.removeAll { $0.id.uuidString == itemID }
+        ipavaultActivityItemIDs.remove(itemID)
+        completedIPAVaultActivityItemIDs.remove(itemID)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultKeepAliveState()
     }
