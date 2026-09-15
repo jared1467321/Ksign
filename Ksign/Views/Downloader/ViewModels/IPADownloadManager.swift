@@ -461,13 +461,22 @@ class IPADownloadManager: NSObject, ObservableObject {
         guard !job.assembling else { return }
         job.assembling = true
 
+        // All network chunks are on disk now, but rebuilding the final IPA can
+        // still take long enough for iOS to suspend us with the screen locked.
+        // Use a counted owner because several IPA Vault jobs may enter this
+        // finishing stage at the same time; each one releases only its own hold.
+        BackgroundAudioManager.shared.begin(.ipaVaultFinishing)
+
         let itemID = job.itemID
         let directory = job.directory
         let chunks = job.chunks
         let totalBytes = job.totalBytes
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                BackgroundAudioManager.shared.end(.ipaVaultFinishing)
+                return
+            }
 
             let result: Result<URL, Error>
             do {
@@ -482,7 +491,11 @@ class IPADownloadManager: NSObject, ObservableObject {
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.finishIPAVaultAssembly(itemID: itemID, result: result)
+                guard let self = self else {
+                    BackgroundAudioManager.shared.end(.ipaVaultFinishing)
+                    return
+                }
+                self.finishIPAVaultAssembly(itemID: itemID, result: result)
             }
         }
     }
@@ -531,6 +544,8 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private func finishIPAVaultAssembly(itemID: String, result: Result<URL, Error>) {
         dispatchPrecondition(condition: .onQueue(.main))
+        defer { BackgroundAudioManager.shared.end(.ipaVaultFinishing) }
+
         guard let job = ipavaultJobs[itemID] else {
             if case .success(let temporaryURL) = result {
                 try? FileManager.default.removeItem(at: temporaryURL)
