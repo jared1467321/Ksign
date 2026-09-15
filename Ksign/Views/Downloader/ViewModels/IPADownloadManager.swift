@@ -19,8 +19,16 @@ class IPADownloadManager: NSObject, ObservableObject {
         downloadItems.filter { $0.isFinished }
     }
     
+    private struct QueuedIPAVaultDownload {
+        let itemID: String
+        let url: URL
+    }
+
     private var urlSession: URLSession!
     private var activeDownloads: [Int: String] = [:] // taskIdentifier -> downloadItem.id
+    private var queuedIPAVaultDownloads: [QueuedIPAVaultDownload] = []
+    private var activeIPAVaultDownloadIDs: Set<String> = []
+    private var maxConcurrentIPAVaultDownloads = 3
     
     override init() {
         super.init()
@@ -33,6 +41,10 @@ class IPADownloadManager: NSObject, ObservableObject {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300 // 5 minutes
         config.waitsForConnectivity = true
+        // IPA Vault exposes up to 8 concurrent file transfers. Keep the
+        // session ceiling at least that high; the IPA Vault queue below
+        // enforces the user-selected limit itself.
+        config.httpMaximumConnectionsPerHost = 8
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
 
@@ -83,41 +95,130 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
     }
     
-    func startDownload(url: URL, filename: String) {
+    @discardableResult
+    func startDownload(url: URL, filename: String) -> UUID {
+        let item = makeDownloadItem(url: url, filename: filename)
+
+        DispatchQueue.main.async {
+            self.downloadItems.insert(item, at: 0)
+        }
+
+        startTask(for: item, url: url, isIPAVaultManaged: false)
+        return item.id
+    }
+
+    /// Enqueues a group of IPA Vault downloads while enforcing the user-selected
+    /// concurrent-file limit. Ordinary Ksign downloads still start immediately.
+    func enqueueIPAVaultDownloads(_ files: [(url: URL, filename: String)], maxConcurrent: Int) {
+        let work = {
+            self.setIPAVaultConcurrentDownloads(maxConcurrent)
+
+            for file in files {
+                let item = self.makeDownloadItem(url: file.url, filename: file.filename)
+                self.downloadItems.insert(item, at: 0)
+                self.queuedIPAVaultDownloads.append(
+                    QueuedIPAVaultDownload(itemID: item.id.uuidString, url: file.url)
+                )
+            }
+
+            self.pumpIPAVaultDownloadQueue()
+        }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    func setIPAVaultConcurrentDownloads(_ value: Int) {
+        let work = {
+            self.maxConcurrentIPAVaultDownloads = min(8, max(1, value))
+            self.pumpIPAVaultDownloadQueue()
+        }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    func cancelDownload(_ item: DownloadItem) {
+        let itemID = item.id.uuidString
+
+        let cancelQueued = {
+            if let queuedIndex = self.queuedIPAVaultDownloads.firstIndex(where: { $0.itemID == itemID }) {
+                self.queuedIPAVaultDownloads.remove(at: queuedIndex)
+                self.downloadItems.removeAll { $0.id == item.id }
+                self.pumpIPAVaultDownloadQueue()
+                return true
+            }
+            return false
+        }
+
+        if Thread.isMainThread {
+            if cancelQueued() { return }
+        } else {
+            var wasQueued = false
+            DispatchQueue.main.sync {
+                wasQueued = cancelQueued()
+            }
+            if wasQueued { return }
+        }
+
+        urlSession.getAllTasks { tasks in
+            if let task = tasks.first(where: { task in
+                self.activeDownloads[task.taskIdentifier] == itemID
+            }) {
+                task.cancel()
+            }
+        }
+    }
+
+    private func makeDownloadItem(url: URL, filename: String) -> DownloadItem {
         let fileManager = FileManager.default
         let downloadDirectory = URL.documentsDirectory.appendingPathComponent("Downloads")
         try? fileManager.createDirectoryIfNeeded(at: downloadDirectory)
-        
-        let destinationURL = downloadDirectory.appendingPathComponent(filename)
-        let item = DownloadItem(
+
+        return DownloadItem(
             title: filename,
             url: url,
-            localPath: destinationURL,
+            localPath: downloadDirectory.appendingPathComponent(filename),
             isFinished: false,
             progress: 0,
             totalBytes: 0,
             bytesDownloaded: 0
         )
-        
-        DispatchQueue.main.async {
-            self.downloadItems.insert(item, at: 0)
-        }
-        
+    }
+
+    private func startTask(for item: DownloadItem, url: URL, isIPAVaultManaged: Bool) {
         let task = urlSession.downloadTask(with: url)
-        
-        activeDownloads[task.taskIdentifier] = item.id.uuidString
-        
+        let itemID = item.id.uuidString
+        activeDownloads[task.taskIdentifier] = itemID
+        if isIPAVaultManaged {
+            activeIPAVaultDownloadIDs.insert(itemID)
+        }
         task.resume()
     }
-    
-    
-    func cancelDownload(_ item: DownloadItem) {
-        urlSession.getAllTasks { tasks in
-            if let task = tasks.first(where: { task in
-                self.activeDownloads[task.taskIdentifier] == item.id.uuidString
-            }) {
-                task.cancel()
+
+    private func pumpIPAVaultDownloadQueue() {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        while activeIPAVaultDownloadIDs.count < maxConcurrentIPAVaultDownloads,
+              !queuedIPAVaultDownloads.isEmpty {
+            let queued = queuedIPAVaultDownloads.removeFirst()
+            guard let item = downloadItems.first(where: { $0.id.uuidString == queued.itemID && !$0.isFinished }) else {
+                continue
             }
+            startTask(for: item, url: queued.url, isIPAVaultManaged: true)
+        }
+    }
+
+    private func finishIPAVaultManagedDownloadIfNeeded(itemID: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if activeIPAVaultDownloadIDs.remove(itemID) != nil {
+            pumpIPAVaultDownloadQueue()
         }
     }
     
@@ -211,12 +312,17 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
                     self.downloadItems[index] = updatedItem
                 }
                 self.activeDownloads.removeValue(forKey: downloadTask.taskIdentifier)
+                self.finishIPAVaultManagedDownloadIfNeeded(itemID: downloadItemId)
             }
         } catch {
             print("Error saving downloaded file: \(error)")
             DispatchQueue.main.async { [weak self] in
-                self?.downloadItems.remove(at: index)
-                self?.activeDownloads.removeValue(forKey: downloadTask.taskIdentifier)
+                guard let self = self else { return }
+                if index < self.downloadItems.count {
+                    self.downloadItems.remove(at: index)
+                }
+                self.activeDownloads.removeValue(forKey: downloadTask.taskIdentifier)
+                self.finishIPAVaultManagedDownloadIfNeeded(itemID: downloadItemId)
             }
         }
     }
@@ -238,15 +344,23 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
     }
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            guard let downloadItemId = activeDownloads[task.taskIdentifier],
-                  let index = downloadItems.firstIndex(where: { $0.id.uuidString == downloadItemId }) else { return }
-            
+        guard let downloadItemId = activeDownloads[task.taskIdentifier] else { return }
+
+        if error != nil {
             DispatchQueue.main.async { [weak self] in
-                self?.downloadItems.remove(at: index)
-                self?.activeDownloads.removeValue(forKey: task.taskIdentifier)
+                guard let self = self else { return }
+                if let index = self.downloadItems.firstIndex(where: { $0.id.uuidString == downloadItemId }) {
+                    self.downloadItems.remove(at: index)
+                }
+                self.activeDownloads.removeValue(forKey: task.taskIdentifier)
+                self.finishIPAVaultManagedDownloadIfNeeded(itemID: downloadItemId)
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.activeDownloads.removeValue(forKey: task.taskIdentifier)
+                self.finishIPAVaultManagedDownloadIfNeeded(itemID: downloadItemId)
             }
         }
-        activeDownloads.removeValue(forKey: task.taskIdentifier)
     }
 }
