@@ -37,6 +37,7 @@ private struct IPAVaultLocalFile: Identifiable, Hashable {
 }
 
 private enum IPAVaultUploadState: Equatable {
+    case queued
     case uploading
     case completed
     case failed(String)
@@ -65,13 +66,16 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
 
     private var taskToJobID: [Int: UUID] = [:]
     private var samples: [UUID: (time: Date, bytes: Int64, speed: Double)] = [:]
+    private var queuedJobIDs: [UUID] = []
+    private var activeJobIDs: Set<UUID> = []
+    private var maxConcurrentFiles = 3
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 60 * 60
-        configuration.httpMaximumConnectionsPerHost = 4
+        configuration.httpMaximumConnectionsPerHost = 8
         return URLSession(configuration: configuration, delegate: self, delegateQueue: OperationQueue.main)
     }()
 
@@ -79,7 +83,14 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         super.init()
     }
 
-    func enqueue(_ files: [IPAVaultLocalFile], baseURL: URL) {
+    func setMaxConcurrentFiles(_ value: Int) {
+        maxConcurrentFiles = min(8, max(1, value))
+        pumpQueue()
+    }
+
+    func enqueue(_ files: [IPAVaultLocalFile], baseURL: URL, maxConcurrent: Int) {
+        setMaxConcurrentFiles(maxConcurrent)
+
         for file in files {
             let remoteURL = baseURL.appendingPathComponent(file.name, isDirectory: false)
             let id = UUID()
@@ -87,27 +98,29 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
                 id: id,
                 file: file,
                 remoteURL: remoteURL,
-                state: .uploading,
+                state: .queued,
                 bytesSent: 0,
                 totalBytes: file.size,
                 bytesPerSecond: 0
             )
             jobs.insert(job, at: 0)
-
-            var request = URLRequest(url: remoteURL)
-            request.httpMethod = "PUT"
-            request.timeoutInterval = 60 * 60
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-            request.setValue(String(file.size), forHTTPHeaderField: "Content-Length")
-
-            let task = session.uploadTask(with: request, fromFile: file.url)
-            taskToJobID[task.taskIdentifier] = id
-            samples[id] = (Date(), 0, 0)
-            task.resume()
+            queuedJobIDs.append(id)
         }
+
+        pumpQueue()
     }
 
     func cancel(_ id: UUID) {
+        if let queueIndex = queuedJobIDs.firstIndex(of: id) {
+            queuedJobIDs.remove(at: queueIndex)
+            if let jobIndex = jobs.firstIndex(where: { $0.id == id }) {
+                jobs[jobIndex].state = .cancelled
+                jobs[jobIndex].bytesPerSecond = 0
+            }
+            pumpQueue()
+            return
+        }
+
         guard let taskID = taskToJobID.first(where: { $0.value == id })?.key else { return }
         session.getAllTasks { tasks in
             tasks.first(where: { $0.taskIdentifier == taskID })?.cancel()
@@ -119,7 +132,11 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         let old = jobs[index]
         guard case .failed = old.state else { return }
         jobs.remove(at: index)
-        enqueue([old.file], baseURL: old.remoteURL.deletingLastPathComponent())
+        enqueue(
+            [old.file],
+            baseURL: old.remoteURL.deletingLastPathComponent(),
+            maxConcurrent: maxConcurrentFiles
+        )
     }
 
     func clearFinished() {
@@ -129,6 +146,32 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
             default: return false
             }
         }
+    }
+
+    private func pumpQueue() {
+        while activeJobIDs.count < maxConcurrentFiles, !queuedJobIDs.isEmpty {
+            let id = queuedJobIDs.removeFirst()
+            guard let index = jobs.firstIndex(where: { $0.id == id }),
+                  case .queued = jobs[index].state else { continue }
+            startUpload(at: index)
+        }
+    }
+
+    private func startUpload(at index: Int) {
+        let job = jobs[index]
+
+        var request = URLRequest(url: job.remoteURL)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 60 * 60
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(String(job.file.size), forHTTPHeaderField: "Content-Length")
+
+        let task = session.uploadTask(with: request, fromFile: job.file.url)
+        jobs[index].state = .uploading
+        taskToJobID[task.taskIdentifier] = job.id
+        activeJobIDs.insert(job.id)
+        samples[job.id] = (Date(), 0, 0)
+        task.resume()
     }
 
     func urlSession(
@@ -163,7 +206,11 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         guard let id = taskToJobID.removeValue(forKey: task.taskIdentifier),
               let index = jobs.firstIndex(where: { $0.id == id }) else { return }
 
-        defer { samples.removeValue(forKey: id) }
+        activeJobIDs.remove(id)
+        defer {
+            samples.removeValue(forKey: id)
+            pumpQueue()
+        }
 
         if let urlError = error as? URLError, urlError.code == .cancelled {
             jobs[index].state = .cancelled
@@ -202,6 +249,7 @@ struct IPAVaultView: View {
 
     @AppStorage("Ksign.IPAVault.serverURL") private var serverURL = "http://100.89.243.68:8765/"
     @AppStorage("Ksign.IPAVault.mode") private var modeRaw = IPAVaultMode.download.rawValue
+    @AppStorage("Ksign.IPAVault.concurrentFiles") private var concurrentFiles = 3
 
     @State private var remoteFiles: [IPAVaultRemoteFile] = []
     @State private var localFiles: [IPAVaultLocalFile] = []
@@ -211,6 +259,9 @@ struct IPAVaultView: View {
     @State private var errorMessage: String?
     @State private var statusMessage: String?
     @State private var showingSettings = false
+    @State private var pendingDelete: IPAVaultRemoteFile?
+    @State private var pendingBatchDelete: [IPAVaultRemoteFile] = []
+    @State private var deletingIDs: Set<String> = []
 
     private var mode: IPAVaultMode {
         IPAVaultMode(rawValue: modeRaw) ?? .download
@@ -272,13 +323,28 @@ struct IPAVaultView: View {
                 actionBar
             }
             .task {
+                let clamped = min(8, max(1, concurrentFiles))
+                if concurrentFiles != clamped {
+                    concurrentFiles = clamped
+                }
+                downloadManager.setIPAVaultConcurrentDownloads(clamped)
+                uploadManager.setMaxConcurrentFiles(clamped)
                 await refreshCurrentMode()
             }
             .onChange(of: modeRaw) { _ in
                 Task { await refreshCurrentMode() }
             }
+            .onChange(of: concurrentFiles) { value in
+                let clamped = min(8, max(1, value))
+                if value != clamped {
+                    concurrentFiles = clamped
+                    return
+                }
+                downloadManager.setIPAVaultConcurrentDownloads(clamped)
+                uploadManager.setMaxConcurrentFiles(clamped)
+            }
             .sheet(isPresented: $showingSettings) {
-                IPAVaultSettingsView(serverURL: $serverURL)
+                IPAVaultSettingsView(serverURL: $serverURL, concurrentFiles: $concurrentFiles)
             }
             .alert("IPA Vault", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -287,6 +353,42 @@ struct IPAVaultView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "Unknown error")
+            }
+            .confirmationDialog(
+                "Delete from Server?",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                presenting: pendingDelete
+            ) { file in
+                Button("Delete \(file.name)", role: .destructive) {
+                    Task { await deleteFromServer(file) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { file in
+                Text("This permanently removes \(file.name) from the VPS. A copy already downloaded to Ksign is not affected.")
+            }
+            .confirmationDialog(
+                pendingBatchDelete.count == 1 ? "Delete 1 File from Server?" : "Delete \(pendingBatchDelete.count) Files from Server?",
+                isPresented: Binding(
+                    get: { !pendingBatchDelete.isEmpty },
+                    set: { if !$0 { pendingBatchDelete.removeAll() } }
+                )
+            ) {
+                Button(
+                    pendingBatchDelete.count == 1 ? "Delete 1 File" : "Delete \(pendingBatchDelete.count) Files",
+                    role: .destructive
+                ) {
+                    let filesToDelete = pendingBatchDelete
+                    pendingBatchDelete.removeAll()
+                    Task { await deleteSelectedFromServer(filesToDelete) }
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingBatchDelete.removeAll()
+                }
+            } message: {
+                Text("This permanently removes the selected files from the VPS. Copies already downloaded to Ksign are not affected.")
             }
         }
     }
@@ -343,6 +445,18 @@ struct IPAVaultView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                if hasActiveDownload(for: file) {
+                                    errorMessage = "Cancel or finish this file’s active download before deleting it from the server."
+                                } else {
+                                    pendingDelete = file
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .disabled(deletingIDs.contains(file.id))
+                        }
                     }
                 } header: {
                     HStack {
@@ -437,18 +551,34 @@ struct IPAVaultView: View {
         if mode == .download && !selectedRemote.isEmpty {
             VStack(spacing: 0) {
                 Divider()
-                Button {
-                    downloadSelected()
-                } label: {
-                    Label(
-                        selectedRemote.count == 1 ? "Download 1" : "Download \(selectedRemote.count)",
-                        systemImage: "arrow.down.circle.fill"
-                    )
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                HStack(spacing: 10) {
+                    Button {
+                        downloadSelected()
+                    } label: {
+                        Label(
+                            selectedRemote.count == 1 ? "Download 1" : "Download \(selectedRemote.count)",
+                            systemImage: "arrow.down.circle.fill"
+                        )
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button(role: .destructive) {
+                        prepareBatchDelete()
+                    } label: {
+                        Label(
+                            selectedRemote.count == 1 ? "Delete 1" : "Delete \(selectedRemote.count)",
+                            systemImage: "trash.fill"
+                        )
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!deletingIDs.isDisjoint(with: selectedRemote))
                 }
-                .buttonStyle(.borderedProminent)
                 .padding(.horizontal)
                 .padding(.vertical, 10)
                 .background(.bar)
@@ -493,9 +623,8 @@ struct IPAVaultView: View {
 
     private func downloadSelected() {
         let selected = remoteFiles.filter { selectedRemote.contains($0.id) }
-        for file in selected {
-            downloadManager.startDownload(url: file.url, filename: file.name)
-        }
+        let downloads = selected.map { (url: $0.url, filename: $0.name) }
+        downloadManager.enqueueIPAVaultDownloads(downloads, maxConcurrent: concurrentFiles)
         statusMessage = selected.count == 1
             ? "Added 1 IPA to Ksign Downloads."
             : "Added \(selected.count) IPAs to Ksign Downloads."
@@ -508,8 +637,107 @@ struct IPAVaultView: View {
             return
         }
         let selected = localFiles.filter { selectedLocal.contains($0.id) }
-        uploadManager.enqueue(selected, baseURL: baseURL)
+        uploadManager.enqueue(selected, baseURL: baseURL, maxConcurrent: concurrentFiles)
         selectedLocal.removeAll()
+    }
+
+    private func hasActiveDownload(for file: IPAVaultRemoteFile) -> Bool {
+        downloadManager.downloadItems.contains { item in
+            !item.isFinished && item.url == file.url
+        }
+    }
+
+    private func prepareBatchDelete() {
+        let selected = remoteFiles.filter { selectedRemote.contains($0.id) }
+        guard !selected.isEmpty else { return }
+
+        let active = selected.filter { hasActiveDownload(for: $0) }
+        guard active.isEmpty else {
+            errorMessage = active.count == 1
+                ? "Cancel or finish the selected file’s active download before deleting it from the server."
+                : "Cancel or finish the \(active.count) selected files with active downloads before deleting this batch from the server."
+            return
+        }
+
+        pendingBatchDelete = selected
+    }
+
+    @MainActor
+    private func deleteFromServer(_ file: IPAVaultRemoteFile) async {
+        guard !deletingIDs.contains(file.id) else { return }
+        guard !hasActiveDownload(for: file) else {
+            errorMessage = "Cancel or finish this file’s active download before deleting it from the server."
+            return
+        }
+
+        deletingIDs.insert(file.id)
+        defer { deletingIDs.remove(file.id) }
+
+        do {
+            try await deleteRemoteFile(file)
+            remoteFiles.removeAll { $0.id == file.id }
+            selectedRemote.remove(file.id)
+            pendingDelete = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func deleteSelectedFromServer(_ files: [IPAVaultRemoteFile]) async {
+        guard !files.isEmpty else { return }
+
+        let active = files.filter { hasActiveDownload(for: $0) }
+        guard active.isEmpty else {
+            errorMessage = "One or more selected files now has an active download. Finish or cancel those downloads and try again."
+            return
+        }
+
+        var failures: [String] = []
+
+        for file in files {
+            guard !deletingIDs.contains(file.id) else { continue }
+            deletingIDs.insert(file.id)
+
+            do {
+                try await deleteRemoteFile(file)
+                remoteFiles.removeAll { $0.id == file.id }
+                selectedRemote.remove(file.id)
+            } catch {
+                failures.append(file.name)
+            }
+
+            deletingIDs.remove(file.id)
+        }
+
+        if !failures.isEmpty {
+            errorMessage = failures.count == 1
+                ? "Couldn’t delete \(failures[0]) from the server."
+                : "Couldn’t delete \(failures.count) selected files from the server."
+        }
+    }
+
+    private func deleteRemoteFile(_ file: IPAVaultRemoteFile) async throws {
+        var request = URLRequest(url: file.url)
+        request.httpMethod = "DELETE"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(
+                domain: "IPAVault",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The server returned an invalid response."]
+            )
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw NSError(
+                domain: "IPAVault",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Server returned HTTP \(http.statusCode)."]
+            )
+        }
     }
 
     @MainActor
@@ -628,6 +856,8 @@ private struct IPAVaultUploadRow: View {
 
     private var detail: String {
         switch job.state {
+        case .queued:
+            return "Queued"
         case .uploading:
             let sent = ByteCountFormatter.string(fromByteCount: job.bytesSent, countStyle: .file)
             let total = ByteCountFormatter.string(fromByteCount: job.totalBytes, countStyle: .file)
@@ -645,7 +875,7 @@ private struct IPAVaultUploadRow: View {
     @ViewBuilder
     private var control: some View {
         switch job.state {
-        case .uploading:
+        case .queued, .uploading:
             Button(role: .destructive) {
                 manager.cancel(job.id)
             } label: {
@@ -672,6 +902,7 @@ private struct IPAVaultUploadRow: View {
 private struct IPAVaultSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var serverURL: String
+    @Binding var concurrentFiles: Int
 
     var body: some View {
         NavigationStack {
@@ -684,7 +915,17 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("IPA Vault uses the nginx JSON directory listing for downloads and HTTP PUT for uploads.")
+                    Text("IPA Vault uses the nginx JSON directory listing for downloads, HTTP DELETE for server cleanup, and HTTP PUT for uploads.")
+                }
+
+                Section {
+                    Stepper(value: $concurrentFiles, in: 1...8) {
+                        LabeledContent("Concurrent files", value: "\(concurrentFiles)")
+                    }
+                } header: {
+                    Text("Transfers")
+                } footer: {
+                    Text("Applies to both IPA Vault downloads and uploads. Changing the value takes effect immediately for queued transfers; already-active files are allowed to finish.")
                 }
             }
             .navigationTitle("IPA Vault Settings")
