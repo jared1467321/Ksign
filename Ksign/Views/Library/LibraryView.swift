@@ -538,6 +538,10 @@ extension LibraryView {
         let maxConcurrent = 2
 
         Task {
+            let token = await MainActor.run {
+                DownloadManager.shared.beginImportBatch(count: urls.count)
+            }
+
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
 
@@ -546,7 +550,7 @@ extension LibraryView {
                 while next < initial {
                     let url = urls[next]
                     next += 1
-                    group.addTask { await Self._importOne(url) }
+                    group.addTask { await Self._importOne(url, token: token) }
                 }
 
                 // Each time one finishes, start the next one — so the number
@@ -555,22 +559,33 @@ extension LibraryView {
                     if next < urls.count {
                         let url = urls[next]
                         next += 1
-                        group.addTask { await Self._importOne(url) }
+                        group.addTask { await Self._importOne(url, token: token) }
                     }
                 }
+            }
+
+            await MainActor.run {
+                DownloadManager.shared.endImportBatch(token)
             }
         }
     }
 
     // Extracts a single IPA and adds it to the library. Static + using the
     // shared manager so the task-group closures don't capture the view.
-    private static func _importOne(_ url: URL) async {
+    private static func _importOne(_ url: URL, token: UUID) async {
         let manager = DownloadManager.shared
         let id = "FeatherManualDownload_\(UUID().uuidString)"
-        let dl = await MainActor.run { manager.startArchive(from: url, id: id) }
+        let dl = await MainActor.run { () -> Download in
+            manager.importDidStart(token)
+            return manager.startArchive(from: url, id: id)
+        }
 
         do {
-            try await manager.handlePachageFile(url: url, dl: dl)
+            try await manager.handlePachageFile(
+                url: url,
+                dl: dl,
+                liveActivityBatchToken: token
+            )
         } catch {
             await MainActor.run {
                 UIAlertController.showAlertWithOk(
