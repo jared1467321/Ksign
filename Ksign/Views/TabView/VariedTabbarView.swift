@@ -22,6 +22,7 @@ struct VariedTabbarView: View {
 			}
 
 			InstallDrawerView()
+			IPAVaultDrawerView()
 		}
 	}
 }
