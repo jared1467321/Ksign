@@ -197,5 +197,12 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Ksign IPA Vault connects to your private file server to browse, download, and upload IPA files.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
