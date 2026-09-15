@@ -114,6 +114,8 @@ struct LibraryView: View {
 	@State private var _selectedSigningAppPresenting: AnyApp?
 	@State private var _selectedInstallAppPresenting: AnyApp?
 	@State private var _selectedAppDylibsPresenting: AnyApp?
+	@State private var _cryptCheckExtractedReportURL: URL?
+	@State private var _cryptCheckExtractedRunning = false
 	@State private var _bulkSignRequest: BulkSignRequest?
 	@State private var _isImportingPresenting = false
 	@State private var _isDownloadingPresenting = false
@@ -190,6 +192,7 @@ struct LibraryView: View {
 									selectedSigningAppPresenting: $_selectedSigningAppPresenting,
 									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
 									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
+									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
 									isSelected: _selectedApps.contains(app.uuid ?? ""),
 									onToggleSelection: { _toggleSelection(for: app) }
 								)
@@ -207,6 +210,7 @@ struct LibraryView: View {
 									selectedSigningAppPresenting: $_selectedSigningAppPresenting,
 									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
 									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
+									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
 									isSelected: _selectedApps.contains(app.uuid ?? ""),
 									onToggleSelection: { _toggleSelection(for: app) }
 								)
@@ -299,6 +303,11 @@ struct LibraryView: View {
                         BulkExportProgressView(manager: _exportManager)
                     }
                     .transition(.opacity)
+                } else if _cryptCheckExtractedRunning {
+                    ProgressView("Running Crypt Check Extracted…")
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: _exportManager.isExporting)
@@ -326,6 +335,9 @@ struct LibraryView: View {
                 DylibsView(app: app.base)
 					.compatNavigationTransition(id: app.base.uuid ?? "", ns: _namespace)
 			}
+            .fullScreenCover(item: $_cryptCheckExtractedReportURL) { url in
+                CryptCheckExtractedReportView(reportURL: url)
+            }
 			.fullScreenCover(item: $_bulkSignRequest) { request in
 				BulkSigningView(apps: request.apps, signAndInstall: request.signAndInstall)
 				.compatNavigationTransition(id: request.id.uuidString, ns: _namespace)
@@ -517,6 +529,36 @@ extension LibraryView {
         _selectedApps.compactMap { id in
             (_importedApps.first(where: { $0.uuid == id }) as AppInfoPresentable?)
             ?? (_signedApps.first(where: { $0.uuid == id }) as AppInfoPresentable?)
+        }
+    }
+
+    private func _runCryptCheckExtracted(_ app: AppInfoPresentable) {
+        guard !_cryptCheckExtractedRunning else { return }
+        guard let appURL = Storage.shared.getAppDirectory(for: app) else {
+            UIAlertController.showAlertWithOk(
+                title: "Crypt Check Extracted",
+                message: "The extracted app bundle could not be located."
+            )
+            return
+        }
+
+        _cryptCheckExtractedRunning = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let reportURL = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
+                DispatchQueue.main.async {
+                    _cryptCheckExtractedRunning = false
+                    _cryptCheckExtractedReportURL = reportURL
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    _cryptCheckExtractedRunning = false
+                    UIAlertController.showAlertWithOk(
+                        title: "Crypt Check Extracted",
+                        message: error.localizedDescription
+                    )
+                }
+            }
         }
     }
 
