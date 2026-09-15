@@ -307,11 +307,23 @@ extension SigningView {
 #if DEBUG
 		LogsManager.shared.startCapture()
 #endif
+		if #available(iOS 16.2, *) {
+			KeepAliveActivityController.shared.clearReport(.signing)
+			KeepAliveActivityController.shared.report(.signing, completed: 0, total: 1)
+			KeepAliveActivityController.shared.report(.signing, fraction: nil)
+			KeepAliveActivityController.shared.report(.signing, detail: "Signing")
+		}
+
 		FR.signPackageFile(
 			app,
 			using: _temporaryOptions,
 			icon: appIcon,
-			certificate: _selectedCert()
+			certificate: _selectedCert(),
+			backgroundCompletion: { error in
+				guard #available(iOS 16.2, *) else { return }
+				KeepAliveActivityController.shared.report(.signing, completed: error == nil ? 1 : 0, total: 1)
+				KeepAliveActivityController.shared.report(.signing, detail: error == nil ? "Completed" : "Error")
+			}
 		) { [self] error in
 			if let error {
 				let ok = UIAlertAction(title: .localized("Dismiss"), style: .cancel) { _ in

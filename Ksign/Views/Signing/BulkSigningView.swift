@@ -266,11 +266,15 @@ extension BulkSigningView {
 		Task.detached(priority: .userInitiated) {
 			var failures: [(name: String, error: Error)] = []
 			var successCount = 0
-			var processed = 0
 
-			// Seed the Dynamic Island bar before the first worker claims signing.
+			// Seed one stable batch report before the first worker claims signing.
+			// The Live Activity intentionally tracks only terminal app completions;
+			// copy/modify/clean phase chatter stays in the foreground UI/logs.
 			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.clearReport(.signing)
 				KeepAliveActivityController.shared.report(.signing, completed: 0, total: configs.count)
+				KeepAliveActivityController.shared.report(.signing, fraction: nil)
+				KeepAliveActivityController.shared.report(.signing, detail: "Signing")
 			}
 
 			// The batch coordinator itself must stay off MainActor. The signing worker
@@ -278,16 +282,23 @@ extension BulkSigningView {
 			// the UI completion callback, so the first app could finish in the
 			// background while the loop remained parked until foreground.
 			for config in configs {
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
-				}
-
 				do {
 					try await Self._signOne(
 						config,
 						certificate: certificate
 					)
 					successCount += 1
+
+					// Publish the terminal success before any optional MainActor cleanup.
+					// Deleting the original app is UI/storage housekeeping and should not
+					// be able to hold the Island count hostage while backgrounded.
+					if #available(iOS 16.2, *) {
+						KeepAliveActivityController.shared.report(
+							.signing,
+							completed: successCount,
+							total: configs.count
+						)
+					}
 
 					if config.options.removeApp, !config.app.isSigned {
 						await MainActor.run {
@@ -297,13 +308,12 @@ extension BulkSigningView {
 				} catch {
 					failures.append((config.app.name ?? .localized("Unknown"), error))
 				}
-
-				processed += 1
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.report(.signing, completed: processed, total: configs.count)
-				}
 			}
 
+			if #available(iOS 16.2, *) {
+				KeepAliveActivityController.shared.report(.signing, completed: successCount, total: configs.count)
+				KeepAliveActivityController.shared.report(.signing, detail: failures.isEmpty ? "Completed" : "Error")
+			}
 
 			await MainActor.run {
 				if !failures.isEmpty {
