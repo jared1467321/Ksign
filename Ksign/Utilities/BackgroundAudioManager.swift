@@ -66,6 +66,7 @@ final class BackgroundAudioManager {
 		case importing
 		case signing
 		case extracting
+		case ipaVaultFinishing
 
 		// What the log and the badge call it. The raw value is an identity key,
 		// not something to show a person.
@@ -78,6 +79,7 @@ final class BackgroundAudioManager {
 			case .importing:		return "Import"
 			case .signing:			return "Signing"
 			case .extracting:		return "Extraction"
+			case .ipaVaultFinishing:	return "IPA Vault finishing"
 			}
 		}
 	}
