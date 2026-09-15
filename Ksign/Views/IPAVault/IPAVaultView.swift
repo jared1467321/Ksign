@@ -1,5 +1,102 @@
 import SwiftUI
 
+// Owns IPA Vault presentation at the tab-bar root, just like InstallSession
+// owns the install drawer. Dismissing the sheet is a minimize operation: the
+// Vault remains active and can be reopened from the floating pill.
+final class IPAVaultPresentationSession: ObservableObject {
+    static let shared = IPAVaultPresentationSession()
+
+    @Published var isPresented = false
+    @Published private(set) var isActive = false
+
+    // One downloader instance is shared by the Downloads tab and the Vault
+    // drawer so minimizing/reopening never swaps out the active transfer owner.
+    let downloadManager = IPADownloadManager()
+
+    private init() {}
+
+    func open() {
+        isActive = true
+        isPresented = true
+    }
+
+    func minimize() {
+        guard isActive else { return }
+        isPresented = false
+    }
+
+    func close() {
+        isPresented = false
+        isActive = false
+    }
+}
+
+// Root-level host for IPA Vault. Its behavior intentionally mirrors the
+// multi-install drawer: swipe/dismiss the sheet to minimize it, then tap the
+// pill above the tab bar to bring it back. Closing is explicit.
+struct IPAVaultDrawerView: View {
+    @ObservedObject private var session = IPAVaultPresentationSession.shared
+    @ObservedObject private var installSession = InstallSession.shared
+
+    private let _tabBarInset: CGFloat = 58
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if session.isActive, !session.isPresented {
+                _pill
+                    .padding(.bottom, _pillBottomInset)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: session.isPresented)
+        .animation(.easeInOut(duration: 0.25), value: session.isActive)
+        .sheet(isPresented: $session.isPresented, onDismiss: {
+            session.minimize()
+        }) {
+            IPAVaultView(downloadManager: session.downloadManager)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    // If the install drawer is minimized at the same time, stack the Vault pill
+    // above it instead of letting the two controls occupy the same hit target.
+    private var _pillBottomInset: CGFloat {
+        installSession.isActive && !installSession.isDrawerPresented
+            ? _tabBarInset + 52
+            : _tabBarInset
+    }
+
+    private var _pill: some View {
+        Button {
+            session.open()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.badge.wifi")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+
+                Text("IPA Vault")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.primary)
+
+                Image(systemName: "chevron.up")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.16), radius: 10, y: 3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Restore IPA Vault")
+    }
+}
 private enum IPAVaultMode: String, CaseIterable, Identifiable {
     case download
     case upload
@@ -37,7 +134,6 @@ private struct IPAVaultLocalFile: Identifiable, Hashable {
 }
 
 private enum IPAVaultUploadState: Equatable {
-    case queued
     case uploading
     case completed
     case failed(String)
@@ -66,16 +162,13 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
 
     private var taskToJobID: [Int: UUID] = [:]
     private var samples: [UUID: (time: Date, bytes: Int64, speed: Double)] = [:]
-    private var queuedJobIDs: [UUID] = []
-    private var activeJobIDs: Set<UUID> = []
-    private var maxConcurrentFiles = 3
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 60 * 60
-        configuration.httpMaximumConnectionsPerHost = 8
+        configuration.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: configuration, delegate: self, delegateQueue: OperationQueue.main)
     }()
 
@@ -83,14 +176,7 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         super.init()
     }
 
-    func setMaxConcurrentFiles(_ value: Int) {
-        maxConcurrentFiles = min(8, max(1, value))
-        pumpQueue()
-    }
-
-    func enqueue(_ files: [IPAVaultLocalFile], baseURL: URL, maxConcurrent: Int) {
-        setMaxConcurrentFiles(maxConcurrent)
-
+    func enqueue(_ files: [IPAVaultLocalFile], baseURL: URL) {
         for file in files {
             let remoteURL = baseURL.appendingPathComponent(file.name, isDirectory: false)
             let id = UUID()
@@ -98,29 +184,27 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
                 id: id,
                 file: file,
                 remoteURL: remoteURL,
-                state: .queued,
+                state: .uploading,
                 bytesSent: 0,
                 totalBytes: file.size,
                 bytesPerSecond: 0
             )
             jobs.insert(job, at: 0)
-            queuedJobIDs.append(id)
-        }
 
-        pumpQueue()
+            var request = URLRequest(url: remoteURL)
+            request.httpMethod = "PUT"
+            request.timeoutInterval = 60 * 60
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue(String(file.size), forHTTPHeaderField: "Content-Length")
+
+            let task = session.uploadTask(with: request, fromFile: file.url)
+            taskToJobID[task.taskIdentifier] = id
+            samples[id] = (Date(), 0, 0)
+            task.resume()
+        }
     }
 
     func cancel(_ id: UUID) {
-        if let queueIndex = queuedJobIDs.firstIndex(of: id) {
-            queuedJobIDs.remove(at: queueIndex)
-            if let jobIndex = jobs.firstIndex(where: { $0.id == id }) {
-                jobs[jobIndex].state = .cancelled
-                jobs[jobIndex].bytesPerSecond = 0
-            }
-            pumpQueue()
-            return
-        }
-
         guard let taskID = taskToJobID.first(where: { $0.value == id })?.key else { return }
         session.getAllTasks { tasks in
             tasks.first(where: { $0.taskIdentifier == taskID })?.cancel()
@@ -132,11 +216,7 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         let old = jobs[index]
         guard case .failed = old.state else { return }
         jobs.remove(at: index)
-        enqueue(
-            [old.file],
-            baseURL: old.remoteURL.deletingLastPathComponent(),
-            maxConcurrent: maxConcurrentFiles
-        )
+        enqueue([old.file], baseURL: old.remoteURL.deletingLastPathComponent())
     }
 
     func clearFinished() {
@@ -146,32 +226,6 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
             default: return false
             }
         }
-    }
-
-    private func pumpQueue() {
-        while activeJobIDs.count < maxConcurrentFiles, !queuedJobIDs.isEmpty {
-            let id = queuedJobIDs.removeFirst()
-            guard let index = jobs.firstIndex(where: { $0.id == id }),
-                  case .queued = jobs[index].state else { continue }
-            startUpload(at: index)
-        }
-    }
-
-    private func startUpload(at index: Int) {
-        let job = jobs[index]
-
-        var request = URLRequest(url: job.remoteURL)
-        request.httpMethod = "PUT"
-        request.timeoutInterval = 60 * 60
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.setValue(String(job.file.size), forHTTPHeaderField: "Content-Length")
-
-        let task = session.uploadTask(with: request, fromFile: job.file.url)
-        jobs[index].state = .uploading
-        taskToJobID[task.taskIdentifier] = job.id
-        activeJobIDs.insert(job.id)
-        samples[job.id] = (Date(), 0, 0)
-        task.resume()
     }
 
     func urlSession(
@@ -206,11 +260,7 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         guard let id = taskToJobID.removeValue(forKey: task.taskIdentifier),
               let index = jobs.firstIndex(where: { $0.id == id }) else { return }
 
-        activeJobIDs.remove(id)
-        defer {
-            samples.removeValue(forKey: id)
-            pumpQueue()
-        }
+        defer { samples.removeValue(forKey: id) }
 
         if let urlError = error as? URLError, urlError.code == .cancelled {
             jobs[index].state = .cancelled
@@ -245,11 +295,13 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
 struct IPAVaultView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var downloadManager: IPADownloadManager
+    @ObservedObject private var presentationSession = IPAVaultPresentationSession.shared
     @ObservedObject private var uploadManager = IPAVaultUploadManager.shared
 
     @AppStorage("Ksign.IPAVault.serverURL") private var serverURL = "http://100.89.243.68:8765/"
     @AppStorage("Ksign.IPAVault.mode") private var modeRaw = IPAVaultMode.download.rawValue
     @AppStorage("Ksign.IPAVault.concurrentFiles") private var concurrentFiles = 3
+    @AppStorage("Ksign.IPAVault.streamsPerFile") private var streamsPerFile = 5
 
     @State private var remoteFiles: [IPAVaultRemoteFile] = []
     @State private var localFiles: [IPAVaultLocalFile] = []
@@ -296,8 +348,20 @@ struct IPAVaultView: View {
             .navigationTitle("IPA Vault")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Done") { dismiss() }
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .accessibilityLabel("Minimize IPA Vault")
+
+                    Button {
+                        presentationSession.close()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("Close IPA Vault")
                 }
 
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -323,12 +387,18 @@ struct IPAVaultView: View {
                 actionBar
             }
             .task {
-                let clamped = min(8, max(1, concurrentFiles))
-                if concurrentFiles != clamped {
-                    concurrentFiles = clamped
+                let clampedConcurrent = min(8, max(1, concurrentFiles))
+                let clampedStreams = min(10, max(1, streamsPerFile))
+                if concurrentFiles != clampedConcurrent {
+                    concurrentFiles = clampedConcurrent
                 }
-                downloadManager.setIPAVaultConcurrentDownloads(clamped)
-                uploadManager.setMaxConcurrentFiles(clamped)
+                if streamsPerFile != clampedStreams {
+                    streamsPerFile = clampedStreams
+                }
+                downloadManager.configureIPAVaultDownloads(
+                    maxConcurrent: clampedConcurrent,
+                    streamsPerFile: clampedStreams
+                )
                 await refreshCurrentMode()
             }
             .onChange(of: modeRaw) { _ in
@@ -340,11 +410,28 @@ struct IPAVaultView: View {
                     concurrentFiles = clamped
                     return
                 }
-                downloadManager.setIPAVaultConcurrentDownloads(clamped)
-                uploadManager.setMaxConcurrentFiles(clamped)
+                downloadManager.configureIPAVaultDownloads(
+                    maxConcurrent: clamped,
+                    streamsPerFile: streamsPerFile
+                )
+            }
+            .onChange(of: streamsPerFile) { value in
+                let clamped = min(10, max(1, value))
+                if value != clamped {
+                    streamsPerFile = clamped
+                    return
+                }
+                downloadManager.configureIPAVaultDownloads(
+                    maxConcurrent: concurrentFiles,
+                    streamsPerFile: clamped
+                )
             }
             .sheet(isPresented: $showingSettings) {
-                IPAVaultSettingsView(serverURL: $serverURL, concurrentFiles: $concurrentFiles)
+                IPAVaultSettingsView(
+                    serverURL: $serverURL,
+                    concurrentFiles: $concurrentFiles,
+                    streamsPerFile: $streamsPerFile
+                )
             }
             .alert("IPA Vault", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -623,8 +710,12 @@ struct IPAVaultView: View {
 
     private func downloadSelected() {
         let selected = remoteFiles.filter { selectedRemote.contains($0.id) }
-        let downloads = selected.map { (url: $0.url, filename: $0.name) }
-        downloadManager.enqueueIPAVaultDownloads(downloads, maxConcurrent: concurrentFiles)
+        let downloads = selected.map { (url: $0.url, filename: $0.name, size: $0.size) }
+        downloadManager.enqueueIPAVaultDownloads(
+            downloads,
+            maxConcurrent: concurrentFiles,
+            streamsPerFile: streamsPerFile
+        )
         statusMessage = selected.count == 1
             ? "Added 1 IPA to Ksign Downloads."
             : "Added \(selected.count) IPAs to Ksign Downloads."
@@ -637,7 +728,7 @@ struct IPAVaultView: View {
             return
         }
         let selected = localFiles.filter { selectedLocal.contains($0.id) }
-        uploadManager.enqueue(selected, baseURL: baseURL, maxConcurrent: concurrentFiles)
+        uploadManager.enqueue(selected, baseURL: baseURL)
         selectedLocal.removeAll()
     }
 
@@ -856,8 +947,6 @@ private struct IPAVaultUploadRow: View {
 
     private var detail: String {
         switch job.state {
-        case .queued:
-            return "Queued"
         case .uploading:
             let sent = ByteCountFormatter.string(fromByteCount: job.bytesSent, countStyle: .file)
             let total = ByteCountFormatter.string(fromByteCount: job.totalBytes, countStyle: .file)
@@ -875,7 +964,7 @@ private struct IPAVaultUploadRow: View {
     @ViewBuilder
     private var control: some View {
         switch job.state {
-        case .queued, .uploading:
+        case .uploading:
             Button(role: .destructive) {
                 manager.cancel(job.id)
             } label: {
@@ -903,6 +992,7 @@ private struct IPAVaultSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var serverURL: String
     @Binding var concurrentFiles: Int
+    @Binding var streamsPerFile: Int
 
     var body: some View {
         NavigationStack {
@@ -915,17 +1005,24 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("IPA Vault uses the nginx JSON directory listing for downloads, HTTP DELETE for server cleanup, and HTTP PUT for uploads.")
+                    Text("IPA Vault uses the nginx JSON directory listing and HTTP Range requests for downloads, and HTTP PUT for uploads.")
                 }
 
-                Section {
+                Section("Downloads") {
                     Stepper(value: $concurrentFiles, in: 1...8) {
                         LabeledContent("Concurrent files", value: "\(concurrentFiles)")
                     }
-                } header: {
-                    Text("Transfers")
+
+                    Stepper(value: $streamsPerFile, in: 1...10) {
+                        LabeledContent("Streams per file", value: "\(streamsPerFile)")
+                    }
+
+                    LabeledContent(
+                        "Maximum active streams",
+                        value: "\(concurrentFiles * streamsPerFile)"
+                    )
                 } footer: {
-                    Text("Applies to both IPA Vault downloads and uploads. Changing the value takes effect immediately for queued transfers; already-active files are allowed to finish.")
+                    Text("These settings apply only to IPA Vault Server → iPhone downloads into Ksign's Downloads folder. They do not change uploads, imports, or signing. Active downloads keep the stream layout they started with.")
                 }
             }
             .navigationTitle("IPA Vault Settings")
