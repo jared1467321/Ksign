@@ -9,6 +9,12 @@ final class IPAVaultPresentationSession: ObservableObject {
     @Published var isPresented = false
     @Published private(set) var isActive = false
 
+    // Selection belongs to the Vault session, not the sheet view. SwiftUI
+    // destroys/recreates the sheet when it is minimized/restored, so keeping
+    // these IDs here preserves the user's working set across that lifecycle.
+    @Published var selectedRemoteIDs: Set<String> = []
+    @Published var selectedLocalIDs: Set<String> = []
+
     // One downloader instance is shared by the Downloads tab and the Vault
     // drawer so minimizing/reopening never swaps out the active transfer owner.
     let downloadManager = IPADownloadManager()
@@ -305,8 +311,6 @@ struct IPAVaultView: View {
 
     @State private var remoteFiles: [IPAVaultRemoteFile] = []
     @State private var localFiles: [IPAVaultLocalFile] = []
-    @State private var selectedRemote: Set<String> = []
-    @State private var selectedLocal: Set<String> = []
     @State private var loading = false
     @State private var errorMessage: String?
     @State private var statusMessage: String?
@@ -517,8 +521,8 @@ struct IPAVaultView: View {
                             toggleRemote(file)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: selectedRemote.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selectedRemote.contains(file.id) ? Color.accentColor : Color.secondary)
+                                Image(systemName: presentationSession.selectedRemoteIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(presentationSession.selectedRemoteIDs.contains(file.id) ? Color.accentColor : Color.secondary)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(file.name)
                                         .foregroundStyle(.primary)
@@ -549,11 +553,11 @@ struct IPAVaultView: View {
                     HStack {
                         Text("Server")
                         Spacer()
-                        Button(selectedRemote.count == remoteFiles.count ? "Clear" : "Select All") {
-                            if selectedRemote.count == remoteFiles.count {
-                                selectedRemote.removeAll()
+                        Button(presentationSession.selectedRemoteIDs.count == remoteFiles.count ? "Clear" : "Select All") {
+                            if presentationSession.selectedRemoteIDs.count == remoteFiles.count {
+                                presentationSession.selectedRemoteIDs.removeAll()
                             } else {
-                                selectedRemote = Set(remoteFiles.map(\.id))
+                                presentationSession.selectedRemoteIDs = Set(remoteFiles.map(\.id))
                             }
                         }
                     }
@@ -596,8 +600,8 @@ struct IPAVaultView: View {
                             toggleLocal(file)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: selectedLocal.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selectedLocal.contains(file.id) ? Color.accentColor : Color.secondary)
+                                Image(systemName: presentationSession.selectedLocalIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(presentationSession.selectedLocalIDs.contains(file.id) ? Color.accentColor : Color.secondary)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(file.name)
                                         .foregroundStyle(.primary)
@@ -618,11 +622,11 @@ struct IPAVaultView: View {
                     Text("Ksign Downloads")
                     Spacer()
                     if !localFiles.isEmpty {
-                        Button(selectedLocal.count == localFiles.count ? "Clear" : "Select All") {
-                            if selectedLocal.count == localFiles.count {
-                                selectedLocal.removeAll()
+                        Button(presentationSession.selectedLocalIDs.count == localFiles.count ? "Clear" : "Select All") {
+                            if presentationSession.selectedLocalIDs.count == localFiles.count {
+                                presentationSession.selectedLocalIDs.removeAll()
                             } else {
-                                selectedLocal = Set(localFiles.map(\.id))
+                                presentationSession.selectedLocalIDs = Set(localFiles.map(\.id))
                             }
                         }
                     }
@@ -635,7 +639,7 @@ struct IPAVaultView: View {
 
     @ViewBuilder
     private var actionBar: some View {
-        if mode == .download && !selectedRemote.isEmpty {
+        if mode == .download && !presentationSession.selectedRemoteIDs.isEmpty {
             VStack(spacing: 0) {
                 Divider()
                 HStack(spacing: 10) {
@@ -643,7 +647,7 @@ struct IPAVaultView: View {
                         downloadSelected()
                     } label: {
                         Label(
-                            selectedRemote.count == 1 ? "Download 1" : "Download \(selectedRemote.count)",
+                            presentationSession.selectedRemoteIDs.count == 1 ? "Download 1" : "Download \(presentationSession.selectedRemoteIDs.count)",
                             systemImage: "arrow.down.circle.fill"
                         )
                         .font(.headline)
@@ -656,7 +660,7 @@ struct IPAVaultView: View {
                         prepareBatchDelete()
                     } label: {
                         Label(
-                            selectedRemote.count == 1 ? "Delete 1" : "Delete \(selectedRemote.count)",
+                            presentationSession.selectedRemoteIDs.count == 1 ? "Delete 1" : "Delete \(presentationSession.selectedRemoteIDs.count)",
                             systemImage: "trash.fill"
                         )
                         .font(.headline)
@@ -664,20 +668,20 @@ struct IPAVaultView: View {
                         .padding(.vertical, 12)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!deletingIDs.isDisjoint(with: selectedRemote))
+                    .disabled(!deletingIDs.isDisjoint(with: presentationSession.selectedRemoteIDs))
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 10)
                 .background(.bar)
             }
-        } else if mode == .upload && !selectedLocal.isEmpty {
+        } else if mode == .upload && !presentationSession.selectedLocalIDs.isEmpty {
             VStack(spacing: 0) {
                 Divider()
                 Button {
                     uploadSelected()
                 } label: {
                     Label(
-                        selectedLocal.count == 1 ? "Send 1" : "Send \(selectedLocal.count)",
+                        presentationSession.selectedLocalIDs.count == 1 ? "Send 1" : "Send \(presentationSession.selectedLocalIDs.count)",
                         systemImage: "arrow.up.circle.fill"
                     )
                     .font(.headline)
@@ -693,23 +697,23 @@ struct IPAVaultView: View {
     }
 
     private func toggleRemote(_ file: IPAVaultRemoteFile) {
-        if selectedRemote.contains(file.id) {
-            selectedRemote.remove(file.id)
+        if presentationSession.selectedRemoteIDs.contains(file.id) {
+            presentationSession.selectedRemoteIDs.remove(file.id)
         } else {
-            selectedRemote.insert(file.id)
+            presentationSession.selectedRemoteIDs.insert(file.id)
         }
     }
 
     private func toggleLocal(_ file: IPAVaultLocalFile) {
-        if selectedLocal.contains(file.id) {
-            selectedLocal.remove(file.id)
+        if presentationSession.selectedLocalIDs.contains(file.id) {
+            presentationSession.selectedLocalIDs.remove(file.id)
         } else {
-            selectedLocal.insert(file.id)
+            presentationSession.selectedLocalIDs.insert(file.id)
         }
     }
 
     private func downloadSelected() {
-        let selected = remoteFiles.filter { selectedRemote.contains($0.id) }
+        let selected = remoteFiles.filter { presentationSession.selectedRemoteIDs.contains($0.id) }
         let downloads = selected.map { (url: $0.url, filename: $0.name, size: $0.size) }
         downloadManager.enqueueIPAVaultDownloads(
             downloads,
@@ -719,7 +723,7 @@ struct IPAVaultView: View {
         statusMessage = selected.count == 1
             ? "Added 1 IPA to Ksign Downloads."
             : "Added \(selected.count) IPAs to Ksign Downloads."
-        selectedRemote.removeAll()
+        presentationSession.selectedRemoteIDs.removeAll()
     }
 
     private func uploadSelected() {
@@ -727,9 +731,9 @@ struct IPAVaultView: View {
             errorMessage = "Enter a valid server URL in IPA Vault settings."
             return
         }
-        let selected = localFiles.filter { selectedLocal.contains($0.id) }
+        let selected = localFiles.filter { presentationSession.selectedLocalIDs.contains($0.id) }
         uploadManager.enqueue(selected, baseURL: baseURL)
-        selectedLocal.removeAll()
+        presentationSession.selectedLocalIDs.removeAll()
     }
 
     private func hasActiveDownload(for file: IPAVaultRemoteFile) -> Bool {
@@ -739,7 +743,7 @@ struct IPAVaultView: View {
     }
 
     private func prepareBatchDelete() {
-        let selected = remoteFiles.filter { selectedRemote.contains($0.id) }
+        let selected = remoteFiles.filter { presentationSession.selectedRemoteIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
 
         let active = selected.filter { hasActiveDownload(for: $0) }
@@ -767,7 +771,7 @@ struct IPAVaultView: View {
         do {
             try await deleteRemoteFile(file)
             remoteFiles.removeAll { $0.id == file.id }
-            selectedRemote.remove(file.id)
+            presentationSession.selectedRemoteIDs.remove(file.id)
             pendingDelete = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -793,7 +797,7 @@ struct IPAVaultView: View {
             do {
                 try await deleteRemoteFile(file)
                 remoteFiles.removeAll { $0.id == file.id }
-                selectedRemote.remove(file.id)
+                presentationSession.selectedRemoteIDs.remove(file.id)
             } catch {
                 failures.append(file.name)
             }
@@ -880,7 +884,7 @@ struct IPAVaultView: View {
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-            selectedRemote = selectedRemote.intersection(Set(remoteFiles.map(\.id)))
+            presentationSession.selectedRemoteIDs = presentationSession.selectedRemoteIDs.intersection(Set(remoteFiles.map(\.id)))
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -911,7 +915,7 @@ struct IPAVaultView: View {
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-            selectedLocal = selectedLocal.intersection(Set(localFiles.map(\.id)))
+            presentationSession.selectedLocalIDs = presentationSession.selectedLocalIDs.intersection(Set(localFiles.map(\.id)))
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
