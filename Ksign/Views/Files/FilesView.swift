@@ -380,8 +380,14 @@ struct FilesView: View {
                 }
             }
         ) { result in
+            let succeeded: Bool
+            switch result {
+            case .success: succeeded = true
+            case .failure: succeeded = false
+            }
+            ExtractManager.shared.finish(item: extractItem, succeeded: succeeded)
+
             DispatchQueue.main.async {
-                
                 switch result {
                 case .success:
                     withAnimation {
@@ -391,7 +397,6 @@ struct FilesView: View {
                 case .failure:
                     UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Whoops!, something went wrong when extracting the file. \nMaybe try switching the extraction library in the settings?"))
                 }
-                ExtractManager.shared.finish(item: extractItem)
             }
         }
     }
@@ -409,8 +414,14 @@ struct FilesView: View {
                 }
             }
         ) { result in
+            let succeeded: Bool
+            switch result {
+            case .success: succeeded = true
+            case .failure: succeeded = false
+            }
+            ExtractManager.shared.finish(item: extractItem, succeeded: succeeded)
+
             DispatchQueue.main.async {
-                
                 switch result {
                 case .success(let ipaFileName):
                     self.viewModel.loadFiles()
@@ -418,7 +429,6 @@ struct FilesView: View {
                 case .failure(let error):
                     UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Failed to package IPA: \(error.localizedDescription)"))
                 }
-                ExtractManager.shared.finish(item: extractItem)
             }
         }
     }
