@@ -22,6 +22,7 @@ struct DownloaderView: View {
     @State private var fileToExport: URL?
     @State private var cryptCheckReportURL: URL?
     @State private var cryptCheckRunning = false
+    @State private var isIPAVaultPresented = false
     @State private var _searchText = ""
 
     @State private var _isEditMode: EditMode = .inactive
@@ -155,6 +156,14 @@ struct DownloaderView: View {
                         }
                     } else {
                         Button {
+                            isIPAVaultPresented = true
+                        } label: {
+                            Image(systemName: "externaldrive.badge.wifi")
+                                .foregroundStyle(NBHalloween.accent)
+                        }
+                        .accessibilityLabel("IPA Vault")
+
+                        Button {
                             _addDownload()
                         } label: {
                             Image(systemName: "plus")
@@ -180,6 +189,9 @@ struct DownloaderView: View {
                 // reorder the list while an import is running.
                 guard !libraryManager.isImporting else { return }
                 downloadManager.loadDownloadedIPAs()
+            }
+            .fullScreenCover(isPresented: $isIPAVaultPresented) {
+                IPAVaultView(downloadManager: downloadManager)
             }
             .fullScreenCover(item: $webViewURL) { url in
                 webViewSheet(url: url)
