@@ -19,8 +19,15 @@ enum FR {
 	static func handlePackageFile(
 		_ ipa: URL,
 		download: Download? = nil,
+		trackLiveActivity: Bool = true,
+		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
+		let liveActivityToken = trackLiveActivity ? UUID() : nil
+		if let liveActivityToken {
+			ImportLiveActivityReporter.shared.begin(token: liveActivityToken, total: 1)
+		}
+
 		Task.detached {
 			await TempMaintenance.shared.beginOperation()
 
@@ -45,12 +52,26 @@ enum FR {
                 
 				try? await handler.clean()
 				await TempMaintenance.shared.endOperation()
+
+				// Publish the terminal result from the worker before hopping to
+				// MainActor. Batch/Live Activity state then keeps advancing even when
+				// the foreground UI is heavily throttled in the background.
+				if let liveActivityToken {
+					ImportLiveActivityReporter.shared.finishItem(token: liveActivityToken, succeeded: true)
+					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
+				}
+				backgroundCompletion?(nil)
 				await MainActor.run {
 					completion(nil)
 				}
 			} catch {
 				try? await handler.clean()
 				await TempMaintenance.shared.endOperation()
+				if let liveActivityToken {
+					ImportLiveActivityReporter.shared.finishItem(token: liveActivityToken, succeeded: false)
+					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
+				}
+				backgroundCompletion?(error)
 				await MainActor.run {
 					completion(error)
 				}
@@ -83,26 +104,13 @@ enum FR {
 			}
 			handler.appIcon = icon
 
-			// These reports originate on the signing worker, not MainActor. The
-			// expanded Live Activity can therefore change phase while SwiftUI is
-			// backgrounded, and the compact island keeps showing the batch count.
-			func stage(_ name: String?) {
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.report(.signing, detail: name)
-				}
-			}
-
 			do {
-				stage("Copying")
 				try await handler.copy()
 
-				stage("Modifying")
 				try await handler.modify()
 
-				stage("Finishing")
 				try? await handler.clean()
 
-				stage(nil)
 				await TempMaintenance.shared.endOperation()
 
 				// Batch count reporting happens before the UI callback so it cannot
@@ -113,7 +121,6 @@ enum FR {
 				}
 			} catch {
 				try? await handler.clean()
-				stage(nil)
 				await TempMaintenance.shared.endOperation()
 				backgroundCompletion?(error)
 				DispatchQueue.main.async {
