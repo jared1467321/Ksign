@@ -1008,7 +1008,7 @@ private struct IPAVaultSettingsView: View {
                     Text("IPA Vault uses the nginx JSON directory listing and HTTP Range requests for downloads, and HTTP PUT for uploads.")
                 }
 
-                Section("Downloads") {
+                Section {
                     Stepper(value: $concurrentFiles, in: 1...8) {
                         LabeledContent("Concurrent files", value: "\(concurrentFiles)")
                     }
@@ -1021,6 +1021,8 @@ private struct IPAVaultSettingsView: View {
                         "Maximum active streams",
                         value: "\(concurrentFiles * streamsPerFile)"
                     )
+                } header: {
+                    Text("Downloads")
                 } footer: {
                     Text("These settings apply only to IPA Vault Server → iPhone downloads into Ksign's Downloads folder. They do not change uploads, imports, or signing. Active downloads keep the stream layout they started with.")
                 }
