@@ -539,7 +539,11 @@ private extension DownloaderView {
         }
 
         do {
-            try await manager.handlePachageFile(url: file.url, dl: dl)
+            try await manager.handlePachageFile(
+                url: file.url,
+                dl: dl,
+                liveActivityBatchToken: token
+            )
         } catch {
             await MainActor.run {
                 UIAlertController.showAlertWithOk(
