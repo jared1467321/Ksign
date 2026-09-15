@@ -12,7 +12,7 @@ import NimbleViews
 import UIKit
 
 struct DownloaderView: View {
-    @StateObject private var downloadManager = IPADownloadManager()
+    @ObservedObject private var downloadManager = IPAVaultPresentationSession.shared.downloadManager
     @StateObject private var libraryManager = DownloadManager.shared
     
     @State private var selectedItem: DownloadItem?
@@ -22,7 +22,6 @@ struct DownloaderView: View {
     @State private var fileToExport: URL?
     @State private var cryptCheckReportURL: URL?
     @State private var cryptCheckRunning = false
-    @State private var isIPAVaultPresented = false
     @State private var _searchText = ""
 
     @State private var _isEditMode: EditMode = .inactive
@@ -156,7 +155,7 @@ struct DownloaderView: View {
                         }
                     } else {
                         Button {
-                            isIPAVaultPresented = true
+                            IPAVaultPresentationSession.shared.open()
                         } label: {
                             Image(systemName: "externaldrive.badge.wifi")
                                 .foregroundStyle(NBHalloween.accent)
@@ -189,9 +188,6 @@ struct DownloaderView: View {
                 // reorder the list while an import is running.
                 guard !libraryManager.isImporting else { return }
                 downloadManager.loadDownloadedIPAs()
-            }
-            .fullScreenCover(isPresented: $isIPAVaultPresented) {
-                IPAVaultView(downloadManager: downloadManager)
             }
             .fullScreenCover(item: $webViewURL) { url in
                 webViewSheet(url: url)
