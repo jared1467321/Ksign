@@ -82,17 +82,16 @@ class DownloadManager: NSObject, ObservableObject {
 
 	private var _importBatches: [UUID: Int] = [:]
 
-	// The size each batch started at. `_importBatches` only holds what's left
-	// to *start*, which is enough for the "+N" header but not for a bar — a bar
-	// needs a denominator that doesn't shrink as work begins.
-	private var _importTotals: [UUID: Int] = [:]
+	// Live Activity progress is intentionally mirrored by a worker-safe
+	// reporter below. The UI backlog remains MainActor-owned, while the pill's
+	// completion events do not depend on MainActor being scheduled in background.
 
 	@MainActor
 	func beginImportBatch(count: Int) -> UUID {
 		let token = UUID()
 		if count > 0 {
 			_importBatches[token] = count
-			_importTotals[token] = count
+			ImportLiveActivityReporter.shared.begin(token: token, total: count)
 		}
 		_recomputeQueuedImports()
 		return token
@@ -111,50 +110,19 @@ class DownloadManager: NSObject, ObservableObject {
 		_recomputeQueuedImports()
 	}
 
-	// Safety net for the batch finishing early — cancellation, or a task that
-	// never got to run. Without it the header could sit on a count forever.
+	// Safety net for cancellation / early termination. The reporter turns any
+	// unaccounted items into failures and leaves the final n/total state visible
+	// for the audio manager's linger period.
 	@MainActor
 	func endImportBatch(_ token: UUID) {
-		guard _importBatches.removeValue(forKey: token) != nil else { return }
-		_importTotals.removeValue(forKey: token)
+		_importBatches.removeValue(forKey: token)
 		_recomputeQueuedImports()
+		ImportLiveActivityReporter.shared.end(token: token)
 	}
 
 	@MainActor
 	private func _recomputeQueuedImports() {
 		queuedImportCount = _importBatches.values.reduce(0, +)
-		_reportImportProgress()
-	}
-
-	// Feeds the Dynamic Island bar during a batch import.
-	//
-	// "Finished" is the total minus what hasn't started yet minus what's
-	// running right now — `_importDepth` is exactly the number in flight, so
-	// this counts genuinely completed apps rather than started ones. Using
-	// started would read 35 of 35 while two were still extracting.
-	@MainActor
-	private func _reportImportProgress() {
-		guard #available(iOS 16.2, *) else { return }
-
-		let total = _importTotals.values.reduce(0, +)
-
-		// Batch fully drained: clear the denominators so the next one starts
-		// clean, and withdraw the figure.
-		if total == 0 || (_importBatches.isEmpty && _importDepth == 0) {
-			_importTotals.removeAll()
-			KeepAliveActivityController.shared.report(.importing, completed: 0, total: nil)
-			KeepAliveActivityController.shared.report(.importing, detail: nil)
-			return
-		}
-
-		let remaining = _importBatches.values.reduce(0, +)
-		let completed = max(0, total - remaining - _importDepth)
-
-		KeepAliveActivityController.shared.report(.importing, completed: completed, total: total)
-		// The count only moves when an entire IPA finishes. Keep one stable phase
-		// label so the widget's elapsed timer continues advancing during a long
-		// extraction instead of looking frozen.
-		KeepAliveActivityController.shared.report(.importing, detail: "Importing")
 	}
 
 	// MARK: - Import-in-progress flag
@@ -179,12 +147,10 @@ class DownloadManager: NSObject, ObservableObject {
 
 	@MainActor func beginImport() {
 		_importDepth += 1
-		_reportImportProgress()
 	}
 
 	@MainActor func endImport() {
 		_importDepth = max(0, _importDepth - 1)
-		_reportImportProgress()
 	}
 	
     private var _session: URLSession!
@@ -287,9 +253,36 @@ extension DownloadManager: URLSessionDownloadDelegate {
 	func handlePachageFile(
 		url: URL,
 		dl: Download?,
+		liveActivityBatchToken: UUID? = nil,
+		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
-		FR.handlePackageFile(url, download: dl) { err in
+		// Every import gets a simple terminal tracker. Bulk imports pre-seed their
+		// full denominator and pass that token through; standalone/overlapping
+		// imports get one-item tokens that naturally aggregate while they overlap.
+		let standaloneToken = liveActivityBatchToken == nil ? UUID() : nil
+		let activityToken = liveActivityBatchToken ?? standaloneToken
+		if let standaloneToken {
+			ImportLiveActivityReporter.shared.begin(token: standaloneToken, total: 1)
+		}
+
+		FR.handlePackageFile(
+			url,
+			download: dl,
+			trackLiveActivity: false,
+			backgroundCompletion: { err in
+				if let activityToken {
+					ImportLiveActivityReporter.shared.finishItem(
+						token: activityToken,
+						succeeded: err == nil
+					)
+				}
+				if let standaloneToken {
+					ImportLiveActivityReporter.shared.end(token: standaloneToken)
+				}
+				backgroundCompletion?(err)
+			}
+		) { err in
 			if let error = err {
 				let generator = UINotificationFeedbackGenerator()
 				generator.notificationOccurred(.error)
@@ -321,15 +314,25 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		}
 	}
 
-	func handlePachageFile(url: URL, dl: Download?) async throws {
+	func handlePachageFile(
+		url: URL,
+		dl: Download?,
+		liveActivityBatchToken: UUID? = nil
+	) async throws {
 		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-			self.handlePachageFile(url: url, dl: dl) { err in
-				if let error = err {
-					continuation.resume(throwing: error)
-				} else {
-					continuation.resume()
-				}
-			}
+			self.handlePachageFile(
+				url: url,
+				dl: dl,
+				liveActivityBatchToken: liveActivityBatchToken,
+				backgroundCompletion: { err in
+					if let error = err {
+						continuation.resume(throwing: error)
+					} else {
+						continuation.resume()
+					}
+				},
+				completion: { _ in }
+			)
 		}
 	}
 	
@@ -428,4 +431,98 @@ extension DownloadManager: URLSessionDownloadDelegate {
             if let error { print("Failed to schedule notification: \(error.localizedDescription)") }
         }
     }
+}
+
+
+// MARK: - Simple, background-safe import Live Activity progress
+
+// One stable denominator and one explicit terminal event per IPA. This mirrors
+// the IPA Vault model: no queue-depth arithmetic, no extraction percentage spam,
+// and no dependency on MainActor callbacks while the app is backgrounded.
+final class ImportLiveActivityReporter {
+	static let shared = ImportLiveActivityReporter()
+
+	private struct Batch {
+		var total: Int
+		var completed = 0
+		var failed = 0
+
+		var terminal: Int { completed + failed }
+	}
+
+	private let queue = DispatchQueue(
+		label: "nya.asami.ksign.import-live-activity",
+		qos: .userInitiated
+	)
+	private var batches: [UUID: Batch] = [:]
+	private var activeTokens: Set<UUID> = []
+
+	private init() { }
+
+	func begin(token: UUID, total: Int) {
+		guard total > 0 else { return }
+		queue.sync {
+			if self.activeTokens.isEmpty {
+				self.batches.removeAll()
+				if #available(iOS 16.2, *) {
+					KeepAliveActivityController.shared.clearReport(.importing)
+				}
+			}
+
+			self.activeTokens.insert(token)
+			self.batches[token] = Batch(total: total)
+			self.publish()
+		}
+	}
+
+	func finishItem(token: UUID, succeeded: Bool) {
+		queue.async {
+			guard var batch = self.batches[token], batch.terminal < batch.total else { return }
+			if succeeded {
+				batch.completed += 1
+			} else {
+				batch.failed += 1
+			}
+			self.batches[token] = batch
+			self.publish()
+		}
+	}
+
+	func end(token: UUID) {
+		queue.async {
+			if var batch = self.batches[token], batch.terminal < batch.total {
+				batch.failed += batch.total - batch.terminal
+				self.batches[token] = batch
+			}
+			self.activeTokens.remove(token)
+			self.publish()
+
+			// Keep the final report in KeepAliveActivityController for the audio
+			// linger, but drop our working state so the next independent batch starts
+			// cleanly at 0/n.
+			if self.activeTokens.isEmpty {
+				self.batches.removeAll()
+			}
+		}
+	}
+
+	private func publish() {
+		let total = batches.values.reduce(0) { $0 + $1.total }
+		guard total > 0 else { return }
+
+		let completed = batches.values.reduce(0) { $0 + $1.completed }
+		let failed = batches.values.reduce(0) { $0 + $1.failed }
+		let terminal = completed + failed
+		let detail: String
+		if terminal >= total {
+			detail = failed == 0 ? "Completed" : "Error"
+		} else {
+			detail = "Importing"
+		}
+
+		guard #available(iOS 16.2, *) else { return }
+		KeepAliveActivityController.shared.report(.importing, completed: completed, total: total)
+		KeepAliveActivityController.shared.report(.importing, fraction: nil)
+		KeepAliveActivityController.shared.report(.importing, detail: detail)
+	}
 }
