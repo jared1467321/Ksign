@@ -48,16 +48,27 @@ final class BulkExportManager: ObservableObject {
 		guard #available(iOS 16.2, *) else { return }
 		KeepAliveActivityController.shared.report(
 			.bulkExport,
-			completed: completed,
-			total: isExporting ? total : nil
+			completed: exportURLs.count,
+			total: total > 0 ? total : nil
 		)
 
-		// The app being zipped right now — the same string the on-screen
-		// overlay shows.
-		KeepAliveActivityController.shared.report(
-			.bulkExport,
-			detail: isExporting && !currentName.isEmpty ? currentName : nil
-		)
+		// Keep the Live Activity deliberately low-churn. The foreground overlay
+		// still shows the current app name; the Island only needs a stable phase
+		// plus the terminal n/total count.
+		KeepAliveActivityController.shared.report(.bulkExport, fraction: nil)
+		let detail: String?
+		if isExporting {
+			detail = "Exporting"
+		} else if total == 0 {
+			detail = nil
+		} else if _cancelled {
+			detail = "Cancelled"
+		} else if !_failures.isEmpty || exportURLs.count < total {
+			detail = "Error"
+		} else {
+			detail = "Completed"
+		}
+		KeepAliveActivityController.shared.report(.bulkExport, detail: detail)
 	}
 
 	// MARK: - Lifecycle
@@ -68,8 +79,11 @@ final class BulkExportManager: ObservableObject {
 		_reset()
 		total = apps.count
 		isExporting = true
-		BackgroundAudioManager.shared.claim(.bulkExport)
+		if #available(iOS 16.2, *) {
+			KeepAliveActivityController.shared.clearReport(.bulkExport)
+		}
 		_reportProgress()
+		BackgroundAudioManager.shared.claim(.bulkExport)
 
 		Task { await _run(apps) }
 	}
@@ -84,9 +98,11 @@ final class BulkExportManager: ObservableObject {
 	func finishPicking() {
 		readyToPick = false
 		_cleanupWorkDirs()
-		_reset()
-		_reportProgress()
+
+		// Leave the final n/total report intact through the audio linger. The next
+		// export explicitly clears it before seeding its own 0/n state.
 		BackgroundAudioManager.shared.release(.bulkExport)
+		_reset()
 	}
 
 	// MARK: - Work
@@ -124,6 +140,7 @@ final class BulkExportManager: ObservableObject {
 		}
 
 		isExporting = false
+		_reportProgress()
 
 		if !exportURLs.isEmpty {
 			readyToPick = true
