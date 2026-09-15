@@ -24,19 +24,11 @@ final class InstallSession: ObservableObject {
 	// a failure doesn't quietly vanish.
 	@Published private(set) var jobs: [InstallJob] = []
 
-	// The drawer prints "\(completedCount) of \(totalCount) installed" off these
-	// two, and has always got it right. So the pill reads them too — from their
-	// own `didSet`, which is the same moment the drawer's label changes.
-	//
-	// This replaces every hand-placed `report(...)` call that used to be dotted
-	// around the finish paths. There is no event to hook up wrong any more: if
-	// the drawer's number moves, the pill's number has already moved with it.
-	@Published private(set) var completedCount = 0 {
-		didSet { _mirrorCountToKeepAlive() }
-	}
-	@Published private(set) var totalCount = 0 {
-		didSet { _mirrorCountToKeepAlive() }
-	}
+	// Foreground drawer counters. Live Activity progress is intentionally
+	// independent: its reporter owns stable job IDs and advances directly from
+	// worker terminal callbacks, so UI scheduling cannot stall the Island count.
+	@Published private(set) var completedCount = 0
+	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
 
 	// Whether the drawer sheet is on screen. Dismissing it is now purely
@@ -183,8 +175,8 @@ final class InstallSession: ObservableObject {
 			return
 		}
 
-		// Capture the job's final 100% before the count transition. The count is an
-		// urgent ActivityKit update, so it will carry the newest fraction with it.
+		// Keep the foreground drawer's aggregate bar current. Live Activity
+		// completion is reported independently from the job's terminal callback.
 		_recomputeProgress()
 		completedCount += 1
 
@@ -325,12 +317,6 @@ final class InstallSession: ObservableObject {
 		_finishIfIdle()
 	}
 
-	private func _mirrorCountToKeepAlive() {
-		BulkInstallLiveActivityReporter.shared.setCounts(
-			completed: completedCount,
-			total: totalCount
-		)
-	}
 
 	// Everything is settled but failed rows stay on screen, so `jobs` never
 	// empties and `_finishIfIdle` never runs. That's the same condition the
@@ -527,50 +513,35 @@ final class InstallSession: ObservableObject {
 // MARK: - Background-safe Live Activity aggregation
 
 // `InstallSession` is intentionally @MainActor because it drives SwiftUI. The
-// install workers are not: archiving, Vapor callbacks and install polling keep
-// producing useful information while the UI actor may be heavily throttled in
-// the background. This small mirror owns only primitive progress snapshots on
-// its own serial queue and feeds ActivityKit without waiting for the drawer.
+// install workers are not: archiving and server callbacks continue while the
+// UI actor may be heavily throttled in the background. This mirror deliberately
+// owns only stable job membership and terminal outcomes, so ActivityKit never
+// depends on the drawer's high-frequency progress stream.
 final class BulkInstallLiveActivityReporter {
 	static let shared = BulkInstallLiveActivityReporter()
-
-	private struct JobState {
-		var packageProgress: Double = 0
-		var installProgress: Double = 0
-		var detail: String = "Queued"
-		var completed = false
-		var failed = false
-
-		var fraction: Double {
-			if completed { return 1 }
-
-			// Packaging is a substantial part of an install, then the manifest /
-			// payload / installation portion owns the remainder. Keep failures at
-			// their last honest position rather than pretending they completed.
-			let package = min(1, max(0, packageProgress))
-			let install = min(1, max(0, installProgress))
-			return min(0.99, package * 0.45 + install * 0.55)
-		}
-	}
 
 	private let _queue = DispatchQueue(
 		label: "nya.asami.ksign.bulk-install-live-activity",
 		qos: .userInitiated
 	)
 
-	private var _jobs: [UUID: JobState] = [:]
-	private var _completed = 0
-	private var _total = 0
+	// Stable batch membership, exactly like IPA Vault. A job remains in the
+	// denominator after its row retires from the drawer; only an explicit remove
+	// (cancel/delete) changes the denominator. Successful terminal callbacks are
+	// the only thing that advances the numerator.
+	private var _jobIDs: Set<UUID> = []
+	private var _completedIDs: Set<UUID> = []
+	private var _failedIDs: Set<UUID> = []
 	private var _paused = false
 	private var _active = false
 
 	private init() { }
 
 	func reset() {
-		_queue.async {
-			self._jobs.removeAll()
-			self._completed = 0
-			self._total = 0
+		_queue.sync {
+			self._jobIDs.removeAll()
+			self._completedIDs.removeAll()
+			self._failedIDs.removeAll()
 			self._paused = false
 			self._active = true
 
@@ -581,102 +552,64 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	func register(_ id: UUID) {
-		_queue.async {
+		_queue.sync {
 			self._active = true
-			if self._jobs[id] == nil {
-				self._jobs[id] = JobState()
-			}
+			self._jobIDs.insert(id)
+			self._completedIDs.remove(id)
+			self._failedIDs.remove(id)
 			self._publish()
 		}
 	}
 
 	func remove(_ id: UUID) {
 		_queue.async {
-			self._jobs.removeValue(forKey: id)
+			self._jobIDs.remove(id)
+			self._completedIDs.remove(id)
+			self._failedIDs.remove(id)
 			self._publish()
 		}
 	}
 
-	func setCounts(completed: Int, total: Int) {
-		_queue.async {
-			self._completed = max(0, min(completed, max(0, total)))
-			self._total = max(0, total)
-			self._active = self._active || total > 0
-			self._publish()
-		}
-	}
 
 	func setPaused(_ paused: Bool) {
 		_queue.async {
+			guard self._paused != paused else { return }
 			self._paused = paused
 			self._publish()
 		}
 	}
 
-	func updatePackage(jobID: UUID, progress: Double) {
-		_queue.async {
-			var state = self._jobs[jobID] ?? JobState()
-			state.packageProgress = max(state.packageProgress, min(1, max(0, progress)))
-			if state.detail == "Queued" { state.detail = "Packaging" }
-			self._jobs[jobID] = state
-			self._publish()
-		}
-	}
-
-	func updateInstall(jobID: UUID, progress: Double) {
-		_queue.async {
-			var state = self._jobs[jobID] ?? JobState()
-			let clamped = min(1, max(0, progress))
-
-			// Ignore the @Published property's initial zero. A real install update
-			// either follows the Installing status or has moved above zero.
-			guard clamped > 0 || state.detail == "Installing" else { return }
-
-			state.packageProgress = 1
-			state.installProgress = max(state.installProgress, clamped)
-			if state.detail != "Completed" && state.detail != "Error" {
-				state.detail = "Installing"
-			}
-			self._jobs[jobID] = state
-			self._publish()
-		}
-	}
+	// Foreground rows still consume their detailed package/install progress. The
+	// Live Activity intentionally ignores those high-frequency samples; that is
+	// what prevents ActivityKit from getting flooded and then appearing frozen.
+	func updatePackage(jobID: UUID, progress: Double) { }
+	func updateInstall(jobID: UUID, progress: Double) { }
 
 	func updateStatus(
 		jobID: UUID,
 		status: InstallerStatusViewModel.InstallerStatus
 	) {
-		let change: (detail: String, packageFinished: Bool, completed: Bool, failed: Bool)
-
-		switch status {
-		case .none:
-			change = ("Packaging", false, false, false)
-		case .ready:
-			change = ("Waiting for Confirmation", true, false, false)
-		case .sendingManifest:
-			change = ("Sending Manifest", true, false, false)
-		case .sendingPayload:
-			change = ("Sending Payload", true, false, false)
-		case .installing:
-			change = ("Installing", true, false, false)
-		case .completed:
-			change = ("Completed", true, true, false)
-		case .broken:
-			change = ("Error", false, false, true)
-		}
-
 		_queue.async {
-			var state = self._jobs[jobID] ?? JobState()
-			state.detail = change.detail
-			if change.packageFinished { state.packageProgress = 1 }
-			if change.completed {
-				state.packageProgress = 1
-				state.installProgress = 1
-				state.completed = true
+			guard self._jobIDs.contains(jobID) else { return }
+
+			switch status {
+			case .completed:
+				self._completedIDs.insert(jobID)
+				self._failedIDs.remove(jobID)
+				self._publish()
+
+			case .broken:
+				self._failedIDs.insert(jobID)
+				self._completedIDs.remove(jobID)
+				self._publish()
+
+			default:
+				// A retry can move a previously-failed job back into flight. Only
+				// publish if that actually changes terminal state.
+				if self._failedIDs.remove(jobID) != nil {
+					self._publish()
+				}
 			}
-			state.failed = change.failed
-			self._jobs[jobID] = state
-			self._publish()
 		}
 	}
 
@@ -684,44 +617,34 @@ final class BulkInstallLiveActivityReporter {
 		_queue.async {
 			guard self._active else { return }
 			self._paused = false
-			self._publish(forcedDetail: "Completed")
+			self._publish(forceTerminal: true)
 		}
 	}
 
-	private func _publish(forcedDetail: String? = nil) {
-		guard _active, _total > 0 else { return }
+	private func _publish(forceTerminal: Bool = false) {
+		guard _active, !_jobIDs.isEmpty else { return }
 
-		let sum = _jobs.values.reduce(0.0) { $0 + $1.fraction }
-		let fraction = min(1, max(0, sum / Double(_total)))
-		let detail = forcedDetail ?? _representativeDetail
+		let completed = _completedIDs.intersection(_jobIDs).count
+		let failed = _failedIDs.intersection(_jobIDs).count
+		let total = _jobIDs.count
+		let allTerminal = completed + failed >= total
+
+		let detail: String
+		if _paused {
+			detail = "Paused"
+		} else if allTerminal || forceTerminal {
+			detail = failed == 0 && completed == total ? "Completed" : "Error"
+		} else {
+			detail = "Installing"
+		}
 
 		guard #available(iOS 16.2, *) else { return }
 		KeepAliveActivityController.shared.report(
 			.bulkInstalls,
-			completed: _completed,
-			total: _total
+			completed: completed,
+			total: total
 		)
-		KeepAliveActivityController.shared.report(.bulkInstalls, fraction: fraction)
+		KeepAliveActivityController.shared.report(.bulkInstalls, fraction: nil)
 		KeepAliveActivityController.shared.report(.bulkInstalls, detail: detail)
-	}
-
-	private var _representativeDetail: String {
-		if _paused { return "Paused" }
-
-		let details = Set(_jobs.values.map(\.detail))
-		for candidate in [
-			"Installing",
-			"Sending Payload",
-			"Sending Manifest",
-			"Waiting for Confirmation",
-			"Packaging",
-			"Queued",
-			"Error",
-			"Completed"
-		] where details.contains(candidate) {
-			return candidate
-		}
-
-		return "Queued"
 	}
 }

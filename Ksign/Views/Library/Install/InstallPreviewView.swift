@@ -88,8 +88,8 @@ struct InstallPreviewView: View {
 			}
 		}
 		.onAppear {
-			BackgroundAudioManager.shared.claim(.singleInstall)
 			SingleInstallLiveActivityReporter.shared.begin()
+			BackgroundAudioManager.shared.claim(.singleInstall)
 			_startLiveActivityBridge()
 			_install()
 		}
@@ -236,21 +236,17 @@ final class SingleInstallLiveActivityReporter {
 	)
 
 	private var _active = false
-	private var _packageProgress: Double = 0
-	private var _installProgress: Double = 0
-	private var _detail = "Packaging"
 	private var _completed = false
+	private var _failed = false
 	private let _serverMonitorID = UUID()
 
 	private init() { }
 
 	func begin() {
-		_queue.async {
+		_queue.sync {
 			self._active = true
-			self._packageProgress = 0
-			self._installProgress = 0
-			self._detail = "Packaging"
 			self._completed = false
+			self._failed = false
 
 			guard #available(iOS 16.2, *) else { return }
 			KeepAliveActivityController.shared.clearReport(.singleInstall)
@@ -258,33 +254,11 @@ final class SingleInstallLiveActivityReporter {
 		}
 	}
 
-	func updatePackage(_ progress: Double) {
-		_queue.async {
-			guard self._active, !self._completed else { return }
-			self._packageProgress = max(
-				self._packageProgress,
-				min(1, max(0, progress))
-			)
-			self._detail = "Packaging"
-			self._publish()
-		}
-	}
-
-	func updateInstall(_ progress: Double) {
-		_queue.async {
-			guard self._active, !self._completed else { return }
-			let clamped = min(1, max(0, progress))
-
-			// Ignore the @Published property's initial zero. A real install update
-			// either follows the Installing status or has moved above zero.
-			guard clamped > 0 || self._detail == "Installing" else { return }
-
-			self._packageProgress = 1
-			self._installProgress = max(self._installProgress, clamped)
-			self._detail = "Installing"
-			self._publish()
-		}
-	}
+	// Keep the detailed foreground progress exactly where it already lives. The
+	// Live Activity only consumes the terminal 0/1 event, avoiding hundreds of
+	// ActivityKit writes during packaging/install polling.
+	func updatePackage(_ progress: Double) { }
+	func updateInstall(_ progress: Double) { }
 
 	func handleServerStatus(
 		_ status: InstallerStatusViewModel.InstallerStatus,
@@ -302,7 +276,6 @@ final class SingleInstallLiveActivityReporter {
 				id: _serverMonitorID,
 				bundleID: bundleID,
 				onProgress: { progress in
-					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
 					DispatchQueue.main.async {
 						viewModel.installProgress = progress
 					}
@@ -326,45 +299,35 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	func updateStatus(_ status: InstallerStatusViewModel.InstallerStatus) {
-		let change: (detail: String, packageFinished: Bool, completed: Bool)
-
-		switch status {
-		case .none:
-			change = ("Packaging", false, false)
-		case .ready:
-			change = ("Waiting for Confirmation", true, false)
-		case .sendingManifest:
-			change = ("Sending Manifest", true, false)
-		case .sendingPayload:
-			change = ("Sending Payload", true, false)
-		case .installing:
-			change = ("Installing", true, false)
-		case .completed:
-			change = ("Completed", true, true)
-		case .broken:
-			change = ("Error", false, false)
-		}
-
 		_queue.async {
 			guard self._active else { return }
-			self._detail = change.detail
-			if change.packageFinished { self._packageProgress = 1 }
-			if change.completed {
-				self._packageProgress = 1
-				self._installProgress = 1
+
+			switch status {
+			case .completed:
 				self._completed = true
+				self._failed = false
+				self._publish()
+
+			case .broken:
+				self._completed = false
+				self._failed = true
+				self._publish()
+
+			default:
+				// A retry can move the install out of a prior error state.
+				if self._failed {
+					self._failed = false
+					self._publish()
+				}
 			}
-			self._publish()
 		}
 	}
 
 	func finish() {
 		_queue.async {
 			guard self._active else { return }
-			self._packageProgress = 1
-			self._installProgress = 1
-			self._detail = "Completed"
 			self._completed = true
+			self._failed = false
 			self._publish()
 		}
 	}
@@ -385,12 +348,15 @@ final class SingleInstallLiveActivityReporter {
 	private func _publish() {
 		guard #available(iOS 16.2, *) else { return }
 
-		let fraction = _completed
-			? 1
-			: min(0.99, _packageProgress * 0.45 + _installProgress * 0.55)
-
-		KeepAliveActivityController.shared.report(.singleInstall, completed: _completed ? 1 : 0, total: 1)
-		KeepAliveActivityController.shared.report(.singleInstall, fraction: fraction)
-		KeepAliveActivityController.shared.report(.singleInstall, detail: _detail)
+		KeepAliveActivityController.shared.report(
+			.singleInstall,
+			completed: _completed ? 1 : 0,
+			total: 1
+		)
+		KeepAliveActivityController.shared.report(.singleInstall, fraction: nil)
+		KeepAliveActivityController.shared.report(
+			.singleInstall,
+			detail: _failed ? "Error" : (_completed ? "Completed" : "Installing")
+		)
 	}
 }
