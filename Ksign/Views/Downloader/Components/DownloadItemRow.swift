@@ -25,6 +25,7 @@ struct DownloadItemRow: View {
     var importIpaToLibrary: (DownloadItem) -> Void
     var exportToFiles: (DownloadItem) -> Void
     var cryptCheck: (DownloadItem) -> Void
+    var pauseResumeDownload: (DownloadItem) -> Void
     var deleteItem: (DownloadItem) -> Void
 
     @State private var showingConfirmationDialog = false
@@ -38,6 +39,7 @@ struct DownloadItemRow: View {
         importIpaToLibrary: @escaping (DownloadItem) -> Void,
         exportToFiles: @escaping (DownloadItem) -> Void,
         cryptCheck: @escaping (DownloadItem) -> Void,
+        pauseResumeDownload: @escaping (DownloadItem) -> Void = { _ in },
         deleteItem: @escaping (DownloadItem) -> Void
     ) {
         self.item = item
@@ -48,6 +50,7 @@ struct DownloadItemRow: View {
         self.importIpaToLibrary = importIpaToLibrary
         self.exportToFiles = exportToFiles
         self.cryptCheck = cryptCheck
+        self.pauseResumeDownload = pauseResumeDownload
         self.deleteItem = deleteItem
     }
 
@@ -109,28 +112,31 @@ struct DownloadItemRow: View {
             Spacer()
             
             if !item.isFinished {
-                ZStack {
-                    Circle()
-                        .trim(from: 0, to: item.progress)
-                        // In progress, so `warning` rather than the accent. A
-                        // download is the most common non-idle state in the app,
-                        // which makes this the ring most likely to actually put
-                        // orange on screen day to day.
-                        .stroke(NBHalloween.warning, style: StrokeStyle(lineWidth: 2.3, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .frame(width: 31, height: 31)
-                        .animation(.smooth, value: item.progress)
-
-                    Image(systemName: item.progress >= 0.75 ? "archivebox" : "square.fill")
-                        .foregroundStyle(NBHalloween.warning)
-                        .font(.footnote).bold()
-                }
-                .onTapGesture {
-                    if item.progress <= 0.75 {
+                Button {
+                    if item.isIPAVaultDownload {
+                        pauseResumeDownload(item)
+                    } else if item.progress <= 0.75 {
                         deleteItem(item)
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .trim(from: 0, to: item.progress)
+                            .stroke(
+                                item.isPaused ? Color.secondary : NBHalloween.warning,
+                                style: StrokeStyle(lineWidth: 2.3, lineCap: .round)
+                            )
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 31, height: 31)
+                            .animation(.smooth, value: item.progress)
+
+                        Image(systemName: activeControlSymbol)
+                            .foregroundStyle(item.isPaused ? Color.accentColor : NBHalloween.warning)
+                            .font(.footnote).bold()
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(activeControlAccessibilityLabel)
             }
         }
         .padding(.vertical, 6)
@@ -163,8 +169,31 @@ struct DownloadItemRow: View {
         }
     }
     
+
+    private var activeControlSymbol: String {
+        if item.isIPAVaultDownload {
+            return item.isPaused ? "play.fill" : "pause.fill"
+        }
+        return item.progress >= 0.75 ? "archivebox" : "square.fill"
+    }
+
+    private var activeControlAccessibilityLabel: String {
+        if item.isIPAVaultDownload {
+            return item.isPaused ? "Resume download" : "Pause download"
+        }
+        return "Cancel download"
+    }
+
     @ViewBuilder
     private func fileConfirmationDialogButtons() -> some View {
+        if item.isIPAVaultDownload && !item.isFinished {
+            Button {
+                pauseResumeDownload(item)
+            } label: {
+                Label(item.isPaused ? "Resume" : "Pause", systemImage: item.isPaused ? "play.fill" : "pause.fill")
+            }
+        }
+
         Button {
             shareItems = [item.localPath]
             UIActivityViewController.show(activityItems: shareItems)
