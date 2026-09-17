@@ -104,6 +104,14 @@ struct SelectionCheckIcon: View {
 	}
 }
 
+private enum CryptCheckExtractedBatchError: LocalizedError {
+    case missingAppBundle
+
+    var errorDescription: String? {
+        "One of the selected extracted app bundles could not be located."
+    }
+}
+
 // MARK: - View
 struct LibraryView: View {
 	@StateObject var downloadManager = DownloadManager.shared
@@ -114,7 +122,7 @@ struct LibraryView: View {
 	@State private var _selectedSigningAppPresenting: AnyApp?
 	@State private var _selectedInstallAppPresenting: AnyApp?
 	@State private var _selectedAppDylibsPresenting: AnyApp?
-	@State private var _cryptCheckExtractedReportURL: URL?
+	@State private var _cryptCheckExtractedReports: CryptCheckExtractedReportCollection?
 	@State private var _cryptCheckExtractedRunning = false
 	@State private var _bulkSignRequest: BulkSignRequest?
 	@State private var _isImportingPresenting = false
@@ -282,6 +290,10 @@ struct LibraryView: View {
                             _exportManager.start(apps: _resolveSelectedApps())
                         }
 
+                        _barButton("lock.open", enabled: !_selectedApps.isEmpty && !_cryptCheckExtractedRunning) {
+                            _bulkCryptCheckExtractedSelected()
+                        }
+
                         _barButton("trash", enabled: !_selectedApps.isEmpty) {
                             _bulkDeleteSelectedApps()
                         }
@@ -335,8 +347,8 @@ struct LibraryView: View {
                 DylibsView(app: app.base)
 					.compatNavigationTransition(id: app.base.uuid ?? "", ns: _namespace)
 			}
-            .fullScreenCover(item: $_cryptCheckExtractedReportURL) { url in
-                CryptCheckExtractedReportView(reportURL: url)
+            .fullScreenCover(item: $_cryptCheckExtractedReports) { reports in
+                CryptCheckExtractedReportView(reportURLs: reports.reportURLs)
             }
 			.fullScreenCover(item: $_bulkSignRequest) { request in
 				BulkSigningView(apps: request.apps, signAndInstall: request.signAndInstall)
@@ -533,24 +545,44 @@ extension LibraryView {
     }
 
     private func _runCryptCheckExtracted(_ app: AppInfoPresentable) {
-        guard !_cryptCheckExtractedRunning else { return }
-        guard let appURL = Storage.shared.getAppDirectory(for: app) else {
+        _runCryptCheckExtracted([app])
+    }
+
+    private func _runCryptCheckExtracted(_ apps: [AppInfoPresentable]) {
+        guard !apps.isEmpty, !_cryptCheckExtractedRunning else { return }
+
+        let appURLs: [URL]
+        do {
+            appURLs = try apps.map { app in
+                guard let appURL = Storage.shared.getAppDirectory(for: app) else {
+                    throw CryptCheckExtractedBatchError.missingAppBundle
+                }
+                return appURL
+            }
+        } catch {
             UIAlertController.showAlertWithOk(
                 title: "Crypt Check Extracted",
-                message: "The extracted app bundle could not be located."
+                message: error.localizedDescription
             )
             return
         }
 
         _cryptCheckExtractedRunning = true
         DispatchQueue.global(qos: .userInitiated).async {
+            var reportURLs: [URL] = []
+
             do {
-                let reportURL = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
+                for appURL in appURLs {
+                    let reportURL = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
+                    reportURLs.append(reportURL)
+                }
+
                 DispatchQueue.main.async {
                     _cryptCheckExtractedRunning = false
-                    _cryptCheckExtractedReportURL = reportURL
+                    _cryptCheckExtractedReports = CryptCheckExtractedReportCollection(reportURLs: reportURLs)
                 }
             } catch {
+                reportURLs.forEach { try? FileManager.default.removeItem(at: $0) }
                 DispatchQueue.main.async {
                     _cryptCheckExtractedRunning = false
                     UIAlertController.showAlertWithOk(
@@ -560,6 +592,21 @@ extension LibraryView {
                 }
             }
         }
+    }
+
+    private func _bulkCryptCheckExtractedSelected() {
+        let source: [AppInfoPresentable] = _selectedTab == 0
+            ? _importedApps.map { $0 as AppInfoPresentable }
+            : _signedApps.map { $0 as AppInfoPresentable }
+        let apps = source.filter { app in
+            guard let uuid = app.uuid else { return false }
+            return _selectedApps.contains(uuid)
+        }
+        guard !apps.isEmpty else { return }
+
+        _selectedApps.removeAll()
+        _isEditMode = .inactive
+        _runCryptCheckExtracted(apps)
     }
 
     @ViewBuilder

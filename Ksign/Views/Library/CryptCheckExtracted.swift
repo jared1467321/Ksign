@@ -1306,44 +1306,69 @@ enum CryptCheckExtractedAnalyzer {
     private static func fileTimestamp() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
         return formatter.string(from: Date())
     }
 }
 
+struct CryptCheckExtractedReportCollection: Identifiable {
+    let id = UUID()
+    let reportURLs: [URL]
+}
+
 struct CryptCheckExtractedReportView: View {
-    let reportURL: URL
+    let reportURLs: [URL]
 
     @Environment(\.dismiss) private var dismiss
     @State private var showExporter = false
+    @State private var selectedIndex = 0
+
+    private var currentReportURL: URL? {
+        guard reportURLs.indices.contains(selectedIndex) else { return reportURLs.first }
+        return reportURLs[selectedIndex]
+    }
+
+    private var navigationTitle: String {
+        guard reportURLs.count > 1 else { return "Crypt Check Extracted" }
+        return "Crypt Check Extracted \(selectedIndex + 1) of \(reportURLs.count)"
+    }
 
     var body: some View {
         NavigationView {
-            CryptCheckExtractedHTMLView(url: reportURL)
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("Crypt Check Extracted")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("Close") { dismiss() }
-                    }
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Save") { showExporter = true }
-                    }
+            TabView(selection: $selectedIndex) {
+                ForEach(Array(reportURLs.enumerated()), id: \.offset) { index, reportURL in
+                    CryptCheckExtractedHTMLView(url: reportURL)
+                        .ignoresSafeArea(edges: .bottom)
+                        .tag(index)
                 }
+            }
+            .tabViewStyle(.page(indexDisplayMode: reportURLs.count > 1 ? .automatic : .never))
+            .navigationTitle(navigationTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") { showExporter = true }
+                        .disabled(currentReportURL == nil)
+                }
+            }
         }
         .sheet(isPresented: $showExporter) {
-            FileExporterRepresentableView(
-                urlsToExport: [reportURL],
-                asCopy: true,
-                useLastLocation: false,
-                onCompletion: { _ in showExporter = false }
-            )
+            if let currentReportURL {
+                FileExporterRepresentableView(
+                    urlsToExport: [currentReportURL],
+                    asCopy: true,
+                    useLastLocation: false,
+                    onCompletion: { _ in showExporter = false }
+                )
+            }
         }
         .onDisappear {
-            // The report is deliberately temporary. Saving exports a copy;
+            // Reports are deliberately temporary. Saving exports a copy;
             // closing without saving leaves nothing behind in the app container.
-            try? FileManager.default.removeItem(at: reportURL)
+            Set(reportURLs).forEach { try? FileManager.default.removeItem(at: $0) }
         }
     }
 }
