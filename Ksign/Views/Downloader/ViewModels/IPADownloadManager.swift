@@ -70,6 +70,8 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var activeIPAVaultDownloadIDs: Set<String> = []
     private var ipavaultJobs: [String: IPAVaultJob] = [:]
     private var ipavaultTaskMetadata: [Int: IPAVaultTaskMetadata] = [:]
+    private var pausedIPAVaultDownloadIDs: Set<String> = []
+    private var resumeRequestedIPAVaultDownloadIDs: Set<String> = []
     private var maxConcurrentIPAVaultDownloads = 3
     private var ipavaultStreamsPerFile = 5
 
@@ -207,7 +209,8 @@ class IPADownloadManager: NSObject, ObservableObject {
                     isFinished: false,
                     progress: 0,
                     totalBytes: file.size,
-                    bytesDownloaded: 0
+                    bytesDownloaded: 0,
+                    isIPAVaultDownload: true
                 )
                 self.downloadItems.insert(item, at: 0)
                 self.pendingIPAVaultDownloads.append(
@@ -299,6 +302,73 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
     }
     
+    func pauseIPAVaultDownload(_ item: DownloadItem) {
+        let work = {
+            let itemID = item.id.uuidString
+            guard item.isIPAVaultDownload, !item.isFinished else { return }
+            guard !self.pausedIPAVaultDownloadIDs.contains(itemID) else { return }
+            guard self.ipavaultJobs[itemID] != nil || self.pendingIPAVaultDownloads.contains(where: { $0.itemID == itemID }) else { return }
+
+            if let job = self.ipavaultJobs[itemID], job.assembling {
+                return
+            }
+
+            self.resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+            self.pausedIPAVaultDownloadIDs.insert(itemID)
+
+            if let job = self.ipavaultJobs[itemID] {
+                job.tasks.values.forEach { $0.suspend() }
+            }
+            self.setIPAVaultPausedState(itemID: itemID, isPaused: true)
+            self.pumpIPAVaultDownloadQueue()
+            self.updateIPAVaultKeepAliveState()
+        }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    func resumeIPAVaultDownload(_ item: DownloadItem) {
+        let work = {
+            let itemID = item.id.uuidString
+            guard item.isIPAVaultDownload, !item.isFinished, self.pausedIPAVaultDownloadIDs.contains(itemID) else { return }
+
+            if self.ipavaultJobs[itemID] != nil {
+                self.resumeRequestedIPAVaultDownloadIDs.insert(itemID)
+            } else {
+                self.pausedIPAVaultDownloadIDs.remove(itemID)
+                self.setIPAVaultPausedState(itemID: itemID, isPaused: false)
+            }
+
+            self.pumpIPAVaultDownloadQueue()
+            self.updateIPAVaultKeepAliveState()
+        }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    private func setIPAVaultPausedState(itemID: String, isPaused: Bool) {
+        guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) else { return }
+        var item = downloadItems[index]
+        item.isPaused = isPaused
+        downloadItems[index] = item
+    }
+
+    private var runningIPAVaultDownloadCount: Int {
+        activeIPAVaultDownloadIDs.reduce(into: 0) { count, itemID in
+            if !pausedIPAVaultDownloadIDs.contains(itemID) {
+                count += 1
+            }
+        }
+    }
+
     func cancelDownload(_ item: DownloadItem) {
         let itemID = item.id.uuidString
         var handledByIPAVault = false
@@ -332,6 +402,8 @@ class IPADownloadManager: NSObject, ObservableObject {
             downloadItems.removeAll { $0.id.uuidString == itemID }
             ipavaultActivityItemIDs.remove(itemID)
             completedIPAVaultActivityItemIDs.remove(itemID)
+            pausedIPAVaultDownloadIDs.remove(itemID)
+            resumeRequestedIPAVaultDownloadIDs.remove(itemID)
             pumpIPAVaultDownloadQueue()
             updateIPAVaultKeepAliveState()
             return true
@@ -347,6 +419,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         downloadItems.removeAll { $0.id.uuidString == itemID }
         ipavaultActivityItemIDs.remove(itemID)
         completedIPAVaultActivityItemIDs.remove(itemID)
+        pausedIPAVaultDownloadIDs.remove(itemID)
+        resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultKeepAliveState()
@@ -356,14 +430,63 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func pumpIPAVaultDownloadQueue() {
         dispatchPrecondition(condition: .onQueue(.main))
 
-        while activeIPAVaultDownloadIDs.count < maxConcurrentIPAVaultDownloads,
-              !pendingIPAVaultDownloads.isEmpty {
-            let pending = pendingIPAVaultDownloads.removeFirst()
+        while runningIPAVaultDownloadCount < maxConcurrentIPAVaultDownloads {
+            if let itemID = resumeRequestedIPAVaultDownloadIDs.first {
+                resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+                guard pausedIPAVaultDownloadIDs.contains(itemID), let job = ipavaultJobs[itemID] else {
+                    continue
+                }
+
+                if job.streamCount != ipavaultStreamsPerFile {
+                    restartPausedIPAVaultDownload(job)
+                } else {
+                    pausedIPAVaultDownloadIDs.remove(itemID)
+                    setIPAVaultPausedState(itemID: itemID, isPaused: false)
+                    job.tasks.values.forEach { $0.resume() }
+                }
+                continue
+            }
+
+            guard let pendingIndex = pendingIPAVaultDownloads.firstIndex(where: {
+                !pausedIPAVaultDownloadIDs.contains($0.itemID)
+            }) else {
+                break
+            }
+
+            let pending = pendingIPAVaultDownloads.remove(at: pendingIndex)
             guard downloadItems.contains(where: { $0.id.uuidString == pending.itemID && !$0.isFinished }) else {
                 continue
             }
             startIPAVaultDownload(pending)
         }
+    }
+
+    private func restartPausedIPAVaultDownload(_ job: IPAVaultJob) {
+        let itemID = job.itemID
+
+        for (taskID, task) in job.tasks {
+            ipavaultTaskMetadata.removeValue(forKey: taskID)
+            task.cancel()
+        }
+
+        ipavaultJobs.removeValue(forKey: itemID)
+        activeIPAVaultDownloadIDs.remove(itemID)
+        pausedIPAVaultDownloadIDs.remove(itemID)
+        resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+        try? FileManager.default.removeItem(at: job.directory)
+
+        if let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) {
+            var item = downloadItems[index]
+            item.progress = 0
+            item.bytesDownloaded = 0
+            item.isPaused = false
+            downloadItems[index] = item
+        }
+
+        pendingIPAVaultDownloads.insert(
+            PendingIPAVaultDownload(itemID: itemID, url: job.url, totalBytes: job.totalBytes),
+            at: 0
+        )
     }
 
     private func startIPAVaultDownload(_ pending: PendingIPAVaultDownload) {
@@ -397,6 +520,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         )
         ipavaultJobs[pending.itemID] = job
         activeIPAVaultDownloadIDs.insert(pending.itemID)
+        pausedIPAVaultDownloadIDs.remove(pending.itemID)
+        setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
         updateIPAVaultKeepAliveState()
 
         for chunk in chunks {
@@ -636,6 +761,8 @@ class IPADownloadManager: NSObject, ObservableObject {
                 completedIPAVaultActivityItemIDs.insert(itemID)
                 ipavaultJobs.removeValue(forKey: itemID)
                 activeIPAVaultDownloadIDs.remove(itemID)
+                pausedIPAVaultDownloadIDs.remove(itemID)
+                resumeRequestedIPAVaultDownloadIDs.remove(itemID)
                 try? FileManager.default.removeItem(at: job.directory)
                 pumpIPAVaultDownloadQueue()
                 updateIPAVaultKeepAliveState()
@@ -661,6 +788,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         downloadItems.removeAll { $0.id.uuidString == itemID }
         ipavaultActivityItemIDs.remove(itemID)
         completedIPAVaultActivityItemIDs.remove(itemID)
+        pausedIPAVaultDownloadIDs.remove(itemID)
+        resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultKeepAliveState()
     }
