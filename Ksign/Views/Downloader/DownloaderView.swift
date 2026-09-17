@@ -20,7 +20,7 @@ struct DownloaderView: View {
     @State private var shareItems: [Any] = []
     @State private var showDocumentPicker = false
     @State private var fileToExport: URL?
-    @State private var cryptCheckReportURL: URL?
+    @State private var cryptCheckReports: CryptCheckReportCollection?
     @State private var cryptCheckRunning = false
     @State private var _searchText = ""
 
@@ -79,6 +79,7 @@ struct DownloaderView: View {
                                 importIpaToLibrary: { item in importIpaToLibrary(item) },
                                 exportToFiles: { item in exportToFiles(item) },
                                 cryptCheck: { item in runCryptCheck(item) },
+                                pauseResumeDownload: { item in togglePauseResume(item) },
                                 deleteItem: { item in deleteItem(item) }
                             )
                         }
@@ -95,6 +96,7 @@ struct DownloaderView: View {
                             importIpaToLibrary: { item in importIpaToLibrary(item) },
                             exportToFiles: { item in exportToFiles(item) },
                             cryptCheck: { item in runCryptCheck(item) },
+                            pauseResumeDownload: { item in togglePauseResume(item) },
                             deleteItem: { item in deleteItem(item) }
                         )
                     }
@@ -150,6 +152,9 @@ struct DownloaderView: View {
                         ) {
                             _bulkImportSelected()
                         }
+                        _barButton("lock.open", enabled: !_selectedDownloads.isEmpty && !cryptCheckRunning) {
+                            _bulkCryptCheckSelected()
+                        }
                         _barButton("trash", enabled: !_selectedDownloads.isEmpty) {
                             _bulkDeleteSelected()
                         }
@@ -192,8 +197,8 @@ struct DownloaderView: View {
             .fullScreenCover(item: $webViewURL) { url in
                 webViewSheet(url: url)
             }
-            .fullScreenCover(item: $cryptCheckReportURL) { url in
-                CryptCheckReportView(reportURL: url)
+            .fullScreenCover(item: $cryptCheckReports) { reports in
+                CryptCheckReportView(reportURLs: reports.reportURLs)
             }
             .sheet(isPresented: $showDocumentPicker) {
                 documentPickerSheet
@@ -340,18 +345,29 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
     }
 
     func runCryptCheck(_ item: DownloadItem) {
-        guard item.isFinished, !cryptCheckRunning else { return }
-        let ipaURL = item.localPath
+        runCryptChecks([item])
+    }
+
+    func runCryptChecks(_ items: [DownloadItem]) {
+        let finishedItems = items.filter(\.isFinished)
+        guard !finishedItems.isEmpty, !cryptCheckRunning else { return }
         cryptCheckRunning = true
 
         DispatchQueue.global(qos: .userInitiated).async {
+            var reportURLs: [URL] = []
+
             do {
-                let reportURL = try CryptCheckAnalyzer.generateReport(for: ipaURL)
+                for item in finishedItems {
+                    let reportURL = try CryptCheckAnalyzer.generateReport(for: item.localPath)
+                    reportURLs.append(reportURL)
+                }
+
                 DispatchQueue.main.async {
                     cryptCheckRunning = false
-                    cryptCheckReportURL = reportURL
+                    cryptCheckReports = CryptCheckReportCollection(reportURLs: reportURLs)
                 }
             } catch {
+                reportURLs.forEach { try? FileManager.default.removeItem(at: $0) }
                 DispatchQueue.main.async {
                     cryptCheckRunning = false
                     UIAlertController.showAlertWithOk(
@@ -360,6 +376,15 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
                     )
                 }
             }
+        }
+    }
+
+    func togglePauseResume(_ item: DownloadItem) {
+        guard item.isIPAVaultDownload, !item.isFinished else { return }
+        if item.isPaused {
+            downloadManager.resumeIPAVaultDownload(item)
+        } else {
+            downloadManager.pauseIPAVaultDownload(item)
         }
     }
     
@@ -479,6 +504,14 @@ private extension DownloaderView {
         } else {
             _selectedDownloads.insert(item.id)
         }
+    }
+
+    func _bulkCryptCheckSelected() {
+        let items = downloadManager.finishedItems.filter { _selectedDownloads.contains($0.id) }
+        guard !items.isEmpty else { return }
+        _selectedDownloads.removeAll()
+        _isEditMode = .inactive
+        runCryptChecks(items)
     }
 
     // Imports every selected download, at most 2 at a time so a big batch
