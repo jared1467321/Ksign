@@ -16,6 +16,8 @@ struct DownloadItem: Identifiable {
     var progress: Double
     var totalBytes: Int64
     var bytesDownloaded: Int64
+    var isIPAVaultDownload: Bool = false
+    var isPaused: Bool = false
 
     var formattedFileSize: String {
         return totalBytes.formattedByteCount
@@ -24,6 +26,7 @@ struct DownloadItem: Identifiable {
     var progressText: String {
         let downloadedStr = bytesDownloaded.formattedByteCount
         let totalStr = totalBytes.formattedByteCount
-        return "\(downloadedStr) / \(totalStr) (\(Int(progress * 100))%)"
+        let progressDescription = "\(downloadedStr) / \(totalStr) (\(Int(progress * 100))%)"
+        return isPaused ? "Paused • \(progressDescription)" : progressDescription
     }
 } 
