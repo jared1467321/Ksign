@@ -1357,7 +1357,7 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Calibration")
                 } footer: {
-                    Text("Uses real IPA files from this Vault and the same ranged-download behavior as normal downloads. Streams mode tests 1–10 at your selected concurrency. Combined mode samples 12 adaptive stream/concurrency combinations. Test data is discarded and your settings are not changed automatically.")
+                    Text("Uses real IPA files from this Vault and the same ranged-download behavior as normal downloads. Streams mode tests 1–10 at your selected concurrency. Combined mode runs 4 broad scouting tests followed by 12 adaptive refinement tests. Test data is discarded and your settings are not changed automatically.")
                 }
             }
             .navigationTitle("IPA Vault Settings")
@@ -1445,77 +1445,220 @@ private struct IPAVaultSettingsView: View {
 
     @MainActor
     private func runAdaptiveCalibration(files: [IPAVaultRemoteFile]) async throws -> [IPAVaultCalibrationSample] {
-        let maxTests = 12
+        let scoutCount = 4
+        let refinementCount = 12
         var samples: [IPAVaultCalibrationSample] = []
         var tested: Set<String> = []
 
-        for index in 0..<maxTests {
+        // Phase 1: four deliberately separated scouts. These are discovery tests
+        // and do not consume the twelve-test refinement budget.
+        for scoutIndex in 0..<scoutCount {
             try Task.checkCancellation()
-            let pair = nextAdaptivePair(testIndex: index, samples: samples, tested: tested)
-            let key = pairKey(concurrency: pair.concurrency, streams: pair.streams)
-            tested.insert(key)
+            let pair = nextScoutPair(index: scoutIndex, tested: tested)
+            tested.insert(pairKey(concurrency: pair.concurrency, streams: pair.streams))
 
-            calibrationStatus = "Test \(index + 1) of \(maxTests) • \(pair.concurrency) concurrent × \(pair.streams) streams"
+            calibrationStatus = "Scout \(scoutIndex + 1) of \(scoutCount) • \(pair.concurrency) concurrent × \(pair.streams) streams"
             let sample = try await measure(
                 files: files,
                 concurrency: pair.concurrency,
                 streams: pair.streams
             )
             samples.append(sample)
-            calibrationStatus = "Test \(index + 1) of \(maxTests) • \(formatSpeed(sample.bytesPerSecond))"
+            calibrationStatus = "Scout \(scoutIndex + 1) of \(scoutCount) • \(formatSpeed(sample.bytesPerSecond))"
+        }
+
+        let scoutSamples = samples
+
+        // Phase 2: spend a full twelve tests refining the promising area(s)
+        // identified by the scouts. Early refinement uses a wider radius to learn
+        // direction; later tests tighten to adjacent grid points around the leader.
+        for refinementIndex in 0..<refinementCount {
+            try Task.checkCancellation()
+            let pair = nextRefinementPair(
+                index: refinementIndex,
+                scoutSamples: scoutSamples,
+                samples: samples,
+                tested: tested
+            )
+            tested.insert(pairKey(concurrency: pair.concurrency, streams: pair.streams))
+
+            calibrationStatus = "Refinement \(refinementIndex + 1) of \(refinementCount) • \(pair.concurrency) concurrent × \(pair.streams) streams"
+            let sample = try await measure(
+                files: files,
+                concurrency: pair.concurrency,
+                streams: pair.streams
+            )
+            samples.append(sample)
+            calibrationStatus = "Refinement \(refinementIndex + 1) of \(refinementCount) • \(formatSpeed(sample.bytesPerSecond))"
         }
 
         return samples
     }
 
-    private func nextAdaptivePair(
-        testIndex: Int,
-        samples: [IPAVaultCalibrationSample],
+    private func nextScoutPair(
+        index: Int,
         tested: Set<String>
     ) -> (concurrency: Int, streams: Int) {
-        let initialBands: [ClosedRange<Int>] = [1...2, 1...2, 6...8, 6...8]
-        let initialStreamBands: [ClosedRange<Int>] = [1...3, 8...10, 1...3, 8...10]
+        // Cover the four broad corners of the 8 × 10 search space. A small amount
+        // of jitter avoids hard-coding the exact same benchmark coordinates while
+        // preserving wide separation between scouts.
+        let concurrencyBands: [ClosedRange<Int>] = [1...2, 1...2, 6...8, 6...8]
+        let streamBands: [ClosedRange<Int>] = [1...3, 8...10, 1...3, 8...10]
+        let safeIndex = min(max(0, index), concurrencyBands.count - 1)
 
-        if testIndex < 4 {
-            for _ in 0..<20 {
-                let pair = (
-                    concurrency: Int.random(in: initialBands[testIndex]),
-                    streams: Int.random(in: initialStreamBands[testIndex])
-                )
-                if !tested.contains(pairKey(concurrency: pair.concurrency, streams: pair.streams)) {
-                    return pair
-                }
+        for _ in 0..<24 {
+            let pair = (
+                concurrency: Int.random(in: concurrencyBands[safeIndex]),
+                streams: Int.random(in: streamBands[safeIndex])
+            )
+            if !tested.contains(pairKey(concurrency: pair.concurrency, streams: pair.streams)) {
+                return pair
             }
         }
 
-        let forceExploration = testIndex >= 4 && (testIndex - 4) % 4 == 3
-        if !forceExploration, let best = samples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond }) {
-            let concurrencyRadius = testIndex < 8 ? 2 : 1
-            let streamRadius = testIndex < 8 ? 2 : 1
+        return firstUntestedPair(tested: tested) ?? (1, 1)
+    }
 
-            for _ in 0..<30 {
-                let concurrency = min(8, max(1, best.concurrency + Int.random(in: -concurrencyRadius...concurrencyRadius)))
-                let streams = min(10, max(1, best.streams + Int.random(in: -streamRadius...streamRadius)))
+    private func nextRefinementPair(
+        index: Int,
+        scoutSamples: [IPAVaultCalibrationSample],
+        samples: [IPAVaultCalibrationSample],
+        tested: Set<String>
+    ) -> (concurrency: Int, streams: Int) {
+        guard let currentBest = samples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond }) else {
+            return firstUntestedPair(tested: tested) ?? (1, 1)
+        }
+
+        // Preserve a genuinely competitive second scouting region instead of
+        // discarding it immediately. It only gets occasional refinement budget
+        // when it was close enough to the initial winner to remain plausible.
+        let bestScout = scoutSamples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond })
+        let secondaryScout: IPAVaultCalibrationSample? = {
+            guard let bestScout else { return nil }
+            return scoutSamples
+                .filter {
+                    pairKey(concurrency: $0.concurrency, streams: $0.streams) != pairKey(concurrency: bestScout.concurrency, streams: bestScout.streams)
+                        && $0.bytesPerSecond >= bestScout.bytesPerSecond * 0.90
+                        && gridDistance($0, bestScout) >= 3
+                }
+                .max(by: { $0.bytesPerSecond < $1.bytesPerSecond })
+        }()
+
+        // Tests 4 and 8 can investigate a close second scouting region. Every
+        // other refinement follows the current leader, so improvements immediately
+        // pull the search toward the better-performing part of the grid.
+        let shouldUseSecondary = secondaryScout != nil && (index == 3 || index == 7)
+        let anchor = shouldUseSecondary ? secondaryScout! : currentBest
+
+        // The first four refinements make wider moves to establish which direction
+        // improves throughput. The remaining eight tighten to the immediate
+        // neighborhood of the best result found so far.
+        let radius = index < 4 ? 2 : 1
+        let candidates = neighborhoodCandidates(
+            around: anchor,
+            radius: radius,
+            tested: tested
+        )
+
+        if let candidate = candidates.max(by: {
+            refinementScore(for: $0, anchor: anchor, samples: samples)
+                < refinementScore(for: $1, anchor: anchor, samples: samples)
+        }) {
+            return candidate
+        }
+
+        // If the chosen neighborhood has already been exhausted, widen one ring
+        // before falling back to the best remaining point in the tiny 80-cell grid.
+        let widerCandidates = neighborhoodCandidates(
+            around: currentBest,
+            radius: min(3, radius + 1),
+            tested: tested
+        )
+        if let candidate = widerCandidates.max(by: {
+            refinementScore(for: $0, anchor: currentBest, samples: samples)
+                < refinementScore(for: $1, anchor: currentBest, samples: samples)
+        }) {
+            return candidate
+        }
+
+        return firstUntestedPair(tested: tested) ?? (currentBest.concurrency, currentBest.streams)
+    }
+
+    private func neighborhoodCandidates(
+        around anchor: IPAVaultCalibrationSample,
+        radius: Int,
+        tested: Set<String>
+    ) -> [(concurrency: Int, streams: Int)] {
+        var candidates: [(concurrency: Int, streams: Int)] = []
+        let safeRadius = max(1, radius)
+
+        for concurrency in max(1, anchor.concurrency - safeRadius)...min(8, anchor.concurrency + safeRadius) {
+            for streams in max(1, anchor.streams - safeRadius)...min(10, anchor.streams + safeRadius) {
+                guard concurrency != anchor.concurrency || streams != anchor.streams else { continue }
+                guard max(abs(concurrency - anchor.concurrency), abs(streams - anchor.streams)) == safeRadius else { continue }
                 let key = pairKey(concurrency: concurrency, streams: streams)
-                if !tested.contains(key) {
+                guard !tested.contains(key) else { continue }
+                candidates.append((concurrency, streams))
+            }
+        }
+
+        return candidates
+    }
+
+    private func refinementScore(
+        for candidate: (concurrency: Int, streams: Int),
+        anchor: IPAVaultCalibrationSample,
+        samples: [IPAVaultCalibrationSample]
+    ) -> Double {
+        guard let maxSpeed = samples.map(\.bytesPerSecond).max(), maxSpeed > 0 else { return 0 }
+
+        // Estimate promise from all measurements, with nearby high-throughput
+        // samples carrying the most weight. This makes the twelve-test phase follow
+        // measured gradients instead of choosing arbitrary random neighbors.
+        var weightedSpeed = 0.0
+        var totalWeight = 0.0
+        var nearestMeasuredDistance = Double.greatestFiniteMagnitude
+
+        for sample in samples {
+            let dc = Double(candidate.concurrency - sample.concurrency)
+            let ds = Double(candidate.streams - sample.streams)
+            let distance = sqrt(dc * dc + ds * ds)
+            nearestMeasuredDistance = min(nearestMeasuredDistance, distance)
+            let weight = 1.0 / (0.75 + distance * distance)
+            weightedSpeed += (sample.bytesPerSecond / maxSpeed) * weight
+            totalWeight += weight
+        }
+
+        let predicted = totalWeight > 0 ? weightedSpeed / totalWeight : 0
+        let anchorDistance = Double(
+            max(abs(candidate.concurrency - anchor.concurrency), abs(candidate.streams - anchor.streams))
+        )
+        let anchorBias = 0.18 / (1.0 + anchorDistance)
+
+        // A small novelty bonus prefers an unmeasured direction when two candidates
+        // have similar predicted throughput, helping the search map the local slope
+        // rather than repeatedly filling only one side of the leader.
+        let novelty = min(3.0, nearestMeasuredDistance) * 0.035
+        let axisProbeBonus = candidate.concurrency == anchor.concurrency || candidate.streams == anchor.streams ? 0.06 : 0
+        return predicted + anchorBias + novelty + axisProbeBonus
+    }
+
+    private func gridDistance(
+        _ lhs: IPAVaultCalibrationSample,
+        _ rhs: IPAVaultCalibrationSample
+    ) -> Int {
+        max(abs(lhs.concurrency - rhs.concurrency), abs(lhs.streams - rhs.streams))
+    }
+
+    private func firstUntestedPair(tested: Set<String>) -> (concurrency: Int, streams: Int)? {
+        for concurrency in 1...8 {
+            for streams in 1...10 {
+                if !tested.contains(pairKey(concurrency: concurrency, streams: streams)) {
                     return (concurrency, streams)
                 }
             }
         }
-
-        var remaining: [(Int, Int)] = []
-        for concurrency in 1...8 {
-            for streams in 1...10 {
-                if !tested.contains(pairKey(concurrency: concurrency, streams: streams)) {
-                    remaining.append((concurrency, streams))
-                }
-            }
-        }
-
-        if let pair = remaining.randomElement() {
-            return (pair.0, pair.1)
-        }
-        return (1, 1)
+        return nil
     }
 
     private func pairKey(concurrency: Int, streams: Int) -> String {
