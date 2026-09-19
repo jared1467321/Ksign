@@ -216,8 +216,16 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var ipavaultAggregateRateSamples: [IPAVaultAggregateSample] = []
 
     // Live Activity batch accounting is intentionally separate from the queue.
+    private struct IPAVaultLiveActivitySnapshot: Equatable {
+        let completed: Int
+        let total: Int
+        let progressStep: Int
+        let detail: String
+    }
+
     private var ipavaultActivityItemIDs: Set<String> = []
     private var completedIPAVaultActivityItemIDs: Set<String> = []
+    private var ipavaultLiveActivitySnapshot: IPAVaultLiveActivitySnapshot?
 
     private var ipavaultTransfersRootURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -420,38 +428,69 @@ class IPADownloadManager: NSObject, ObservableObject {
                 beginIPAVaultBatch()
             }
 
-            if #available(iOS 16.2, *) {
-                let total = ipavaultActivityItemIDs.count
-                let completed = completedIPAVaultActivityItemIDs
-                    .intersection(ipavaultActivityItemIDs)
-                    .count
-
-                KeepAliveActivityController.shared.report(
-                    .ipaVaultDownloads,
-                    completed: completed,
-                    total: total > 0 ? total : nil
-                )
-
-                let isFinishing = !activeIPAVaultDownloadIDs.isEmpty &&
-                    activeIPAVaultDownloadIDs.allSatisfy { ipavaultJobs[$0]?.assembling == true }
-                KeepAliveActivityController.shared.report(
-                    .ipaVaultDownloads,
-                    detail: isFinishing ? "Finishing IPA Vault downloads" : "Downloading from IPA Vault"
-                )
-            }
-
+            publishIPAVaultLiveActivityState()
             BackgroundAudioManager.shared.claim(.ipaVaultDownloads)
         } else {
-            if #available(iOS 16.2, *) {
-                KeepAliveActivityController.shared.clearReport(.ipaVaultDownloads)
-            }
+            // Publish the terminal 100% snapshot before releasing the owner. The
+            // controller keeps it visible through the audio manager's existing
+            // handoff/linger window; the next batch clears it before starting.
+            publishIPAVaultLiveActivityState()
             BackgroundAudioManager.shared.release(.ipaVaultDownloads)
 
             ipavaultActivityItemIDs.removeAll()
             completedIPAVaultActivityItemIDs.removeAll()
+            ipavaultLiveActivitySnapshot = nil
             stopIPAVaultAdaptiveController()
             endIPAVaultBatch()
         }
+    }
+
+    private func publishIPAVaultLiveActivityState() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard #available(iOS 16.2, *) else { return }
+
+        let total = ipavaultActivityItemIDs.count
+        guard total > 0 else { return }
+
+        let completed = completedIPAVaultActivityItemIDs
+            .intersection(ipavaultActivityItemIDs)
+            .count
+
+        let aggregate = ipavaultActivityItemIDs.reduce(0.0) { partial, itemID in
+            if completedIPAVaultActivityItemIDs.contains(itemID) {
+                return partial + 1
+            }
+            let fraction = downloadItems.first(where: { $0.id.uuidString == itemID })?.progress ?? 0
+            return partial + min(1, max(0, fraction))
+        } / Double(total)
+
+        let isFinishing = !activeIPAVaultDownloadIDs.isEmpty &&
+            activeIPAVaultDownloadIDs.allSatisfy { ipavaultJobs[$0]?.assembling == true }
+        let detail: String
+        if completed >= total {
+            detail = "Completed"
+        } else if isFinishing {
+            detail = "Finishing IPA Vault downloads"
+        } else {
+            detail = "Downloading from IPA Vault"
+        }
+        let progressStep = aggregate >= 1 ? 100 : Int(floor((aggregate + 0.000_000_001) * 100))
+        let snapshot = IPAVaultLiveActivitySnapshot(
+            completed: completed,
+            total: total,
+            progressStep: progressStep,
+            detail: detail
+        )
+        guard snapshot != ipavaultLiveActivitySnapshot else { return }
+        ipavaultLiveActivitySnapshot = snapshot
+
+        KeepAliveActivityController.shared.report(
+            .ipaVaultDownloads,
+            completed: completed,
+            total: total,
+            fraction: Double(progressStep) / 100,
+            detail: detail
+        )
     }
 
     func pauseIPAVaultDownload(_ item: DownloadItem) {
@@ -852,6 +891,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         item.bytesDownloaded = downloaded
         item.progress = job.totalBytes > 0 ? Double(downloaded) / Double(job.totalBytes) : 0
         downloadItems[index] = item
+        publishIPAVaultLiveActivityState()
     }
 
     private func commitIPAVaultBytes(_ metadata: IPAVaultTaskMetadata, job: IPAVaultJob, through absoluteEnd: Int64) {
@@ -1139,6 +1179,10 @@ class IPADownloadManager: NSObject, ObservableObject {
     // MARK: Batch stream learning
 
     private func beginIPAVaultBatch() {
+        if #available(iOS 16.2, *) {
+            KeepAliveActivityController.shared.clearReport(.ipaVaultDownloads)
+        }
+        ipavaultLiveActivitySnapshot = nil
         ipavaultBatchIsActive = true
         ipavaultBatchObservationSequence = 0
         ipavaultBatchObservations.removeAll(keepingCapacity: true)
