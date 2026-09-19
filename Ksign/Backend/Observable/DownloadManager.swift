@@ -521,8 +521,12 @@ final class ImportLiveActivityReporter {
 		}
 
 		guard #available(iOS 16.2, *) else { return }
-		KeepAliveActivityController.shared.report(.importing, completed: completed, total: total)
-		KeepAliveActivityController.shared.report(.importing, fraction: nil)
-		KeepAliveActivityController.shared.report(.importing, detail: detail)
+		KeepAliveActivityController.shared.report(
+			.importing,
+			completed: completed,
+			total: total,
+			fraction: nil,
+			detail: detail
+		)
 	}
 }

@@ -35,6 +35,7 @@ final class ExtractManager: ObservableObject {
 	private var _activeActivityItemIDs: Set<String> = []
 	private var _completedActivityItemIDs: Set<String> = []
 	private var _failedActivityItemIDs: Set<String> = []
+	private var _activityProgress: [String: Double] = [:]
 
 	private init() { }
 
@@ -52,6 +53,18 @@ final class ExtractManager: ObservableObject {
 
 	func updateProgress(for item: ExtractItem, progress: Double) {
 		let clamped = max(0.0, min(1.0, progress))
+
+		let liveFraction = clamped >= 1
+			? 1
+			: floor((clamped + 0.000_000_001) * 100) / 100
+
+		_activityQueue.async {
+			guard self._activityItemIDs.contains(item.id) else { return }
+			guard self._activityProgress[item.id] != liveFraction else { return }
+			self._activityProgress[item.id] = liveFraction
+			self._publishActivity()
+		}
+
 		DispatchQueue.main.async {
 			item.progress = clamped
 		}
@@ -74,6 +87,7 @@ final class ExtractManager: ObservableObject {
 				_activityItemIDs.removeAll()
 				_completedActivityItemIDs.removeAll()
 				_failedActivityItemIDs.removeAll()
+				_activityProgress.removeAll()
 				if #available(iOS 16.2, *) {
 					KeepAliveActivityController.shared.clearReport(.extracting)
 				}
@@ -81,6 +95,7 @@ final class ExtractManager: ObservableObject {
 
 			_activityItemIDs.insert(id)
 			_activeActivityItemIDs.insert(id)
+			_activityProgress[id] = 0
 			_publishActivity()
 		}
 	}
@@ -92,6 +107,7 @@ final class ExtractManager: ObservableObject {
 			if succeeded {
 				_completedActivityItemIDs.insert(id)
 				_failedActivityItemIDs.remove(id)
+				_activityProgress[id] = 1
 			} else {
 				_failedActivityItemIDs.insert(id)
 				_completedActivityItemIDs.remove(id)
@@ -106,11 +122,21 @@ final class ExtractManager: ObservableObject {
 		let failed = _failedActivityItemIDs.intersection(_activityItemIDs).count
 		let total = _activityItemIDs.count
 		let terminal = completed + failed
+		let aggregateFraction = min(
+			1,
+			max(
+				0,
+				_activityItemIDs.reduce(0.0) { partial, id in
+					partial + (_activityProgress[id] ?? 0)
+				} / Double(total)
+			)
+		)
 
-		KeepAliveActivityController.shared.report(.extracting, completed: completed, total: total)
-		KeepAliveActivityController.shared.report(.extracting, fraction: nil)
 		KeepAliveActivityController.shared.report(
 			.extracting,
+			completed: completed,
+			total: total,
+			fraction: aggregateFraction,
 			detail: terminal == total ? (failed == 0 ? "Completed" : "Error") : "Extracting"
 		)
 	}

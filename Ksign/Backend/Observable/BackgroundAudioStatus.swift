@@ -25,11 +25,10 @@ struct BackgroundAudioEvent: Identifiable, Equatable {
 		case interrupted
 		case resumed
 		case reconfigured
-		// Anything to do with the Dynamic Island pill: whether it was asked
-		// for, whether the system actually started it, and how it ended. The
-		// pill only exists while the app is backgrounded, so without a trace
-		// here there is no way to tell "never submitted" from "submitted and
-		// silently reclaimed".
+		// Anything to do with the Live Activity: whether it was requested,
+		// whether the system actually started it, updates, and how it ended.
+		// Keeping this trace separate from the audio log makes it possible to
+		// distinguish app/background-execution failures from ActivityKit ones.
 		case island
 	}
 
