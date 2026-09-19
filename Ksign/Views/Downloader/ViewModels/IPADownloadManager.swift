@@ -217,9 +217,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     // Live Activity batch accounting is intentionally separate from the queue.
     private struct IPAVaultLiveActivitySnapshot: Equatable {
-        let completed: Int
-        let total: Int
-        let progressStep: Int
+        let milestone: Int
         let detail: String
     }
 
@@ -474,11 +472,17 @@ class IPADownloadManager: NSObject, ObservableObject {
         } else {
             detail = "Downloading from IPA Vault"
         }
-        let progressStep = aggregate >= 1 ? 100 : Int(floor((aggregate + 0.000_000_001) * 100))
+        // IPA Vault transfers can move fast enough that percentage-based Live
+        // Activity progress produces far more updates than the UI needs. Present
+        // the whole batch as six coarse milestones instead: 0/6 ... 6/6. This
+        // keeps phase changes immediate while bounding progress-driven ActivityKit
+        // writes to six meaningful steps for the entire batch.
+        let milestoneCount = 6
+        let milestone = aggregate >= 1
+            ? milestoneCount
+            : Int(floor((aggregate + 0.000_000_001) * Double(milestoneCount)))
         let snapshot = IPAVaultLiveActivitySnapshot(
-            completed: completed,
-            total: total,
-            progressStep: progressStep,
+            milestone: milestone,
             detail: detail
         )
         guard snapshot != ipavaultLiveActivitySnapshot else { return }
@@ -486,9 +490,9 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         KeepAliveActivityController.shared.report(
             .ipaVaultDownloads,
-            completed: completed,
-            total: total,
-            fraction: Double(progressStep) / 100,
+            completed: milestone,
+            total: milestoneCount,
+            fraction: nil,
             detail: detail
         )
     }
