@@ -46,6 +46,12 @@ class IPADownloadManager: NSObject, ObservableObject {
         let bytes: Int64
     }
 
+    private struct IPAVaultBatchObservation {
+        let itemID: String
+        let streams: Int
+        let sequence: Int
+    }
+
     private final class IPAVaultTaskMetadata {
         let itemID: String
         let leaseStart: Int64
@@ -174,6 +180,17 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var maxConcurrentIPAVaultDownloads = 3
     private var ipavaultStartingStreamsPerFile = 5
     private let ipavaultHardMaxStreamsPerFile = 10
+
+    // A batch is exactly one IPA Vault keep-alive lifetime. The user's configured
+    // streams/job value seeds a new batch. Stable per-job probe results then form
+    // a recency-weighted consensus used only to seed jobs that start later in the
+    // same batch; active jobs keep their own independently learned stream count.
+    private var ipavaultBatchIsActive = false
+    private var ipavaultBatchStartingStreams = 5
+    private var ipavaultBatchObservationSequence = 0
+    private var ipavaultBatchObservations: [String: IPAVaultBatchObservation] = [:]
+    private let ipavaultBatchObservationLimit = 16
+    private let ipavaultBatchRecencyDecay = 0.72
 
     @Published private(set) var ipavaultAdaptiveStreamCount = 0
     @Published private(set) var ipavaultAdaptiveSpeedBPS: Double = 0
@@ -362,6 +379,11 @@ class IPADownloadManager: NSObject, ObservableObject {
             // concurrency must not reset a job's learned stream count. Only an
             // explicit streams/job change restarts adaptation from that new value.
             if previousStartingStreams != self.ipavaultStartingStreamsPerFile {
+                // An explicit user/calibration change becomes the new authority.
+                // Reset the temporary batch prior rather than letting observations
+                // collected under the old starting value override the new setting.
+                self.resetIPAVaultBatchLearningToConfiguredStart()
+
                 let now = ProcessInfo.processInfo.systemUptime
                 for job in self.ipavaultJobs.values where !job.assembling {
                     job.desiredStreams = self.ipavaultStartingStreamsPerFile
@@ -394,6 +416,10 @@ class IPADownloadManager: NSObject, ObservableObject {
         let hasWork = !pendingIPAVaultDownloads.isEmpty || !activeIPAVaultDownloadIDs.isEmpty
 
         if hasWork {
+            if !ipavaultBatchIsActive {
+                beginIPAVaultBatch()
+            }
+
             if #available(iOS 16.2, *) {
                 let total = ipavaultActivityItemIDs.count
                 let completed = completedIPAVaultActivityItemIDs
@@ -424,6 +450,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             ipavaultActivityItemIDs.removeAll()
             completedIPAVaultActivityItemIDs.removeAll()
             stopIPAVaultAdaptiveController()
+            endIPAVaultBatch()
         }
     }
 
@@ -567,7 +594,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
                 pausedIPAVaultDownloadIDs.remove(itemID)
                 setIPAVaultPausedState(itemID: itemID, isPaused: false)
-                job.desiredStreams = ipavaultStartingStreamsPerFile
+                job.desiredStreams = currentIPAVaultBatchStartingStreams()
                 resetIPAVaultAdaptiveMeasurements(for: job)
                 rebalanceIPAVaultStreams()
                 continue
@@ -621,7 +648,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 directory: directory,
                 partialURL: partialURL,
                 fileDescriptor: descriptor,
-                startingStreams: ipavaultStartingStreamsPerFile
+                startingStreams: currentIPAVaultBatchStartingStreams()
             )
             ipavaultJobs[pending.itemID] = job
             activeIPAVaultDownloadIDs.insert(pending.itemID)
@@ -1109,6 +1136,118 @@ class IPADownloadManager: NSObject, ObservableObject {
         return (start, end, total)
     }
 
+    // MARK: Batch stream learning
+
+    private func beginIPAVaultBatch() {
+        ipavaultBatchIsActive = true
+        ipavaultBatchObservationSequence = 0
+        ipavaultBatchObservations.removeAll(keepingCapacity: true)
+        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
+        print("IPA Vault adaptive: new batch starts at \(ipavaultBatchStartingStreams) streams/job.")
+    }
+
+    private func endIPAVaultBatch() {
+        guard ipavaultBatchIsActive else { return }
+        print(
+            "IPA Vault adaptive: batch ended; discard learned start " +
+            "\(ipavaultBatchStartingStreams) and return to configured " +
+            "\(ipavaultStartingStreamsPerFile) next batch."
+        )
+        ipavaultBatchIsActive = false
+        ipavaultBatchObservationSequence = 0
+        ipavaultBatchObservations.removeAll(keepingCapacity: true)
+        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
+    }
+
+    private func resetIPAVaultBatchLearningToConfiguredStart() {
+        ipavaultBatchObservationSequence = 0
+        ipavaultBatchObservations.removeAll(keepingCapacity: true)
+        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
+        if ipavaultBatchIsActive {
+            print(
+                "IPA Vault adaptive: batch learning reset to configured " +
+                "\(ipavaultBatchStartingStreams) streams/job."
+            )
+        }
+    }
+
+    private func currentIPAVaultBatchStartingStreams() -> Int {
+        if ipavaultBatchIsActive {
+            return min(ipavaultHardMaxStreamsPerFile, max(1, ipavaultBatchStartingStreams))
+        }
+        return min(ipavaultHardMaxStreamsPerFile, max(1, ipavaultStartingStreamsPerFile))
+    }
+
+    private func recordIPAVaultBatchPreference(for job: IPAVaultJob, streams: Int) {
+        guard ipavaultBatchIsActive else { return }
+
+        ipavaultBatchObservationSequence += 1
+        let boundedStreams = min(ipavaultHardMaxStreamsPerFile, max(1, streams))
+        ipavaultBatchObservations[job.itemID] = IPAVaultBatchObservation(
+            itemID: job.itemID,
+            streams: boundedStreams,
+            sequence: ipavaultBatchObservationSequence
+        )
+
+        if ipavaultBatchObservations.count > ipavaultBatchObservationLimit {
+            let oldest = ipavaultBatchObservations.values
+                .sorted { $0.sequence < $1.sequence }
+                .prefix(ipavaultBatchObservations.count - ipavaultBatchObservationLimit)
+            for observation in oldest {
+                ipavaultBatchObservations.removeValue(forKey: observation.itemID)
+            }
+        }
+
+        let previous = ipavaultBatchStartingStreams
+        ipavaultBatchStartingStreams = calculateIPAVaultBatchStartingStreams()
+        if previous != ipavaultBatchStartingStreams {
+            print(
+                "IPA Vault adaptive: batch start moved \(previous)→" +
+                "\(ipavaultBatchStartingStreams) streams/job from " +
+                "\(ipavaultBatchObservations.count) recent job observations."
+            )
+        }
+    }
+
+    private func calculateIPAVaultBatchStartingStreams() -> Int {
+        guard !ipavaultBatchObservations.isEmpty else {
+            return ipavaultStartingStreamsPerFile
+        }
+
+        let newestSequence = ipavaultBatchObservationSequence
+        var weightedVotes: [(streams: Int, weight: Double)] = ipavaultBatchObservations.values.map { observation in
+            let age = max(0, newestSequence - observation.sequence)
+            let weight = pow(ipavaultBatchRecencyDecay, Double(age))
+            return (observation.streams, weight)
+        }
+
+        // Keep the calibrated/user setting as a weak prior at the beginning of a
+        // batch. Its influence decays quickly as real jobs produce evidence, so
+        // two or three recent jobs agreeing can move the baseline while one odd
+        // download normally cannot.
+        let observationCount = ipavaultBatchObservations.count
+        let configuredPriorWeight = 1.5 * pow(ipavaultBatchRecencyDecay, Double(observationCount))
+        weightedVotes.append((ipavaultStartingStreamsPerFile, configuredPriorWeight))
+
+        let totalWeight = weightedVotes.reduce(0.0) { $0 + $1.weight }
+        guard totalWeight > 0 else { return ipavaultStartingStreamsPerFile }
+
+        let ordered = weightedVotes.sorted { lhs, rhs in
+            if lhs.streams == rhs.streams { return lhs.weight > rhs.weight }
+            return lhs.streams < rhs.streams
+        }
+        let halfway = totalWeight / 2.0
+        var cumulative = 0.0
+        for vote in ordered {
+            cumulative += vote.weight
+            if cumulative >= halfway {
+                return min(ipavaultHardMaxStreamsPerFile, max(1, vote.streams))
+            }
+        }
+
+        return min(ipavaultHardMaxStreamsPerFile, max(1, ordered.last?.streams ?? ipavaultStartingStreamsPerFile))
+    }
+
     // MARK: Adaptive stream controller
 
     private func startIPAVaultAdaptiveControllerIfNeeded() {
@@ -1403,6 +1542,13 @@ class IPADownloadManager: NSObject, ObservableObject {
             "baseline \(String(format: "%.1f", baseline / 1_000_000)) MB/s, " +
             "measured \(String(format: "%.1f", measured / 1_000_000)) MB/s."
         )
+
+        // One job gets one vote. Repeated probes replace that job's previous vote
+        // rather than allowing a long download to dominate the batch. Updating a
+        // vote also makes it the newest evidence, so changing conditions are
+        // reflected quickly in the starting point of later jobs.
+        recordIPAVaultBatchPreference(for: job, streams: job.desiredStreams)
+
         job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
         job.adaptiveLastDecisionAt = now
         job.adaptiveProbe = nil
