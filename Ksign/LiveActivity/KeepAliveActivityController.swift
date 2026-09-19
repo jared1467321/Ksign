@@ -8,14 +8,17 @@ import Foundation
 import OSLog
 import UIKit
 
-// Starts, updates and ends the keep-alive Live Activity.
+// Owns the app's single local Live Activity.
 //
-// Background execution is owned by `BackgroundAudioManager`; this controller
-// only mirrors work that is already running into ActivityKit. Its state and
-// pacing run on a dedicated serial queue rather than the main actor. Signing,
-// archiving and install polling all continue on worker queues while the app is
-// backgrounded, so making ActivityKit delivery depend on the UI run loop can
-// leave updates queued until the app becomes active again.
+// The important separation is:
+// - BackgroundAudioManager owns background execution.
+// - Work owners/reporters own whether there is a real job to display.
+// - This controller owns ActivityKit lifetime and serialization only.
+//
+// A Live Activity is requested while the app is foregrounded, then the same
+// Activity instance survives foreground/background transitions until the work
+// ends. Local Activity.update calls are allowed while the app has background
+// execution time, so updates are not tied to SwiftUI or UIApplication state.
 @available(iOS 16.2, *)
 final class KeepAliveActivityController {
 	static let shared = KeepAliveActivityController()
@@ -25,16 +28,34 @@ final class KeepAliveActivityController {
 		qos: .userInitiated
 	)
 
-	// Every mutable field below is confined to `_queue`.
+	// MARK: - Activity lifetime
+
 	private var _activity: Activity<KeepAliveAttributes>?
+	private var _appIsActive = false
+	private var _featureEnabled = true
+	private var _audioIsRunning = false
+	private var _activeOwners: [String] = []
+	private var _handoffOwners: [String] = []
 
-	// The last owners that were actually holding something. During the audio
-	// manager's linger gap between two items in a batch, keep showing the previous
-	// owner instead of tearing the activity down and rebuilding it.
-	private var _lastOwners: [String] = []
+	// If a person or the system dismisses the current activity, don't immediately
+	// recreate it for the same work. Once all owners are gone, the next job gets a
+	// fresh chance to create one.
+	private var _suppressedForCurrentWork = false
 
-	// What each owner has told us about itself. Fields are merged rather than
-	// replaced, so a batch can own the count while the worker owns the phase text.
+	// When the last owner releases, BackgroundAudioManager deliberately keeps its
+	// audio graph alive for a short handoff window. `_handoffOwners` mirrors that
+	// exact window so a download -> import -> sign/install chain keeps one Activity
+	// without maintaining a second, competing timer here.
+
+	// Request failures shouldn't become a hot loop while progress callbacks are
+	// arriving rapidly.
+	private var _nextStartAttempt = Date.distantPast
+	private static let _retryDelay: TimeInterval = 15
+
+	private var _lifecycleObservers: [NSObjectProtocol] = []
+
+	// MARK: - Work reports
+
 	private struct _Report: Equatable {
 		var completed: Int?
 		var total: Int?
@@ -44,71 +65,28 @@ final class KeepAliveActivityController {
 	}
 
 	private var _reports: [String: _Report] = [:]
-
-	// Most-recent report wins when the current focus disappears. The focused
-	// owner remains sticky while it is still active so the bar cannot ping-pong
-	// between simultaneous operations.
 	private var _sequence: UInt64 = 0
 	private var _reportSeq: [String: UInt64] = [:]
 	private var _focusOwner: String?
 
-	// Reports and audio-state publications arrive independently. Keep the latest
-	// values so either path can rebuild the complete ActivityKit state.
-	private var _lastIsRunning = false
-	private var _lastOwnersInput: [String] = []
-	private var _featureEnabled = true
-
-	// A failed request normally means Live Activities are disabled or temporarily
-	// unavailable. Avoid retrying continuously while work is running.
-	private var _nextAttempt = Date.distantPast
-	private static let _retryDelay: TimeInterval = 30
+	// Producers may report very frequently. Progress is reduced to human-visible
+	// one-percent steps before ActivityKit sees it; phase/count/owner changes are
+	// never delayed by an arbitrary timer.
+	private static let _progressStep = 0.01
 
 	// MARK: - Serialized ActivityKit delivery
 
-	// Producers may report as often as they need. Only the newest desired state
-	// is retained, and exactly one Activity.update call is in flight at a time.
+	// Activity.update is serialized. While one update is in flight, newer state
+	// simply replaces the pending state. This prevents stale callbacks from
+	// building an unbounded queue without inventing a timing quota.
 	private var _desiredState: KeepAliveAttributes.ContentState?
-	private var _pendingUrgentPush = false
-	private var _pushInFlight = false
-	private var _scheduledPush: DispatchWorkItem?
-	private var _lastPushedState: KeepAliveAttributes.ContentState?
-	private var _lastPushAt = Date.distantPast
-
-	// ActivityKit can silently stop repainting a long-lived local activity when
-	// it is updated too aggressively. Every push therefore has a meaningful
-	// global floor, even for count/owner/completion changes. Ordinary phase and
-	// percentage movement is coalesced more heavily so a long batch can survive
-	// from start to finish without exhausting the activity's practical render
-	// budget.
-	private static let _urgentPushInterval: TimeInterval = 3
-	private static let _progressPushInterval: TimeInterval = 8
-
-	// Fractions are quantized before entering the state graph. Producers may keep
-	// sampling at high frequency, but ActivityKit only sees movement in 3-point
-	// steps and the scheduler retains only the newest state between pushes.
-	private static let _progressStep = 0.03
-
-	// ActivityKit behaves most reliably for this app when the activity is born as
-	// the app leaves the foreground. Work can run for any length of time while the
-	// app is visible; we retain the newest state here and create a fresh activity
-	// only from `willResignActive`. Returning to the foreground dismisses the
-	// visible activity without clearing the still-running operation.
-	private var _mayPresentActivity = false
-	private var _foregroundDeferralLogged = false
-	private var _lifecycleObservers: [NSObjectProtocol] = []
+	private var _updateInFlight = false
+	private var _inFlightState: KeepAliveAttributes.ContentState?
+	private var _lastDeliveredState: KeepAliveAttributes.ContentState?
+	private var _reconcileScheduled = false
 
 	private init() {
 		let center = NotificationCenter.default
-
-		_lifecycleObservers.append(
-			center.addObserver(
-				forName: UIApplication.willResignActiveNotification,
-				object: nil,
-				queue: .main
-			) { [weak self] _ in
-				self?._willResignActive()
-			}
-		)
 
 		_lifecycleObservers.append(
 			center.addObserver(
@@ -116,9 +94,33 @@ final class KeepAliveActivityController {
 				object: nil,
 				queue: .main
 			) { [weak self] _ in
-				self?._didBecomeActive()
+				self?._setAppActive(true)
 			}
 		)
+
+		_lifecycleObservers.append(
+			center.addObserver(
+				forName: UIApplication.willResignActiveNotification,
+				object: nil,
+				queue: .main
+			) { [weak self] _ in
+				self?._setAppActive(false)
+			}
+		)
+
+		// The singleton can first be touched from a worker queue. Read UIKit state
+		// on main, then adopt any surviving Activity from a prior process lifetime.
+		DispatchQueue.main.async { [weak self] in
+			guard let self else { return }
+			let active = UIApplication.shared.applicationState == .active
+			let existing = Activity<KeepAliveAttributes>.activities
+
+			self._queue.async {
+				self._appIsActive = active
+				self._adoptExistingActivity(existing)
+				self._reconcile()
+			}
+		}
 	}
 
 	deinit {
@@ -131,21 +133,81 @@ final class KeepAliveActivityController {
 	// MARK: - Driven by BackgroundAudioStatus
 
 	func sync(isRunning: Bool, owners: [String]) {
-		// Capture the switch at the call site. The controller does not mutate this
-		// setting and should not have to hop to the UI actor to read it later.
 		let enabled = OptionsManager.shared.options.backgroundAudio
 
 		_queue.async {
+			let previousOwners = self._activeOwners
+			let hadWork = !previousOwners.isEmpty
+			let hasWork = !owners.isEmpty
+
 			self._featureEnabled = enabled
-			self._lastIsRunning = isRunning
-			self._lastOwnersInput = owners
-			self._apply(isRunning: isRunning, owners: owners)
+			self._audioIsRunning = isRunning
+			self._activeOwners = owners
+
+			if hadWork && !hasWork {
+				// The audio manager itself owns the handoff window. Keep the final
+				// owner visible for exactly as long as that graph is still running so
+				// a terminal report or the next pipeline owner can reuse this Activity.
+				self._handoffOwners = previousOwners
+			} else if hasWork {
+				self._handoffOwners = []
+				if !hadWork {
+					self._suppressedForCurrentWork = false
+					self._nextStartAttempt = .distantPast
+				}
+			}
+
+			// Once the audio manager says its linger is actually over, the job is
+			// over too. Reset dismissal suppression now so the next independent job
+			// gets a fresh Activity.
+			if !hasWork && !isRunning {
+				self._handoffOwners = []
+				self._focusOwner = nil
+				self._suppressedForCurrentWork = false
+			}
+
+			self._scheduleReconcile()
 		}
 	}
 
-	private func _focusedOwner(among display: [String]) -> String? {
+	private func _setAppActive(_ active: Bool) {
+		_queue.async {
+			self._appIsActive = active
+			if active {
+				// A request may have failed only because the app was transitioning
+				// out of the foreground. Returning active is the right retry point.
+				self._nextStartAttempt = .distantPast
+			}
+			self._scheduleReconcile()
+		}
+	}
+
+	private func _adoptExistingActivity(_ activities: [Activity<KeepAliveAttributes>]) {
+		guard _activity == nil, let first = activities.first else { return }
+
+		_activity = first
+		_lastDeliveredState = first.content.state
+		_watchActivityState(first)
+
+		BackgroundAudioStatus.shared.record(
+			.island,
+			"adopted existing activity — \(first.content.state.summary)"
+		)
+
+		// There should only be one Ksign keep-alive activity. Clean up leftovers
+		// from a crash/relaunch race rather than letting duplicate islands survive.
+		for extra in activities.dropFirst() {
+			Task(priority: .utility) {
+				await extra.end(nil, dismissalPolicy: .immediate)
+			}
+		}
+	}
+
+	// MARK: - State construction
+
+	private func _focusedOwner(among owners: [String]) -> String? {
 		if let current = _focusOwner,
-		   display.contains(current),
+		   owners.contains(current),
 		   _reports[current] != nil {
 			return current
 		}
@@ -153,7 +215,7 @@ final class KeepAliveActivityController {
 		var best: String?
 		var bestSeq: UInt64 = 0
 
-		for owner in display where _reports[owner] != nil {
+		for owner in owners where _reports[owner] != nil {
 			let seq = _reportSeq[owner] ?? 0
 			if best == nil || seq > bestSeq {
 				best = owner
@@ -164,34 +226,25 @@ final class KeepAliveActivityController {
 		return best
 	}
 
-	private func _apply(isRunning: Bool, owners: [String]) {
-		let wanted = _featureEnabled && (isRunning || !owners.isEmpty)
+	private func _currentState() -> KeepAliveAttributes.ContentState? {
+		let displayOwners = _activeOwners.isEmpty ? _handoffOwners : _activeOwners
+		guard !displayOwners.isEmpty else { return nil }
 
-		guard wanted else {
-			_end()
-			return
-		}
-
-		if !owners.isEmpty { _lastOwners = owners }
-		let display = owners.isEmpty ? _lastOwners : owners
-
-		let focus = _focusedOwner(among: display)
+		let focus = _focusedOwner(among: displayOwners)
 		_focusOwner = focus
 		let report = focus.flatMap { _reports[$0] }
 
-		// Lead with the owner whose progress is being displayed so the title and
-		// progress can never describe different jobs.
 		let named: [String]
-		if let focus, let index = display.firstIndex(of: focus) {
-			var reordered = display
+		if let focus, let index = displayOwners.firstIndex(of: focus) {
+			var reordered = displayOwners
 			reordered.remove(at: index)
 			named = [focus] + reordered
 		} else {
-			named = display
+			named = displayOwners
 		}
 
-		let state = KeepAliveAttributes.ContentState(
-			isRunning: isRunning,
+		return KeepAliveAttributes.ContentState(
+			isRunning: _audioIsRunning,
 			owners: named,
 			completed: report?.completed,
 			total: report?.total,
@@ -199,195 +252,131 @@ final class KeepAliveActivityController {
 			detail: report?.detail,
 			detailStartedAt: report?.detailStartedAt
 		)
-
-		// While the app is active, retain the complete current state but do not
-		// create or update an ActivityKit activity. `willResignActive` calls back
-		// into `_apply` synchronously and starts a fresh activity with this truth.
-		guard _mayPresentActivity else {
-			_desiredState = state
-			_pendingUrgentPush = false
-
-			_scheduledPush?.cancel()
-			_scheduledPush = nil
-
-			if !_foregroundDeferralLogged {
-				_foregroundDeferralLogged = true
-				BackgroundAudioStatus.shared.record(
-					.island,
-					"waiting for background — latest state retained for \(state.summary)"
-				)
-			}
-
-			return
-		}
-
-		_foregroundDeferralLogged = false
-
-		// A newly requested activity already contains this state, so there is no
-		// reason to immediately update it again. If the request fails, retain the
-		// desired state and let the serial scheduler retry after the backoff.
-		if _activity == nil {
-			_start(with: state)
-			if _activity != nil { return }
-		}
-
-		let prior = _desiredState ?? _lastPushedState
-		_enqueue(state, urgent: _isUrgentTransition(from: prior, to: state))
 	}
 
-	private func _isUrgentTransition(
-		from old: KeepAliveAttributes.ContentState?,
-		to new: KeepAliveAttributes.ContentState
-	) -> Bool {
-		guard let old else { return true }
+	private func _scheduleReconcile() {
+		guard !_reconcileScheduled else { return }
+		_reconcileScheduled = true
 
-		// Owner and item-count changes are the compact island's primary signal, so
-		// keep them on the shorter cadence. They are still globally limited to one
-		// push every three seconds, which prevents fast batches from producing a
-		// burst for every individual phase and completion callback.
-		if old.isRunning != new.isRunning
-			|| old.owners != new.owners
-			|| old.completed != new.completed
-			|| old.total != new.total {
-			return true
-		}
-
-		// Terminal states should not sit behind the eight-second ordinary cadence.
-		// The three-second global floor still applies, so even completion/error
-		// transitions cannot create back-to-back ActivityKit writes.
-		if new.detail != old.detail, _isTerminalDetail(new.detail) {
-			return true
-		}
-
-		if old.progressFraction == nil || new.progressFraction == nil {
-			return old.progressFraction != new.progressFraction
-		}
-
-		return (old.progressFraction ?? 0) < 1 && (new.progressFraction ?? 0) >= 1
-	}
-
-	private func _isTerminalDetail(_ detail: String?) -> Bool {
-		guard let detail else { return false }
-		let normalized = detail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-		return normalized == "completed"
-			|| normalized == "complete"
-			|| normalized == "error"
-			|| normalized == "failed"
-			|| normalized == "cancelled"
-			|| normalized == "canceled"
-	}
-
-	private func _enqueue(_ state: KeepAliveAttributes.ContentState, urgent: Bool) {
-		// Nothing changed and nothing newer is waiting.
-		guard state != _lastPushedState || _desiredState != nil else { return }
-
-		_desiredState = state
-		_pendingUrgentPush = _pendingUrgentPush || urgent
-
-		// If a progress update was waiting on the slower cadence and an urgent
-		// transition arrives, replace the scheduled wake-up with the earlier one.
-		if urgent, let scheduled = _scheduledPush {
-			scheduled.cancel()
-			_scheduledPush = nil
-		}
-
-		_schedulePushIfNeeded()
-	}
-
-	private func _schedulePushIfNeeded() {
-		guard _mayPresentActivity,
-		      !_pushInFlight,
-		      _scheduledPush == nil,
-		      let desired = _desiredState else { return }
-
-		if desired == _lastPushedState {
-			_desiredState = nil
-			_pendingUrgentPush = false
-			return
-		}
-
-		if _activity == nil {
-			if Date() >= _nextAttempt {
-				_start(with: desired)
-				if _activity != nil { return }
-			}
-
-			let delay = max(0.25, min(1.0, _nextAttempt.timeIntervalSinceNow))
-			_schedule(after: delay)
-			return
-		}
-
-		let minimumInterval = _pendingUrgentPush
-			? Self._urgentPushInterval
-			: Self._progressPushInterval
-		let remaining = minimumInterval - Date().timeIntervalSince(_lastPushAt)
-
-		if remaining > 0 {
-			_schedule(after: remaining)
-		} else {
-			_beginPush()
-		}
-	}
-
-	private func _schedule(after delay: TimeInterval) {
-		let item = DispatchWorkItem { [weak self] in
+		_queue.async { [weak self] in
 			guard let self else { return }
-			self._scheduledPush = nil
-			self._schedulePushIfNeeded()
+			self._reconcileScheduled = false
+			self._reconcile()
 		}
-
-		_scheduledPush = item
-		_queue.asyncAfter(deadline: .now() + max(0.01, delay), execute: item)
 	}
 
-	private func _beginPush() {
-		guard !_pushInFlight,
+	private func _reconcile() {
+		guard _featureEnabled else {
+			_endCurrentActivity(reason: "background audio turned off")
+			return
+		}
+
+		// No owners + no running audio means BackgroundAudioManager has completed
+		// its own linger window. That is the authoritative end of this local job.
+		if _activeOwners.isEmpty && !_audioIsRunning {
+			_handoffOwners = []
+			_focusOwner = nil
+			_endCurrentActivity(reason: "work finished")
+			return
+		}
+
+		guard let state = _currentState() else { return }
+		guard !_suppressedForCurrentWork else { return }
+
+		if _activity == nil {
+			_desiredState = state
+			// Never create a brand-new activity for a job that already released
+			// its owner and is only inside the audio manager's linger/handoff window.
+			if !_activeOwners.isEmpty {
+				_startIfPossible(with: state)
+			}
+			return
+		}
+
+		_enqueue(state)
+	}
+
+	// MARK: - Activity start/update/end
+
+	private func _startIfPossible(with state: KeepAliveAttributes.ContentState) {
+		guard _activity == nil,
+		      _appIsActive,
+		      !_activeOwners.isEmpty,
+		      !_suppressedForCurrentWork,
+		      Date() >= _nextStartAttempt else { return }
+
+		guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+			_nextStartAttempt = Date().addingTimeInterval(Self._retryDelay)
+			Logger.misc.error("Live Activities are disabled for this app.")
+			BackgroundAudioStatus.shared.record(.island, "can't show — Live Activities are turned off for Ksign")
+			return
+		}
+
+		do {
+			let activity = try Activity.request(
+				attributes: KeepAliveAttributes(startedAt: Date()),
+				content: ActivityContent(state: state, staleDate: nil),
+				pushType: nil
+			)
+
+			_activity = activity
+			_lastDeliveredState = state
+			_nextStartAttempt = .distantPast
+			if _desiredState == state { _desiredState = nil }
+
+			BackgroundAudioStatus.shared.record(.island, "showing — \(state.summaryLine)")
+			_watchActivityState(activity)
+			_drainUpdates()
+		} catch {
+			_nextStartAttempt = Date().addingTimeInterval(Self._retryDelay)
+			Logger.misc.error("Keep-alive Live Activity failed to start: \(error.localizedDescription)")
+			BackgroundAudioStatus.shared.record(.island, "failed to start — \(error.localizedDescription)")
+		}
+	}
+
+	private func _enqueue(_ state: KeepAliveAttributes.ContentState) {
+		guard state != _lastDeliveredState || _desiredState != nil else { return }
+		_desiredState = state
+		_drainUpdates()
+	}
+
+	private func _drainUpdates() {
+		guard !_updateInFlight,
 		      let activity = _activity,
 		      let state = _desiredState else { return }
 
-		_pushInFlight = true
-		let activityID = activity.id
-		let stateBeingPushed = state
-		let wasUrgent = _pendingUrgentPush
-		_pendingUrgentPush = false
+		if state == _lastDeliveredState {
+			_desiredState = nil
+			return
+		}
 
-		// This task is intentionally created from the controller's worker queue and
-		// has no MainActor annotation. ActivityKit supports background updates; the
-		// delivery path must not wait for SwiftUI's run loop to become active again.
+		_desiredState = nil
+		_updateInFlight = true
+		_inFlightState = state
+		let activityID = activity.id
+
 		Task(priority: .userInitiated) { [weak self] in
-			await activity.update(ActivityContent(state: stateBeingPushed, staleDate: nil))
+			await activity.update(ActivityContent(state: state, staleDate: nil))
 
 			self?._queue.async {
-				self?._finishPush(
-					activityID: activityID,
-					state: stateBeingPushed,
-					wasUrgent: wasUrgent
-				)
+				self?._finishUpdate(activityID: activityID, state: state)
 			}
 		}
 	}
 
-	private func _finishPush(
+	private func _finishUpdate(
 		activityID: String,
-		state: KeepAliveAttributes.ContentState,
-		wasUrgent: Bool
+		state: KeepAliveAttributes.ContentState
 	) {
-		_pushInFlight = false
+		_updateInFlight = false
+		_inFlightState = nil
 
-		// Ignore completion from an activity that was replaced while the await was
-		// in flight. The newest desired state remains queued for the replacement.
 		guard _activity?.id == activityID else {
-			_schedulePushIfNeeded()
+			_drainUpdates()
 			return
 		}
 
-		_lastPushedState = state
-		_lastPushAt = Date()
-
-		if _desiredState == state {
-			_desiredState = nil
-			_pendingUrgentPush = false
-		}
+		_lastDeliveredState = state
 
 		let count = "\(state.completed.map(String.init) ?? "–")/\(state.total.map(String.init) ?? "–")"
 		let percent = state.progressFraction
@@ -395,26 +384,103 @@ final class KeepAliveActivityController {
 			?? ""
 		BackgroundAudioStatus.shared.record(
 			.island,
-			"pushed\(wasUrgent ? "" : " progress") — \(count)\(percent) — \(state.summaryLine)"
+			"updated — \(count)\(percent) — \(state.summaryLine)"
 		)
 
-		_schedulePushIfNeeded()
+		_drainUpdates()
 	}
 
-	private func _stopPusher() {
-		_scheduledPush?.cancel()
-		_scheduledPush = nil
+	private func _endCurrentActivity(reason: String) {
+		let finalState = _desiredState ?? _inFlightState ?? _lastDeliveredState
 		_desiredState = nil
-		_pendingUrgentPush = false
-		_pushInFlight = false
-		_lastPushedState = nil
-		_lastPushAt = .distantPast
+		_updateInFlight = false
+		_inFlightState = nil
+		_handoffOwners = []
+		_focusOwner = nil
+		_nextStartAttempt = .distantPast
+
+		guard let activity = _activity else {
+			_lastDeliveredState = nil
+			return
+		}
+
+		_activity = nil
+		_lastDeliveredState = nil
+
+		BackgroundAudioStatus.shared.record(.island, "ended — \(reason)")
+
+		Task(priority: .utility) {
+			let finalContent = finalState.map {
+				ActivityContent(state: $0, staleDate: nil)
+			}
+			await activity.end(finalContent, dismissalPolicy: .immediate)
+		}
+	}
+
+	private func _watchActivityState(_ activity: Activity<KeepAliveAttributes>) {
+		let id = activity.id
+
+		Task(priority: .utility) { [weak self] in
+			for await state in activity.activityStateUpdates {
+				self?._queue.async {
+					guard let self, self._activity?.id == id else { return }
+
+					if state == .stale {
+						BackgroundAudioStatus.shared.record(.island, "system marked activity stale")
+						return
+					}
+
+					guard state == .ended || state == .dismissed else { return }
+
+					self._activity = nil
+					self._desiredState = nil
+					self._updateInFlight = false
+					self._inFlightState = nil
+					self._lastDeliveredState = nil
+					self._suppressedForCurrentWork = true
+					BackgroundAudioStatus.shared.record(
+						.island,
+						state == .dismissed ? "activity dismissed" : "system ended activity"
+					)
+				}
+
+				if state == .ended || state == .dismissed { break }
+			}
+		}
 	}
 
 	// MARK: - Work reports
 
-	// Batch position. Pass nil for `total` to withdraw the count without
-	// disturbing the phase or fraction.
+	// Preferred path for reporters that already know their complete state. Updating
+	// all fields in one queue transaction prevents ActivityKit from ever seeing a
+	// half-updated snapshot such as a new count paired with an old percentage.
+	func report(
+		_ owner: BackgroundAudioManager.Owner,
+		completed: Int?,
+		total: Int?,
+		fraction: Double?,
+		detail: String?
+	) {
+		_merge(owner) { report in
+			if let total, total > 0, let completed {
+				report.completed = max(0, min(completed, total))
+				report.total = total
+			} else {
+				report.completed = nil
+				report.total = nil
+			}
+
+			report.fraction = Self._quantizedFraction(fraction)
+
+			let normalized = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+			let value = (normalized?.isEmpty == false) ? normalized : nil
+			if report.detail != value {
+				report.detail = value
+				report.detailStartedAt = value == nil ? nil : Date()
+			}
+		}
+	}
+
 	func report(_ owner: BackgroundAudioManager.Owner, completed: Int, total: Int?) {
 		_merge(owner) {
 			if let total, total > 0 {
@@ -427,27 +493,21 @@ final class KeepAliveActivityController {
 		}
 	}
 
-	// A genuine 0...1 figure. Producers may call this frequently; values are
-	// quantized here and the serial scheduler applies the global pacing policy.
 	func report(_ owner: BackgroundAudioManager.Owner, fraction: Double?) {
 		_merge(owner) {
-			guard let fraction else {
-				$0.fraction = nil
-				return
-			}
-
-			let clamped = min(1, max(0, fraction))
-			if clamped >= 1 {
-				$0.fraction = 1
-			} else {
-				let units = floor((clamped + 0.000_000_001) / Self._progressStep)
-				$0.fraction = min(0.99, units * Self._progressStep)
-			}
+			$0.fraction = Self._quantizedFraction(fraction)
 		}
 	}
 
-	// Phase changes reset the system-rendered elapsed timer. Repeating the same
-	// phase does not reset it or generate a new state.
+	private static func _quantizedFraction(_ fraction: Double?) -> Double? {
+		guard let fraction else { return nil }
+		let clamped = min(1, max(0, fraction))
+		guard clamped < 1 else { return 1 }
+
+		let units = floor((clamped + 0.000_000_001) / _progressStep)
+		return min(0.99, units * _progressStep)
+	}
+
 	func report(_ owner: BackgroundAudioManager.Owner, detail: String?) {
 		_merge(owner) {
 			let normalized = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -463,7 +523,10 @@ final class KeepAliveActivityController {
 		_merge(owner) { $0 = _Report() }
 	}
 
-	private func _merge(_ owner: BackgroundAudioManager.Owner, _ change: @escaping (inout _Report) -> Void) {
+	private func _merge(
+		_ owner: BackgroundAudioManager.Owner,
+		_ change: @escaping (inout _Report) -> Void
+	) {
 		let key = owner.displayName
 
 		_queue.async {
@@ -473,7 +536,8 @@ final class KeepAliveActivityController {
 
 			guard report != before else { return }
 
-			if report == _Report() {
+			let removed = report == _Report()
+			if removed {
 				self._reports.removeValue(forKey: key)
 				self._reportSeq.removeValue(forKey: key)
 				if self._focusOwner == key { self._focusOwner = nil }
@@ -483,184 +547,11 @@ final class KeepAliveActivityController {
 				self._reportSeq[key] = self._sequence
 			}
 
-			// Several workflows seed their count before they claim the keep-alive.
-			// Retain that report until the next audio publication instead of treating
-			// the temporary absence of an owner as the end of an activity.
-			if self._activity == nil,
-			   !self._lastIsRunning,
-			   self._lastOwnersInput.isEmpty {
-				return
-			}
-
-			self._apply(isRunning: self._lastIsRunning, owners: self._lastOwnersInput)
-		}
-	}
-
-	// MARK: - Lifecycle
-
-	// UIKit posts this notification on the main thread before the app completes
-	// its transition out of the foreground. Synchronizing with our private queue
-	// guarantees that all reports already submitted by the workers are folded into
-	// the initial state before `Activity.request` returns.
-	private func _willResignActive() {
-		_queue.sync {
-			guard !self._mayPresentActivity else { return }
-
-			self._mayPresentActivity = true
-			self._foregroundDeferralLogged = false
-
-			guard self._featureEnabled,
-			      self._lastIsRunning || !self._lastOwnersInput.isEmpty else { return }
-
-			BackgroundAudioStatus.shared.record(
-				.island,
-				"app leaving foreground — creating activity from latest state"
-			)
-
-			self._apply(
-				isRunning: self._lastIsRunning,
-				owners: self._lastOwnersInput
-			)
-		}
-	}
-
-	private func _didBecomeActive() {
-		_queue.async {
-			self._mayPresentActivity = false
-			self._dismissForForeground()
-		}
-	}
-
-	private func _dismissForForeground() {
-		guard let activity = _activity else {
-			_stopPusher()
-			return
-		}
-
-		_activity = nil
-		_stopPusher()
-		_nextAttempt = .distantPast
-
-		BackgroundAudioStatus.shared.record(
-			.island,
-			"dismissed — app returned to foreground; running work retained"
-		)
-
-		Task(priority: .utility) {
-			await activity.end(nil, dismissalPolicy: .immediate)
-		}
-	}
-
-	private func _start(with state: KeepAliveAttributes.ContentState) {
-		guard _mayPresentActivity else {
-			_desiredState = state
-			return
-		}
-		guard Date() >= _nextAttempt else {
-			_desiredState = state
-			_schedulePushIfNeeded()
-			return
-		}
-
-		guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-			_desiredState = state
-			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
-			Logger.misc.error("Live Activities are disabled for this app — keep-alive pill can't be shown.")
-			BackgroundAudioStatus.shared.record(.island, "can't show — Live Activities are turned off for ASign")
-			_schedulePushIfNeeded()
-			return
-		}
-
-		do {
-			_activity = try Activity.request(
-				attributes: KeepAliveAttributes(startedAt: Date()),
-				content: ActivityContent(state: state, staleDate: nil),
-				pushType: nil
-			)
-
-			_lastPushedState = state
-			_lastPushAt = Date()
-			_nextAttempt = .distantPast
-
-			if _desiredState == state {
-				_desiredState = nil
-				_pendingUrgentPush = false
-			}
-
-			BackgroundAudioStatus.shared.record(.island, "showing — \(state.summary)")
-			_watchActivityState()
-		} catch {
-			_desiredState = state
-			_nextAttempt = Date().addingTimeInterval(Self._retryDelay)
-			Logger.misc.error("Keep-alive Live Activity failed to start: \(error.localizedDescription)")
-			BackgroundAudioStatus.shared.record(.island, "failed to start — \(error.localizedDescription)")
-			_schedulePushIfNeeded()
-		}
-	}
-
-	private func _watchActivityState() {
-		guard let activity = _activity else { return }
-		let id = activity.id
-
-		Task(priority: .utility) { [weak self] in
-			for await state in activity.activityStateUpdates {
-				guard state == .dismissed || state == .ended else { continue }
-
-				self?._queue.async {
-					guard let self, self._activity?.id == id else { return }
-
-					self._activity = nil
-					self._lastPushedState = nil
-					self._lastPushAt = .distantPast
-					self._nextAttempt = Date().addingTimeInterval(Self._retryDelay)
-
-					BackgroundAudioStatus.shared.record(
-						.island,
-						"went away on its own — will try again in \(Int(Self._retryDelay))s if work is still running"
-					)
-
-					// Rebuild the current truth now. The scheduler retains it during
-					// the backoff and recreates the activity without another report.
-					self._apply(
-						isRunning: self._lastIsRunning,
-						owners: self._lastOwnersInput
-					)
-				}
-
-				break
-			}
-		}
-	}
-
-	private func _end() {
-		guard let activity = _activity else {
-			_stopPusher()
-			_reports.removeAll()
-			_reportSeq.removeAll()
-			_focusOwner = nil
-			_lastOwners = []
-			_lastIsRunning = false
-			_lastOwnersInput = []
-			_nextAttempt = .distantPast
-			_foregroundDeferralLogged = false
-			return
-		}
-
-		_activity = nil
-		_lastOwners = []
-		_stopPusher()
-		_reports.removeAll()
-		_reportSeq.removeAll()
-		_focusOwner = nil
-		_lastIsRunning = false
-		_lastOwnersInput = []
-		_nextAttempt = .distantPast
-		_foregroundDeferralLogged = false
-
-		BackgroundAudioStatus.shared.record(.island, "dismissed — nothing left holding the keep-alive")
-
-		Task(priority: .utility) {
-			await activity.end(nil, dismissalPolicy: .immediate)
+			// A reporter commonly clears itself just after its audio owner releases.
+			// Don't erase the terminal state from the Live Activity during the handoff
+			// audio-manager linger; the final content remains what was last delivered.
+			if removed && !self._activeOwners.contains(key) { return }
+			self._scheduleReconcile()
 		}
 	}
 }
