@@ -46,16 +46,8 @@ final class BulkExportManager: ObservableObject {
 	// single app has no sub-progress to offer.
 	private func _reportProgress() {
 		guard #available(iOS 16.2, *) else { return }
-		KeepAliveActivityController.shared.report(
-			.bulkExport,
-			completed: exportURLs.count,
-			total: total > 0 ? total : nil
-		)
-
-		// Keep the Live Activity deliberately low-churn. The foreground overlay
-		// still shows the current app name; the Island only needs a stable phase
-		// plus the terminal n/total count.
-		KeepAliveActivityController.shared.report(.bulkExport, fraction: nil)
+		// The archiver doesn't expose trustworthy sub-file zip progress here, so
+		// completed-app count is the meaningful progress signal for this workflow.
 		let detail: String?
 		if isExporting {
 			detail = "Exporting"
@@ -68,7 +60,13 @@ final class BulkExportManager: ObservableObject {
 		} else {
 			detail = "Completed"
 		}
-		KeepAliveActivityController.shared.report(.bulkExport, detail: detail)
+		KeepAliveActivityController.shared.report(
+			.bulkExport,
+			completed: exportURLs.count,
+			total: total > 0 ? total : nil,
+			fraction: nil,
+			detail: detail
+		)
 	}
 
 	// MARK: - Lifecycle
