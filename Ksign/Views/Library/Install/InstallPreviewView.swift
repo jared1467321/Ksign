@@ -230,14 +230,38 @@ struct InstallPreviewView: View {
 final class SingleInstallLiveActivityReporter {
 	static let shared = SingleInstallLiveActivityReporter()
 
+	private enum _Stage {
+		case packaging
+		case ready
+		case sendingManifest
+		case sendingPayload
+		case installing
+		case completed
+		case failed
+
+		var detail: String {
+			switch self {
+			case .packaging: return "Packaging"
+			case .ready: return "Ready"
+			case .sendingManifest: return "Sending Manifest"
+			case .sendingPayload: return "Sending Payload"
+			case .installing: return "Installing"
+			case .completed: return "Completed"
+			case .failed: return "Error"
+			}
+		}
+	}
+
 	private let _queue = DispatchQueue(
 		label: "nya.asami.ksign.single-install-live-activity",
 		qos: .userInitiated
 	)
 
 	private var _active = false
-	private var _completed = false
-	private var _failed = false
+	private var _stage: _Stage = .packaging
+	private var _packageProgress: Double = 0
+	private var _installProgress: Double = 0
+	private var _fraction: Double = 0
 	private let _serverMonitorID = UUID()
 
 	private init() { }
@@ -245,8 +269,10 @@ final class SingleInstallLiveActivityReporter {
 	func begin() {
 		_queue.sync {
 			self._active = true
-			self._completed = false
-			self._failed = false
+			self._stage = .packaging
+			self._packageProgress = 0
+			self._installProgress = 0
+			self._fraction = 0
 
 			guard #available(iOS 16.2, *) else { return }
 			KeepAliveActivityController.shared.clearReport(.singleInstall)
@@ -254,11 +280,39 @@ final class SingleInstallLiveActivityReporter {
 		}
 	}
 
-	// Keep the detailed foreground progress exactly where it already lives. The
-	// Live Activity only consumes the terminal 0/1 event, avoiding hundreds of
-	// ActivityKit writes during packaging/install polling.
-	func updatePackage(_ progress: Double) { }
-	func updateInstall(_ progress: Double) { }
+	func updatePackage(_ progress: Double) {
+		_queue.async {
+			guard self._active else { return }
+			let value = min(1, max(0, progress))
+			guard value != self._packageProgress else { return }
+
+			self._packageProgress = value
+			guard self._stage == .packaging else { return }
+
+			let next = self._quantized(max(self._fraction, value * 0.5))
+			guard next != self._fraction else { return }
+			self._fraction = next
+			self._publish()
+		}
+	}
+
+	func updateInstall(_ progress: Double) {
+		_queue.async {
+			guard self._active, self._stage != .completed, self._stage != .failed else { return }
+			let value = min(1, max(0, progress))
+			let stageChanged = self._stage != .installing
+			let progressChanged = value != self._installProgress
+			guard stageChanged || progressChanged else { return }
+
+			self._installProgress = value
+			self._stage = .installing
+			let next = self._quantized(max(self._fraction, 0.5 + (value * 0.5)))
+			let fractionChanged = next != self._fraction
+			self._fraction = next
+			guard stageChanged || fractionChanged else { return }
+			self._publish()
+		}
+	}
 
 	func handleServerStatus(
 		_ status: InstallerStatusViewModel.InstallerStatus,
@@ -276,6 +330,7 @@ final class SingleInstallLiveActivityReporter {
 				id: _serverMonitorID,
 				bundleID: bundleID,
 				onProgress: { progress in
+					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
 					DispatchQueue.main.async {
 						viewModel.installProgress = progress
 					}
@@ -302,23 +357,32 @@ final class SingleInstallLiveActivityReporter {
 		_queue.async {
 			guard self._active else { return }
 
+			let previous = self._stage
 			switch status {
+			case .none:
+				self._stage = .packaging
+				self._fraction = self._quantized(max(self._fraction, self._packageProgress * 0.5))
+			case .ready:
+				self._stage = .ready
+				self._fraction = max(self._fraction, 0.5)
+			case .sendingManifest:
+				self._stage = .sendingManifest
+				self._fraction = max(self._fraction, 0.5)
+			case .sendingPayload:
+				self._stage = .sendingPayload
+				self._fraction = max(self._fraction, 0.5)
+			case .installing:
+				self._stage = .installing
+				self._fraction = self._quantized(max(self._fraction, 0.5 + (self._installProgress * 0.5)))
 			case .completed:
-				self._completed = true
-				self._failed = false
-				self._publish()
-
+				self._stage = .completed
+				self._fraction = 1
 			case .broken:
-				self._completed = false
-				self._failed = true
-				self._publish()
+				self._stage = .failed
+			}
 
-			default:
-				// A retry can move the install out of a prior error state.
-				if self._failed {
-					self._failed = false
-					self._publish()
-				}
+			if previous != self._stage || self._stage == .completed {
+				self._publish()
 			}
 		}
 	}
@@ -326,8 +390,8 @@ final class SingleInstallLiveActivityReporter {
 	func finish() {
 		_queue.async {
 			guard self._active else { return }
-			self._completed = true
-			self._failed = false
+			self._stage = .completed
+			self._fraction = 1
 			self._publish()
 		}
 	}
@@ -338,11 +402,15 @@ final class SingleInstallLiveActivityReporter {
 		_queue.async {
 			guard self._active else { return }
 			self._active = false
-
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.clearReport(.singleInstall)
-			}
+			// Keep the terminal snapshot intact through BackgroundAudioManager's
+			// handoff/linger window. The next begin() clears it before seeding 0%.
 		}
+	}
+
+	private func _quantized(_ fraction: Double) -> Double {
+		let clamped = min(1, max(0, fraction))
+		guard clamped < 1 else { return 1 }
+		return ((clamped + 0.000_000_001) * 100).rounded(.down) / 100
 	}
 
 	private func _publish() {
@@ -350,13 +418,11 @@ final class SingleInstallLiveActivityReporter {
 
 		KeepAliveActivityController.shared.report(
 			.singleInstall,
-			completed: _completed ? 1 : 0,
-			total: 1
-		)
-		KeepAliveActivityController.shared.report(.singleInstall, fraction: nil)
-		KeepAliveActivityController.shared.report(
-			.singleInstall,
-			detail: _failed ? "Error" : (_completed ? "Completed" : "Installing")
+			completed: _stage == .completed ? 1 : 0,
+			total: 1,
+			fraction: _fraction,
+			detail: _stage.detail
 		)
 	}
 }
+

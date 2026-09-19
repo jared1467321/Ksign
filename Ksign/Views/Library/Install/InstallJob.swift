@@ -433,12 +433,10 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
-		// Per-job ActivityKit reporting intentionally does not live here. Several
-		// jobs can emit the same transitions at once, which previously made them
-		// fight over the Dynamic Island and generated excessive updates.
-		// `InstallSession` samples all jobs, derives one representative batch phase
-		// and one aggregate fraction, and the controller serializes/coalesces the
-		// resulting ActivityKit updates. The drawer still reads each job directly.
+		// Per-job ActivityKit *state* does not live here. Jobs forward primitive
+		// progress/status callbacks into one batch reporter, which derives a single
+		// aggregate snapshot; the controller then serializes/coalesces that snapshot.
+		// The drawer still reads each job directly.
 
 		if case .ready = newStatus {
 			switch batchRole {
