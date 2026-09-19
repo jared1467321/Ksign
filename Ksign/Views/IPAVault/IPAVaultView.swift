@@ -993,12 +993,266 @@ private struct IPAVaultUploadRow: View {
     }
 }
 
+private enum IPAVaultCalibrationMode: String, CaseIterable, Identifiable {
+    case streamsOnly
+    case streamsAndConcurrency
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .streamsOnly: return "Streams"
+        case .streamsAndConcurrency: return "Streams + Concurrency"
+        }
+    }
+}
+
+private struct IPAVaultCalibrationSample {
+    let concurrency: Int
+    let streams: Int
+    let bytesPerSecond: Double
+}
+
+/// Runs a single timed IPA Vault transport benchmark. Each logical file is split
+/// into the same HTTP Range layout used by the real Vault downloader. Completed
+/// ranges are immediately restarted so small IPAs cannot end a timed sample early.
+private final class IPAVaultCalibrationProbe: NSObject, URLSessionDownloadDelegate {
+    private struct StreamSpec {
+        let request: URLRequest
+    }
+
+    private let lock = NSLock()
+    private var session: URLSession!
+    private var specsByTaskID: [Int: StreamSpec] = [:]
+    private var isRunning = false
+    private var isMeasuring = false
+    private var measuredBytes: Int64 = 0
+    private var firstError: Error?
+
+    override init() {
+        super.init()
+
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 60
+        configuration.waitsForConnectivity = true
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpMaximumConnectionsPerHost = 80
+
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        delegateQueue.qualityOfService = .userInitiated
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
+    }
+
+    deinit {
+        session?.invalidateAndCancel()
+    }
+
+    func run(
+        files: [IPAVaultRemoteFile],
+        concurrency: Int,
+        streams: Int,
+        measurementSeconds: TimeInterval
+    ) async throws -> Double {
+        guard !files.isEmpty else {
+            throw NSError(domain: "IPAVaultCalibration", code: 1, userInfo: [NSLocalizedDescriptionKey: "No IPA files are available for calibration."])
+        }
+
+        let requests = makeStreamRequests(
+            files: files,
+            concurrency: max(1, concurrency),
+            streams: max(1, streams)
+        )
+        guard !requests.isEmpty else {
+            throw NSError(domain: "IPAVaultCalibration", code: 2, userInfo: [NSLocalizedDescriptionKey: "The selected IPA files are too small to test."])
+        }
+
+        lock.lock()
+        isRunning = true
+        isMeasuring = false
+        measuredBytes = 0
+        firstError = nil
+        lock.unlock()
+
+        defer { stop() }
+
+        for spec in requests {
+            start(spec)
+        }
+
+        // Give TCP/request setup a short fixed warm-up so a 1-second sample is
+        // still measuring transfer speed rather than mostly connection startup.
+        try await wait(seconds: 0.5)
+        if let error = currentError() { throw error }
+
+        lock.lock()
+        measuredBytes = 0
+        isMeasuring = true
+        lock.unlock()
+
+        let started = Date()
+        let deadline = started.addingTimeInterval(max(1, measurementSeconds))
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if let error = currentError() { throw error }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        lock.lock()
+        isMeasuring = false
+        let bytes = measuredBytes
+        lock.unlock()
+
+        if let error = currentError() { throw error }
+        let elapsed = max(0.001, Date().timeIntervalSince(started))
+        return Double(bytes) / elapsed
+    }
+
+    private func wait(seconds: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if let error = currentError() { throw error }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    private func makeStreamRequests(
+        files: [IPAVaultRemoteFile],
+        concurrency: Int,
+        streams: Int
+    ) -> [StreamSpec] {
+        var specs: [StreamSpec] = []
+
+        for fileIndex in 0..<concurrency {
+            let file = files[fileIndex % files.count]
+            let safeStreamCount = max(1, min(streams, Int(min(file.size, Int64(Int.max)))))
+            let base = file.size / Int64(safeStreamCount)
+            let remainder = file.size % Int64(safeStreamCount)
+            var cursor: Int64 = 0
+
+            for streamIndex in 0..<safeStreamCount {
+                let length = base + (Int64(streamIndex) < remainder ? 1 : 0)
+                let start = cursor
+                let end = cursor + length - 1
+                cursor = end + 1
+
+                var request = URLRequest(url: file.url)
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                request.timeoutInterval = 60
+                request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                specs.append(StreamSpec(request: request))
+            }
+        }
+
+        return specs
+    }
+
+    private func start(_ spec: StreamSpec) {
+        lock.lock()
+        let shouldStart = isRunning
+        lock.unlock()
+        guard shouldStart else { return }
+
+        let task = session.downloadTask(with: spec.request)
+        lock.lock()
+        specsByTaskID[task.taskIdentifier] = spec
+        lock.unlock()
+        task.resume()
+    }
+
+    private func stop() {
+        lock.lock()
+        isRunning = false
+        isMeasuring = false
+        specsByTaskID.removeAll()
+        lock.unlock()
+        session.invalidateAndCancel()
+    }
+
+    private func currentError() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstError
+    }
+
+    private func recordError(_ error: Error) {
+        lock.lock()
+        if firstError == nil {
+            firstError = error
+        }
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        lock.lock()
+        if isMeasuring {
+            measuredBytes += max(0, bytesWritten)
+        }
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        guard let http = downloadTask.response as? HTTPURLResponse else {
+            recordError(NSError(domain: "IPAVaultCalibration", code: 3, userInfo: [NSLocalizedDescriptionKey: "The calibration server returned an invalid response."]))
+            return
+        }
+
+        guard http.statusCode == 206 else {
+            let message = http.statusCode == 200
+                ? "The server ignored the HTTP Range request required for calibration."
+                : "Calibration request returned HTTP \(http.statusCode)."
+            recordError(NSError(domain: "IPAVaultCalibration", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: message]))
+            return
+        }
+        // The temporary download is intentionally not moved anywhere; URLSession
+        // discards it after this callback. Calibration never creates Vault jobs.
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let spec = specsByTaskID.removeValue(forKey: task.taskIdentifier)
+        let shouldRestart = isRunning && error == nil && firstError == nil
+        lock.unlock()
+
+        if let error = error as NSError?, error.code != NSURLErrorCancelled {
+            recordError(error)
+            return
+        }
+
+        if shouldRestart, let spec {
+            start(spec)
+        }
+    }
+}
+
 private struct IPAVaultSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var serverURL: String
     @Binding var concurrentFiles: Int
     @Binding var streamsPerFile: Int
     @ObservedObject var downloadManager: IPADownloadManager
+
+    @State private var calibrationMode = IPAVaultCalibrationMode.streamsOnly
+    @State private var calibrationSeconds = 3
+    @State private var calibrationRunning = false
+    @State private var calibrationStatus: String?
+    @State private var calibrationResult: IPAVaultCalibrationSample?
+    @State private var calibrationError: String?
+    @State private var calibrationTask: Task<Void, Never>?
 
     private var hasActiveVaultDownloads: Bool {
         downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
@@ -1043,7 +1297,76 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Downloads")
                 } footer: {
-                    Text("Concurrent jobs always follow your configured value. Each job starts at your configured streams/job value, then independently probes one stream up or down to follow current conditions, with a hard maximum of 10 streams per job. Existing calibration therefore remains the starting point rather than being discarded. These settings do not affect uploads, imports, or signing.")
+                    Text("Concurrent jobs always follow your configured value. Each job starts at your configured streams/job value, then independently probes one stream up or down to follow current conditions, with a hard maximum of 10 streams per job. Calibration remains the starting point rather than being discarded. These settings do not affect uploads, imports, or signing.")
+                }
+
+                Section {
+                    Picker("Mode", selection: $calibrationMode) {
+                        ForEach(IPAVaultCalibrationMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(calibrationRunning)
+                    .onChange(of: calibrationMode) { _ in
+                        calibrationResult = nil
+                        calibrationStatus = nil
+                        calibrationError = nil
+                    }
+
+                    Stepper(value: $calibrationSeconds, in: 1...10) {
+                        LabeledContent("Time per test", value: "\(calibrationSeconds) sec")
+                    }
+                    .disabled(calibrationRunning)
+
+                    Button {
+                        startCalibration()
+                    } label: {
+                        HStack {
+                            if calibrationRunning {
+                                ProgressView()
+                            }
+                            Text(calibrationRunning ? "Calibrating…" : "Calibrate")
+                        }
+                    }
+                    .disabled(calibrationRunning || hasActiveVaultDownloads)
+
+                    if hasActiveVaultDownloads && !calibrationRunning {
+                        Text("Finish or cancel active IPA Vault downloads before calibrating so they do not distort the result.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let calibrationStatus {
+                        Text(calibrationStatus)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let result = calibrationResult {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if calibrationMode == .streamsOnly {
+                                Text("Best: \(result.streams) streams at \(result.concurrency) concurrent")
+                                    .font(.headline)
+                            } else {
+                                Text("Best: \(result.concurrency) concurrent × \(result.streams) streams")
+                                    .font(.headline)
+                            }
+                            Text(formatSpeed(result.bytesPerSecond))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let calibrationError {
+                        Text(calibrationError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("Calibration")
+                } footer: {
+                    Text("Uses real IPA files from this Vault and the same ranged-download behavior as normal downloads. Streams mode tests 1–10 at your selected concurrency. Combined mode runs 4 broad scouting tests followed by 12 adaptive refinement tests. Test data is discarded and your settings are not changed automatically.")
                 }
             }
             .navigationTitle("IPA Vault Settings")
@@ -1053,7 +1376,365 @@ private struct IPAVaultSettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .onDisappear {
+                calibrationTask?.cancel()
+                calibrationTask = nil
+            }
         }
+    }
+
+    private func startCalibration() {
+        guard !calibrationRunning else { return }
+        calibrationResult = nil
+        calibrationError = nil
+        calibrationStatus = "Loading Vault IPA list…"
+        calibrationRunning = true
+
+        calibrationTask = Task {
+            await runCalibration()
+        }
+    }
+
+    @MainActor
+    private func runCalibration() async {
+        defer {
+            calibrationRunning = false
+            calibrationTask = nil
+        }
+
+        do {
+            guard !hasActiveVaultDownloads else {
+                throw NSError(domain: "IPAVaultCalibration", code: 10, userInfo: [NSLocalizedDescriptionKey: "Finish or cancel active IPA Vault downloads before calibrating."])
+            }
+
+            let files = try await loadCalibrationFiles()
+            try Task.checkCancellation()
+
+            let samples: [IPAVaultCalibrationSample]
+            switch calibrationMode {
+            case .streamsOnly:
+                samples = try await runStreamCalibration(files: files)
+            case .streamsAndConcurrency:
+                samples = try await runAdaptiveCalibration(files: files)
+            }
+
+            guard let best = samples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond }) else {
+                throw NSError(domain: "IPAVaultCalibration", code: 11, userInfo: [NSLocalizedDescriptionKey: "Calibration did not produce a usable result."])
+            }
+
+            calibrationResult = best
+            calibrationStatus = "Calibration complete."
+        } catch is CancellationError {
+            calibrationStatus = nil
+        } catch {
+            calibrationStatus = nil
+            calibrationError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func runStreamCalibration(files: [IPAVaultRemoteFile]) async throws -> [IPAVaultCalibrationSample] {
+        var samples: [IPAVaultCalibrationSample] = []
+        let fixedConcurrency = min(8, max(1, concurrentFiles))
+
+        for streams in 1...10 {
+            try Task.checkCancellation()
+            calibrationStatus = "Test \(streams) of 10 • \(fixedConcurrency) concurrent × \(streams) streams"
+            let sample = try await measure(
+                files: files,
+                concurrency: fixedConcurrency,
+                streams: streams
+            )
+            samples.append(sample)
+            calibrationStatus = "Test \(streams) of 10 • \(formatSpeed(sample.bytesPerSecond))"
+        }
+
+        return samples
+    }
+
+    @MainActor
+    private func runAdaptiveCalibration(files: [IPAVaultRemoteFile]) async throws -> [IPAVaultCalibrationSample] {
+        let scoutCount = 4
+        let refinementCount = 12
+        var samples: [IPAVaultCalibrationSample] = []
+        var tested: Set<String> = []
+
+        // Phase 1: four deliberately separated scouts. These are discovery tests
+        // and do not consume the twelve-test refinement budget.
+        for scoutIndex in 0..<scoutCount {
+            try Task.checkCancellation()
+            let pair = nextScoutPair(index: scoutIndex, tested: tested)
+            tested.insert(pairKey(concurrency: pair.concurrency, streams: pair.streams))
+
+            calibrationStatus = "Scout \(scoutIndex + 1) of \(scoutCount) • \(pair.concurrency) concurrent × \(pair.streams) streams"
+            let sample = try await measure(
+                files: files,
+                concurrency: pair.concurrency,
+                streams: pair.streams
+            )
+            samples.append(sample)
+            calibrationStatus = "Scout \(scoutIndex + 1) of \(scoutCount) • \(formatSpeed(sample.bytesPerSecond))"
+        }
+
+        let scoutSamples = samples
+
+        // Phase 2: spend a full twelve tests refining the promising area(s)
+        // identified by the scouts. Early refinement uses a wider radius to learn
+        // direction; later tests tighten to adjacent grid points around the leader.
+        for refinementIndex in 0..<refinementCount {
+            try Task.checkCancellation()
+            let pair = nextRefinementPair(
+                index: refinementIndex,
+                scoutSamples: scoutSamples,
+                samples: samples,
+                tested: tested
+            )
+            tested.insert(pairKey(concurrency: pair.concurrency, streams: pair.streams))
+
+            calibrationStatus = "Refinement \(refinementIndex + 1) of \(refinementCount) • \(pair.concurrency) concurrent × \(pair.streams) streams"
+            let sample = try await measure(
+                files: files,
+                concurrency: pair.concurrency,
+                streams: pair.streams
+            )
+            samples.append(sample)
+            calibrationStatus = "Refinement \(refinementIndex + 1) of \(refinementCount) • \(formatSpeed(sample.bytesPerSecond))"
+        }
+
+        return samples
+    }
+
+    private func nextScoutPair(
+        index: Int,
+        tested: Set<String>
+    ) -> (concurrency: Int, streams: Int) {
+        // Cover the four broad corners of the 8 × 10 search space. A small amount
+        // of jitter avoids hard-coding the exact same benchmark coordinates while
+        // preserving wide separation between scouts.
+        let concurrencyBands: [ClosedRange<Int>] = [1...2, 1...2, 6...8, 6...8]
+        let streamBands: [ClosedRange<Int>] = [1...3, 8...10, 1...3, 8...10]
+        let safeIndex = min(max(0, index), concurrencyBands.count - 1)
+
+        for _ in 0..<24 {
+            let pair = (
+                concurrency: Int.random(in: concurrencyBands[safeIndex]),
+                streams: Int.random(in: streamBands[safeIndex])
+            )
+            if !tested.contains(pairKey(concurrency: pair.concurrency, streams: pair.streams)) {
+                return pair
+            }
+        }
+
+        return firstUntestedPair(tested: tested) ?? (1, 1)
+    }
+
+    private func nextRefinementPair(
+        index: Int,
+        scoutSamples: [IPAVaultCalibrationSample],
+        samples: [IPAVaultCalibrationSample],
+        tested: Set<String>
+    ) -> (concurrency: Int, streams: Int) {
+        guard let currentBest = samples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond }) else {
+            return firstUntestedPair(tested: tested) ?? (1, 1)
+        }
+
+        // Preserve a genuinely competitive second scouting region instead of
+        // discarding it immediately. It only gets occasional refinement budget
+        // when it was close enough to the initial winner to remain plausible.
+        let bestScout = scoutSamples.max(by: { $0.bytesPerSecond < $1.bytesPerSecond })
+        let secondaryScout: IPAVaultCalibrationSample? = {
+            guard let bestScout else { return nil }
+            return scoutSamples
+                .filter {
+                    pairKey(concurrency: $0.concurrency, streams: $0.streams) != pairKey(concurrency: bestScout.concurrency, streams: bestScout.streams)
+                        && $0.bytesPerSecond >= bestScout.bytesPerSecond * 0.90
+                        && gridDistance($0, bestScout) >= 3
+                }
+                .max(by: { $0.bytesPerSecond < $1.bytesPerSecond })
+        }()
+
+        // Tests 4 and 8 can investigate a close second scouting region. Every
+        // other refinement follows the current leader, so improvements immediately
+        // pull the search toward the better-performing part of the grid.
+        let shouldUseSecondary = secondaryScout != nil && (index == 3 || index == 7)
+        let anchor = shouldUseSecondary ? secondaryScout! : currentBest
+
+        // The first four refinements make wider moves to establish which direction
+        // improves throughput. The remaining eight tighten to the immediate
+        // neighborhood of the best result found so far.
+        let radius = index < 4 ? 2 : 1
+        let candidates = neighborhoodCandidates(
+            around: anchor,
+            radius: radius,
+            tested: tested
+        )
+
+        if let candidate = candidates.max(by: {
+            refinementScore(for: $0, anchor: anchor, samples: samples)
+                < refinementScore(for: $1, anchor: anchor, samples: samples)
+        }) {
+            return candidate
+        }
+
+        // If the chosen neighborhood has already been exhausted, widen one ring
+        // before falling back to the best remaining point in the tiny 80-cell grid.
+        let widerCandidates = neighborhoodCandidates(
+            around: currentBest,
+            radius: min(3, radius + 1),
+            tested: tested
+        )
+        if let candidate = widerCandidates.max(by: {
+            refinementScore(for: $0, anchor: currentBest, samples: samples)
+                < refinementScore(for: $1, anchor: currentBest, samples: samples)
+        }) {
+            return candidate
+        }
+
+        return firstUntestedPair(tested: tested) ?? (currentBest.concurrency, currentBest.streams)
+    }
+
+    private func neighborhoodCandidates(
+        around anchor: IPAVaultCalibrationSample,
+        radius: Int,
+        tested: Set<String>
+    ) -> [(concurrency: Int, streams: Int)] {
+        var candidates: [(concurrency: Int, streams: Int)] = []
+        let safeRadius = max(1, radius)
+
+        for concurrency in max(1, anchor.concurrency - safeRadius)...min(8, anchor.concurrency + safeRadius) {
+            for streams in max(1, anchor.streams - safeRadius)...min(10, anchor.streams + safeRadius) {
+                guard concurrency != anchor.concurrency || streams != anchor.streams else { continue }
+                guard max(abs(concurrency - anchor.concurrency), abs(streams - anchor.streams)) == safeRadius else { continue }
+                let key = pairKey(concurrency: concurrency, streams: streams)
+                guard !tested.contains(key) else { continue }
+                candidates.append((concurrency, streams))
+            }
+        }
+
+        return candidates
+    }
+
+    private func refinementScore(
+        for candidate: (concurrency: Int, streams: Int),
+        anchor: IPAVaultCalibrationSample,
+        samples: [IPAVaultCalibrationSample]
+    ) -> Double {
+        guard let maxSpeed = samples.map(\.bytesPerSecond).max(), maxSpeed > 0 else { return 0 }
+
+        // Estimate promise from all measurements, with nearby high-throughput
+        // samples carrying the most weight. This makes the twelve-test phase follow
+        // measured gradients instead of choosing arbitrary random neighbors.
+        var weightedSpeed = 0.0
+        var totalWeight = 0.0
+        var nearestMeasuredDistance = Double.greatestFiniteMagnitude
+
+        for sample in samples {
+            let dc = Double(candidate.concurrency - sample.concurrency)
+            let ds = Double(candidate.streams - sample.streams)
+            let distance = sqrt(dc * dc + ds * ds)
+            nearestMeasuredDistance = min(nearestMeasuredDistance, distance)
+            let weight = 1.0 / (0.75 + distance * distance)
+            weightedSpeed += (sample.bytesPerSecond / maxSpeed) * weight
+            totalWeight += weight
+        }
+
+        let predicted = totalWeight > 0 ? weightedSpeed / totalWeight : 0
+        let anchorDistance = Double(
+            max(abs(candidate.concurrency - anchor.concurrency), abs(candidate.streams - anchor.streams))
+        )
+        let anchorBias = 0.18 / (1.0 + anchorDistance)
+
+        // A small novelty bonus prefers an unmeasured direction when two candidates
+        // have similar predicted throughput, helping the search map the local slope
+        // rather than repeatedly filling only one side of the leader.
+        let novelty = min(3.0, nearestMeasuredDistance) * 0.035
+        let axisProbeBonus = candidate.concurrency == anchor.concurrency || candidate.streams == anchor.streams ? 0.06 : 0
+        return predicted + anchorBias + novelty + axisProbeBonus
+    }
+
+    private func gridDistance(
+        _ lhs: IPAVaultCalibrationSample,
+        _ rhs: IPAVaultCalibrationSample
+    ) -> Int {
+        max(abs(lhs.concurrency - rhs.concurrency), abs(lhs.streams - rhs.streams))
+    }
+
+    private func firstUntestedPair(tested: Set<String>) -> (concurrency: Int, streams: Int)? {
+        for concurrency in 1...8 {
+            for streams in 1...10 {
+                if !tested.contains(pairKey(concurrency: concurrency, streams: streams)) {
+                    return (concurrency, streams)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func pairKey(concurrency: Int, streams: Int) -> String {
+        "\(concurrency)x\(streams)"
+    }
+
+    @MainActor
+    private func measure(
+        files: [IPAVaultRemoteFile],
+        concurrency: Int,
+        streams: Int
+    ) async throws -> IPAVaultCalibrationSample {
+        let probe = IPAVaultCalibrationProbe()
+        let speed = try await probe.run(
+            files: files,
+            concurrency: concurrency,
+            streams: streams,
+            measurementSeconds: TimeInterval(calibrationSeconds)
+        )
+        return IPAVaultCalibrationSample(
+            concurrency: concurrency,
+            streams: streams,
+            bytesPerSecond: speed
+        )
+    }
+
+    private func loadCalibrationFiles() async throws -> [IPAVaultRemoteFile] {
+        let trimmed = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let baseURL = URL(string: trimmed.hasSuffix("/") ? trimmed : trimmed + "/") else {
+            throw NSError(domain: "IPAVaultCalibration", code: 12, userInfo: [NSLocalizedDescriptionKey: "Enter a valid IPA Vault server URL first."])
+        }
+
+        var request = URLRequest(url: baseURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "IPAVaultCalibration", code: 13, userInfo: [NSLocalizedDescriptionKey: "The server returned an invalid response."])
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "IPAVaultCalibration", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Server returned HTTP \(http.statusCode)."])
+        }
+
+        let entries = try JSONDecoder().decode([IPAVaultNginxEntry].self, from: data)
+        let files = entries.compactMap { entry -> IPAVaultRemoteFile? in
+            guard entry.type == "file",
+                  entry.name.lowercased().hasSuffix(".ipa"),
+                  !entry.name.hasPrefix(".ipavault-"),
+                  let size = entry.size,
+                  size > 0 else { return nil }
+            return IPAVaultRemoteFile(
+                name: entry.name,
+                size: size,
+                url: baseURL.appendingPathComponent(entry.name, isDirectory: false)
+            )
+        }
+        .sorted { $0.size > $1.size }
+
+        guard !files.isEmpty else {
+            throw NSError(domain: "IPAVaultCalibration", code: 14, userInfo: [NSLocalizedDescriptionKey: "No IPA files were found in this Vault."])
+        }
+
+        // Eight is the maximum concurrency, so more files cannot participate in a sample.
+        return Array(files.prefix(8))
     }
 
     private func formatSpeed(_ bytesPerSecond: Double) -> String {
