@@ -138,8 +138,6 @@ final class InstallSession: ObservableObject {
 
 		if _willBatch { _admitBatchJobs() }
 
-		BulkInstallLiveActivityReporter.shared.publishCurrent()
-
 		guard isActive else { return }
 
 		// Claimed once for the whole batch rather than once per row. The rows
@@ -514,24 +512,34 @@ final class InstallSession: ObservableObject {
 
 // MARK: - Background-safe Live Activity aggregation
 
-// The Live Activity deliberately tracks only fully installed apps out of the
-// batch total. Per-app package/install percentages remain in the in-app UI and
-// are never forwarded to ActivityKit.
+// `InstallSession` is intentionally @MainActor because it drives SwiftUI. The
+// install workers are not: archiving and server callbacks continue while the
+// UI actor may be delayed in the background. This mirror consumes primitive
+// worker progress/status callbacks directly and publishes one aggregate batch
+// snapshot, so ActivityKit does not depend on the drawer's rendering cadence.
 final class BulkInstallLiveActivityReporter {
 	static let shared = BulkInstallLiveActivityReporter()
 
 	private enum _Stage: Equatable {
 		case queued
-		case running
+		case packaging
+		case ready
+		case sendingManifest
+		case sendingPayload
+		case installing
 		case completed
 		case failed
 	}
 
 	private struct _Job {
 		var stage: _Stage = .queued
+		var packageProgress: Double = 0
+		var installProgress: Double = 0
+		var fraction: Double = 0
 
 		var isCompleted: Bool { stage == .completed }
 		var isFailed: Bool { stage == .failed }
+		var isTerminal: Bool { isCompleted || isFailed }
 	}
 
 	private let _queue = DispatchQueue(
@@ -539,7 +547,11 @@ final class BulkInstallLiveActivityReporter {
 		qos: .userInitiated
 	)
 
+	// One background-safe mirror per stable job ID. Each job contributes a
+	// monotonic 0...1 value to the batch aggregate, so the Live Activity can use
+	// the real package/install progress without depending on the MainActor drawer.
 	private var _jobs: [UUID: _Job] = [:]
+	private var _paused = false
 	private var _active = false
 
 	private init() { }
@@ -547,6 +559,7 @@ final class BulkInstallLiveActivityReporter {
 	func reset() {
 		_queue.sync {
 			self._jobs.removeAll()
+			self._paused = false
 			self._active = true
 
 			if #available(iOS 16.2, *) {
@@ -561,13 +574,6 @@ final class BulkInstallLiveActivityReporter {
 			if self._jobs[id] == nil {
 				self._jobs[id] = _Job()
 			}
-		}
-	}
-
-	// Called once after the caller has finished registering the current batch so
-	// ActivityKit sees 0/N directly instead of 0/1, 0/2, ... while jobs are added.
-	func publishCurrent() {
-		_queue.async {
 			self._publish()
 		}
 	}
@@ -579,18 +585,46 @@ final class BulkInstallLiveActivityReporter {
 		}
 	}
 
-	// Pausing does not change "apps installed / total apps", so it does not
-	// generate a Live Activity update.
-	func setPaused(_ paused: Bool) { }
+	func setPaused(_ paused: Bool) {
+		_queue.async {
+			guard self._paused != paused else { return }
+			self._paused = paused
+			self._publish()
+		}
+	}
 
-	// Per-app package/install percentages are intentionally ignored. Live Activity
-	// progress for installs is only the number of fully installed apps.
 	func updatePackage(jobID: UUID, progress: Double) {
-		_markRunning(jobID)
+		_queue.async {
+			guard var job = self._jobs[jobID], !job.isTerminal else { return }
+			let value = min(1, max(0, progress))
+			guard value != job.packageProgress else { return }
+
+			let before = job
+			job.packageProgress = value
+			if job.stage == .queued || job.stage == .packaging {
+				job.stage = .packaging
+				job.fraction = self._quantized(max(job.fraction, value * 0.5))
+			}
+			self._jobs[jobID] = job
+			guard job.stage != before.stage || job.fraction != before.fraction else { return }
+			self._publish()
+		}
 	}
 
 	func updateInstall(jobID: UUID, progress: Double) {
-		_markRunning(jobID)
+		_queue.async {
+			guard var job = self._jobs[jobID], !job.isTerminal else { return }
+			let value = min(1, max(0, progress))
+			guard value != job.installProgress || job.stage != .installing else { return }
+
+			let before = job
+			job.installProgress = value
+			job.stage = .installing
+			job.fraction = self._quantized(max(job.fraction, 0.5 + (value * 0.5)))
+			self._jobs[jobID] = job
+			guard job.stage != before.stage || job.fraction != before.fraction else { return }
+			self._publish()
+		}
 	}
 
 	func updateStatus(
@@ -599,43 +633,59 @@ final class BulkInstallLiveActivityReporter {
 	) {
 		_queue.async {
 			guard var job = self._jobs[jobID] else { return }
-			let before = job.stage
+			let before = job
 
 			switch status {
+			case .none:
+				if !job.isCompleted {
+					job.stage = .packaging
+					job.fraction = self._quantized(max(job.fraction, job.packageProgress * 0.5))
+				}
+			case .ready:
+				if !job.isCompleted {
+					job.stage = .ready
+					job.fraction = max(job.fraction, 0.5)
+				}
+			case .sendingManifest:
+				if !job.isCompleted {
+					job.stage = .sendingManifest
+					job.fraction = max(job.fraction, 0.5)
+				}
+			case .sendingPayload:
+				if !job.isCompleted {
+					job.stage = .sendingPayload
+					job.fraction = max(job.fraction, 0.5)
+				}
+			case .installing:
+				if !job.isCompleted {
+					job.stage = .installing
+					job.fraction = self._quantized(max(job.fraction, 0.5 + (job.installProgress * 0.5)))
+				}
 			case .completed:
 				job.stage = .completed
+				job.fraction = 1
 			case .broken:
 				job.stage = .failed
-			default:
-				if !job.isCompleted && !job.isFailed {
-					job.stage = .running
-				}
 			}
 
-			guard job.stage != before else { return }
+			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._jobs[jobID] = job
-
-			// Only a completed install changes X/N. Failures are retained internally
-			// and reflected by the terminal Error state, but never counted as installed.
-			if job.stage == .completed {
-				self._publish()
-			}
+			self._publish()
 		}
 	}
 
 	func finish() {
 		_queue.async {
 			guard self._active else { return }
+			self._paused = false
 			self._publish(forceTerminal: true)
 		}
 	}
 
-	private func _markRunning(_ jobID: UUID) {
-		_queue.async {
-			guard var job = self._jobs[jobID], !job.isCompleted, !job.isFailed else { return }
-			job.stage = .running
-			self._jobs[jobID] = job
-		}
+	private func _quantized(_ fraction: Double) -> Double {
+		let clamped = min(1, max(0, fraction))
+		guard clamped < 1 else { return 1 }
+		return ((clamped + 0.000_000_001) * 100).rounded(.down) / 100
 	}
 
 	private func _publish(forceTerminal: Bool = false) {
@@ -646,9 +696,15 @@ final class BulkInstallLiveActivityReporter {
 		let failed = values.filter(\.isFailed).count
 		let total = values.count
 		let allTerminal = completed + failed >= total
+		let aggregateFraction = min(
+			1,
+			max(0, values.reduce(0.0) { $0 + $1.fraction } / Double(total))
+		)
 
 		let detail: String
-		if forceTerminal || allTerminal {
+		if _paused {
+			detail = "Paused"
+		} else if allTerminal || forceTerminal {
 			detail = failed == 0 && completed == total ? "Completed" : "Error"
 		} else {
 			detail = "Installing"
@@ -664,3 +720,4 @@ final class BulkInstallLiveActivityReporter {
 		)
 	}
 }
+
