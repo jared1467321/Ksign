@@ -223,34 +223,11 @@ struct InstallPreviewView: View {
 
 // MARK: - Background-safe single-install Live Activity mirror
 
-// The view model remains UI-oriented, but the archiver, local server and
-// install-progress poller all have worker-thread callbacks. Mirroring those
-// primitive values here prevents the Live Activity from waiting for SwiftUI's
-// onReceive handlers to run after the app returns to the foreground.
+// The Live Activity deliberately tracks only whether this one app has fully
+// installed. Package/install percentages stay in the in-app UI and are never
+// forwarded to ActivityKit.
 final class SingleInstallLiveActivityReporter {
 	static let shared = SingleInstallLiveActivityReporter()
-
-	private enum _Stage {
-		case packaging
-		case ready
-		case sendingManifest
-		case sendingPayload
-		case installing
-		case completed
-		case failed
-
-		var detail: String {
-			switch self {
-			case .packaging: return "Packaging"
-			case .ready: return "Ready"
-			case .sendingManifest: return "Sending Manifest"
-			case .sendingPayload: return "Sending Payload"
-			case .installing: return "Installing"
-			case .completed: return "Completed"
-			case .failed: return "Error"
-			}
-		}
-	}
 
 	private let _queue = DispatchQueue(
 		label: "nya.asami.ksign.single-install-live-activity",
@@ -258,10 +235,7 @@ final class SingleInstallLiveActivityReporter {
 	)
 
 	private var _active = false
-	private var _stage: _Stage = .packaging
-	private var _packageProgress: Double = 0
-	private var _installProgress: Double = 0
-	private var _fraction: Double = 0
+	private var _completed = false
 	private let _serverMonitorID = UUID()
 
 	private init() { }
@@ -269,50 +243,19 @@ final class SingleInstallLiveActivityReporter {
 	func begin() {
 		_queue.sync {
 			self._active = true
-			self._stage = .packaging
-			self._packageProgress = 0
-			self._installProgress = 0
-			self._fraction = 0
+			self._completed = false
 
 			guard #available(iOS 16.2, *) else { return }
 			KeepAliveActivityController.shared.clearReport(.singleInstall)
-			self._publish()
+			self._publish(completed: 0, detail: "Installing")
 		}
 	}
 
-	func updatePackage(_ progress: Double) {
-		_queue.async {
-			guard self._active else { return }
-			let value = min(1, max(0, progress))
-			guard value != self._packageProgress else { return }
+	// Install percentages are intentionally not forwarded to ActivityKit.
+	// A single install is either 0/1 or 1/1.
+	func updatePackage(_ progress: Double) { }
 
-			self._packageProgress = value
-			guard self._stage == .packaging else { return }
-
-			let next = self._quantized(max(self._fraction, value * 0.5))
-			guard next != self._fraction else { return }
-			self._fraction = next
-			self._publish()
-		}
-	}
-
-	func updateInstall(_ progress: Double) {
-		_queue.async {
-			guard self._active, self._stage != .completed, self._stage != .failed else { return }
-			let value = min(1, max(0, progress))
-			let stageChanged = self._stage != .installing
-			let progressChanged = value != self._installProgress
-			guard stageChanged || progressChanged else { return }
-
-			self._installProgress = value
-			self._stage = .installing
-			let next = self._quantized(max(self._fraction, 0.5 + (value * 0.5)))
-			let fractionChanged = next != self._fraction
-			self._fraction = next
-			guard stageChanged || fractionChanged else { return }
-			self._publish()
-		}
-	}
+	func updateInstall(_ progress: Double) { }
 
 	func handleServerStatus(
 		_ status: InstallerStatusViewModel.InstallerStatus,
@@ -330,7 +273,6 @@ final class SingleInstallLiveActivityReporter {
 				id: _serverMonitorID,
 				bundleID: bundleID,
 				onProgress: { progress in
-					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
 					DispatchQueue.main.async {
 						viewModel.installProgress = progress
 					}
@@ -357,42 +299,27 @@ final class SingleInstallLiveActivityReporter {
 		_queue.async {
 			guard self._active else { return }
 
-			let previous = self._stage
 			switch status {
-			case .none:
-				self._stage = .packaging
-				self._fraction = self._quantized(max(self._fraction, self._packageProgress * 0.5))
-			case .ready:
-				self._stage = .ready
-				self._fraction = max(self._fraction, 0.5)
-			case .sendingManifest:
-				self._stage = .sendingManifest
-				self._fraction = max(self._fraction, 0.5)
-			case .sendingPayload:
-				self._stage = .sendingPayload
-				self._fraction = max(self._fraction, 0.5)
-			case .installing:
-				self._stage = .installing
-				self._fraction = self._quantized(max(self._fraction, 0.5 + (self._installProgress * 0.5)))
 			case .completed:
-				self._stage = .completed
-				self._fraction = 1
-			case .broken:
-				self._stage = .failed
-			}
+				guard !self._completed else { return }
+				self._completed = true
+				self._publish(completed: 1, detail: "Completed")
 
-			if previous != self._stage || self._stage == .completed {
-				self._publish()
+			case .broken:
+				guard !self._completed else { return }
+				self._publish(completed: 0, detail: "Error")
+
+			default:
+				break
 			}
 		}
 	}
 
 	func finish() {
 		_queue.async {
-			guard self._active else { return }
-			self._stage = .completed
-			self._fraction = 1
-			self._publish()
+			guard self._active, !self._completed else { return }
+			self._completed = true
+			self._publish(completed: 1, detail: "Completed")
 		}
 	}
 
@@ -403,26 +330,19 @@ final class SingleInstallLiveActivityReporter {
 			guard self._active else { return }
 			self._active = false
 			// Keep the terminal snapshot intact through BackgroundAudioManager's
-			// handoff/linger window. The next begin() clears it before seeding 0%.
+			// handoff/linger window. The next begin() clears it before seeding 0/1.
 		}
 	}
 
-	private func _quantized(_ fraction: Double) -> Double {
-		let clamped = min(1, max(0, fraction))
-		guard clamped < 1 else { return 1 }
-		return ((clamped + 0.000_000_001) * 100).rounded(.down) / 100
-	}
-
-	private func _publish() {
+	private func _publish(completed: Int, detail: String) {
 		guard #available(iOS 16.2, *) else { return }
 
 		KeepAliveActivityController.shared.report(
 			.singleInstall,
-			completed: _stage == .completed ? 1 : 0,
+			completed: completed,
 			total: 1,
-			fraction: _fraction,
-			detail: _stage.detail
+			fraction: nil,
+			detail: detail
 		)
 	}
 }
-
