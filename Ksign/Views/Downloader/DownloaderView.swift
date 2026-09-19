@@ -39,6 +39,22 @@ struct DownloaderView: View {
         }
     }
 
+    private var hasActiveIPAVaultDownloads: Bool {
+        downloadManager.activeItems.contains { $0.isIPAVaultDownload }
+    }
+
+    private var ipavaultLiveThroughputText: String {
+        guard downloadManager.ipavaultAdaptiveSpeedBPS > 0 else {
+            return "Measuring…"
+        }
+        return String(format: "%.1f MB/s", downloadManager.ipavaultAdaptiveSpeedBPS / 1_000_000)
+    }
+
+    private var ipavaultActiveStreamsText: String {
+        let count = downloadManager.ipavaultAdaptiveStreamCount
+        return "\(count) stream\(count == 1 ? "" : "s")"
+    }
+
     var body: some View {
         NBNavigationView(.localized("Downloads")) {
             List {
@@ -66,6 +82,29 @@ struct DownloaderView: View {
                     }
                 } else if !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
                     NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
+                        if hasActiveIPAVaultDownloads {
+                            HStack(spacing: 8) {
+                                Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
+                                    .fontWeight(.semibold)
+
+                                Spacer()
+
+                                Text(ipavaultLiveThroughputText)
+                                    .monospacedDigit()
+
+                                Text("•")
+                                    .foregroundStyle(.tertiary)
+
+                                Text(ipavaultActiveStreamsText)
+                                    .monospacedDigit()
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("IPA Vault live download status")
+                            .accessibilityValue("\(ipavaultLiveThroughputText), \(ipavaultActiveStreamsText)")
+                        }
+
                         ForEach(libraryManager.downloads) { download in
                             AppStoreDownloadItemRow(download: download)
                         }
