@@ -7,6 +7,7 @@
 
 import SwiftUI
 import WebKit
+import Darwin
 
 class IPADownloadManager: NSObject, ObservableObject {
     @Published var downloadItems: [DownloadItem] = []
@@ -25,47 +26,145 @@ class IPADownloadManager: NSObject, ObservableObject {
         let totalBytes: Int64
     }
 
-    private struct IPAVaultChunk {
-        let index: Int
-        let start: Int64
-        let end: Int64
-        var received: Int64
+    private struct IPAVaultRange {
+        var start: Int64
+        var end: Int64 // exclusive
+        var attempt: Int
 
-        var expectedLength: Int64 {
-            max(0, end - start + 1)
+        var length: Int64 {
+            max(0, end - start)
         }
     }
 
-    private struct IPAVaultTaskMetadata {
+    private struct IPAVaultWorkerRateSample {
+        let time: TimeInterval
+        let bytes: Int64
+    }
+
+    private struct IPAVaultAggregateSample {
+        let time: TimeInterval
+        let bytes: Int64
+    }
+
+    private final class IPAVaultTaskMetadata {
         let itemID: String
-        let chunkIndex: Int
+        let leaseStart: Int64
+        let requestEnd: Int64
+        let attempt: Int
+        let startedAt: TimeInterval
+        var effectiveEnd: Int64
+        var currentPosition: Int64
+        var committedEnd: Int64
+        var lastProgressAt: TimeInterval
+        var responseValidated = false
+        var terminalError: Error?
+        var preempted = false
+        var suppressCompletion = false
+        var rateSamples: [IPAVaultWorkerRateSample]
+
+        init(
+            itemID: String,
+            leaseStart: Int64,
+            requestEnd: Int64,
+            attempt: Int,
+            startedAt: TimeInterval
+        ) {
+            self.itemID = itemID
+            self.leaseStart = leaseStart
+            self.requestEnd = requestEnd
+            self.attempt = attempt
+            self.startedAt = startedAt
+            self.effectiveEnd = requestEnd
+            self.currentPosition = leaseStart
+            self.committedEnd = leaseStart
+            self.lastProgressAt = startedAt
+            self.rateSamples = [IPAVaultWorkerRateSample(time: startedAt, bytes: 0)]
+        }
     }
 
     private final class IPAVaultJob {
         let itemID: String
         let url: URL
         let totalBytes: Int64
-        let streamCount: Int
         let directory: URL
-        var chunks: [IPAVaultChunk]
-        var tasks: [Int: URLSessionDownloadTask] = [:]
+        let partialURL: URL
+        var fileDescriptor: Int32
+        var freeRanges: [IPAVaultRange]
+        var tasks: [Int: URLSessionDataTask] = [:]
+        var committedBytes: Int64 = 0
         var assembling = false
+        var recentCompletedRates: [Double] = []
 
-        init(itemID: String, url: URL, totalBytes: Int64, streamCount: Int, directory: URL, chunks: [IPAVaultChunk]) {
+        // Stream adaptation is intentionally per job. The configured streams/job
+        // value is the starting point only; each job can independently probe up
+        // or down from there while never exceeding the hard transport ceiling.
+        var desiredStreams: Int
+        var adaptiveProbe: IPAVaultAdaptiveProbe?
+        var adaptiveLastAcceptedBPS: Double = 0
+        var adaptiveLastDecisionAt: TimeInterval = 0
+        var adaptiveNextUpProbeAt: TimeInterval = 0
+        var adaptiveNextDownProbeAt: TimeInterval = 0
+        var controllerThroughputSamples: [(time: TimeInterval, bps: Double)] = []
+        var usefulBytes: Int64 = 0
+        var aggregateRateSamples: [IPAVaultAggregateSample] = []
+
+        init(
+            itemID: String,
+            url: URL,
+            totalBytes: Int64,
+            directory: URL,
+            partialURL: URL,
+            fileDescriptor: Int32,
+            startingStreams: Int
+        ) {
             self.itemID = itemID
             self.url = url
             self.totalBytes = totalBytes
-            self.streamCount = streamCount
             self.directory = directory
-            self.chunks = chunks
+            self.partialURL = partialURL
+            self.fileDescriptor = fileDescriptor
+            self.desiredStreams = min(10, max(1, startingStreams))
+            self.freeRanges = [IPAVaultRange(start: 0, end: totalBytes, attempt: 0)]
         }
     }
-    
+
+    private enum IPAVaultProbeDirection {
+        case up
+        case down
+    }
+
+    private final class IPAVaultAdaptiveProbe {
+        let direction: IPAVaultProbeDirection
+        let previousBudget: Int
+        let targetBudget: Int
+        let baselineBPS: Double
+        let noiseFraction: Double
+        let requestedAt: TimeInterval
+        var measurementStartedAt: TimeInterval?
+        var samples: [Double] = []
+
+        init(
+            direction: IPAVaultProbeDirection,
+            previousBudget: Int,
+            targetBudget: Int,
+            baselineBPS: Double,
+            noiseFraction: Double,
+            requestedAt: TimeInterval
+        ) {
+            self.direction = direction
+            self.previousBudget = previousBudget
+            self.targetBudget = targetBudget
+            self.baselineBPS = baselineBPS
+            self.noiseFraction = noiseFraction
+            self.requestedAt = requestedAt
+        }
+    }
+
     private var urlSession: URLSession!
     private var activeDownloads: [Int: String] = [:] // taskIdentifier -> downloadItem.id
 
-    // IPA Vault has its own downloader so its concurrency/stream settings never
-    // affect Ksign's ordinary downloader, imports, signing, or upload path.
+    // IPA Vault owns its own ranged transport. Concurrent jobs remain fixed at the
+    // user's setting. The streams/job value is each job's adaptive starting point.
     private var pendingIPAVaultDownloads: [PendingIPAVaultDownload] = []
     private var activeIPAVaultDownloadIDs: Set<String> = []
     private var ipavaultJobs: [String: IPAVaultJob] = [:]
@@ -73,20 +172,40 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var pausedIPAVaultDownloadIDs: Set<String> = []
     private var resumeRequestedIPAVaultDownloadIDs: Set<String> = []
     private var maxConcurrentIPAVaultDownloads = 3
-    private var ipavaultStreamsPerFile = 5
+    private var ipavaultStartingStreamsPerFile = 5
+    private let ipavaultHardMaxStreamsPerFile = 10
 
-    // Live Activity batch accounting is intentionally separate from
-    // `pendingIPAVaultDownloads` / `activeIPAVaultDownloadIDs`. Those collections
-    // only describe work that has not finished yet, while the compact island needs
-    // a stable denominator and a count of IPAs that made it all the way through
-    // assembly and into Downloads.
+    @Published private(set) var ipavaultAdaptiveStreamCount = 0
+    @Published private(set) var ipavaultAdaptiveSpeedBPS: Double = 0
+
+    private let ipavaultBlockSize: Int64 = 256 * 1024
+    private let ipavaultMinimumLeaseBytes: Int64 = 2 * 1024 * 1024
+    private let ipavaultDefaultLeaseBytes: Int64 = 8 * 1024 * 1024
+    private let ipavaultMaximumLeaseBytes: Int64 = 64 * 1024 * 1024
+    private let ipavaultLeaseTargetSeconds: Double = 2.0
+    private let ipavaultTailMinimumBytes: Int64 = 512 * 1024
+    private let ipavaultTailMinimumSavingsSeconds: Double = 0.75
+    private let ipavaultSpeedWindowSeconds: Double = 1.50
+    private let ipavaultControllerTickSeconds: Double = 0.75
+    private let ipavaultProbeSettleSeconds: Double = 0.75
+    private let ipavaultProbeMeasureSeconds: Double = 2.25
+    private let ipavaultPeriodicDownProbeSeconds: Double = 15.0
+    private let ipavaultWorkerStallSeconds: Double = 3.0
+    private let ipavaultStallDetectionFloorSeconds: Double = 4.0
+    private let ipavaultMaximumRangeRetries = 5
+
+    private var ipavaultAdaptiveTimer: Timer?
+    private var ipavaultTotalUsefulBytes: Int64 = 0
+    private var ipavaultAggregateRateSamples: [IPAVaultAggregateSample] = []
+
+    // Live Activity batch accounting is intentionally separate from the queue.
     private var ipavaultActivityItemIDs: Set<String> = []
     private var completedIPAVaultActivityItemIDs: Set<String> = []
 
-    private var ipavaultChunksRootURL: URL {
+    private var ipavaultTransfersRootURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("KsignIPAVault", isDirectory: true)
-            .appendingPathComponent("chunks", isDirectory: true)
+            .appendingPathComponent("transfers", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
@@ -97,11 +216,10 @@ class IPADownloadManager: NSObject, ObservableObject {
         config.timeoutIntervalForResource = 24 * 60 * 60
         config.waitsForConnectivity = true
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        // 8 concurrent files * 10 streams per file is the UI maximum.
         config.httpMaximumConnectionsPerHost = 80
         return URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue.main)
     }()
-    
+
     override init() {
         super.init()
         setupURLSession()
@@ -187,8 +305,8 @@ class IPADownloadManager: NSObject, ObservableObject {
     }
 
     /// Queues IPA Vault server -> Downloads transfers. `maxConcurrent` controls
-    /// how many files run at once; `streamsPerFile` controls HTTP Range chunks
-    /// within each active file. No other Ksign transfer path uses these values.
+    /// how many jobs run at once and is never changed adaptively. `streamsPerFile`
+    /// is the starting stream count for each job; each job then probes independently.
     func enqueueIPAVaultDownloads(
         _ files: [(url: URL, filename: String, size: Int64)],
         maxConcurrent: Int,
@@ -225,6 +343,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
             self.updateIPAVaultKeepAliveState()
             self.pumpIPAVaultDownloadQueue()
+            self.startIPAVaultAdaptiveControllerIfNeeded()
         }
 
         if Thread.isMainThread {
@@ -236,8 +355,22 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     func configureIPAVaultDownloads(maxConcurrent: Int, streamsPerFile: Int) {
         let work = {
+            let previousStartingStreams = self.ipavaultStartingStreamsPerFile
             self.applyIPAVaultDownloadConfiguration(maxConcurrent: maxConcurrent, streamsPerFile: streamsPerFile)
+
+            // The two concurrency controls are independent. Changing running-job
+            // concurrency must not reset a job's learned stream count. Only an
+            // explicit streams/job change restarts adaptation from that new value.
+            if previousStartingStreams != self.ipavaultStartingStreamsPerFile {
+                let now = ProcessInfo.processInfo.systemUptime
+                for job in self.ipavaultJobs.values where !job.assembling {
+                    job.desiredStreams = self.ipavaultStartingStreamsPerFile
+                    self.resetIPAVaultAdaptiveMeasurements(for: job, now: now)
+                }
+            }
+
             self.pumpIPAVaultDownloadQueue()
+            self.rebalanceIPAVaultStreams()
         }
 
         if Thread.isMainThread {
@@ -249,15 +382,12 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private func applyIPAVaultDownloadConfiguration(maxConcurrent: Int, streamsPerFile: Int) {
         maxConcurrentIPAVaultDownloads = min(8, max(1, maxConcurrent))
-        ipavaultStreamsPerFile = min(10, max(1, streamsPerFile))
+        ipavaultStartingStreamsPerFile = min(ipavaultHardMaxStreamsPerFile, max(1, streamsPerFile))
     }
 
-    // IPA Vault uses a foreground URLSession and performs its own chunk assembly,
-    // so the keep-alive must already be running before the app backgrounds.
-    // Starting silent audio only when assembly begins is too late: iOS may have
-    // suspended us by then and a backgrounded app cannot reliably start a new
-    // playback session. Hold one identity claim for the entire IPA Vault queue —
-    // from the first queued transfer through the last assembly/move.
+    // IPA Vault uses foreground ranged requests, so the keep-alive must already
+    // be running before the app backgrounds. Hold one identity claim for the
+    // entire IPA Vault queue, including the tiny final fsync/move phase.
     private func updateIPAVaultKeepAliveState() {
         dispatchPrecondition(condition: .onQueue(.main))
 
@@ -265,10 +395,6 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         if hasWork {
             if #available(iOS 16.2, *) {
-                // Seed the report before claiming audio. `claim` immediately mirrors
-                // its owners into ActivityKit, so doing this first guarantees the
-                // activity is born with a compact n/n label instead of briefly
-                // falling back to the long owner name ("IPA Vault downloads").
                 let total = ipavaultActivityItemIDs.count
                 let completed = completedIPAVaultActivityItemIDs
                     .intersection(ipavaultActivityItemIDs)
@@ -295,13 +421,12 @@ class IPADownloadManager: NSObject, ObservableObject {
             }
             BackgroundAudioManager.shared.release(.ipaVaultDownloads)
 
-            // The report has been withdrawn, so the next independently queued IPA
-            // Vault batch must start at 0/n rather than inheriting the prior batch.
             ipavaultActivityItemIDs.removeAll()
             completedIPAVaultActivityItemIDs.removeAll()
+            stopIPAVaultAdaptiveController()
         }
     }
-    
+
     func pauseIPAVaultDownload(_ item: DownloadItem) {
         let work = {
             let itemID = item.id.uuidString
@@ -317,10 +442,13 @@ class IPADownloadManager: NSObject, ObservableObject {
             self.pausedIPAVaultDownloadIDs.insert(itemID)
 
             if let job = self.ipavaultJobs[itemID] {
-                job.tasks.values.forEach { $0.suspend() }
+                self.cancelIPAVaultStreams(job, requeueUnfinished: true)
+                job.desiredStreams = self.ipavaultStartingStreamsPerFile
+                self.resetIPAVaultAdaptiveMeasurements(for: job)
             }
             self.setIPAVaultPausedState(itemID: itemID, isPaused: true)
             self.pumpIPAVaultDownloadQueue()
+            self.rebalanceIPAVaultStreams()
             self.updateIPAVaultKeepAliveState()
         }
 
@@ -363,7 +491,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private var runningIPAVaultDownloadCount: Int {
         activeIPAVaultDownloadIDs.reduce(into: 0) { count, itemID in
-            if !pausedIPAVaultDownloadIDs.contains(itemID) {
+            if !pausedIPAVaultDownloadIDs.contains(itemID), ipavaultJobs[itemID]?.assembling != true {
                 count += 1
             }
         }
@@ -405,16 +533,15 @@ class IPADownloadManager: NSObject, ObservableObject {
             pausedIPAVaultDownloadIDs.remove(itemID)
             resumeRequestedIPAVaultDownloadIDs.remove(itemID)
             pumpIPAVaultDownloadQueue()
+            rebalanceIPAVaultStreams()
             updateIPAVaultKeepAliveState()
             return true
         }
 
         guard let job = ipavaultJobs.removeValue(forKey: itemID) else { return false }
 
-        for (taskID, task) in job.tasks {
-            ipavaultTaskMetadata.removeValue(forKey: taskID)
-            task.cancel()
-        }
+        cancelIPAVaultStreams(job, requeueUnfinished: false)
+        closeIPAVaultFileIfNeeded(job)
         activeIPAVaultDownloadIDs.remove(itemID)
         downloadItems.removeAll { $0.id.uuidString == itemID }
         ipavaultActivityItemIDs.remove(itemID)
@@ -423,6 +550,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
+        rebalanceIPAVaultStreams()
         updateIPAVaultKeepAliveState()
         return true
     }
@@ -437,13 +565,11 @@ class IPADownloadManager: NSObject, ObservableObject {
                     continue
                 }
 
-                if job.streamCount != ipavaultStreamsPerFile {
-                    restartPausedIPAVaultDownload(job)
-                } else {
-                    pausedIPAVaultDownloadIDs.remove(itemID)
-                    setIPAVaultPausedState(itemID: itemID, isPaused: false)
-                    job.tasks.values.forEach { $0.resume() }
-                }
+                pausedIPAVaultDownloadIDs.remove(itemID)
+                setIPAVaultPausedState(itemID: itemID, isPaused: false)
+                job.desiredStreams = ipavaultStartingStreamsPerFile
+                resetIPAVaultAdaptiveMeasurements(for: job)
+                rebalanceIPAVaultStreams()
                 continue
             }
 
@@ -459,270 +585,407 @@ class IPADownloadManager: NSObject, ObservableObject {
             }
             startIPAVaultDownload(pending)
         }
-    }
 
-    private func restartPausedIPAVaultDownload(_ job: IPAVaultJob) {
-        let itemID = job.itemID
-
-        for (taskID, task) in job.tasks {
-            ipavaultTaskMetadata.removeValue(forKey: taskID)
-            task.cancel()
-        }
-
-        ipavaultJobs.removeValue(forKey: itemID)
-        activeIPAVaultDownloadIDs.remove(itemID)
-        pausedIPAVaultDownloadIDs.remove(itemID)
-        resumeRequestedIPAVaultDownloadIDs.remove(itemID)
-        try? FileManager.default.removeItem(at: job.directory)
-
-        if let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) {
-            var item = downloadItems[index]
-            item.progress = 0
-            item.bytesDownloaded = 0
-            item.isPaused = false
-            downloadItems[index] = item
-        }
-
-        pendingIPAVaultDownloads.insert(
-            PendingIPAVaultDownload(itemID: itemID, url: job.url, totalBytes: job.totalBytes),
-            at: 0
-        )
+        startIPAVaultAdaptiveControllerIfNeeded()
+        rebalanceIPAVaultStreams()
     }
 
     private func startIPAVaultDownload(_ pending: PendingIPAVaultDownload) {
-        let maxStreamsBySize: Int
-        if pending.totalBytes > Int64(Int.max) {
-            maxStreamsBySize = Int.max
-        } else {
-            maxStreamsBySize = max(1, Int(pending.totalBytes))
-        }
-        let streamCount = min(ipavaultStreamsPerFile, maxStreamsBySize)
-        let chunks = makeIPAVaultChunks(totalBytes: pending.totalBytes, count: streamCount)
-        let directory = ipavaultChunksRootURL.appendingPathComponent(pending.itemID, isDirectory: true)
+        let directory = ipavaultTransfersRootURL.appendingPathComponent(pending.itemID, isDirectory: true)
+        let partialURL = directory.appendingPathComponent("download.partial", isDirectory: false)
+        let fileManager = FileManager.default
 
         do {
-            if FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.removeItem(at: directory)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: directory)
             }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            guard fileManager.createFile(atPath: partialURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            let descriptor = Darwin.open(partialURL.path, O_RDWR)
+            guard descriptor >= 0 else {
+                throw posixError("open")
+            }
+            guard Darwin.ftruncate(descriptor, off_t(pending.totalBytes)) == 0 else {
+                let error = posixError("ftruncate")
+                Darwin.close(descriptor)
+                throw error
+            }
+
+            let job = IPAVaultJob(
+                itemID: pending.itemID,
+                url: pending.url,
+                totalBytes: pending.totalBytes,
+                directory: directory,
+                partialURL: partialURL,
+                fileDescriptor: descriptor,
+                startingStreams: ipavaultStartingStreamsPerFile
+            )
+            ipavaultJobs[pending.itemID] = job
+            activeIPAVaultDownloadIDs.insert(pending.itemID)
+            pausedIPAVaultDownloadIDs.remove(pending.itemID)
+            setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
+            resetIPAVaultAdaptiveMeasurements(for: job)
+            updateIPAVaultKeepAliveState()
         } catch {
+            try? fileManager.removeItem(at: directory)
             failIPAVaultDownload(itemID: pending.itemID, error: error)
+        }
+    }
+
+    private func runningIPAVaultJobs() -> [IPAVaultJob] {
+        activeIPAVaultDownloadIDs.compactMap { itemID in
+            guard !pausedIPAVaultDownloadIDs.contains(itemID),
+                  let job = ipavaultJobs[itemID],
+                  !job.assembling else { return nil }
+            return job
+        }
+    }
+
+    private func totalRunningIPAVaultStreamCount() -> Int {
+        runningIPAVaultJobs().reduce(0) { $0 + $1.tasks.count }
+    }
+
+    private func rebalanceIPAVaultStreams() {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        let jobs = runningIPAVaultJobs()
+        guard !jobs.isEmpty else {
+            ipavaultAdaptiveStreamCount = 0
             return
         }
 
-        let job = IPAVaultJob(
-            itemID: pending.itemID,
-            url: pending.url,
-            totalBytes: pending.totalBytes,
-            streamCount: streamCount,
-            directory: directory,
-            chunks: chunks
+        for job in jobs {
+            job.desiredStreams = min(ipavaultHardMaxStreamsPerFile, max(1, job.desiredStreams))
+
+            var safety = 0
+            while job.tasks.count < job.desiredStreams && safety < 128 {
+                safety += 1
+
+                if startNextIPAVaultLease(job) {
+                    continue
+                }
+
+                // Near EOF all untouched ranges may already be leased. Split a long
+                // active tail only when the Telegram-style ETA calculation says it
+                // saves meaningful time; otherwise simply let the short lease finish.
+                if !splitIPAVaultTailForAdditionalStream(in: [job]) {
+                    break
+                }
+            }
+        }
+
+        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
+    }
+
+    private func remainingIPAVaultBytes(_ job: IPAVaultJob) -> Int64 {
+        max(0, job.totalBytes - job.committedBytes)
+    }
+
+    private func startNextIPAVaultLease(_ job: IPAVaultJob) -> Bool {
+        guard !job.assembling, !pausedIPAVaultDownloadIDs.contains(job.itemID) else { return false }
+        guard !job.freeRanges.isEmpty else { return false }
+
+        job.freeRanges.sort { $0.start < $1.start }
+        var source = job.freeRanges.removeFirst()
+        guard source.length > 0 else { return false }
+
+        let desiredLength = desiredIPAVaultLeaseLength(for: job)
+        var leaseEnd = min(source.end, source.start + desiredLength)
+        if leaseEnd < source.end {
+            leaseEnd = alignIPAVaultOffsetDown(leaseEnd)
+            if leaseEnd <= source.start {
+                leaseEnd = min(source.end, source.start + ipavaultBlockSize)
+            }
+        }
+
+        let lease = IPAVaultRange(start: source.start, end: leaseEnd, attempt: source.attempt)
+        if leaseEnd < source.end {
+            source.start = leaseEnd
+            job.freeRanges.insert(source, at: 0)
+        }
+
+        var request = URLRequest(url: job.url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        request.setValue("bytes=\(lease.start)-\(lease.end - 1)", forHTTPHeaderField: "Range")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+
+        let task = ipavaultSession.dataTask(with: request)
+        let now = ProcessInfo.processInfo.systemUptime
+        let metadata = IPAVaultTaskMetadata(
+            itemID: job.itemID,
+            leaseStart: lease.start,
+            requestEnd: lease.end,
+            attempt: lease.attempt,
+            startedAt: now
         )
-        ipavaultJobs[pending.itemID] = job
-        activeIPAVaultDownloadIDs.insert(pending.itemID)
-        pausedIPAVaultDownloadIDs.remove(pending.itemID)
-        setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
-        updateIPAVaultKeepAliveState()
-
-        for chunk in chunks {
-            var request = URLRequest(url: pending.url)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            request.timeoutInterval = 60
-            request.setValue("bytes=\(chunk.start)-\(chunk.end)", forHTTPHeaderField: "Range")
-            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-
-            let task = ipavaultSession.downloadTask(with: request)
-            job.tasks[task.taskIdentifier] = task
-            ipavaultTaskMetadata[task.taskIdentifier] = IPAVaultTaskMetadata(
-                itemID: pending.itemID,
-                chunkIndex: chunk.index
-            )
-            task.countOfBytesClientExpectsToReceive = chunk.expectedLength
-            task.resume()
-        }
+        job.tasks[task.taskIdentifier] = task
+        ipavaultTaskMetadata[task.taskIdentifier] = metadata
+        task.countOfBytesClientExpectsToReceive = lease.length
+        task.resume()
+        return true
     }
 
-    private func makeIPAVaultChunks(totalBytes: Int64, count: Int) -> [IPAVaultChunk] {
-        let safeCount = max(1, min(count, Int(min(totalBytes, Int64(Int.max)))))
-        let base = totalBytes / Int64(safeCount)
-        let remainder = totalBytes % Int64(safeCount)
-        var cursor: Int64 = 0
-        var chunks: [IPAVaultChunk] = []
-
-        for index in 0..<safeCount {
-            let length = base + (Int64(index) < remainder ? 1 : 0)
-            let start = cursor
-            let end = cursor + length - 1
-            chunks.append(IPAVaultChunk(index: index, start: start, end: end, received: 0))
-            cursor = end + 1
+    private func desiredIPAVaultLeaseLength(for job: IPAVaultJob) -> Int64 {
+        let currentRates = job.tasks.keys.compactMap { taskID -> Double? in
+            guard let metadata = ipavaultTaskMetadata[taskID] else { return nil }
+            let rate = effectiveIPAVaultWorkerBPS(metadata, now: ProcessInfo.processInfo.systemUptime)
+            return rate > 0 ? rate : nil
         }
-        return chunks
+        let historical = job.recentCompletedRates.suffix(12)
+        let rates = Array(currentRates) + Array(historical)
+
+        let estimate: Double
+        if rates.isEmpty {
+            estimate = Double(ipavaultDefaultLeaseBytes) / ipavaultLeaseTargetSeconds
+        } else {
+            estimate = median(rates)
+        }
+
+        let raw = Int64(max(1, estimate * ipavaultLeaseTargetSeconds))
+        let clamped = min(ipavaultMaximumLeaseBytes, max(ipavaultMinimumLeaseBytes, raw))
+        return max(ipavaultBlockSize, alignIPAVaultOffsetDown(clamped))
     }
 
-    private func updateIPAVaultProgress(itemID: String, totalBytes: Int64, bytesDownloaded: Int64) {
-        guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) else { return }
-        let downloaded = min(totalBytes, max(0, bytesDownloaded))
+    private func alignIPAVaultOffsetDown(_ value: Int64) -> Int64 {
+        guard value > 0 else { return 0 }
+        return (value / ipavaultBlockSize) * ipavaultBlockSize
+    }
+
+    private func alignIPAVaultOffsetNearest(_ value: Int64) -> Int64 {
+        guard value > 0 else { return 0 }
+        return ((value + ipavaultBlockSize / 2) / ipavaultBlockSize) * ipavaultBlockSize
+    }
+
+    private func splitIPAVaultTailForAdditionalStream(in jobs: [IPAVaultJob]) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        var candidates: [(eta: Double, metadata: IPAVaultTaskMetadata, job: IPAVaultJob, bps: Double)] = []
+        var peerRates: [Double] = []
+
+        for job in jobs {
+            for taskID in job.tasks.keys {
+                guard let metadata = ipavaultTaskMetadata[taskID], !metadata.preempted else { continue }
+                let remaining = metadata.effectiveEnd - metadata.currentPosition
+                let bps = effectiveIPAVaultWorkerBPS(metadata, now: now)
+                if bps > 0 { peerRates.append(bps) }
+                guard remaining >= ipavaultTailMinimumBytes * 2 else { continue }
+                candidates.append((Double(remaining) / max(1, bps), metadata, job, bps))
+            }
+        }
+
+        guard !candidates.isEmpty, !peerRates.isEmpty else { return false }
+        let medianBPS = median(peerRates)
+        guard let victim = candidates.max(by: { $0.eta < $1.eta }) else { return false }
+
+        let victimBPS = victim.bps > 0 ? victim.bps : max(1, medianBPS * 0.25)
+        let thiefBPS = max(1, medianBPS)
+        let position = victim.metadata.currentPosition
+        let oldEnd = victim.metadata.effectiveEnd
+        let remaining = oldEnd - position
+        guard remaining >= ipavaultTailMinimumBytes * 2 else { return false }
+
+        let keepBytes = Int64(Double(remaining) * (victimBPS / (victimBPS + thiefBPS)))
+        var cut = alignIPAVaultOffsetNearest(position + keepBytes)
+        cut = max(position + ipavaultTailMinimumBytes, min(cut, oldEnd - ipavaultTailMinimumBytes))
+        cut = alignIPAVaultOffsetDown(cut)
+        guard cut > position, cut < oldEnd else { return false }
+
+        let victimKeep = Double(cut - position) / victimBPS
+        let thiefTime = Double(oldEnd - cut) / thiefBPS
+        let projectedNewTime = max(victimKeep, thiefTime)
+        let projectedSaving = victim.eta - projectedNewTime
+        guard projectedSaving >= ipavaultTailMinimumSavingsSeconds else { return false }
+
+        victim.metadata.effectiveEnd = cut
+        victim.metadata.preempted = true
+        victim.job.freeRanges.append(
+            IPAVaultRange(start: cut, end: oldEnd, attempt: victim.metadata.attempt)
+        )
+        print(
+            "IPA Vault adaptive: split \(oldEnd - cut) bytes from a straggler " +
+            "(projected save \(String(format: "%.2f", projectedSaving))s)."
+        )
+        return true
+    }
+
+    private func updateIPAVaultProgress(for job: IPAVaultJob) {
+        guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == job.itemID }) else { return }
+
+        let uncommittedInFlight = job.tasks.keys.reduce(Int64(0)) { partial, taskID in
+            guard let metadata = ipavaultTaskMetadata[taskID] else { return partial }
+            return partial + max(0, metadata.currentPosition - metadata.committedEnd)
+        }
+        let downloaded = min(job.totalBytes, max(0, job.committedBytes + uncommittedInFlight))
+
         var item = downloadItems[index]
-        item.totalBytes = totalBytes
+        item.totalBytes = job.totalBytes
         item.bytesDownloaded = downloaded
-        item.progress = totalBytes > 0 ? Double(downloaded) / Double(totalBytes) : 0
+        item.progress = job.totalBytes > 0 ? Double(downloaded) / Double(job.totalBytes) : 0
         downloadItems[index] = item
     }
 
-    private func handleIPAVaultChunkProgress(
-        taskIdentifier: Int,
-        totalBytesWritten: Int64
-    ) {
-        guard let metadata = ipavaultTaskMetadata[taskIdentifier],
-              let job = ipavaultJobs[metadata.itemID],
-              job.chunks.indices.contains(metadata.chunkIndex) else { return }
+    private func commitIPAVaultBytes(_ metadata: IPAVaultTaskMetadata, job: IPAVaultJob, through absoluteEnd: Int64) {
+        let bounded = min(metadata.effectiveEnd, max(metadata.committedEnd, absoluteEnd))
+        let commitEnd: Int64
+        if bounded == metadata.effectiveEnd && metadata.effectiveEnd == job.totalBytes {
+            commitEnd = bounded
+        } else {
+            commitEnd = alignIPAVaultOffsetDown(bounded)
+        }
 
-        let expected = job.chunks[metadata.chunkIndex].expectedLength
-        job.chunks[metadata.chunkIndex].received = min(expected, max(0, totalBytesWritten))
-        let total = job.chunks.reduce(Int64(0)) { $0 + min($1.received, $1.expectedLength) }
-        updateIPAVaultProgress(itemID: metadata.itemID, totalBytes: job.totalBytes, bytesDownloaded: total)
+        guard commitEnd > metadata.committedEnd else { return }
+        job.committedBytes += commitEnd - metadata.committedEnd
+        metadata.committedEnd = commitEnd
     }
 
-    private func handleIPAVaultChunkFinished(
-        downloadTask: URLSessionDownloadTask,
-        location: URL
-    ) {
-        let taskID = downloadTask.taskIdentifier
-        guard let metadata = ipavaultTaskMetadata[taskID],
-              let job = ipavaultJobs[metadata.itemID],
-              job.chunks.indices.contains(metadata.chunkIndex) else { return }
+    private func completeIPAVaultStream(taskIdentifier: Int, error: Error?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let metadata = ipavaultTaskMetadata[taskIdentifier],
+              let job = ipavaultJobs[metadata.itemID] else { return }
 
-        guard let response = downloadTask.response as? HTTPURLResponse else {
-            failIPAVaultDownload(
-                itemID: metadata.itemID,
-                error: NSError(domain: "IPAVault", code: 1, userInfo: [NSLocalizedDescriptionKey: "The server returned an invalid response."])
-            )
+        job.tasks.removeValue(forKey: taskIdentifier)
+        ipavaultTaskMetadata.removeValue(forKey: taskIdentifier)
+
+        if let terminalError = metadata.terminalError {
+            failIPAVaultDownload(itemID: metadata.itemID, error: terminalError)
             return
         }
 
-        guard response.statusCode == 206 else {
-            let message = response.statusCode == 200
-                ? "The server ignored the HTTP Range request required for multi-stream downloading."
-                : "Server returned HTTP \(response.statusCode)."
-            failIPAVaultDownload(
-                itemID: metadata.itemID,
-                error: NSError(domain: "IPAVault", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
-            )
+        let reachedEffectiveEnd = metadata.currentPosition >= metadata.effectiveEnd
+        let cancellationWasExpected = metadata.preempted && reachedEffectiveEnd
+
+        if error == nil || cancellationWasExpected {
+            guard reachedEffectiveEnd else {
+                requeueIPAVaultStream(metadata, job: job, reason: error)
+                return
+            }
+
+            if metadata.committedEnd < metadata.effectiveEnd {
+                job.committedBytes += metadata.effectiveEnd - metadata.committedEnd
+                metadata.committedEnd = metadata.effectiveEnd
+            }
+
+            let elapsed = max(0.001, ProcessInfo.processInfo.systemUptime - metadata.startedAt)
+            let completedLength = max(0, metadata.effectiveEnd - metadata.leaseStart)
+            if completedLength > 0 {
+                job.recentCompletedRates.append(Double(completedLength) / elapsed)
+                if job.recentCompletedRates.count > 24 {
+                    job.recentCompletedRates.removeFirst(job.recentCompletedRates.count - 24)
+                }
+            }
+
+            updateIPAVaultProgress(for: job)
+            maybeFinishIPAVaultDownload(job)
+            rebalanceIPAVaultStreams()
             return
         }
 
-        let chunk = job.chunks[metadata.chunkIndex]
-        let receivedSize = fileSize(at: location)
-        guard receivedSize == chunk.expectedLength else {
+        requeueIPAVaultStream(metadata, job: job, reason: error)
+    }
+
+    private func requeueIPAVaultStream(_ metadata: IPAVaultTaskMetadata, job: IPAVaultJob, reason: Error?) {
+        let retryStart = metadata.committedEnd
+        guard retryStart < metadata.effectiveEnd else {
+            maybeFinishIPAVaultDownload(job)
+            rebalanceIPAVaultStreams()
+            return
+        }
+
+        let nextAttempt = metadata.attempt + 1
+        if nextAttempt > ipavaultMaximumRangeRetries {
+            let detail = reason?.localizedDescription ?? "range ended before all committed bytes arrived"
             failIPAVaultDownload(
-                itemID: metadata.itemID,
+                itemID: job.itemID,
                 error: NSError(
                     domain: "IPAVault",
-                    code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "A download stream ended early (\(receivedSize) of \(chunk.expectedLength) bytes)."]
+                    code: 31,
+                    userInfo: [NSLocalizedDescriptionKey: "A ranged download repeatedly failed near byte \(retryStart): \(detail)"]
                 )
             )
             return
         }
 
-        let chunkURL = job.directory.appendingPathComponent(String(format: "chunk-%03d.part", chunk.index))
-
-        do {
-            if FileManager.default.fileExists(atPath: chunkURL.path) {
-                try FileManager.default.removeItem(at: chunkURL)
-            }
-            try FileManager.default.moveItem(at: location, to: chunkURL)
-        } catch {
-            failIPAVaultDownload(itemID: metadata.itemID, error: error)
-            return
-        }
-
-        job.chunks[metadata.chunkIndex].received = chunk.expectedLength
-        job.tasks.removeValue(forKey: taskID)
-        ipavaultTaskMetadata.removeValue(forKey: taskID)
-
-        let total = job.chunks.reduce(Int64(0)) { $0 + min($1.received, $1.expectedLength) }
-        updateIPAVaultProgress(itemID: metadata.itemID, totalBytes: job.totalBytes, bytesDownloaded: total)
-
-        if !job.assembling && job.chunks.allSatisfy({ $0.received == $0.expectedLength }) {
-            beginIPAVaultAssembly(job)
-        }
+        job.freeRanges.append(
+            IPAVaultRange(start: retryStart, end: metadata.effectiveEnd, attempt: nextAttempt)
+        )
+        updateIPAVaultProgress(for: job)
+        rebalanceIPAVaultStreams()
     }
 
-    private func beginIPAVaultAssembly(_ job: IPAVaultJob) {
-        guard !job.assembling else { return }
+    private func cancelIPAVaultStreams(_ job: IPAVaultJob, requeueUnfinished: Bool) {
+        let taskIDs = Array(job.tasks.keys)
+        for taskID in taskIDs {
+            guard let task = job.tasks.removeValue(forKey: taskID),
+                  let metadata = ipavaultTaskMetadata.removeValue(forKey: taskID) else {
+                continue
+            }
+
+            if requeueUnfinished, metadata.committedEnd < metadata.effectiveEnd {
+                job.freeRanges.append(
+                    IPAVaultRange(
+                        start: metadata.committedEnd,
+                        end: metadata.effectiveEnd,
+                        attempt: metadata.attempt
+                    )
+                )
+            }
+            metadata.suppressCompletion = true
+            task.cancel()
+        }
+        updateIPAVaultProgress(for: job)
+    }
+
+    private func maybeFinishIPAVaultDownload(_ job: IPAVaultJob) {
+        guard !job.assembling,
+              job.tasks.isEmpty,
+              job.freeRanges.isEmpty,
+              job.committedBytes >= job.totalBytes else { return }
+
         job.assembling = true
+        updateIPAVaultProgress(for: job)
         updateIPAVaultKeepAliveState()
 
         let itemID = job.itemID
-        let directory = job.directory
-        let chunks = job.chunks
-        let totalBytes = job.totalBytes
+        let partialURL = job.partialURL
+        let descriptor = job.fileDescriptor
+        job.fileDescriptor = -1
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
 
             let result: Result<URL, Error>
-            do {
-                let assembledURL = try self.assembleIPAVaultChunks(
-                    directory: directory,
-                    chunks: chunks,
-                    expectedTotalBytes: totalBytes
-                )
-                result = .success(assembledURL)
-            } catch {
+            if descriptor >= 0 && Darwin.fsync(descriptor) != 0 {
+                let error = self.posixError("fsync")
+                Darwin.close(descriptor)
                 result = .failure(error)
+            } else {
+                if descriptor >= 0 {
+                    Darwin.close(descriptor)
+                }
+                let finalSize = self.fileSize(at: partialURL)
+                if finalSize == job.totalBytes {
+                    result = .success(partialURL)
+                } else {
+                    result = .failure(
+                        NSError(
+                            domain: "IPAVault",
+                            code: 32,
+                            userInfo: [NSLocalizedDescriptionKey: "The completed IPA has an unexpected size (\(finalSize) of \(job.totalBytes) bytes)."]
+                        )
+                    )
+                }
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.finishIPAVaultAssembly(itemID: itemID, result: result)
+                self?.finishIPAVaultDownload(itemID: itemID, result: result)
             }
         }
     }
 
-    private func assembleIPAVaultChunks(
-        directory: URL,
-        chunks: [IPAVaultChunk],
-        expectedTotalBytes: Int64
-    ) throws -> URL {
-        let outputURL = directory.appendingPathComponent("assembled.partial")
-        let fileManager = FileManager.default
-
-        if fileManager.fileExists(atPath: outputURL.path) {
-            try fileManager.removeItem(at: outputURL)
-        }
-        guard fileManager.createFile(atPath: outputURL.path, contents: nil) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-
-        let output = try FileHandle(forWritingTo: outputURL)
-        defer { try? output.close() }
-
-        for chunk in chunks.sorted(by: { $0.index < $1.index }) {
-            let chunkURL = directory.appendingPathComponent(String(format: "chunk-%03d.part", chunk.index))
-            let input = try FileHandle(forReadingFrom: chunkURL)
-
-            while true {
-                let data = try input.read(upToCount: 1024 * 1024) ?? Data()
-                if data.isEmpty { break }
-                try output.write(contentsOf: data)
-            }
-            try input.close()
-        }
-
-        try output.synchronize()
-        let finalSize = fileSize(at: outputURL)
-        guard finalSize == expectedTotalBytes else {
-            throw NSError(
-                domain: "IPAVault",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "The assembled IPA is incomplete (\(finalSize) of \(expectedTotalBytes) bytes)."]
-            )
-        }
-        return outputURL
-    }
-
-    private func finishIPAVaultAssembly(itemID: String, result: Result<URL, Error>) {
+    private func finishIPAVaultDownload(itemID: String, result: Result<URL, Error>) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let job = ipavaultJobs[itemID] else {
             if case .success(let temporaryURL) = result {
@@ -739,7 +1002,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) else {
                 failIPAVaultDownload(
                     itemID: itemID,
-                    error: NSError(domain: "IPAVault", code: 4, userInfo: [NSLocalizedDescriptionKey: "The download item disappeared before assembly completed."])
+                    error: NSError(domain: "IPAVault", code: 33, userInfo: [NSLocalizedDescriptionKey: "The download item disappeared before the completed IPA could be moved."])
                 )
                 return
             }
@@ -777,10 +1040,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         print("IPA Vault download failed: \(error.localizedDescription)")
 
         if let job = ipavaultJobs.removeValue(forKey: itemID) {
-            for (taskID, task) in job.tasks {
-                ipavaultTaskMetadata.removeValue(forKey: taskID)
-                task.cancel()
-            }
+            cancelIPAVaultStreams(job, requeueUnfinished: false)
+            closeIPAVaultFileIfNeeded(job)
             try? FileManager.default.removeItem(at: job.directory)
         }
 
@@ -794,6 +1055,473 @@ class IPADownloadManager: NSObject, ObservableObject {
         updateIPAVaultKeepAliveState()
     }
 
+    private func closeIPAVaultFileIfNeeded(_ job: IPAVaultJob) {
+        if job.fileDescriptor >= 0 {
+            Darwin.close(job.fileDescriptor)
+            job.fileDescriptor = -1
+        }
+    }
+
+    private func writeIPAVaultData(_ data: Data, count: Int, to descriptor: Int32, offset: Int64) throws {
+        guard count > 0 else { return }
+
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < count {
+                let result = Darwin.pwrite(
+                    descriptor,
+                    base.advanced(by: written),
+                    count - written,
+                    off_t(offset + Int64(written))
+                )
+                if result < 0 {
+                    throw posixError("pwrite")
+                }
+                if result == 0 {
+                    throw NSError(domain: "IPAVault", code: 34, userInfo: [NSLocalizedDescriptionKey: "Writing the IPA made no progress."])
+                }
+                written += result
+            }
+        }
+    }
+
+    private func posixError(_ operation: String) -> NSError {
+        let code = errno
+        let description = String(cString: strerror(code))
+        return NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: "IPA Vault \(operation) failed: \(description)"]
+        )
+    }
+
+    private func parseIPAVaultContentRange(_ value: String) -> (start: Int64, end: Int64, total: Int64)? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
+        let body = trimmed.dropFirst(6)
+        let pieces = body.split(separator: "/", maxSplits: 1)
+        guard pieces.count == 2, let total = Int64(pieces[1]) else { return nil }
+        let bounds = pieces[0].split(separator: "-", maxSplits: 1)
+        guard bounds.count == 2,
+              let start = Int64(bounds[0]),
+              let end = Int64(bounds[1]) else { return nil }
+        return (start, end, total)
+    }
+
+    // MARK: Adaptive stream controller
+
+    private func startIPAVaultAdaptiveControllerIfNeeded() {
+        guard ipavaultAdaptiveTimer == nil, !runningIPAVaultJobs().isEmpty else { return }
+        let timer = Timer(timeInterval: ipavaultControllerTickSeconds, repeats: true) { [weak self] _ in
+            self?.tickIPAVaultAdaptiveController()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        ipavaultAdaptiveTimer = timer
+        tickIPAVaultAdaptiveController()
+    }
+
+    private func stopIPAVaultAdaptiveController() {
+        ipavaultAdaptiveTimer?.invalidate()
+        ipavaultAdaptiveTimer = nil
+        ipavaultAdaptiveStreamCount = 0
+        ipavaultAdaptiveSpeedBPS = 0
+        ipavaultAggregateRateSamples.removeAll()
+        for job in ipavaultJobs.values {
+            job.adaptiveProbe = nil
+            job.controllerThroughputSamples.removeAll()
+        }
+    }
+
+    private func resetIPAVaultAdaptiveMeasurements(for job: IPAVaultJob, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        job.adaptiveProbe = nil
+        job.controllerThroughputSamples.removeAll()
+        job.aggregateRateSamples.removeAll()
+        job.usefulBytes = 0
+        job.adaptiveLastAcceptedBPS = 0
+        job.adaptiveLastDecisionAt = now
+        job.adaptiveNextUpProbeAt = now + 1.5
+        job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
+    }
+
+    private func recordIPAVaultUsefulBytes(_ bytes: Int64, for job: IPAVaultJob, now: TimeInterval) {
+        guard bytes > 0 else { return }
+
+        ipavaultTotalUsefulBytes += bytes
+        if let last = ipavaultAggregateRateSamples.last, now - last.time < 0.10 {
+            ipavaultAggregateRateSamples[ipavaultAggregateRateSamples.count - 1] = IPAVaultAggregateSample(
+                time: now,
+                bytes: ipavaultTotalUsefulBytes
+            )
+        } else {
+            ipavaultAggregateRateSamples.append(IPAVaultAggregateSample(time: now, bytes: ipavaultTotalUsefulBytes))
+        }
+        let aggregateCutoff = now - 6.0
+        while ipavaultAggregateRateSamples.count > 2, ipavaultAggregateRateSamples[1].time < aggregateCutoff {
+            ipavaultAggregateRateSamples.removeFirst()
+        }
+
+        job.usefulBytes += bytes
+        if let last = job.aggregateRateSamples.last, now - last.time < 0.10 {
+            job.aggregateRateSamples[job.aggregateRateSamples.count - 1] = IPAVaultAggregateSample(
+                time: now,
+                bytes: job.usefulBytes
+            )
+        } else {
+            job.aggregateRateSamples.append(IPAVaultAggregateSample(time: now, bytes: job.usefulBytes))
+        }
+        let jobCutoff = now - 6.0
+        while job.aggregateRateSamples.count > 2, job.aggregateRateSamples[1].time < jobCutoff {
+            job.aggregateRateSamples.removeFirst()
+        }
+    }
+
+    private func currentIPAVaultBPS(samples: [IPAVaultAggregateSample], now: TimeInterval) -> Double {
+        let cutoff = now - ipavaultSpeedWindowSeconds
+        guard let last = samples.last else { return 0 }
+        guard now - last.time <= 1.0 else { return 0 }
+        let first = samples.last(where: { $0.time <= cutoff }) ?? samples.first!
+        let span = last.time - first.time
+        guard span >= 0.50 else { return 0 }
+        return Double(max(0, last.bytes - first.bytes)) / span
+    }
+
+    private func currentIPAVaultAggregateBPS(now: TimeInterval) -> Double {
+        currentIPAVaultBPS(samples: ipavaultAggregateRateSamples, now: now)
+    }
+
+    private func currentIPAVaultJobBPS(_ job: IPAVaultJob, now: TimeInterval) -> Double {
+        currentIPAVaultBPS(samples: job.aggregateRateSamples, now: now)
+    }
+
+    private func tickIPAVaultAdaptiveController() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let jobs = runningIPAVaultJobs()
+        guard !jobs.isEmpty else {
+            ipavaultAdaptiveStreamCount = 0
+            ipavaultAdaptiveSpeedBPS = 0
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        for job in jobs where job.adaptiveLastDecisionAt == 0 {
+            resetIPAVaultAdaptiveMeasurements(for: job, now: now)
+        }
+
+        recycleStalledIPAVaultStreams(now: now)
+        rebalanceIPAVaultStreams()
+        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
+        ipavaultAdaptiveSpeedBPS = currentIPAVaultAggregateBPS(now: now)
+
+        // Keep probes isolated. Each job owns its own adaptive state and result,
+        // but only one job perturbs stream count at a time so simultaneous probes
+        // do not contaminate one another's measurements on a shared connection.
+        let orderedJobs = jobs.sorted {
+            if $0.adaptiveProbe != nil && $1.adaptiveProbe == nil { return true }
+            if $0.adaptiveProbe == nil && $1.adaptiveProbe != nil { return false }
+            return $0.adaptiveLastDecisionAt < $1.adaptiveLastDecisionAt
+        }
+
+        let activeProbeJob = orderedJobs.first(where: { $0.adaptiveProbe != nil })
+        for job in orderedJobs {
+            let allowNewProbe = activeProbeJob == nil
+            if tickIPAVaultAdaptiveJob(job, now: now, allowNewProbe: allowNewProbe) {
+                break
+            }
+        }
+    }
+
+    @discardableResult
+    private func tickIPAVaultAdaptiveJob(_ job: IPAVaultJob, now: TimeInterval, allowNewProbe: Bool) -> Bool {
+        let bps = currentIPAVaultJobBPS(job, now: now)
+        guard bps > 0 else { return false }
+
+        job.controllerThroughputSamples.append((time: now, bps: bps))
+        let sampleCutoff = now - 8.0
+        job.controllerThroughputSamples.removeAll { $0.time < sampleCutoff }
+
+        if let probe = job.adaptiveProbe {
+            continueIPAVaultProbe(probe, for: job, now: now, currentBPS: bps)
+            return true
+        }
+
+        guard allowNewProbe else { return false }
+        guard now - job.adaptiveLastDecisionAt >= 1.5 else { return false }
+        let baselineSamples = job.controllerThroughputSamples.suffix(5).map(\.bps)
+        guard baselineSamples.count >= 3 else { return false }
+
+        let baseline = median(Array(baselineSamples))
+        let noise = relativeNoise(Array(baselineSamples), around: baseline)
+        if job.adaptiveLastAcceptedBPS <= 0 {
+            job.adaptiveLastAcceptedBPS = baseline
+        }
+
+        let sharpRegression = job.adaptiveLastAcceptedBPS > 0 &&
+            baseline < job.adaptiveLastAcceptedBPS * 0.85
+
+        if job.desiredStreams > 1,
+           (sharpRegression || now >= job.adaptiveNextDownProbeAt) {
+            return beginIPAVaultProbe(
+                direction: .down,
+                for: job,
+                baselineBPS: baseline,
+                noiseFraction: noise,
+                now: now
+            )
+        }
+
+        if job.desiredStreams < ipavaultHardMaxStreamsPerFile,
+           now >= job.adaptiveNextUpProbeAt {
+            return beginIPAVaultProbe(
+                direction: .up,
+                for: job,
+                baselineBPS: baseline,
+                noiseFraction: noise,
+                now: now
+            )
+        }
+
+        return false
+    }
+
+    @discardableResult
+    private func beginIPAVaultProbe(
+        direction: IPAVaultProbeDirection,
+        for job: IPAVaultJob,
+        baselineBPS: Double,
+        noiseFraction: Double,
+        now: TimeInterval
+    ) -> Bool {
+        let previous = job.desiredStreams
+        let target: Int
+        switch direction {
+        case .up:
+            target = min(ipavaultHardMaxStreamsPerFile, previous + 1)
+        case .down:
+            target = max(1, previous - 1)
+        }
+        guard target != previous else { return false }
+
+        job.adaptiveProbe = IPAVaultAdaptiveProbe(
+            direction: direction,
+            previousBudget: previous,
+            targetBudget: target,
+            baselineBPS: baselineBPS,
+            noiseFraction: noiseFraction,
+            requestedAt: now
+        )
+        let label = direction == .up ? "up" : "down"
+        print(
+            "IPA Vault adaptive [\(job.itemID.prefix(8))]: probe \(label) \(previous)→\(target) " +
+            "from \(String(format: "%.1f", baselineBPS / 1_000_000)) MB/s."
+        )
+        job.desiredStreams = target
+        job.adaptiveLastDecisionAt = now
+        rebalanceIPAVaultStreams()
+        return true
+    }
+
+    private func continueIPAVaultProbe(
+        _ probe: IPAVaultAdaptiveProbe,
+        for job: IPAVaultJob,
+        now: TimeInterval,
+        currentBPS: Double
+    ) {
+        let actualStreams = job.tasks.count
+        let targetReached: Bool
+        switch probe.direction {
+        case .up:
+            targetReached = actualStreams >= probe.targetBudget
+        case .down:
+            targetReached = actualStreams <= probe.targetBudget
+        }
+
+        guard targetReached else {
+            if now - probe.requestedAt > 12.0 {
+                job.desiredStreams = probe.previousBudget
+                job.adaptiveProbe = nil
+                job.adaptiveNextUpProbeAt = now + 4.0
+                job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
+                rebalanceIPAVaultStreams()
+            }
+            return
+        }
+
+        if probe.measurementStartedAt == nil {
+            probe.measurementStartedAt = now
+            probe.samples.removeAll()
+            return
+        }
+
+        guard let measurementStartedAt = probe.measurementStartedAt else { return }
+        if now - measurementStartedAt < ipavaultProbeSettleSeconds {
+            return
+        }
+
+        probe.samples.append(currentBPS)
+        guard now - measurementStartedAt >= ipavaultProbeSettleSeconds + ipavaultProbeMeasureSeconds,
+              probe.samples.count >= 2 else { return }
+
+        let measured = median(probe.samples)
+        let baseline = probe.baselineBPS
+        let noise = probe.noiseFraction
+        let keepTarget: Bool
+
+        switch probe.direction {
+        case .up:
+            let requiredGain = max(0.04, min(0.12, noise * 1.5 + 0.02))
+            keepTarget = measured >= baseline * (1.0 + requiredGain)
+
+        case .down:
+            // Prefer the lower stream count if it is effectively as fast as the
+            // baseline. This converges on minimum concurrency near peak throughput.
+            let toleratedLoss = min(0.03, max(0.015, noise))
+            keepTarget = measured >= baseline * (1.0 - toleratedLoss)
+        }
+
+        if keepTarget {
+            job.adaptiveLastAcceptedBPS = measured
+            job.desiredStreams = probe.targetBudget
+            if probe.direction == .up {
+                job.adaptiveNextUpProbeAt = now + 1.5
+            } else {
+                job.adaptiveNextUpProbeAt = now + 4.0
+            }
+        } else {
+            job.adaptiveLastAcceptedBPS = baseline
+            job.desiredStreams = probe.previousBudget
+            if probe.direction == .up {
+                job.adaptiveNextUpProbeAt = now + 10.0
+            } else {
+                job.adaptiveNextUpProbeAt = now + 3.0
+            }
+        }
+
+        let resultLabel = keepTarget ? "keep" : "revert"
+        print(
+            "IPA Vault adaptive [\(job.itemID.prefix(8))]: \(resultLabel) \(probe.targetBudget) streams; " +
+            "baseline \(String(format: "%.1f", baseline / 1_000_000)) MB/s, " +
+            "measured \(String(format: "%.1f", measured / 1_000_000)) MB/s."
+        )
+        job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
+        job.adaptiveLastDecisionAt = now
+        job.adaptiveProbe = nil
+        job.controllerThroughputSamples.removeAll(keepingCapacity: true)
+        rebalanceIPAVaultStreams()
+    }
+
+    private func recycleStalledIPAVaultStreams(now: TimeInterval) {
+        let jobs = runningIPAVaultJobs()
+        var candidates: [(taskID: Int, metadata: IPAVaultTaskMetadata, job: IPAVaultJob)] = []
+        var healthyRates: [Double] = []
+
+        for job in jobs {
+            for taskID in job.tasks.keys {
+                guard let metadata = ipavaultTaskMetadata[taskID] else { continue }
+                let rate = effectiveIPAVaultWorkerBPS(metadata, now: now)
+                let staleFor = now - metadata.lastProgressAt
+                if rate > 0, staleFor < 1.5 {
+                    healthyRates.append(rate)
+                }
+                if now - metadata.startedAt >= ipavaultStallDetectionFloorSeconds,
+                   staleFor >= ipavaultWorkerStallSeconds {
+                    candidates.append((taskID, metadata, job))
+                }
+            }
+        }
+
+        guard !candidates.isEmpty, !healthyRates.isEmpty else { return }
+        let peerMedian = median(healthyRates)
+        guard peerMedian >= 256 * 1024 else { return }
+
+        // Recycle at most one stream per controller tick. That avoids a transient
+        // radio/server hiccup causing a synchronized restart storm.
+        if let stalled = candidates.max(by: {
+            (now - $0.metadata.lastProgressAt) < (now - $1.metadata.lastProgressAt)
+        }) {
+            let nextAttempt = stalled.metadata.attempt + 1
+            if nextAttempt > ipavaultMaximumRangeRetries {
+                failIPAVaultDownload(
+                    itemID: stalled.job.itemID,
+                    error: NSError(
+                        domain: "IPAVault",
+                        code: 37,
+                        userInfo: [NSLocalizedDescriptionKey: "A ranged stream repeatedly stalled near byte \(stalled.metadata.committedEnd)."]
+                    )
+                )
+                return
+            }
+
+            guard let task = stalled.job.tasks.removeValue(forKey: stalled.taskID) else { return }
+            ipavaultTaskMetadata.removeValue(forKey: stalled.taskID)
+            if stalled.metadata.committedEnd < stalled.metadata.effectiveEnd {
+                stalled.job.freeRanges.append(
+                    IPAVaultRange(
+                        start: stalled.metadata.committedEnd,
+                        end: stalled.metadata.effectiveEnd,
+                        attempt: nextAttempt
+                    )
+                )
+            }
+            print(
+                "IPA Vault adaptive: recycling stalled stream at byte \(stalled.metadata.committedEnd)."
+            )
+            stalled.metadata.suppressCompletion = true
+            task.cancel()
+            updateIPAVaultProgress(for: stalled.job)
+            rebalanceIPAVaultStreams()
+        }
+    }
+
+    private func effectiveIPAVaultWorkerBPS(_ metadata: IPAVaultTaskMetadata, now: TimeInterval) -> Double {
+        let progressed = max(0, metadata.currentPosition - metadata.leaseStart)
+        let elapsed = max(0.001, now - metadata.startedAt)
+        let average = Double(progressed) / elapsed
+
+        let cutoff = now - ipavaultSpeedWindowSeconds
+        let relevant = metadata.rateSamples.filter { $0.time >= cutoff }
+        var windowRate = 0.0
+        var windowSpan = 0.0
+        if relevant.count >= 2, let first = relevant.first, let last = relevant.last {
+            windowSpan = last.time - first.time
+            if windowSpan > 0 {
+                windowRate = Double(max(0, last.bytes - first.bytes)) / windowSpan
+            }
+        }
+
+        var result: Double
+        if windowRate > 0, windowSpan >= 0.50 {
+            result = windowRate
+        } else if windowRate > 0, average > 0 {
+            result = windowRate * 0.85 + average * 0.15
+        } else {
+            result = windowRate > 0 ? windowRate : average
+        }
+
+        guard result > 0 else { return 0 }
+        let staleFor = max(0, now - metadata.lastProgressAt)
+        if staleFor > 0.50 {
+            result *= max(0.20, 0.50 / staleFor)
+        }
+        return max(1, result)
+    }
+
+    private func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
+    }
+
+    private func relativeNoise(_ values: [Double], around center: Double) -> Double {
+        guard center > 0, !values.isEmpty else { return 0 }
+        let meanAbsoluteDeviation = values.reduce(0) { $0 + abs($1 - center) } / Double(values.count)
+        return meanAbsoluteDeviation / center
+    }
+
     private func fileSize(at url: URL) -> Int64 {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let number = attributes[.size] as? NSNumber else {
@@ -801,7 +1529,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
         return number.int64Value
     }
-    
+
     func handleITMSServicesURL(_ url: URL, completion: @escaping (Result<String, Error>) -> Void) {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let queryItems = components.queryItems,
@@ -861,30 +1589,133 @@ class IPADownloadManager: NSObject, ObservableObject {
     }
 }
 
-// MARK: - URLSessionDownloadDelegate
+// MARK: - URLSession delegates
 
-extension IPADownloadManager: URLSessionDownloadDelegate {
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        if session === ipavaultSession {
-            handleIPAVaultChunkFinished(downloadTask: downloadTask, location: location)
+extension IPADownloadManager: URLSessionDownloadDelegate, URLSessionDataDelegate {
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard session === ipavaultSession else {
+            completionHandler(.allow)
             return
         }
+
+        guard let metadata = ipavaultTaskMetadata[dataTask.taskIdentifier],
+              let job = ipavaultJobs[metadata.itemID],
+              let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+
+        guard http.statusCode == 206 else {
+            let message = http.statusCode == 200
+                ? "The server ignored the HTTP Range request required for adaptive downloading."
+                : "Server returned HTTP \(http.statusCode)."
+            metadata.terminalError = NSError(
+                domain: "IPAVault",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+            completionHandler(.cancel)
+            return
+        }
+
+        guard let value = http.value(forHTTPHeaderField: "Content-Range"),
+              let contentRange = parseIPAVaultContentRange(value),
+              contentRange.start == metadata.leaseStart,
+              contentRange.end == metadata.requestEnd - 1,
+              contentRange.total == job.totalBytes else {
+            metadata.terminalError = NSError(
+                domain: "IPAVault",
+                code: 35,
+                userInfo: [NSLocalizedDescriptionKey: "The server returned a mismatched Content-Range for an adaptive stream."]
+            )
+            completionHandler(.cancel)
+            return
+        }
+
+        metadata.responseValidated = true
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard session === ipavaultSession,
+              let metadata = ipavaultTaskMetadata[dataTask.taskIdentifier],
+              let job = ipavaultJobs[metadata.itemID],
+              metadata.responseValidated,
+              job.fileDescriptor >= 0 else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+
+        let remaining = max(0, metadata.effectiveEnd - metadata.currentPosition)
+        let acceptedCount = min(data.count, Int(min(Int64(Int.max), remaining)))
+
+        if !metadata.preempted, acceptedCount < data.count {
+            metadata.terminalError = NSError(
+                domain: "IPAVault",
+                code: 36,
+                userInfo: [NSLocalizedDescriptionKey: "The server sent more data than the requested byte range."]
+            )
+            dataTask.cancel()
+            return
+        }
+
+        if acceptedCount > 0 {
+            do {
+                try writeIPAVaultData(data, count: acceptedCount, to: job.fileDescriptor, offset: metadata.currentPosition)
+            } catch {
+                metadata.terminalError = error
+                dataTask.cancel()
+                return
+            }
+
+            metadata.currentPosition += Int64(acceptedCount)
+            recordIPAVaultUsefulBytes(Int64(acceptedCount), for: job, now: now)
+            metadata.lastProgressAt = now
+            let progressed = metadata.currentPosition - metadata.leaseStart
+            if let last = metadata.rateSamples.last, now - last.time < 0.10 {
+                metadata.rateSamples[metadata.rateSamples.count - 1] = IPAVaultWorkerRateSample(
+                    time: now,
+                    bytes: progressed
+                )
+            } else {
+                metadata.rateSamples.append(IPAVaultWorkerRateSample(time: now, bytes: progressed))
+            }
+            let cutoff = now - ipavaultSpeedWindowSeconds
+            while metadata.rateSamples.count > 2, metadata.rateSamples[1].time < cutoff {
+                metadata.rateSamples.removeFirst()
+            }
+
+            commitIPAVaultBytes(metadata, job: job, through: metadata.currentPosition)
+            updateIPAVaultProgress(for: job)
+        }
+
+        if metadata.preempted, metadata.currentPosition >= metadata.effectiveEnd {
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard session !== ipavaultSession else { return }
 
         let fileManager = FileManager.default
         guard let downloadItemId = activeDownloads[downloadTask.taskIdentifier],
               let index = downloadItems.firstIndex(where: { $0.id.uuidString == downloadItemId }) else { return }
-        
+
         let item = downloadItems[index]
-        
+
         do {
             if fileManager.fileExists(atPath: item.localPath.path) {
                 try fileManager.removeItem(at: item.localPath)
             }
             try fileManager.moveItem(at: location, to: item.localPath)
-            
+
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                
+
                 var updatedItem = item
                 updatedItem.isFinished = true
                 updatedItem.progress = 1.0
@@ -892,7 +1723,7 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
                     updatedItem.totalBytes = fileSize
                     updatedItem.bytesDownloaded = fileSize
                 }
-                
+
                 if index < self.downloadItems.count {
                     self.downloadItems[index] = updatedItem
                 }
@@ -906,21 +1737,21 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
             }
         }
     }
-    
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        if session === ipavaultSession {
-            handleIPAVaultChunkProgress(
-                taskIdentifier: downloadTask.taskIdentifier,
-                totalBytesWritten: totalBytesWritten
-            )
-            return
-        }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard session !== ipavaultSession else { return }
 
         guard let downloadItemId = activeDownloads[downloadTask.taskIdentifier],
               let index = downloadItems.firstIndex(where: { $0.id.uuidString == downloadItemId }) else { return }
-        
+
         let progress = totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0
-        
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self, index < self.downloadItems.count else { return }
             var item = self.downloadItems[index]
@@ -930,20 +1761,21 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
             self.downloadItems[index] = item
         }
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if session === ipavaultSession {
-            guard let metadata = ipavaultTaskMetadata[task.taskIdentifier] else { return }
-            if let error {
-                failIPAVaultDownload(itemID: metadata.itemID, error: error)
+            if let metadata = ipavaultTaskMetadata[task.taskIdentifier], metadata.suppressCompletion {
+                ipavaultTaskMetadata.removeValue(forKey: task.taskIdentifier)
+                return
             }
+            completeIPAVaultStream(taskIdentifier: task.taskIdentifier, error: error)
             return
         }
 
-        if let error = error {
+        if error != nil {
             guard let downloadItemId = activeDownloads[task.taskIdentifier],
                   let index = downloadItems.firstIndex(where: { $0.id.uuidString == downloadItemId }) else { return }
-            
+
             DispatchQueue.main.async { [weak self] in
                 self?.downloadItems.remove(at: index)
                 self?.activeDownloads.removeValue(forKey: task.taskIdentifier)
