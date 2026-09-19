@@ -268,13 +268,17 @@ extension BulkSigningView {
 			var successCount = 0
 
 			// Seed one stable batch report before the first worker claims signing.
-			// The Live Activity intentionally tracks only terminal app completions;
-			// copy/modify/clean phase chatter stays in the foreground UI/logs.
+			// Signing has no trustworthy sub-step percentage here, so the Live
+			// Activity uses completed-app count as its meaningful progress signal.
 			if #available(iOS 16.2, *) {
 				KeepAliveActivityController.shared.clearReport(.signing)
-				KeepAliveActivityController.shared.report(.signing, completed: 0, total: configs.count)
-				KeepAliveActivityController.shared.report(.signing, fraction: nil)
-				KeepAliveActivityController.shared.report(.signing, detail: "Signing")
+				KeepAliveActivityController.shared.report(
+					.signing,
+					completed: 0,
+					total: configs.count,
+					fraction: nil,
+					detail: "Signing"
+				)
 			}
 
 			// The batch coordinator itself must stay off MainActor. The signing worker
@@ -296,7 +300,9 @@ extension BulkSigningView {
 						KeepAliveActivityController.shared.report(
 							.signing,
 							completed: successCount,
-							total: configs.count
+							total: configs.count,
+							fraction: nil,
+							detail: "Signing"
 						)
 					}
 
@@ -311,8 +317,13 @@ extension BulkSigningView {
 			}
 
 			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.report(.signing, completed: successCount, total: configs.count)
-				KeepAliveActivityController.shared.report(.signing, detail: failures.isEmpty ? "Completed" : "Error")
+				KeepAliveActivityController.shared.report(
+					.signing,
+					completed: successCount,
+					total: configs.count,
+					fraction: nil,
+					detail: failures.isEmpty ? "Completed" : "Error"
+				)
 			}
 
 			await MainActor.run {
