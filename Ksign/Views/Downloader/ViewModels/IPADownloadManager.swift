@@ -215,8 +215,8 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var ipavaultTotalUsefulBytes: Int64 = 0
     private var ipavaultAggregateRateSamples: [IPAVaultAggregateSample] = []
 
-    // Live Activity batch accounting is intentionally separate from the queue.
-    private struct IPAVaultLiveActivitySnapshot: Equatable {
+    // System background-task progress accounting is intentionally separate from the queue.
+    private struct IPAVaultBackgroundTaskSnapshot: Equatable {
         let completed: Int
         let total: Int
         let detail: String
@@ -224,7 +224,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private var ipavaultActivityItemIDs: Set<String> = []
     private var completedIPAVaultActivityItemIDs: Set<String> = []
-    private var ipavaultLiveActivitySnapshot: IPAVaultLiveActivitySnapshot?
+    private var ipavaultBackgroundTaskSnapshot: IPAVaultBackgroundTaskSnapshot?
 
     private var ipavaultTransfersRootURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -365,7 +365,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 self.ipavaultActivityItemIDs.insert(item.id.uuidString)
             }
 
-            self.updateIPAVaultKeepAliveState()
+            self.updateIPAVaultBackgroundTaskState()
             self.pumpIPAVaultDownloadQueue()
             self.startIPAVaultAdaptiveControllerIfNeeded()
         }
@@ -414,10 +414,9 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultStartingStreamsPerFile = min(ipavaultHardMaxStreamsPerFile, max(1, streamsPerFile))
     }
 
-    // IPA Vault uses foreground ranged requests, so the keep-alive must already
-    // be running before the app backgrounds. Hold one identity claim for the
-    // entire IPA Vault queue, including the tiny final fsync/move phase.
-    private func updateIPAVaultKeepAliveState() {
+    // IPA Vault uses foreground ranged requests, so claim one continued-processing
+    // task for the entire queue, including the tiny final fsync/move phase.
+    private func updateIPAVaultBackgroundTaskState() {
         dispatchPrecondition(condition: .onQueue(.main))
 
         let hasWork = !pendingIPAVaultDownloads.isEmpty || !activeIPAVaultDownloadIDs.isEmpty
@@ -427,27 +426,30 @@ class IPADownloadManager: NSObject, ObservableObject {
                 beginIPAVaultBatch()
             }
 
-            publishIPAVaultLiveActivityState()
-            BackgroundAudioManager.shared.claim(.ipaVaultDownloads)
+            publishIPAVaultBackgroundTaskState()
+            BackgroundTaskManager.shared.claim(.ipaVaultDownloads)
         } else {
-            // Publish the terminal 100% snapshot before releasing the owner. The
-            // controller keeps it visible through the audio manager's existing
-            // handoff/linger window; the next batch clears it before starting.
-            publishIPAVaultLiveActivityState()
-            BackgroundAudioManager.shared.release(.ipaVaultDownloads)
+            // Publish the terminal snapshot before completing the system task.
+            publishIPAVaultBackgroundTaskState()
+            let total = ipavaultActivityItemIDs.count
+            let completed = completedIPAVaultActivityItemIDs
+                .intersection(ipavaultActivityItemIDs)
+                .count
+            BackgroundTaskManager.shared.release(
+                .ipaVaultDownloads,
+                success: total == 0 || completed >= total
+            )
 
             ipavaultActivityItemIDs.removeAll()
             completedIPAVaultActivityItemIDs.removeAll()
-            ipavaultLiveActivitySnapshot = nil
+            ipavaultBackgroundTaskSnapshot = nil
             stopIPAVaultAdaptiveController()
             endIPAVaultBatch()
         }
     }
 
-    private func publishIPAVaultLiveActivityState() {
+    private func publishIPAVaultBackgroundTaskState() {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard #available(iOS 16.2, *) else { return }
-
         let total = ipavaultActivityItemIDs.count
         guard total > 0 else { return }
 
@@ -465,15 +467,15 @@ class IPADownloadManager: NSObject, ObservableObject {
         } else {
             detail = "Downloading from IPA Vault"
         }
-        let snapshot = IPAVaultLiveActivitySnapshot(
+        let snapshot = IPAVaultBackgroundTaskSnapshot(
             completed: completed,
             total: total,
             detail: detail
         )
-        guard snapshot != ipavaultLiveActivitySnapshot else { return }
-        ipavaultLiveActivitySnapshot = snapshot
+        guard snapshot != ipavaultBackgroundTaskSnapshot else { return }
+        ipavaultBackgroundTaskSnapshot = snapshot
 
-        KeepAliveActivityController.shared.report(
+        BackgroundTaskManager.shared.report(
             .ipaVaultDownloads,
             completed: completed,
             total: total,
@@ -504,7 +506,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             self.setIPAVaultPausedState(itemID: itemID, isPaused: true)
             self.pumpIPAVaultDownloadQueue()
             self.rebalanceIPAVaultStreams()
-            self.updateIPAVaultKeepAliveState()
+            self.updateIPAVaultBackgroundTaskState()
         }
 
         if Thread.isMainThread {
@@ -527,7 +529,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             }
 
             self.pumpIPAVaultDownloadQueue()
-            self.updateIPAVaultKeepAliveState()
+            self.updateIPAVaultBackgroundTaskState()
         }
 
         if Thread.isMainThread {
@@ -589,7 +591,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             resumeRequestedIPAVaultDownloadIDs.remove(itemID)
             pumpIPAVaultDownloadQueue()
             rebalanceIPAVaultStreams()
-            updateIPAVaultKeepAliveState()
+            updateIPAVaultBackgroundTaskState()
             return true
         }
 
@@ -606,7 +608,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
         rebalanceIPAVaultStreams()
-        updateIPAVaultKeepAliveState()
+        updateIPAVaultBackgroundTaskState()
         return true
     }
 
@@ -683,7 +685,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             pausedIPAVaultDownloadIDs.remove(pending.itemID)
             setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
             resetIPAVaultAdaptiveMeasurements(for: job)
-            updateIPAVaultKeepAliveState()
+            updateIPAVaultBackgroundTaskState()
         } catch {
             try? fileManager.removeItem(at: directory)
             failIPAVaultDownload(itemID: pending.itemID, error: error)
@@ -880,7 +882,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         item.bytesDownloaded = downloaded
         item.progress = job.totalBytes > 0 ? Double(downloaded) / Double(job.totalBytes) : 0
         downloadItems[index] = item
-        publishIPAVaultLiveActivityState()
+        publishIPAVaultBackgroundTaskState()
     }
 
     private func commitIPAVaultBytes(_ metadata: IPAVaultTaskMetadata, job: IPAVaultJob, through absoluteEnd: Int64) {
@@ -1002,7 +1004,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         job.assembling = true
         updateIPAVaultProgress(for: job)
-        updateIPAVaultKeepAliveState()
+        updateIPAVaultBackgroundTaskState()
 
         let itemID = job.itemID
         let partialURL = job.partialURL
@@ -1084,7 +1086,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 resumeRequestedIPAVaultDownloadIDs.remove(itemID)
                 try? FileManager.default.removeItem(at: job.directory)
                 pumpIPAVaultDownloadQueue()
-                updateIPAVaultKeepAliveState()
+                updateIPAVaultBackgroundTaskState()
             } catch {
                 failIPAVaultDownload(itemID: itemID, error: error)
             }
@@ -1108,7 +1110,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         pausedIPAVaultDownloadIDs.remove(itemID)
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         pumpIPAVaultDownloadQueue()
-        updateIPAVaultKeepAliveState()
+        updateIPAVaultBackgroundTaskState()
     }
 
     private func closeIPAVaultFileIfNeeded(_ job: IPAVaultJob) {
@@ -1168,10 +1170,8 @@ class IPADownloadManager: NSObject, ObservableObject {
     // MARK: Batch stream learning
 
     private func beginIPAVaultBatch() {
-        if #available(iOS 16.2, *) {
-            KeepAliveActivityController.shared.clearReport(.ipaVaultDownloads)
-        }
-        ipavaultLiveActivitySnapshot = nil
+        BackgroundTaskManager.shared.clearReport(.ipaVaultDownloads)
+        ipavaultBackgroundTaskSnapshot = nil
         ipavaultBatchIsActive = true
         ipavaultBatchObservationSequence = 0
         ipavaultBatchObservations.removeAll(keepingCapacity: true)
