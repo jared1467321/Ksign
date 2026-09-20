@@ -147,7 +147,7 @@ final class InstallSession: ObservableObject {
 		// No local flag guards this any more: the manager tracks claims by
 		// owner, so `start(apps:)` running again for apps added to a batch
 		// already in flight is a no-op rather than a second claim to balance.
-		BackgroundAudioManager.shared.claim(.bulkInstalls)
+		BackgroundTaskManager.shared.claim(.bulkInstalls)
 
 		isDrawerPresented = true
 		_startTicking()
@@ -204,7 +204,7 @@ final class InstallSession: ObservableObject {
 			self._retired.removeAll { $0 === job }
 		}
 
-		_finishIfIdle()
+		_finishIfIdle(success: true)
 	}
 
 	// Drops a single job, from the row's context menu.
@@ -232,7 +232,7 @@ final class InstallSession: ObservableObject {
 			_admitBatchJobs()
 			_formBatchGroups()
 		}
-		_finishIfIdle()
+		_finishIfIdle(success: false)
 	}
 
 	func retry(_ job: InstallJob) {
@@ -314,7 +314,7 @@ final class InstallSession: ObservableObject {
 	func dismissAll() {
 		for job in jobs { job.cancel() }
 		withAnimation(.easeInOut(duration: 0.25)) { jobs.removeAll() }
-		_finishIfIdle()
+		_finishIfIdle(success: false)
 	}
 
 
@@ -323,21 +323,24 @@ final class InstallSession: ObservableObject {
 	// drawer already tests to decide it's finished-with-failures.
 	//
 	// Without this a single failed install meant `release(.bulkInstalls)` was
-	// never called and the silent audio ran until the app was killed.
+	// never called and the continued-processing task stayed owned indefinitely.
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
 
 		_recomputeProgress()
-		BackgroundAudioManager.shared.release(.bulkInstalls)
-		_stopTicking()
-
 		BulkInstallLiveActivityReporter.shared.finish()
+		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase == .completed })
+		_stopTicking()
 	}
 
-	private func _finishIfIdle() {
+	private func _finishIfIdle(success: Bool) {
 		guard jobs.isEmpty else { return }
 
-		BackgroundAudioManager.shared.release(.bulkInstalls)
+		// Publish the terminal snapshot while the task is still owned. `report`
+		// deliberately cannot create a task by itself, so this ordering also makes
+		// late queue callbacks harmless after release.
+		BulkInstallLiveActivityReporter.shared.finish()
+		BackgroundTaskManager.shared.release(.bulkInstalls, success: success)
 
 		_stopTicking()
 		webviewJob = nil
@@ -355,10 +358,8 @@ final class InstallSession: ObservableObject {
 
 		isDrawerPresented = false
 
-		// No final tally to send and nothing to zero. The counters already hold
-		// the finished figures, `didSet` already pushed them, and `start(apps:)`
-		// clears them when the next batch begins.
-		BulkInstallLiveActivityReporter.shared.finish()
+		// The reporter already published its terminal snapshot above; the next
+		// `start(apps:)` clears it before seeding the next batch.
 	}
 
 	// MARK: - Batched prompts
@@ -454,17 +455,6 @@ final class InstallSession: ObservableObject {
 			while !Task.isCancelled {
 				self?._recomputeProgress()
 
-				// While there are jobs, keep verifying that the keep-alive is
-				// actually running rather than trusting the claim we made when
-				// the batch started. An interruption — a call, an alarm,
-				// another app taking the audio session — stops the engine and
-				// it does not come back on its own; before this, the rest of
-				// the batch simply ran unprotected and nothing said so.
-				//
-				// Idempotent and gated by its own backoff, so this is a cheap
-				// check on the common path, not a restart attempt every 0.4s.
-				BackgroundAudioManager.shared.ensureRunning()
-
 				try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
 				if self == nil { break }
 			}
@@ -475,11 +465,9 @@ final class InstallSession: ObservableObject {
 		_tickTask?.cancel()
 		_tickTask = nil
 
-		// Deliberately does *not* withdraw the Dynamic Island counts. This runs
-		// the instant the last row retires, so clearing here meant the pill
-		// jumped from "11 of 12" straight to no bar and you never saw the batch
-		// land. `_finishIfIdle` publishes the final tally instead, and the
-		// controller drops it when the activity itself ends.
+		// Deliberately does *not* withdraw the system progress here. This runs
+		// the instant the last row retires; `_finishIfIdle` publishes the final
+		// tally immediately before completing the continued-processing task.
 	}
 
 	private func _recomputeProgress() {
@@ -562,9 +550,7 @@ final class BulkInstallLiveActivityReporter {
 			self._paused = false
 			self._active = true
 
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.clearReport(.bulkInstalls)
-			}
+			BackgroundTaskManager.shared.clearReport(.bulkInstalls)
 		}
 	}
 
@@ -675,7 +661,7 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	func finish() {
-		_queue.async {
+		_queue.sync {
 			guard self._active else { return }
 			self._paused = false
 			self._publish(forceTerminal: true)
@@ -710,8 +696,7 @@ final class BulkInstallLiveActivityReporter {
 			detail = "Installing"
 		}
 
-		guard #available(iOS 16.2, *) else { return }
-		KeepAliveActivityController.shared.report(
+		BackgroundTaskManager.shared.report(
 			.bulkInstalls,
 			completed: completed,
 			total: total,

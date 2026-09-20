@@ -80,8 +80,13 @@ struct InstallPreviewView: View {
 			}
 
 			switch newStatus {
-			case .completed, .broken(_):
-				BackgroundAudioManager.shared.release(.singleInstall)
+			case .completed:
+				SingleInstallLiveActivityReporter.shared.updateStatus(newStatus)
+				BackgroundTaskManager.shared.release(.singleInstall, success: true)
+				_cleanupArchive()
+			case .broken:
+				SingleInstallLiveActivityReporter.shared.updateStatus(newStatus)
+				BackgroundTaskManager.shared.release(.singleInstall, success: false)
 				_cleanupArchive()
 			default:
 				break
@@ -89,14 +94,14 @@ struct InstallPreviewView: View {
 		}
 		.onAppear {
 			SingleInstallLiveActivityReporter.shared.begin()
-			BackgroundAudioManager.shared.claim(.singleInstall)
+			BackgroundTaskManager.shared.claim(.singleInstall)
 			_startLiveActivityBridge()
 			_install()
 		}
 		.onDisappear {
 			_activityCancellables.removeAll()
 			SingleInstallLiveActivityReporter.shared.end()
-			BackgroundAudioManager.shared.release(.singleInstall)
+			BackgroundTaskManager.shared.release(.singleInstall, success: false)
 			// Covers dismissal before a terminal status ever arrives.
 			_cleanupArchive()
 		}
@@ -274,8 +279,7 @@ final class SingleInstallLiveActivityReporter {
 			self._installProgress = 0
 			self._fraction = 0
 
-			guard #available(iOS 16.2, *) else { return }
-			KeepAliveActivityController.shared.clearReport(.singleInstall)
+			BackgroundTaskManager.shared.clearReport(.singleInstall)
 			self._publish()
 		}
 	}
@@ -354,7 +358,7 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	func updateStatus(_ status: InstallerStatusViewModel.InstallerStatus) {
-		_queue.async {
+		_queue.sync {
 			guard self._active else { return }
 
 			let previous = self._stage
@@ -402,8 +406,8 @@ final class SingleInstallLiveActivityReporter {
 		_queue.async {
 			guard self._active else { return }
 			self._active = false
-			// Keep the terminal snapshot intact through BackgroundAudioManager's
-			// handoff/linger window. The next begin() clears it before seeding 0%.
+			// The system task lifetime is owned by the install view; this reporter
+			// only stops accepting further state for the finished install.
 		}
 	}
 
@@ -414,9 +418,7 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	private func _publish() {
-		guard #available(iOS 16.2, *) else { return }
-
-		KeepAliveActivityController.shared.report(
+		BackgroundTaskManager.shared.report(
 			.singleInstall,
 			completed: _stage == .completed ? 1 : 0,
 			total: 1,
