@@ -293,7 +293,7 @@ final class SingleInstallLiveActivityReporter {
 			self._packageProgress = value
 			guard self._stage == .packaging else { return }
 
-			let next = self._quantized(max(self._fraction, value * 0.5))
+			let next = min(1, max(self._fraction, value * 0.5))
 			guard next != self._fraction else { return }
 			self._fraction = next
 			self._publish()
@@ -310,7 +310,7 @@ final class SingleInstallLiveActivityReporter {
 
 			self._installProgress = value
 			self._stage = .installing
-			let next = self._quantized(max(self._fraction, 0.5 + (value * 0.5)))
+			let next = min(1, max(self._fraction, 0.5 + (value * 0.5)))
 			let fractionChanged = next != self._fraction
 			self._fraction = next
 			guard stageChanged || fractionChanged else { return }
@@ -365,7 +365,7 @@ final class SingleInstallLiveActivityReporter {
 			switch status {
 			case .none:
 				self._stage = .packaging
-				self._fraction = self._quantized(max(self._fraction, self._packageProgress * 0.5))
+				self._fraction = min(1, max(self._fraction, self._packageProgress * 0.5))
 			case .ready:
 				self._stage = .ready
 				self._fraction = max(self._fraction, 0.5)
@@ -377,7 +377,7 @@ final class SingleInstallLiveActivityReporter {
 				self._fraction = max(self._fraction, 0.5)
 			case .installing:
 				self._stage = .installing
-				self._fraction = self._quantized(max(self._fraction, 0.5 + (self._installProgress * 0.5)))
+				self._fraction = min(1, max(self._fraction, 0.5 + (self._installProgress * 0.5)))
 			case .completed:
 				self._stage = .completed
 				self._fraction = 1
@@ -411,18 +411,12 @@ final class SingleInstallLiveActivityReporter {
 		}
 	}
 
-	private func _quantized(_ fraction: Double) -> Double {
-		let clamped = min(1, max(0, fraction))
-		guard clamped < 1 else { return 1 }
-		return ((clamped + 0.000_000_001) * 100).rounded(.down) / 100
-	}
-
 	private func _publish() {
 		BackgroundTaskManager.shared.report(
 			.singleInstall,
 			completed: _stage == .completed ? 1 : 0,
 			total: 1,
-			fraction: nil,
+			fraction: _fraction,
 			detail: _stage.detail
 		)
 	}

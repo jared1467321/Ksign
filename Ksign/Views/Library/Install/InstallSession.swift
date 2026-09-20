@@ -589,7 +589,7 @@ final class BulkInstallLiveActivityReporter {
 			job.packageProgress = value
 			if job.stage == .queued || job.stage == .packaging {
 				job.stage = .packaging
-				job.fraction = self._quantized(max(job.fraction, value * 0.5))
+				job.fraction = min(1, max(job.fraction, value * 0.5))
 			}
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
@@ -606,7 +606,7 @@ final class BulkInstallLiveActivityReporter {
 			let before = job
 			job.installProgress = value
 			job.stage = .installing
-			job.fraction = self._quantized(max(job.fraction, 0.5 + (value * 0.5)))
+			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._publish()
@@ -625,7 +625,7 @@ final class BulkInstallLiveActivityReporter {
 			case .none:
 				if !job.isCompleted {
 					job.stage = .packaging
-					job.fraction = self._quantized(max(job.fraction, job.packageProgress * 0.5))
+					job.fraction = min(1, max(job.fraction, job.packageProgress * 0.5))
 				}
 			case .ready:
 				if !job.isCompleted {
@@ -645,7 +645,7 @@ final class BulkInstallLiveActivityReporter {
 			case .installing:
 				if !job.isCompleted {
 					job.stage = .installing
-					job.fraction = self._quantized(max(job.fraction, 0.5 + (job.installProgress * 0.5)))
+					job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
 				}
 			case .completed:
 				job.stage = .completed
@@ -666,12 +666,6 @@ final class BulkInstallLiveActivityReporter {
 			self._paused = false
 			self._publish(forceTerminal: true)
 		}
-	}
-
-	private func _quantized(_ fraction: Double) -> Double {
-		let clamped = min(1, max(0, fraction))
-		guard clamped < 1 else { return 1 }
-		return ((clamped + 0.000_000_001) * 100).rounded(.down) / 100
 	}
 
 	private func _publish(forceTerminal: Bool = false) {
@@ -700,7 +694,7 @@ final class BulkInstallLiveActivityReporter {
 			.bulkInstalls,
 			completed: completed,
 			total: total,
-			fraction: nil,
+			fraction: aggregateFraction,
 			detail: detail
 		)
 	}
