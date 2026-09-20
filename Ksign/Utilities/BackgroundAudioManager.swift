@@ -39,10 +39,9 @@ import OSLog
 //    so a genuinely broken engine can't turn into a hot loop hammering the
 //    audio session from a timer.
 //
-// 3. The `backgroundAudio` option still gates everything. It gates the *engine*
-//    rather than the claim, so the invariant is exact: option off, nothing
-//    runs — including mid-batch, where turning it off now stops the engine on
-//    the next check instead of at the end of the batch.
+// 3. The legacy `backgroundAudio` option still gates legacy/user-visible claims.
+//    BGContinuedProcessingTask claims are separate and intentionally bypass it:
+//    they are an internal execution fallback owned entirely by BackgroundTaskManager.
 //
 // 4. Every transition is reported to `BackgroundAudioStatus`, which is what the
 //    speaker badge at the top of the screen reads. Reporting is transitions
@@ -93,6 +92,13 @@ final class BackgroundAudioManager {
 
 	private var _owners: Set<Owner> = []
 
+	// BGContinuedProcessingTask ownership lives here too, but deliberately has no
+	// user-facing identity. These claims bypass the old background-audio option and
+	// never flow into BackgroundAudioStatus / the legacy local Live Activity. The
+	// system BG task is already the visible progress surface; this channel is only
+	// an execution keep-alive.
+	private var _systemTaskClaims: Set<String> = []
+
 	// Counted claims, for scoped operations that overlap: `begin`/`end` rather
 	// than `claim`/`release`. Kept separate rather than folded into `_owners`
 	// because the two models genuinely differ, and an owner has to pick one —
@@ -130,6 +136,11 @@ final class BackgroundAudioManager {
 	// "started" from "restarted" in the log: if the engine is being started
 	// while this is already true, it died on us rather than being asked to run.
 	private var _running = false
+
+	// Hidden BG-task claims never publish status. Remember whether a legacy
+	// visible claim has published so we can clear that state exactly once when
+	// its last holder goes away without making hidden-only watchdog ticks visible.
+	private var _visibleStatusPublished = false
 
 	private init() {
 		let center = NotificationCenter.default
@@ -250,6 +261,28 @@ final class BackgroundAudioManager {
 		_evaluate(force: false)
 	}
 
+	// MARK: - Invisible BG task claims
+
+	// These are intentionally string-keyed so BackgroundTaskManager can mirror its
+	// own workflow/download identities without exposing them through this manager's
+	// public Owner enum or status UI. Calls are idempotent.
+	func claimSystemTask(_ key: String) {
+		_lock.lock()
+		let inserted = _systemTaskClaims.insert(key).inserted
+		_lock.unlock()
+
+		_evaluate(force: inserted)
+	}
+
+	func releaseSystemTask(_ key: String) {
+		_lock.lock()
+		let removed = _systemTaskClaims.remove(key) != nil
+		_lock.unlock()
+
+		guard removed else { return }
+		_evaluate(force: false)
+	}
+
 	// MARK: - The health check
 
 	private func _evaluate(force: Bool) {
@@ -261,13 +294,15 @@ final class BackgroundAudioManager {
 		defer { _publishLocked() }
 
 		let optionEnabled = OptionsManager.shared.options.backgroundAudio
-		let claimed = !_owners.isEmpty || !_counts.isEmpty
+		let visibleClaimed = !_owners.isEmpty || !_counts.isEmpty
+		let systemTaskClaimed = !_systemTaskClaims.isEmpty
+		let claimed = systemTaskClaimed || (optionEnabled && visibleClaimed)
 
-		guard optionEnabled, claimed else {
+		guard claimed else {
 			// Turning the option off stops immediately — a setting should mean
 			// what it says. Merely running out of claims goes through the
 			// linger window first, so chained work doesn't thrash the session.
-			let immediate = !optionEnabled
+			let immediate = !optionEnabled && visibleClaimed
 
 			if !immediate {
 				let idleSince = _idleSince ?? Date()
@@ -284,9 +319,11 @@ final class BackgroundAudioManager {
 			if _sessionActive || _engine.isRunning {
 				_stopEngineLocked()
 
-				_status.record(.stopped, immediate
-					? "background audio turned off in settings"
-					: "nothing left to keep alive")
+				if _visibleStatusPublished {
+					_status.record(.stopped, immediate
+						? "background audio turned off in settings"
+						: "nothing left to keep alive")
+				}
 			}
 
 			_stopWatchdogLocked()
@@ -347,19 +384,21 @@ final class BackgroundAudioManager {
 				Logger.misc.info("Background audio recovered after \(self._failureStreak) failed attempt(s).")
 			}
 
-			if _running {
-				// We thought it was running and here we are starting it again,
-				// so something knocked it over: an interruption, a route
-				// change, or a failed attempt we're now recovering from.
-				_status.record(.restarted, _failureStreak > 0
-					? "recovered after \(_failureStreak) failed attempt(s)"
-					: "engine had stopped on its own")
-			} else {
-				let holders = _activeOwnersLocked.joined(separator: ", ")
+			if OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked {
+				if _running {
+					// We thought it was running and here we are starting it again,
+					// so something knocked it over: an interruption, a route
+					// change, or a failed attempt we're now recovering from.
+					_status.record(.restarted, _failureStreak > 0
+						? "recovered after \(_failureStreak) failed attempt(s)"
+						: "engine had stopped on its own")
+				} else {
+					let holders = _activeOwnersLocked.joined(separator: ", ")
 
-				_status.record(.started, holders.isEmpty
-					? ""
-					: "keeping the app awake for \(holders)")
+					_status.record(.started, holders.isEmpty
+						? ""
+						: "keeping the app awake for \(holders)")
+				}
 			}
 
 			_running = true
@@ -386,7 +425,9 @@ final class BackgroundAudioManager {
 			// Unlike the os_log line above, every attempt is recorded — the
 			// backoff caps at 30s, so the worst case is one line per half
 			// minute, and seeing the retries is the point of the log.
-			_status.record(.failed, "\(error.localizedDescription) — retrying in \(Int(delay))s (attempt \(_failureStreak))")
+			if OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked {
+				_status.record(.failed, "\(error.localizedDescription) — retrying in \(Int(delay))s (attempt \(_failureStreak))")
+			}
 		}
 	}
 
@@ -444,7 +485,7 @@ final class BackgroundAudioManager {
 		// includes the counted owners (import, signing), not just the
 		// identity-claimed ones. Missing those meant a call landing mid-sign
 		// left no trace in the log at all.
-		let relevant = !_owners.isEmpty || !_counts.isEmpty
+		let relevant = OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked
 
 		switch type {
 		case .began:
@@ -477,7 +518,7 @@ final class BackgroundAudioManager {
 		_lock.lock()
 		_needsRestart = true
 		// Same reasoning as the interruption handler above.
-		let relevant = !_owners.isEmpty || !_counts.isEmpty
+		let relevant = OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked
 		_lock.unlock()
 
 		if relevant {
@@ -494,13 +535,25 @@ final class BackgroundAudioManager {
 	private var _status: BackgroundAudioStatus { .shared }
 
 	private func _publishLocked() {
-		_status.update(
-			isRunning: _engine.isRunning,
-			owners: _activeOwnersLocked
-		)
+		let visibleEnabled = OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked
+
+		if visibleEnabled {
+			_visibleStatusPublished = true
+			_status.update(
+				isRunning: _engine.isRunning,
+				owners: _activeOwnersLocked
+			)
+		} else if _visibleStatusPublished {
+			_visibleStatusPublished = false
+			_status.update(isRunning: false, owners: [])
+		}
 	}
 
-	// Both kinds of claim, in one list, for display. Identity and counted
+	private var _hasVisibleClaimsLocked: Bool {
+		!_owners.isEmpty || !_counts.isEmpty
+	}
+
+	// Both kinds of visible claim, in one list, for display. Identity and counted
 	// owners are disjoint by contract, so a plain union is exact.
 	private var _activeOwnersLocked: [String] {
 		_owners.union(_counts.keys).map(\.displayName).sorted()

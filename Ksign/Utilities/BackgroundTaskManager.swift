@@ -74,6 +74,10 @@ final class BackgroundTaskManager: ObservableObject {
     private var _workflowStates: [Owner: WorkflowState] = [:]
     private var _downloadStates: [String: DownloadState] = [:]
 
+    // Keep fraction-backed Progress granular enough that long jobs visibly move
+    // even when each callback advances by much less than one percent.
+    private static let _fractionProgressUnits: Int64 = 1_000_000
+
     private let _baseIdentifier: String
 
     private init() {
@@ -97,6 +101,7 @@ final class BackgroundTaskManager: ObservableObject {
         _workflowStates[owner] = state
         _lock.unlock()
 
+        BackgroundAudioManager.shared.claimSystemTask(_audioKey(for: owner))
         _submitWorkflowIfNeeded(owner)
     }
 
@@ -131,6 +136,7 @@ final class BackgroundTaskManager: ObservableObject {
         _workflowStates[owner] = state
         _lock.unlock()
 
+        BackgroundAudioManager.shared.claimSystemTask(_audioKey(for: owner))
         _submitWorkflowIfNeeded(owner)
     }
 
@@ -248,6 +254,7 @@ final class BackgroundTaskManager: ObservableObject {
     func clearReport(_ owner: Owner) {
         var staleTask: BGContinuedProcessingTask?
         var cancelIdentifier: String?
+        var removedState = false
 
         _lock.lock()
         if var state = _workflowStates[owner] {
@@ -258,6 +265,7 @@ final class BackgroundTaskManager: ObservableObject {
                     cancelIdentifier = state.identifier
                 }
                 _workflowStates.removeValue(forKey: owner)
+                removedState = true
             } else {
                 _workflowStates[owner] = state
             }
@@ -268,6 +276,9 @@ final class BackgroundTaskManager: ObservableObject {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: cancelIdentifier)
         }
         staleTask?.setTaskCompleted(success: false)
+        if removedState {
+            BackgroundAudioManager.shared.releaseSystemTask(_audioKey(for: owner))
+        }
     }
 
     // MARK: - Per-download API
@@ -301,6 +312,7 @@ final class BackgroundTaskManager: ObservableObject {
         }
         _lock.unlock()
 
+        BackgroundAudioManager.shared.claimSystemTask(_audioKey(forDownload: downloadId))
         _submitDownloadIfNeeded(downloadId)
     }
 
@@ -311,7 +323,7 @@ final class BackgroundTaskManager: ObservableObject {
         // work has completed. Reserve the system's 100% state for stopTask(), so
         // we don't surrender the continued runtime while that tail is still live.
         let percent = min(99, Int((rawValue * 100).rounded(.down)))
-        let value = Double(percent) / 100
+        let value = min(0.999_999, rawValue)
         var task: BGContinuedProcessingTask?
         var title = ""
         var subtitle = ""
@@ -345,6 +357,7 @@ final class BackgroundTaskManager: ObservableObject {
         stateToFinish = _downloadStates.removeValue(forKey: downloadId)
         _lock.unlock()
 
+        BackgroundAudioManager.shared.releaseSystemTask(_audioKey(forDownload: downloadId))
         guard let stateToFinish else { return }
 
         if stateToFinish.requestOutstanding, let identifier = stateToFinish.identifier {
@@ -365,6 +378,14 @@ final class BackgroundTaskManager: ObservableObject {
     }
 
     // MARK: - Workflow internals
+
+    private func _audioKey(for owner: Owner) -> String {
+        "workflow:\(owner.rawValue)"
+    }
+
+    private func _audioKey(forDownload downloadId: String) -> String {
+        "download:\(downloadId)"
+    }
 
     private func _newWorkflowIdentifier(_ owner: Owner) -> String {
         "\(_baseIdentifier).workflow.\(owner.rawValue).\(UUID().uuidString)"
@@ -598,15 +619,17 @@ final class BackgroundTaskManager: ObservableObject {
         if let task {
             if success {
                 var completedReport = finalReport
-                if let total = completedReport.total, total > 0 {
-                    completedReport.completed = total
-                } else if completedReport.fraction != nil {
+                if completedReport.fraction != nil {
                     completedReport.fraction = 1
+                } else if let total = completedReport.total, total > 0 {
+                    completedReport.completed = total
                 }
                 _apply(owner: owner, report: completedReport, to: task)
             }
             task.setTaskCompleted(success: success)
         }
+
+        BackgroundAudioManager.shared.releaseSystemTask(_audioKey(for: owner))
     }
 
     private func _report(for owner: Owner) -> Report? {
@@ -623,8 +646,10 @@ final class BackgroundTaskManager: ObservableObject {
         task.updateTitle(presentation.title, subtitle: presentation.subtitle)
 
         if let fraction = report.fraction {
-            task.progress.totalUnitCount = 100
-            task.progress.completedUnitCount = Int64((fraction * 100).rounded(.down))
+            task.progress.totalUnitCount = Self._fractionProgressUnits
+            task.progress.completedUnitCount = Int64(
+                (fraction * Double(Self._fractionProgressUnits)).rounded(.down)
+            )
         } else if let total = report.total, total > 0, let completed = report.completed {
             task.progress.totalUnitCount = Int64(total)
             task.progress.completedUnitCount = Int64(max(0, min(completed, total)))
@@ -872,9 +897,9 @@ final class BackgroundTaskManager: ObservableObject {
         subtitle: String,
         to task: BGContinuedProcessingTask
     ) {
-        task.progress.totalUnitCount = 100
+        task.progress.totalUnitCount = Self._fractionProgressUnits
         task.progress.completedUnitCount = Int64(
-            (min(1, max(0, progress)) * 100).rounded(.down)
+            (min(1, max(0, progress)) * Double(Self._fractionProgressUnits)).rounded(.down)
         )
         task.updateTitle(title, subtitle: subtitle)
     }
