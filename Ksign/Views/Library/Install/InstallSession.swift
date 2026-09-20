@@ -601,6 +601,13 @@ final class BulkInstallLiveActivityReporter {
 		_queue.async {
 			guard var job = self._jobs[jobID], !job.isTerminal else { return }
 			let value = min(1, max(0, progress))
+
+			// @Published immediately emits its current value to new subscribers.
+			// A fresh InstallerStatusViewModel therefore reports installProgress == 0
+			// while the job is still packaging. Zero alone is not evidence that the
+			// install phase has started; only honor it once status has moved the job
+			// into .installing. This keeps real packaging progress advancing 0...50%.
+			guard value > 0 || job.stage == .installing else { return }
 			guard value != job.installProgress || job.stage != .installing else { return }
 
 			let before = job
