@@ -28,20 +28,24 @@ enum FR {
 			ImportLiveActivityReporter.shared.begin(token: liveActivityToken, total: 1)
 		}
 
+		// A network download already owns a continued-processing task from byte 0
+		// through extraction/import. Local/direct imports use the aggregate import
+		// workflow instead. Acquire it before detaching so request creation stays on
+		// the user-initiated foreground path.
+		let ownsImportBackgroundTask = download == nil || download?.onlyArchiving == true
+		if ownsImportBackgroundTask {
+			BackgroundTaskManager.shared.begin(.importing)
+		}
+
 		Task.detached {
 			await TempMaintenance.shared.beginOperation()
 
-			// Unzipping an IPA and moving it into place is real work, and it's
-			// exactly the moment someone locks the phone. Counted rather than
-			// identity-claimed because two imports can be in flight at once —
-			// dropping a couple of files in, or a download finishing mid-import
-			// — and the first to finish must not cut the second one off.
-			//
-			// `defer` rather than a call on each exit path: the catch branch
-			// below is easy to extend later and forget about, and an unbalanced
-			// begin leaks the engine.
-			BackgroundAudioManager.shared.begin(.importing)
-			defer { BackgroundAudioManager.shared.end(.importing) }
+			var backgroundSucceeded = false
+			defer {
+				if ownsImportBackgroundTask {
+					BackgroundTaskManager.shared.end(.importing, success: backgroundSucceeded)
+				}
+			}
 
 			let handler = AppFileHandler(file: ipa, download: download)
 			
@@ -60,6 +64,7 @@ enum FR {
 					ImportLiveActivityReporter.shared.finishItem(token: liveActivityToken, succeeded: true)
 					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
 				}
+				backgroundSucceeded = true
 				backgroundCompletion?(nil)
 				await MainActor.run {
 					completion(nil)
@@ -87,16 +92,15 @@ enum FR {
 		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
+		// Establish the task at the foreground/user-action boundary. Bulk signing
+		// already holds an identity claim, so this simply adds a counted worker there.
+		BackgroundTaskManager.shared.begin(.signing)
+
 		Task.detached {
 			await TempMaintenance.shared.beginOperation()
 
-			// zsign on a large app is the longest stretch of pure CPU work in
-			// here, and it was the one major pipeline with no keep-alive at
-			// all. Counted for the same reason as import above; the bulk signer
-			// runs these strictly one at a time, but nothing in the type system
-			// says a single sign can't overlap a bulk batch.
-			BackgroundAudioManager.shared.begin(.signing)
-			defer { BackgroundAudioManager.shared.end(.signing) }
+			var backgroundSucceeded = false
+			defer { BackgroundTaskManager.shared.end(.signing, success: backgroundSucceeded) }
 
 			let handler = SigningHandler(app: app, options: options)
 			if !options.onlyModify {
@@ -115,6 +119,7 @@ enum FR {
 
 				// Batch count reporting happens before the UI callback so it cannot
 				// be delayed until the app returns to the foreground.
+				backgroundSucceeded = true
 				backgroundCompletion?(nil)
 				DispatchQueue.main.async {
 					completion(nil)

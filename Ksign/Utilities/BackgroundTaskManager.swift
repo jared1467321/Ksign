@@ -1,127 +1,876 @@
 //
 //  BackgroundTaskManager.swift
-//  Feather
+//  Ksign
 //
-//  Created by Nagata Asami on 4/1/26.
+//  Owns BGContinuedProcessingTask-backed execution and system Live Activity
+//  progress for every long-running workflow in the app.
 //
 
-import Foundation
 import BackgroundTasks
-import CryptoKit
+import Foundation
 
-@available(iOS 26.0, *)
 final class BackgroundTaskManager: ObservableObject {
     static let shared = BackgroundTaskManager()
 
-    private let baseId = "\(Bundle.main.bundleIdentifier!).userTask"
+    enum Owner: String {
+        case bulkInstalls
+        case singleInstall
+        case bulkExport
+        case importing
+        case signing
+        case extracting
+        case ipaVaultDownloads
 
-    // Everything below the lock used to be a plain Dictionary/Set mutated from
-    // two different execution contexts with no synchronization:
-    //   - the main thread, via `updateProgress` / `stopTask` (called out of the
-    //     extraction progress callback's `DispatchQueue.main.async`), and
-    //   - BGTaskScheduler's own queue, via the `register` completion handler and
-    //     each task's `expirationHandler`.
-    // Concurrent unsynchronized access to a Swift Dictionary is undefined
-    // behavior — it can corrupt, crash, or spin. Every touch of these two
-    // collections now goes through `_lock`, and the lock is only ever held
-    // around the collection access itself, never across a BGTaskScheduler or
-    // BGContinuedProcessingTask call (holding a lock across framework calls is
-    // how you trade one hang for another).
-    private let _lock = NSLock()
-    private var _activeTasks: [String: BGContinuedProcessingTask] = [:]
-    private var _registeredTasks: Set<String> = []
-
-    // MARK: - Locked accessors
-
-    private func _task(for id: String) -> BGContinuedProcessingTask? {
-        _lock.lock(); defer { _lock.unlock() }
-        return _activeTasks[id]
-    }
-
-    private func _store(_ task: BGContinuedProcessingTask, for id: String) {
-        _lock.lock(); defer { _lock.unlock() }
-        _activeTasks[id] = task
-    }
-
-    // Remove-and-return in one locked step. This is what makes completion safe:
-    // if a 100% progress update and the expiration handler (or a download-side
-    // stopTask) race to finish the same task, exactly one of them gets the task
-    // back and calls `setTaskCompleted`; the loser gets nil and does nothing.
-    // The old code could call `setTaskCompleted` twice on the same task.
-    private func _take(for id: String) -> BGContinuedProcessingTask? {
-        _lock.lock(); defer { _lock.unlock() }
-        return _activeTasks.removeValue(forKey: id)
-    }
-
-    private func _isRegistered(_ id: String) -> Bool {
-        _lock.lock(); defer { _lock.unlock() }
-        return _registeredTasks.contains(id)
-    }
-
-    private func _markRegistered(_ id: String) {
-        _lock.lock(); defer { _lock.unlock() }
-        _registeredTasks.insert(id)
-    }
-
-    // MARK: - Public API (unchanged signatures)
-
-    func startTask(for downloadId: String, filename: String) {
-        let taskIdentifier = "\(baseId).\(downloadId.md5)"
-
-        if !_isRegistered(taskIdentifier) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { [weak self] task in
-                guard let self, let task = task as? BGContinuedProcessingTask else { return }
-                self._store(task, for: task.identifier)
-
-                task.expirationHandler = { [weak self] in
-                    guard let self else { return }
-                    if let download = DownloadManager.shared.getDownload(by: downloadId) {
-                        DownloadManager.shared.cancelDownload(download)
-                    }
-                    // Pull it out so a later stopTask can't double-complete it.
-                    _ = self._take(for: task.identifier)
-                }
+        var title: String {
+            switch self {
+            case .bulkInstalls:       return "Installing Apps"
+            case .singleInstall:      return "Installing App"
+            case .bulkExport:         return "Exporting Apps"
+            case .importing:          return "Importing Apps"
+            case .signing:            return "Signing Apps"
+            case .extracting:         return "Extracting"
+            case .ipaVaultDownloads:  return "IPA Vault Downloads"
             }
-            _markRegistered(taskIdentifier)
+        }
+    }
+
+    private struct Report: Equatable {
+        var completed: Int?
+        var total: Int?
+        var fraction: Double?
+        var detail: String?
+    }
+
+    private struct WorkflowState {
+        var task: BGContinuedProcessingTask?
+        var identifier: String?
+        var handlerRegistered = false
+        var requestOutstanding = false
+        var submissionToken: UUID?
+        var identityClaimed = false
+        var count = 0
+        var success = true
+        var suppressed = false
+        var report = Report()
+    }
+
+    private struct DownloadState {
+        var task: BGContinuedProcessingTask?
+        var identifier: String?
+        var handlerRegistered = false
+        var requestOutstanding = false
+        var submissionToken: UUID?
+        var title: String
+        var subtitle: String
+        var progress: Double = 0
+        var suppressed = false
+    }
+
+    private let _lock = NSLock()
+    private let _submissionQueue = DispatchQueue(
+        label: "AppAssassin.signer.ipa.background-task-submission",
+        qos: .userInitiated
+    )
+    private var _workflowStates: [Owner: WorkflowState] = [:]
+    private var _downloadStates: [String: DownloadState] = [:]
+
+    private let _baseIdentifier: String
+
+    private init() {
+        let bundleID = Bundle.main.bundleIdentifier ?? "AppAssassin.signer.ipa"
+        _baseIdentifier = "\(bundleID).userTask"
+    }
+
+    // MARK: - Workflow ownership
+
+    // Identity ownership is useful for a batch/queue whose individual workers
+    // can briefly drop to zero. Repeated claims from the same owner are idempotent.
+    func claim(_ owner: Owner) {
+        _lock.lock()
+        var state = _workflowStates[owner] ?? WorkflowState()
+        let wasClaimed = state.identityClaimed
+        state.identityClaimed = true
+        if !wasClaimed && state.count == 0 {
+            state.success = true
+            state.suppressed = false
+        }
+        _workflowStates[owner] = state
+        _lock.unlock()
+
+        _submitWorkflowIfNeeded(owner)
+    }
+
+    func release(_ owner: Owner, success: Bool = true) {
+        var shouldFinish = false
+
+        _lock.lock()
+        guard var state = _workflowStates[owner] else {
+            _lock.unlock()
+            return
+        }
+        state.identityClaimed = false
+        state.success = state.success && success
+        shouldFinish = state.count == 0
+        _workflowStates[owner] = state
+        _lock.unlock()
+
+        if shouldFinish {
+            _finishWorkflow(owner)
+        }
+    }
+
+    // Counted ownership protects overlapping workers of the same operation type.
+    func begin(_ owner: Owner) {
+        _lock.lock()
+        var state = _workflowStates[owner] ?? WorkflowState()
+        if state.count == 0 && !state.identityClaimed {
+            state.success = true
+            state.suppressed = false
+        }
+        state.count += 1
+        _workflowStates[owner] = state
+        _lock.unlock()
+
+        _submitWorkflowIfNeeded(owner)
+    }
+
+    func end(_ owner: Owner, success: Bool) {
+        var shouldFinish = false
+
+        _lock.lock()
+        guard var state = _workflowStates[owner], state.count > 0 else {
+            _lock.unlock()
+            return
+        }
+        state.count -= 1
+        state.success = state.success && success
+        shouldFinish = state.count == 0 && !state.identityClaimed
+        _workflowStates[owner] = state
+        _lock.unlock()
+
+        if shouldFinish {
+            _finishWorkflow(owner)
+        }
+    }
+
+    // MARK: - Workflow progress
+
+    // This mirrors the old Live Activity reporting surface so each existing
+    // reporter still decides which changes are meaningful. Identical snapshots
+    // are discarded before BackgroundTasks sees them.
+    func report(
+        _ owner: Owner,
+        completed: Int?,
+        total: Int?,
+        fraction: Double?,
+        detail: String?
+    ) {
+        let normalizedDetail: String? = {
+            let value = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }()
+        let normalizedFraction = fraction.map { min(1, max(0, $0)) }
+
+        var task: BGContinuedProcessingTask?
+        var reportToApply: Report?
+
+        _lock.lock()
+        var state = _workflowStates[owner] ?? WorkflowState()
+        let next = Report(
+            completed: {
+                guard let total, total > 0, let completed else { return nil }
+                return max(0, min(completed, total))
+            }(),
+            total: {
+                guard let total, total > 0, completed != nil else { return nil }
+                return total
+            }(),
+            fraction: normalizedFraction,
+            detail: normalizedDetail
+        )
+
+        if state.report != next {
+            state.report = next
+            if normalizedDetail == "Error" || normalizedDetail == "Cancelled" {
+                state.success = false
+            }
+            task = state.task
+            reportToApply = next
+        }
+        _workflowStates[owner] = state
+        _lock.unlock()
+
+        if let task, let reportToApply {
+            _apply(owner: owner, report: reportToApply, to: task)
         }
 
-        let request = BGContinuedProcessingTaskRequest(
-            identifier: taskIdentifier,
-            title: filename,
-            subtitle: .localized("Downloading")
+        // A report is state, not ownership. Only `claim` / `begin` may create a
+        // task, so a late asynchronous reporter can never resurrect a finished
+        // system Live Activity.
+    }
+
+    func report(_ owner: Owner, completed: Int, total: Int?) {
+        let current = _report(for: owner)
+        report(
+            owner,
+            completed: completed,
+            total: total,
+            fraction: current?.fraction,
+            detail: current?.detail
         )
-        request.strategy = .queue
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-            print(error)
+    }
+
+    func report(_ owner: Owner, fraction: Double?) {
+        let current = _report(for: owner)
+        report(
+            owner,
+            completed: current?.completed,
+            total: current?.total,
+            fraction: fraction,
+            detail: current?.detail
+        )
+    }
+
+    func report(_ owner: Owner, detail: String?) {
+        let current = _report(for: owner)
+        report(
+            owner,
+            completed: current?.completed,
+            total: current?.total,
+            fraction: current?.fraction,
+            detail: detail
+        )
+    }
+
+    // Called before a new independent batch seeds its first snapshot. If an
+    // unowned state survived an unusual early-exit path, retire it rather than
+    // allowing the next task run to inherit its request/progress.
+    func clearReport(_ owner: Owner) {
+        var staleTask: BGContinuedProcessingTask?
+        var cancelIdentifier: String?
+
+        _lock.lock()
+        if var state = _workflowStates[owner] {
+            state.report = Report()
+            if !state.identityClaimed && state.count == 0 {
+                staleTask = state.task
+                if state.requestOutstanding {
+                    cancelIdentifier = state.identifier
+                }
+                _workflowStates.removeValue(forKey: owner)
+            } else {
+                _workflowStates[owner] = state
+            }
         }
+        _lock.unlock()
+
+        if let cancelIdentifier {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: cancelIdentifier)
+        }
+        staleTask?.setTaskCompleted(success: false)
+    }
+
+    // MARK: - Per-download API
+
+    func startTask(
+        for downloadId: String,
+        filename: String,
+        subtitle: String = "Downloading"
+    ) {
+        _lock.lock()
+        if var state = _downloadStates[downloadId] {
+            state.title = filename
+            state.subtitle = subtitle
+
+            if state.suppressed {
+                // An expired/cancelled BG task cannot be reused. A deliberate
+                // resume is a new continued-processing task with a fresh ID.
+                state.task = nil
+                state.identifier = nil
+                state.handlerRegistered = false
+                state.requestOutstanding = false
+                state.submissionToken = nil
+                state.suppressed = false
+            }
+            _downloadStates[downloadId] = state
+        } else {
+            _downloadStates[downloadId] = DownloadState(
+                title: filename,
+                subtitle: subtitle
+            )
+        }
+        _lock.unlock()
+
+        _submitDownloadIfNeeded(downloadId)
     }
 
     func updateProgress(for downloadId: String, progress: Double) {
-        let taskIdentifier = "\(baseId).\(downloadId.md5)"
-        guard let task = _task(for: taskIdentifier) else { return }
+        let rawValue = min(1, max(0, progress))
 
-        task.progress.totalUnitCount = 100
-        task.progress.completedUnitCount = Int64(progress * 100)
-        task.updateTitle(task.title, subtitle: "\(Int(progress * 100))%")
+        // AppFileHandler reaches 100% extraction before its final move/database
+        // work has completed. Reserve the system's 100% state for stopTask(), so
+        // we don't surrender the continued runtime while that tail is still live.
+        let percent = min(99, Int((rawValue * 100).rounded(.down)))
+        let value = Double(percent) / 100
+        var task: BGContinuedProcessingTask?
+        var title = ""
+        var subtitle = ""
 
-        if task.progress.completedUnitCount >= task.progress.totalUnitCount {
-            stopTask(for: downloadId, success: true)
+        _lock.lock()
+        guard var state = _downloadStates[downloadId] else {
+            _lock.unlock()
+            return
+        }
+        guard value != state.progress else {
+            _lock.unlock()
+            return
+        }
+        state.progress = value
+        state.subtitle = "\(percent)%"
+        task = state.task
+        title = state.title
+        subtitle = state.subtitle
+        _downloadStates[downloadId] = state
+        _lock.unlock()
+
+        if let task {
+            _applyDownloadProgress(value, title: title, subtitle: subtitle, to: task)
         }
     }
 
     func stopTask(for downloadId: String, success: Bool) {
-        let taskIdentifier = "\(baseId).\(downloadId.md5)"
-        // Atomic take: only the caller that actually removes the task completes
-        // it. Framework call happens outside the lock.
-        guard let task = _take(for: taskIdentifier) else { return }
-        task.setTaskCompleted(success: success)
-    }
-}
+        var stateToFinish: DownloadState?
 
-extension String {
-    var md5: String {
-        Insecure.MD5.hash(data: Data(self.utf8)).map { String(format: "%02hhx", $0) }.joined()
+        _lock.lock()
+        stateToFinish = _downloadStates.removeValue(forKey: downloadId)
+        _lock.unlock()
+
+        guard let stateToFinish else { return }
+
+        if stateToFinish.requestOutstanding, let identifier = stateToFinish.identifier {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        }
+
+        if let task = stateToFinish.task {
+            if success {
+                _applyDownloadProgress(
+                    1,
+                    title: stateToFinish.title,
+                    subtitle: "Completed",
+                    to: task
+                )
+            }
+            task.setTaskCompleted(success: success)
+        }
+    }
+
+    // MARK: - Workflow internals
+
+    private func _newWorkflowIdentifier(_ owner: Owner) -> String {
+        "\(_baseIdentifier).workflow.\(owner.rawValue).\(UUID().uuidString)"
+    }
+
+    private func _workflowDidLaunch(
+        _ owner: Owner,
+        identifier: String,
+        task: BGContinuedProcessingTask
+    ) {
+        var report = Report()
+        var shouldReject = false
+
+        _lock.lock()
+        if var state = _workflowStates[owner],
+           state.identifier == identifier,
+           !state.suppressed {
+            state.task = task
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            report = state.report
+            _workflowStates[owner] = state
+        } else {
+            shouldReject = true
+        }
+        _lock.unlock()
+
+        if shouldReject {
+            task.setTaskCompleted(success: false)
+            return
+        }
+
+        task.expirationHandler = { [weak self, weak task] in
+            guard let self, let task else { return }
+            self._workflowExpired(owner, task: task)
+        }
+
+        _apply(owner: owner, report: report, to: task)
+    }
+
+    private func _workflowExpired(_ owner: Owner, task: BGContinuedProcessingTask) {
+        var ownsTask = false
+
+        _lock.lock()
+        if var state = _workflowStates[owner], state.task === task {
+            state.task = nil
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            state.success = false
+            state.suppressed = true
+            _workflowStates[owner] = state
+            ownsTask = true
+        }
+        _lock.unlock()
+
+        if ownsTask {
+            task.setTaskCompleted(success: false)
+        }
+    }
+
+    private func _submitWorkflowIfNeeded(_ owner: Owner) {
+        var request: BGContinuedProcessingTaskRequest?
+        var submissionToken: UUID?
+        var identifier: String?
+        var mustRegister = false
+
+        _lock.lock()
+        if var state = _workflowStates[owner],
+           (state.identityClaimed || state.count > 0),
+           !state.suppressed,
+           state.task == nil,
+           !state.requestOutstanding {
+            let token = UUID()
+            let taskIdentifier = state.identifier ?? _newWorkflowIdentifier(owner)
+            state.identifier = taskIdentifier
+            state.requestOutstanding = true
+            state.submissionToken = token
+            mustRegister = !state.handlerRegistered
+            _workflowStates[owner] = state
+
+            let presentation = _presentation(owner: owner, report: state.report)
+            let newRequest = BGContinuedProcessingTaskRequest(
+                identifier: taskIdentifier,
+                title: presentation.title,
+                subtitle: presentation.subtitle
+            )
+            newRequest.strategy = .queue
+            request = newRequest
+            submissionToken = token
+            identifier = taskIdentifier
+        }
+        _lock.unlock()
+
+        guard let request, let submissionToken, let identifier else { return }
+
+        if mustRegister {
+            let registered = BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: identifier,
+                using: nil
+            ) { [weak self] task in
+                guard
+                    let self,
+                    let continuedTask = task as? BGContinuedProcessingTask
+                else { return }
+
+                self._workflowDidLaunch(
+                    owner,
+                    identifier: identifier,
+                    task: continuedTask
+                )
+            }
+
+            guard registered else {
+                _workflowRegistrationFailed(
+                    owner,
+                    token: submissionToken,
+                    identifier: identifier
+                )
+                return
+            }
+
+            _lock.lock()
+            if var state = _workflowStates[owner],
+               state.submissionToken == submissionToken,
+               state.identifier == identifier {
+                state.handlerRegistered = true
+                _workflowStates[owner] = state
+            }
+            _lock.unlock()
+        }
+
+        // iOS 27's replacement submission API can report failures that occur
+        // after submission leaves this process. Apple also asks callers not to
+        // invoke it on the main/performance-critical queue.
+        _submissionQueue.async { [weak self] in
+            guard let self,
+                  self._workflowSubmissionIsCurrent(owner, token: submissionToken)
+            else { return }
+
+            BGTaskScheduler.shared.submitTaskRequest(request) { [weak self] error in
+                self?._workflowSubmissionCompleted(
+                    owner,
+                    token: submissionToken,
+                    identifier: identifier,
+                    error: error
+                )
+            }
+        }
+    }
+
+    private func _workflowRegistrationFailed(
+        _ owner: Owner,
+        token: UUID,
+        identifier: String
+    ) {
+        _lock.lock()
+        if var state = _workflowStates[owner],
+           state.submissionToken == token,
+           state.identifier == identifier,
+           state.task == nil {
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            _workflowStates[owner] = state
+        }
+        _lock.unlock()
+
+        print("BGContinuedProcessingTask registration failed for \(identifier)")
+    }
+
+    private func _workflowSubmissionIsCurrent(_ owner: Owner, token: UUID) -> Bool {
+        _lock.lock(); defer { _lock.unlock() }
+        guard let state = _workflowStates[owner] else { return false }
+        return state.submissionToken == token
+            && state.requestOutstanding
+            && state.task == nil
+            && state.handlerRegistered
+            && (state.identityClaimed || state.count > 0)
+            && !state.suppressed
+    }
+
+    private func _workflowSubmissionCompleted(
+        _ owner: Owner,
+        token: UUID,
+        identifier: String,
+        error: Error?
+    ) {
+        guard let error else { return }
+
+        var isCurrent = false
+        _lock.lock()
+        if var state = _workflowStates[owner],
+           state.submissionToken == token,
+           state.identifier == identifier,
+           state.task == nil {
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            _workflowStates[owner] = state
+            isCurrent = true
+        }
+        _lock.unlock()
+
+        if isCurrent {
+            print("Failed to submit continued processing task \(identifier): \(error)")
+        }
+    }
+
+    private func _finishWorkflow(_ owner: Owner) {
+        var task: BGContinuedProcessingTask?
+        var identifier: String?
+        var success = true
+        var requestOutstanding = false
+        var finalReport = Report()
+
+        _lock.lock()
+        if let state = _workflowStates.removeValue(forKey: owner) {
+            task = state.task
+            identifier = state.identifier
+            success = state.success
+            requestOutstanding = state.requestOutstanding
+            finalReport = state.report
+        }
+        _lock.unlock()
+
+        if requestOutstanding, let identifier {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        }
+
+        if let task {
+            if success {
+                var completedReport = finalReport
+                if let total = completedReport.total, total > 0 {
+                    completedReport.completed = total
+                } else if completedReport.fraction != nil {
+                    completedReport.fraction = 1
+                }
+                _apply(owner: owner, report: completedReport, to: task)
+            }
+            task.setTaskCompleted(success: success)
+        }
+    }
+
+    private func _report(for owner: Owner) -> Report? {
+        _lock.lock(); defer { _lock.unlock() }
+        return _workflowStates[owner]?.report
+    }
+
+    private func _apply(
+        owner: Owner,
+        report: Report,
+        to task: BGContinuedProcessingTask
+    ) {
+        let presentation = _presentation(owner: owner, report: report)
+        task.updateTitle(presentation.title, subtitle: presentation.subtitle)
+
+        if let fraction = report.fraction {
+            task.progress.totalUnitCount = 100
+            task.progress.completedUnitCount = Int64((fraction * 100).rounded(.down))
+        } else if let total = report.total, total > 0, let completed = report.completed {
+            task.progress.totalUnitCount = Int64(total)
+            task.progress.completedUnitCount = Int64(max(0, min(completed, total)))
+        } else {
+            task.progress.totalUnitCount = 1
+            task.progress.completedUnitCount = 0
+        }
+    }
+
+    private func _presentation(
+        owner: Owner,
+        report: Report
+    ) -> (title: String, subtitle: String) {
+        var pieces: [String] = []
+
+        if let detail = report.detail, !detail.isEmpty {
+            pieces.append(detail)
+        }
+
+        if let total = report.total, total > 0, let completed = report.completed {
+            pieces.append("\(max(0, min(completed, total))) of \(total)")
+        } else if let fraction = report.fraction {
+            pieces.append("\(Int((fraction * 100).rounded()))%")
+        }
+
+        if pieces.isEmpty {
+            pieces.append("Working")
+        }
+
+        return (owner.title, pieces.joined(separator: " · "))
+    }
+
+    // MARK: - Download internals
+
+    private func _newDownloadIdentifier() -> String {
+        "\(_baseIdentifier).download.\(UUID().uuidString)"
+    }
+
+    private func _downloadDidLaunch(
+        _ downloadId: String,
+        identifier: String,
+        task: BGContinuedProcessingTask
+    ) {
+        var stateToApply: DownloadState?
+
+        _lock.lock()
+        if var state = _downloadStates[downloadId],
+           state.identifier == identifier,
+           !state.suppressed {
+            state.task = task
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            _downloadStates[downloadId] = state
+            stateToApply = state
+        }
+        _lock.unlock()
+
+        guard let stateToApply else {
+            task.setTaskCompleted(success: false)
+            return
+        }
+
+        task.expirationHandler = { [weak self, weak task] in
+            guard let self, let task else { return }
+            self._downloadExpired(downloadId, task: task)
+        }
+
+        _applyDownloadProgress(
+            stateToApply.progress,
+            title: stateToApply.title,
+            subtitle: stateToApply.subtitle,
+            to: task
+        )
+    }
+
+    private func _downloadExpired(_ downloadId: String, task: BGContinuedProcessingTask) {
+        var ownsTask = false
+
+        _lock.lock()
+        if var state = _downloadStates[downloadId], state.task === task {
+            state.task = nil
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            state.suppressed = true
+            _downloadStates[downloadId] = state
+            ownsTask = true
+        }
+        _lock.unlock()
+
+        guard ownsTask else { return }
+
+        DispatchQueue.main.async {
+            if let download = DownloadManager.shared.getDownload(by: downloadId) {
+                DownloadManager.shared.cancelDownload(download)
+            }
+        }
+        task.setTaskCompleted(success: false)
+    }
+
+    private func _submitDownloadIfNeeded(_ downloadId: String) {
+        var request: BGContinuedProcessingTaskRequest?
+        var submissionToken: UUID?
+        var identifier: String?
+        var mustRegister = false
+
+        _lock.lock()
+        if var state = _downloadStates[downloadId],
+           !state.suppressed,
+           state.task == nil,
+           !state.requestOutstanding {
+            let token = UUID()
+            let taskIdentifier = state.identifier ?? _newDownloadIdentifier()
+            state.identifier = taskIdentifier
+            state.requestOutstanding = true
+            state.submissionToken = token
+            mustRegister = !state.handlerRegistered
+            _downloadStates[downloadId] = state
+
+            let newRequest = BGContinuedProcessingTaskRequest(
+                identifier: taskIdentifier,
+                title: state.title,
+                subtitle: state.subtitle
+            )
+            newRequest.strategy = .queue
+            request = newRequest
+            submissionToken = token
+            identifier = taskIdentifier
+        }
+        _lock.unlock()
+
+        guard let request, let submissionToken, let identifier else { return }
+
+        if mustRegister {
+            let registered = BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: identifier,
+                using: nil
+            ) { [weak self] task in
+                guard
+                    let self,
+                    let continuedTask = task as? BGContinuedProcessingTask
+                else { return }
+
+                self._downloadDidLaunch(
+                    downloadId,
+                    identifier: identifier,
+                    task: continuedTask
+                )
+            }
+
+            guard registered else {
+                _downloadRegistrationFailed(
+                    downloadId,
+                    token: submissionToken,
+                    identifier: identifier
+                )
+                return
+            }
+
+            _lock.lock()
+            if var state = _downloadStates[downloadId],
+               state.submissionToken == submissionToken,
+               state.identifier == identifier {
+                state.handlerRegistered = true
+                _downloadStates[downloadId] = state
+            }
+            _lock.unlock()
+        }
+
+        _submissionQueue.async { [weak self] in
+            guard let self,
+                  self._downloadSubmissionIsCurrent(downloadId, token: submissionToken)
+            else { return }
+
+            BGTaskScheduler.shared.submitTaskRequest(request) { [weak self] error in
+                self?._downloadSubmissionCompleted(
+                    downloadId,
+                    token: submissionToken,
+                    identifier: identifier,
+                    error: error
+                )
+            }
+        }
+    }
+
+    private func _downloadRegistrationFailed(
+        _ downloadId: String,
+        token: UUID,
+        identifier: String
+    ) {
+        _lock.lock()
+        if var state = _downloadStates[downloadId],
+           state.submissionToken == token,
+           state.identifier == identifier,
+           state.task == nil {
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            _downloadStates[downloadId] = state
+        }
+        _lock.unlock()
+
+        print("BGContinuedProcessingTask registration failed for \(identifier)")
+    }
+
+    private func _downloadSubmissionIsCurrent(_ downloadId: String, token: UUID) -> Bool {
+        _lock.lock(); defer { _lock.unlock() }
+        guard let state = _downloadStates[downloadId] else { return false }
+        return state.submissionToken == token
+            && state.requestOutstanding
+            && state.task == nil
+            && state.handlerRegistered
+            && !state.suppressed
+    }
+
+    private func _downloadSubmissionCompleted(
+        _ downloadId: String,
+        token: UUID,
+        identifier: String,
+        error: Error?
+    ) {
+        guard let error else { return }
+
+        var isCurrent = false
+        _lock.lock()
+        if var state = _downloadStates[downloadId],
+           state.submissionToken == token,
+           state.identifier == identifier,
+           state.task == nil {
+            state.requestOutstanding = false
+            state.submissionToken = nil
+            _downloadStates[downloadId] = state
+            isCurrent = true
+        }
+        _lock.unlock()
+
+        if isCurrent {
+            print("Failed to submit download continued processing task \(identifier): \(error)")
+        }
+    }
+
+    private func _applyDownloadProgress(
+        _ progress: Double,
+        title: String,
+        subtitle: String,
+        to task: BGContinuedProcessingTask
+    ) {
+        task.progress.totalUnitCount = 100
+        task.progress.completedUnitCount = Int64(
+            (min(1, max(0, progress)) * 100).rounded(.down)
+        )
+        task.updateTitle(title, subtitle: subtitle)
     }
 }
