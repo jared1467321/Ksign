@@ -57,9 +57,7 @@ final class ExtractManager: ObservableObject {
 	func updateProgress(for item: ExtractItem, progress: Double) {
 		let clamped = max(0.0, min(1.0, progress))
 
-		let liveFraction = clamped >= 1
-			? 1
-			: floor((clamped + 0.000_000_001) * 100) / 100
+		let liveFraction = clamped
 
 		_activityQueue.async {
 			guard self._activityItemIDs.contains(item.id) else { return }
