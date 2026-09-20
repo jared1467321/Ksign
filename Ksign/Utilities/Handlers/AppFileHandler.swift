@@ -93,9 +93,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 				self._lastReportedPercent = percent
 				DispatchQueue.main.async {
 					download.unpackageProgress = progress
-					if #available(iOS 26.0, *) {
-						BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-					}
+					BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
 				}
 			}
 		)
@@ -114,9 +112,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 					_lastReportedPercent = percent
 					DispatchQueue.main.async {
 						download.unpackageProgress = progress
-						if #available(iOS 26.0, *) {
-							BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-						}
+						BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
 					}
 				}
 			}
