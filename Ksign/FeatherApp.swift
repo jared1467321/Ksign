@@ -27,7 +27,6 @@ struct FeatherApp: App {
 				// overlay would float over each tab's navigation bar title,
 				// which is the one place at the top of the screen that's
 				// already spoken for.
-				BackgroundAudioIndicatorView()
                 ExtractHeaderView(extractManager: extractManager)
                     .transition(.move(edge: .top).combined(with: .opacity))
 				DownloadHeaderView(downloadManager: downloadManager)
