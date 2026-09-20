@@ -112,7 +112,7 @@ class DownloadManager: NSObject, ObservableObject {
 
 	// Safety net for cancellation / early termination. The reporter turns any
 	// unaccounted items into failures and leaves the final n/total state visible
-	// for the audio manager's linger period.
+	// until the system continued-processing task completes.
 	@MainActor
 	func endImportBatch(_ token: UUID) {
 		_importBatches.removeValue(forKey: token)
@@ -155,16 +155,6 @@ class DownloadManager: NSObject, ObservableObject {
 	
     private var _session: URLSession!
     
-    private func _updateBackgroundAudioState() {
-        if #unavailable(iOS 26.0){
-            if !downloads.isEmpty {
-                BackgroundAudioManager.shared.claim(.downloads)
-            } else  {
-                BackgroundAudioManager.shared.release(.downloads)
-            }
-        }
-    }
-    
     override init() {
         super.init()
         let configuration = URLSessionConfiguration.default
@@ -187,11 +177,7 @@ class DownloadManager: NSObject, ObservableObject {
         task.resume()
         
         downloads.append(download)
-		if #available(iOS 26.0, *) {
-			BackgroundTaskManager.shared.startTask(for: id, filename: url.lastPathComponent)
-		} else {
-			_updateBackgroundAudioState()
-		}
+		BackgroundTaskManager.shared.startTask(for: id, filename: url.lastPathComponent)
         return download
     }
 	
@@ -201,7 +187,6 @@ class DownloadManager: NSObject, ObservableObject {
 	) -> Download {
 		let download = Download(id: id, url: url, onlyArchiving: true)
 		downloads.append(download)
-		_updateBackgroundAudioState()
 		return download
 	}
     
@@ -210,24 +195,21 @@ class DownloadManager: NSObject, ObservableObject {
             let task = _session.downloadTask(withResumeData: resumeData)
             download.task = task
             task.resume()
-            _updateBackgroundAudioState()
+            BackgroundTaskManager.shared.startTask(for: download.id, filename: download.fileName)
         } else if let url = download.task?.originalRequest?.url {
             let task = _session.downloadTask(with: url)
             download.task = task
             task.resume()
-            _updateBackgroundAudioState()
+            BackgroundTaskManager.shared.startTask(for: download.id, filename: download.fileName)
         }
     }
     
     func cancelDownload(_ download: Download) {
         download.task?.cancel()
-        
+        BackgroundTaskManager.shared.stopTask(for: download.id, success: false)
+
         if let index = downloads.firstIndex(where: { $0.id == download.id }) {
             downloads.remove(at: index)
-            _updateBackgroundAudioState()
-            if #available(iOS 26.0, *) {
-                BackgroundTaskManager.shared.stopTask(for: download.id, success: false)
-            }
         }
     }
     
@@ -257,11 +239,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
-		// Every import gets a simple terminal tracker. Bulk imports pre-seed their
-		// full denominator and pass that token through; standalone/overlapping
-		// imports get one-item tokens that naturally aggregate while they overlap.
-		let standaloneToken = liveActivityBatchToken == nil ? UUID() : nil
-		let activityToken = liveActivityBatchToken ?? standaloneToken
+		// Local/direct imports use one aggregate continued-processing task. A
+		// network download already owns a per-download continued-processing task
+		// through extraction/import, so don't create a second system Live Activity
+		// for the same work.
+		let tracksImportWorkflow = dl == nil || dl?.onlyArchiving == true
+		let standaloneToken = tracksImportWorkflow && liveActivityBatchToken == nil ? UUID() : nil
+		let activityToken = tracksImportWorkflow ? (liveActivityBatchToken ?? standaloneToken) : nil
 		if let standaloneToken {
 			ImportLiveActivityReporter.shared.begin(token: standaloneToken, total: 1)
 		}
@@ -271,6 +255,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			download: dl,
 			trackLiveActivity: false,
 			backgroundCompletion: { err in
+				if let dl, !dl.onlyArchiving {
+					BackgroundTaskManager.shared.stopTask(for: dl.id, success: err == nil)
+				}
 				if let activityToken {
 					ImportLiveActivityReporter.shared.finishItem(
 						token: activityToken,
@@ -360,6 +347,12 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			}
 		} catch {
 			print("Error handling downloaded file: \(error.localizedDescription)")
+			BackgroundTaskManager.shared.stopTask(for: download.id, success: false)
+			DispatchQueue.main.async {
+				if let index = self.getDownloadIndex(by: download.id) {
+					self.downloads.remove(at: index)
+				}
+			}
 		}
 	}
     
@@ -372,9 +365,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			: 0
             download.bytesDownloaded = totalBytesWritten
             download.totalBytes = totalBytesExpectedToWrite
-            if #available(iOS 26.0, *) {
-                BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-            }
+            BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
         }
     }
     
@@ -387,6 +378,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 			return
 		}
 		
+		BackgroundTaskManager.shared.stopTask(for: download.id, success: false)
 		DispatchQueue.main.async {
 			if let index = self.getDownloadIndex(by: download.id) {
 				self.downloads.remove(at: index)
@@ -464,9 +456,8 @@ final class ImportLiveActivityReporter {
 		queue.sync {
 			if self.activeTokens.isEmpty {
 				self.batches.removeAll()
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.clearReport(.importing)
-				}
+				BackgroundTaskManager.shared.clearReport(.importing)
+				BackgroundTaskManager.shared.claim(.importing)
 			}
 
 			self.activeTokens.insert(token)
@@ -497,10 +488,11 @@ final class ImportLiveActivityReporter {
 			self.activeTokens.remove(token)
 			self.publish()
 
-			// Keep the final report in KeepAliveActivityController for the audio
-			// linger, but drop our working state so the next independent batch starts
-			// cleanly at 0/n.
+			// The batch token holds one identity claim across gaps between individual
+			// import workers, so the system task doesn't end/restart between files.
 			if self.activeTokens.isEmpty {
+				let succeeded = self.batches.values.allSatisfy { $0.failed == 0 && $0.terminal >= $0.total }
+				BackgroundTaskManager.shared.release(.importing, success: succeeded)
 				self.batches.removeAll()
 			}
 		}
@@ -520,8 +512,7 @@ final class ImportLiveActivityReporter {
 			detail = "Importing"
 		}
 
-		guard #available(iOS 16.2, *) else { return }
-		KeepAliveActivityController.shared.report(
+		BackgroundTaskManager.shared.report(
 			.importing,
 			completed: completed,
 			total: total,

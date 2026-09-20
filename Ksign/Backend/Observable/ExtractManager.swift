@@ -43,10 +43,13 @@ final class ExtractManager: ObservableObject {
 	func start(fileName: String) -> ExtractItem {
 		let item = ExtractItem(fileName: fileName)
 		_startActivity(id: item.id)
+		// Submit while this foreground/user-initiated start call is still active;
+		// the main-queue list mutation below remains the UI source of truth.
+		BackgroundTaskManager.shared.claim(.extracting)
 
 		DispatchQueue.main.async {
 			self.extractItems.append(item)
-			self._updateBackgroundAudioState()
+			self._updateBackgroundTaskState()
 		}
 		return item
 	}
@@ -77,7 +80,7 @@ final class ExtractManager: ObservableObject {
 			if let idx = self.extractItems.firstIndex(where: { $0.id == item.id }) {
 				self.extractItems.remove(at: idx)
 			}
-			self._updateBackgroundAudioState()
+			self._updateBackgroundTaskState()
 		}
 	}
 
@@ -88,9 +91,7 @@ final class ExtractManager: ObservableObject {
 				_completedActivityItemIDs.removeAll()
 				_failedActivityItemIDs.removeAll()
 				_activityProgress.removeAll()
-				if #available(iOS 16.2, *) {
-					KeepAliveActivityController.shared.clearReport(.extracting)
-				}
+				BackgroundTaskManager.shared.clearReport(.extracting)
 			}
 
 			_activityItemIDs.insert(id)
@@ -117,7 +118,7 @@ final class ExtractManager: ObservableObject {
 	}
 
 	private func _publishActivity() {
-		guard #available(iOS 16.2, *), !_activityItemIDs.isEmpty else { return }
+		guard !_activityItemIDs.isEmpty else { return }
 		let completed = _completedActivityItemIDs.intersection(_activityItemIDs).count
 		let failed = _failedActivityItemIDs.intersection(_activityItemIDs).count
 		let total = _activityItemIDs.count
@@ -132,7 +133,7 @@ final class ExtractManager: ObservableObject {
 			)
 		)
 
-		KeepAliveActivityController.shared.report(
+		BackgroundTaskManager.shared.report(
 			.extracting,
 			completed: completed,
 			total: total,
@@ -144,11 +145,12 @@ final class ExtractManager: ObservableObject {
 	// Identity-claimed off the live list, the same way `DownloadManager` does
 	// it: the list is already the source of truth for whether anything is
 	// extracting, so deriving the claim from it can't drift out of sync.
-	private func _updateBackgroundAudioState() {
+	private func _updateBackgroundTaskState() {
 		if !extractItems.isEmpty {
-			BackgroundAudioManager.shared.claim(.extracting)
+			BackgroundTaskManager.shared.claim(.extracting)
 		} else {
-			BackgroundAudioManager.shared.release(.extracting)
+			let failed = !_failedActivityItemIDs.isEmpty
+			BackgroundTaskManager.shared.release(.extracting, success: !failed)
 		}
 	}
 }
