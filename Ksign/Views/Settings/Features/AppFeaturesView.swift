@@ -15,13 +15,6 @@ struct AppFeaturesView: View {
     var body: some View {
         NBList(.localized("App Features")) {
             Section {
-                Toggle(isOn: $_optionsManager.options.backgroundAudio) {
-                    Label(.localized("Keep app running in background"), systemImage: "arrow.trianglehead.2.clockwise")
-                }
-            } footer: {
-                Text(.localized("This will keep the app running even when you close it, helpful with download or installing ipa."))
-            }
-            Section {
                 Toggle(isOn: $_optionsManager.options.signingLogs) {
                     Label(.localized("Show logs when signing"), systemImage: "terminal")
                 }
