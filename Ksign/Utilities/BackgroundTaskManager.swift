@@ -496,16 +496,19 @@ final class BackgroundTaskManager: ObservableObject {
             _lock.unlock()
         }
 
-        // iOS 27's replacement submission API can report failures that occur
-        // after submission leaves this process. Apple also asks callers not to
-        // invoke it on the main/performance-critical queue.
+        // The project currently builds with the iOS 26.5 SDK. That SDK exposes
+        // BGContinuedProcessingTask but not iOS 27's asynchronous
+        // submitTaskRequest(_:completionHandler:) API yet, so submit using the
+        // supported synchronous-throwing scheduler API.
         _submissionQueue.async { [weak self] in
             guard let self,
                   self._workflowSubmissionIsCurrent(owner, token: submissionToken)
             else { return }
 
-            BGTaskScheduler.shared.submitTaskRequest(request) { [weak self] error in
-                self?._workflowSubmissionCompleted(
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                self._workflowSubmissionCompleted(
                     owner,
                     token: submissionToken,
                     identifier: identifier,
@@ -795,8 +798,10 @@ final class BackgroundTaskManager: ObservableObject {
                   self._downloadSubmissionIsCurrent(downloadId, token: submissionToken)
             else { return }
 
-            BGTaskScheduler.shared.submitTaskRequest(request) { [weak self] error in
-                self?._downloadSubmissionCompleted(
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                self._downloadSubmissionCompleted(
                     downloadId,
                     token: submissionToken,
                     identifier: identifier,
