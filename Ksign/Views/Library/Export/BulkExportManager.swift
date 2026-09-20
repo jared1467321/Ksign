@@ -41,11 +41,10 @@ final class BulkExportManager: ObservableObject {
 		return min(1.0, Double(completed) / Double(total))
 	}
 
-	// Mirrors the batch position into the keep-alive's Dynamic Island bar.
+	// Mirrors the batch position into the system continued-processing progress UI.
 	// Counted per app, same as the on-screen overlay — the zip step for a
 	// single app has no sub-progress to offer.
 	private func _reportProgress() {
-		guard #available(iOS 16.2, *) else { return }
 		// The archiver doesn't expose trustworthy sub-file zip progress here, so
 		// completed-app count is the meaningful progress signal for this workflow.
 		let detail: String?
@@ -60,7 +59,7 @@ final class BulkExportManager: ObservableObject {
 		} else {
 			detail = "Completed"
 		}
-		KeepAliveActivityController.shared.report(
+		BackgroundTaskManager.shared.report(
 			.bulkExport,
 			completed: exportURLs.count,
 			total: total > 0 ? total : nil,
@@ -77,11 +76,9 @@ final class BulkExportManager: ObservableObject {
 		_reset()
 		total = apps.count
 		isExporting = true
-		if #available(iOS 16.2, *) {
-			KeepAliveActivityController.shared.clearReport(.bulkExport)
-		}
+		BackgroundTaskManager.shared.clearReport(.bulkExport)
 		_reportProgress()
-		BackgroundAudioManager.shared.claim(.bulkExport)
+		BackgroundTaskManager.shared.claim(.bulkExport)
 
 		Task { await _run(apps) }
 	}
@@ -97,9 +94,6 @@ final class BulkExportManager: ObservableObject {
 		readyToPick = false
 		_cleanupWorkDirs()
 
-		// Leave the final n/total report intact through the audio linger. The next
-		// export explicitly clears it before seeding its own 0/n state.
-		BackgroundAudioManager.shared.release(.bulkExport)
 		_reset()
 	}
 
@@ -139,12 +133,15 @@ final class BulkExportManager: ObservableObject {
 
 		isExporting = false
 		_reportProgress()
+		BackgroundTaskManager.shared.release(
+			.bulkExport,
+			success: !_cancelled && _failures.isEmpty && exportURLs.count == total
+		)
 
 		if !exportURLs.isEmpty {
 			readyToPick = true
 		} else {
 			_cleanupWorkDirs()
-			BackgroundAudioManager.shared.release(.bulkExport)
 			_reportFailuresIfNeeded()
 			_reset()
 		}
