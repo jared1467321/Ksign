@@ -270,16 +270,15 @@ extension BulkSigningView {
 			// Seed one stable batch report before the first worker claims signing.
 			// Signing has no trustworthy sub-step percentage here, so the Live
 			// Activity uses completed-app count as its meaningful progress signal.
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.clearReport(.signing)
-				KeepAliveActivityController.shared.report(
-					.signing,
-					completed: 0,
-					total: configs.count,
-					fraction: nil,
-					detail: "Signing"
-				)
-			}
+			BackgroundTaskManager.shared.clearReport(.signing)
+			BackgroundTaskManager.shared.claim(.signing)
+			BackgroundTaskManager.shared.report(
+				.signing,
+				completed: 0,
+				total: configs.count,
+				fraction: nil,
+				detail: "Signing"
+			)
 
 			// The batch coordinator itself must stay off MainActor. The signing worker
 			// already runs detached; previously the continuation resumed only through
@@ -296,15 +295,13 @@ extension BulkSigningView {
 					// Publish the terminal success before any optional MainActor cleanup.
 					// Deleting the original app is UI/storage housekeeping and should not
 					// be able to hold the Island count hostage while backgrounded.
-					if #available(iOS 16.2, *) {
-						KeepAliveActivityController.shared.report(
-							.signing,
-							completed: successCount,
-							total: configs.count,
-							fraction: nil,
-							detail: "Signing"
-						)
-					}
+					BackgroundTaskManager.shared.report(
+						.signing,
+						completed: successCount,
+						total: configs.count,
+						fraction: nil,
+						detail: "Signing"
+					)
 
 					if config.options.removeApp, !config.app.isSigned {
 						await MainActor.run {
@@ -316,15 +313,14 @@ extension BulkSigningView {
 				}
 			}
 
-			if #available(iOS 16.2, *) {
-				KeepAliveActivityController.shared.report(
-					.signing,
-					completed: successCount,
-					total: configs.count,
-					fraction: nil,
-					detail: failures.isEmpty ? "Completed" : "Error"
-				)
-			}
+			BackgroundTaskManager.shared.report(
+				.signing,
+				completed: successCount,
+				total: configs.count,
+				fraction: nil,
+				detail: failures.isEmpty ? "Completed" : "Error"
+			)
+			BackgroundTaskManager.shared.release(.signing, success: failures.isEmpty)
 
 			await MainActor.run {
 				if !failures.isEmpty {
