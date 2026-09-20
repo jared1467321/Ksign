@@ -219,6 +219,7 @@ class IPADownloadManager: NSObject, ObservableObject {
     private struct IPAVaultBackgroundTaskSnapshot: Equatable {
         let completed: Int
         let total: Int
+        let fraction: Double
         let detail: String
     }
 
@@ -467,9 +468,26 @@ class IPADownloadManager: NSObject, ObservableObject {
         } else {
             detail = "Downloading from IPA Vault"
         }
+        let progressByID = Dictionary(
+            uniqueKeysWithValues: downloadItems.map { ($0.id.uuidString, min(1, max(0, $0.progress))) }
+        )
+        let aggregateFraction = min(
+            1,
+            max(
+                0,
+                ipavaultActivityItemIDs.reduce(0.0) { partial, itemID in
+                    if completedIPAVaultActivityItemIDs.contains(itemID) {
+                        return partial + 1
+                    }
+                    return partial + (progressByID[itemID] ?? 0)
+                } / Double(total)
+            )
+        )
+
         let snapshot = IPAVaultBackgroundTaskSnapshot(
             completed: completed,
             total: total,
+            fraction: aggregateFraction,
             detail: detail
         )
         guard snapshot != ipavaultBackgroundTaskSnapshot else { return }
@@ -479,7 +497,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             .ipaVaultDownloads,
             completed: completed,
             total: total,
-            fraction: nil,
+            fraction: aggregateFraction,
             detail: detail
         )
     }
