@@ -452,6 +452,26 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
     }
 
+    /// Keeps the Live Activity filename stable while IPA Vault downloads run concurrently.
+    /// The selected item remains pinned until it reaches a terminal state, then advances to
+    /// the oldest remaining item from the original queue order.
+    private func stickyIPAVaultActivityItemID() -> String? {
+        if let current = ipavaultCurrentActivityItemID,
+           ipavaultActivityItemIDs.contains(current),
+           !completedIPAVaultActivityItemIDs.contains(current) {
+            return current
+        }
+
+        let next = downloadItems.reversed().first { item in
+            let itemID = item.id.uuidString
+            return ipavaultActivityItemIDs.contains(itemID) &&
+                !completedIPAVaultActivityItemIDs.contains(itemID)
+        }?.id.uuidString
+
+        ipavaultCurrentActivityItemID = next
+        return next
+    }
+
     private func publishIPAVaultBackgroundTaskState() {
         dispatchPrecondition(condition: .onQueue(.main))
         let total = ipavaultActivityItemIDs.count
@@ -487,17 +507,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             )
         )
 
-        let currentItemID: String? = {
-            if let current = ipavaultCurrentActivityItemID,
-               ipavaultActivityItemIDs.contains(current),
-               !completedIPAVaultActivityItemIDs.contains(current) {
-                return current
-            }
-            if let active = activeIPAVaultDownloadIDs.first {
-                return active
-            }
-            return pendingIPAVaultDownloads.first?.itemID
-        }()
+        let currentItemID = stickyIPAVaultActivityItemID()
         let currentItem = currentItemID.flatMap { itemID in
             downloadItems.first(where: { $0.id.uuidString == itemID })?.title
         }
@@ -723,7 +733,6 @@ class IPADownloadManager: NSObject, ObservableObject {
             )
             ipavaultJobs[pending.itemID] = job
             activeIPAVaultDownloadIDs.insert(pending.itemID)
-            ipavaultCurrentActivityItemID = pending.itemID
             pausedIPAVaultDownloadIDs.remove(pending.itemID)
             setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
             resetIPAVaultAdaptiveMeasurements(for: job)
@@ -918,8 +927,6 @@ class IPADownloadManager: NSObject, ObservableObject {
             return partial + max(0, metadata.currentPosition - metadata.committedEnd)
         }
         let downloaded = min(job.totalBytes, max(0, job.committedBytes + uncommittedInFlight))
-
-        ipavaultCurrentActivityItemID = job.itemID
 
         var item = downloadItems[index]
         item.totalBytes = job.totalBytes
