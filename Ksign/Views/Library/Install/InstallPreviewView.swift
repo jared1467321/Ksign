@@ -93,7 +93,7 @@ struct InstallPreviewView: View {
 			}
 		}
 		.onAppear {
-			SingleInstallLiveActivityReporter.shared.begin()
+			SingleInstallLiveActivityReporter.shared.begin(name: app.name)
 			BackgroundTaskManager.shared.claim(.singleInstall)
 			_startLiveActivityBridge()
 			_install()
@@ -267,17 +267,19 @@ final class SingleInstallLiveActivityReporter {
 	private var _packageProgress: Double = 0
 	private var _installProgress: Double = 0
 	private var _fraction: Double = 0
+	private var _currentItem: String?
 	private let _serverMonitorID = UUID()
 
 	private init() { }
 
-	func begin() {
+	func begin(name: String?) {
 		_queue.sync {
 			self._active = true
 			self._stage = .packaging
 			self._packageProgress = 0
 			self._installProgress = 0
 			self._fraction = 0
+			self._currentItem = name
 
 			BackgroundTaskManager.shared.clearReport(.singleInstall)
 			self._publish()
@@ -414,10 +416,11 @@ final class SingleInstallLiveActivityReporter {
 	private func _publish() {
 		BackgroundTaskManager.shared.report(
 			.singleInstall,
-			completed: _stage == .completed ? 1 : 0,
+			completed: (_stage == .completed || _stage == .failed) ? 1 : 0,
 			total: 1,
-			fraction: _fraction,
-			detail: _stage.detail
+			fraction: _stage == .failed ? 1 : _fraction,
+			detail: _stage.detail,
+			currentItem: _currentItem
 		)
 	}
 }

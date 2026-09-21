@@ -125,7 +125,7 @@ final class InstallSession: ObservableObject {
 			do {
 				let job = try InstallJob(app: app)
 				jobs.append(job)
-				BulkInstallLiveActivityReporter.shared.register(job.id)
+				BulkInstallLiveActivityReporter.shared.register(job.id, name: app.name)
 				totalCount += 1
 				// Batched jobs are released to build a group at a time (see
 				// `_admitBatchJobs`), so only a manifest's worth of servers is ever
@@ -520,10 +520,12 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	private struct _Job {
+		var name: String?
 		var stage: _Stage = .queued
 		var packageProgress: Double = 0
 		var installProgress: Double = 0
 		var fraction: Double = 0
+		var sequence: Int = 0
 
 		var isCompleted: Bool { stage == .completed }
 		var isFailed: Bool { stage == .failed }
@@ -541,6 +543,7 @@ final class BulkInstallLiveActivityReporter {
 	private var _jobs: [UUID: _Job] = [:]
 	private var _paused = false
 	private var _active = false
+	private var _sequence = 0
 
 	private init() { }
 
@@ -549,16 +552,18 @@ final class BulkInstallLiveActivityReporter {
 			self._jobs.removeAll()
 			self._paused = false
 			self._active = true
+			self._sequence = 0
 
 			BackgroundTaskManager.shared.clearReport(.bulkInstalls)
 		}
 	}
 
-	func register(_ id: UUID) {
+	func register(_ id: UUID, name: String?) {
 		_queue.sync {
 			self._active = true
 			if self._jobs[id] == nil {
-				self._jobs[id] = _Job()
+				self._sequence += 1
+				self._jobs[id] = _Job(name: name, sequence: self._sequence)
 			}
 			self._publish()
 		}
@@ -591,6 +596,8 @@ final class BulkInstallLiveActivityReporter {
 				job.stage = .packaging
 				job.fraction = min(1, max(job.fraction, value * 0.5))
 			}
+			self._sequence += 1
+			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._publish()
@@ -614,6 +621,8 @@ final class BulkInstallLiveActivityReporter {
 			job.installProgress = value
 			job.stage = .installing
 			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
+			self._sequence += 1
+			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._publish()
@@ -659,9 +668,12 @@ final class BulkInstallLiveActivityReporter {
 				job.fraction = 1
 			case .broken:
 				job.stage = .failed
+				job.fraction = 1
 			}
 
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
+			self._sequence += 1
+			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			self._publish()
 		}
@@ -697,12 +709,21 @@ final class BulkInstallLiveActivityReporter {
 			detail = "Installing"
 		}
 
+		let currentItem = _jobs.values
+			.filter { !$0.isTerminal && $0.stage != .queued }
+			.max(by: { $0.sequence < $1.sequence })?.name
+			?? _jobs.values
+				.filter { !$0.isTerminal }
+				.max(by: { $0.sequence < $1.sequence })?.name
+			?? _jobs.values.max(by: { $0.sequence < $1.sequence })?.name
+
 		BackgroundTaskManager.shared.report(
 			.bulkInstalls,
-			completed: completed,
+			completed: completed + failed,
 			total: total,
 			fraction: aggregateFraction,
-			detail: detail
+			detail: detail,
+			currentItem: currentItem
 		)
 	}
 }
