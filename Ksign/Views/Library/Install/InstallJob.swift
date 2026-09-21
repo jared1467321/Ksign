@@ -7,12 +7,45 @@ import SwiftUI
 import Combine
 import IDeviceSwift
 import OSLog
+import Darwin
 
 // Cheap, advisory headroom for this process. Apple documents
 // `os_proc_available_memory()` as the current app memory limit minus this
 // process's footprint; it can change at any time, so every log samples fresh.
 private func _availableProcessMemoryMB() -> UInt64 {
 	UInt64(os_proc_available_memory()) / 1_048_576
+}
+
+// A point-in-time view of the process's memory envelope. `availableBytes` is
+// intentionally sampled fresh every time; Apple explicitly documents it as an
+// advisory value that can change whenever the app does work. `phys_footprint`
+// is paired with it only to estimate the *current* process budget, not to infer
+// how much physical RAM the device has.
+private struct _ProcessMemorySnapshot {
+	let availableBytes: UInt64
+	let footprintBytes: UInt64
+	let budgetBytes: UInt64
+}
+
+private func _processPhysicalFootprintBytes() -> UInt64? {
+	var info = task_vm_info_data_t()
+	var count = mach_msg_type_number_t(
+		MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+	)
+
+	let result = withUnsafeMutablePointer(to: &info) { pointer in
+		pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+			task_info(
+				mach_task_self_,
+				task_flavor_t(TASK_VM_INFO),
+				rebound,
+				&count
+			)
+		}
+	}
+
+	guard result == KERN_SUCCESS else { return nil }
+	return UInt64(info.phys_footprint)
 }
 
 // One app's install.
@@ -554,12 +587,6 @@ final class InstallJob: ObservableObject, Identifiable {
 							jobID: jobID,
 							progress: progress
 						)
-					},
-					uiProgressReporter: { progress in
-						PackageProgressUIBridge.shared.submit(
-							progress,
-							to: viewModel
-						)
 					}
 				)
 				try await handler.move()
@@ -742,20 +769,43 @@ final class InstallPromptCoordinator {
 
 // Limits how many installs run at once. Each job acquires a slot before
 // starting and releases it when it finishes (or gives up), so a large batch
-// installs a few at a time instead of all at once — the device can't actually
-// install many simultaneously, and flooding it is what leaves apps stuck.
+// installs a few at a time instead of all at once.
+//
+// For high-concurrency batch building, the configured limit is a ceiling, not
+// a command to immediately launch that many jobs. Admissions ramp one at a time
+// while the coordinator watches the process's real memory envelope. It learns
+// how much headroom each newly admitted build actually consumes and stops
+// admitting more while memory is still falling or there isn't room for another
+// observed build plus a reserve. No device-RAM-sized constants are used.
 @MainActor
 final class InstallQueueCoordinator {
 	static let shared = InstallQueueCoordinator()
 
-	// The session's desired concurrency. Memory pressure never overwrites this:
-	// it applies a temporary admission cap on top, so once pressure clears we can
-	// recover to the exact limit the current install mode requested.
+	private struct _AdmissionObservation {
+		let id: UUID
+		let startedAt: TimeInterval
+		let startAvailableBytes: UInt64
+		let startFootprintBytes: UInt64
+		var minimumAvailableBytes: UInt64
+		var maximumFootprintBytes: UInt64
+		var lastMeaningfulLowAt: TimeInterval
+		var lastMeaningfulLowBytes: UInt64
+	}
+
+	private struct _HeadroomSample {
+		let time: TimeInterval
+		let availableBytes: UInt64
+	}
+
+	// The session's requested concurrency. For batching this remains 5; adaptive
+	// memory control only decides how quickly/how far toward that ceiling it is
+	// safe to ramp at this moment.
 	private var _configuredMaxConcurrent = 3
 
-	// nil = no memory-pressure throttle. warning -> 1, critical -> 0. Existing
-	// holders are deliberately left alone; lowering this only prevents new
-	// archive/install jobs from entering until enough current work has drained.
+	// Kernel pressure is the emergency brake. It never rewrites the configured
+	// ceiling. Warning/critical both block *new* admissions; existing holders are
+	// allowed to finish naturally. Once the kernel reports normal again, a short
+	// cooldown ends and the adaptive controller takes over the ramp from there.
 	private var _memoryPressureLimit: Int?
 	private var _memoryRecoveryTask: Task<Void, Never>?
 
@@ -765,19 +815,29 @@ final class InstallQueueCoordinator {
 	)
 	private var _memoryPressureSource: DispatchSourceMemoryPressure?
 
-	func setMaxConcurrent(_ n: Int) {
-		_configuredMaxConcurrent = max(1, n)
-	}
+	// Adaptive admission state. The timing values merely control observation
+	// cadence; unlike the old MB buckets, none encode an assumed device size.
+	private let _admissionObservationWindow: TimeInterval = 0.8
+	private let _headroomSettleWindow: TimeInterval = 0.35
+	private let _recentTrendWindow: TimeInterval = 1.2
+	private let _sampleInterval: TimeInterval = 0.10
+	private let _footprintSampleInterval: TimeInterval = 0.50
+
+	private var _admissionObservation: _AdmissionObservation?
+	private var _learnedBuildCostBytes: Double?
+	private var _recentHeadroom: [_HeadroomSample] = []
+	private var _lastHeadroomSampleAt: TimeInterval = 0
+	private var _cachedFootprintBytes: UInt64?
+	private var _cachedBudgetBytes: UInt64?
+	private var _cachedFootprintAt: TimeInterval = 0
+	private var _lastAdaptiveState: String?
+	private var _didLogSnapshotFailure = false
 
 	// Who holds a slot, rather than how many are held.
 	//
 	// A bare counter trusts every caller to increment and decrement exactly
-	// once, and three separate bugs have now come from that trust being
-	// misplaced — a double release, a task that claimed a slot and returned
-	// without giving it back, a dead job whose queued task claimed one later.
-	// Tracking identity makes the operations idempotent: releasing twice does
-	// nothing, releasing something that never held a slot does nothing, and
-	// claiming twice can't double-count because it's a set.
+	// once. Tracking identity makes release/claim idempotent and also gives the
+	// adaptive learner an exact count of expensive build jobs currently alive.
 	private var _holders: Set<UUID> = []
 	private var _isPaused = false
 
@@ -787,6 +847,13 @@ final class InstallQueueCoordinator {
 
 	var activeCount: Int { _holders.count }
 
+	private var _usesAdaptiveMemoryAdmission: Bool {
+		// The ordinary install path is intentionally capped at 3 already. The
+		// adaptive ramp exists for the higher-concurrency batch builder, where 5
+		// remains the desired ceiling when memory permits it.
+		_configuredMaxConcurrent > 3
+	}
+
 	private var _effectiveMaxConcurrent: Int {
 		guard let pressureLimit = _memoryPressureLimit else {
 			return _configuredMaxConcurrent
@@ -794,17 +861,25 @@ final class InstallQueueCoordinator {
 		return min(_configuredMaxConcurrent, pressureLimit)
 	}
 
-	// Pausing works by simply declining to hand out slots. Jobs already
-	// holding one never consult this again, so anything mid-install runs to
-	// completion untouched — exactly the "let what's running finish" behaviour.
+	func setMaxConcurrent(_ n: Int) {
+		let newValue = max(1, n)
+		guard newValue != _configuredMaxConcurrent else { return }
+
+		_configuredMaxConcurrent = newValue
+		_resetAdaptiveLearning()
+	}
+
+	// Pausing works by simply declining to hand out slots. Jobs already holding
+	// one never consult this again, so anything mid-build/install runs to
+	// completion untouched.
 	func setPaused(_ paused: Bool) {
 		_isPaused = paused
 	}
 
 	// Waits until a slot is free, then claims it for `id` and returns true.
-	// Returns false if the calling task is cancelled while waiting — in that
-	// case nothing is claimed. Because this runs on the main actor the
-	// check-and-claim is atomic and two installs can't grab the same slot.
+	// Returns false if the calling task is cancelled while waiting. Because this
+	// runs on MainActor, check + admission + claim are atomic: waiting jobs cannot
+	// all sample the same headroom and stampede through together.
 	func acquire(for id: UUID) async -> Bool {
 		while true {
 			if Task.isCancelled { return false }
@@ -813,23 +888,363 @@ final class InstallQueueCoordinator {
 
 			let effectiveMax = _effectiveMaxConcurrent
 			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax {
-				_holders.insert(id)
-				return true
+				if !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: id) {
+					_holders.insert(id)
+					if _usesAdaptiveMemoryAdmission {
+						_beginAdmissionObservation(for: id)
+					}
+					return true
+				}
 			}
-			// Back off while paused or critically memory-throttled. A pause can
-			// last minutes, and a big batch means one waiting task per queued app.
-			// There's no reason to wake twenty of them ten times a second while no
-			// admission is possible. Warning pressure still checks at the normal
-			// cadence because a single slot may open as existing work drains.
+
+			// A paused/pressure-blocked queue can sleep longer. During adaptive
+			// throttling we intentionally wake at the sampling cadence so the next
+			// slot can be admitted as soon as headroom stabilizes or recovers.
 			let fullyStopped = _isPaused || effectiveMax == 0
 			try? await Task.sleep(
-				nanoseconds: fullyStopped ? 500_000_000 : 100_000_000
+				nanoseconds: fullyStopped
+					? 500_000_000
+					: UInt64(_sampleInterval * 1_000_000_000)
 			)
 		}
 	}
 
 	func release(_ id: UUID) {
-		_holders.remove(id)
+		guard _holders.remove(id) != nil else { return }
+
+		// Capture one last sample while the just-finished job's footprint is still
+		// representative. If this was the newest admission, its observation can
+		// now contribute to the learned cost even if no waiter happened to sample
+		// after the observation window elapsed.
+		if _usesAdaptiveMemoryAdmission {
+			let now = ProcessInfo.processInfo.systemUptime
+			if let snapshot = _adaptiveMemorySnapshot(at: now, forceFootprint: true) {
+				_recordHeadroomSample(snapshot.availableBytes, at: now)
+				_updateAdmissionObservation(with: snapshot, at: now)
+			}
+			if _admissionObservation?.id == id {
+				_finalizeAdmissionObservation(now: now, force: true)
+			}
+		}
+	}
+
+	// MARK: - Adaptive memory admission
+
+	private func _adaptiveAdmissionIsSafe(for id: UUID) -> Bool {
+		let now = ProcessInfo.processInfo.systemUptime
+		guard let snapshot = _adaptiveMemorySnapshot(at: now), snapshot.budgetBytes > 0 else {
+			if !_didLogSnapshotFailure {
+				_didLogSnapshotFailure = true
+				Logger.misc.warning(
+					"Adaptive archive admission couldn't read TASK_VM_INFO; falling back to configured limit plus kernel pressure events"
+				)
+			}
+			return true
+		}
+
+		_didLogSnapshotFailure = false
+		_recordHeadroomSample(snapshot.availableBytes, at: now)
+		_updateAdmissionObservation(with: snapshot, at: now)
+
+		// Never admit the next job immediately behind the previous one. The newest
+		// job gets a short observation window in which its real footprint/headroom
+		// effect becomes visible. This closes the old race where five waiters all
+		// saw essentially the same pre-allocation memory state.
+		if let observation = _admissionObservation {
+			let age = now - observation.startedAt
+			if age < _admissionObservationWindow {
+				_logAdaptiveHold(
+					"observing newest build",
+					snapshot: snapshot,
+					estimatedCostBytes: _estimatedNextBuildCost(snapshot: snapshot)
+				)
+				return false
+			}
+
+			let sinceLow = now - observation.lastMeaningfulLowAt
+			if sinceLow < _headroomSettleWindow {
+				_logAdaptiveHold(
+					"headroom still settling",
+					snapshot: snapshot,
+					estimatedCostBytes: _estimatedNextBuildCost(snapshot: snapshot)
+				)
+				return false
+			}
+
+			_finalizeAdmissionObservation(now: now, force: false)
+		}
+
+		let estimatedCost = _estimatedNextBuildCost(snapshot: snapshot)
+		let reserve = _dynamicReserveBytes(snapshot: snapshot, estimatedCostBytes: estimatedCost)
+		let required = estimatedCost + reserve
+
+		guard Double(snapshot.availableBytes) > required else {
+			_logAdaptiveHold(
+				"insufficient learned headroom",
+				snapshot: snapshot,
+				estimatedCostBytes: estimatedCost,
+				reserveBytes: reserve
+			)
+			return false
+		}
+
+		// Even with adequate absolute headroom, don't add another build while the
+		// latest samples show it is still materially falling. The threshold is
+		// expressed as a fraction of one learned/provisional build cost, not MB.
+		if _recentHeadroomIsFalling(estimatedCostBytes: estimatedCost, now: now) {
+			_logAdaptiveHold(
+				"headroom is still falling",
+				snapshot: snapshot,
+				estimatedCostBytes: estimatedCost,
+				reserveBytes: reserve
+			)
+			return false
+		}
+
+		let activeAfter = _holders.count + 1
+		let availableMB = _bytesToMB(snapshot.availableBytes)
+		let footprintMB = _bytesToMB(snapshot.footprintBytes)
+		let budgetMB = _bytesToMB(snapshot.budgetBytes)
+		let learnedMB = _bytesToMB(estimatedCost)
+		let reserveMB = _bytesToMB(reserve)
+		let state = "admit-\(activeAfter)"
+		if _lastAdaptiveState != state {
+			_lastAdaptiveState = state
+			Logger.misc.info(
+				"Adaptive archive admission -> \(activeAfter)/\(self._configuredMaxConcurrent); available=\(availableMB) MB, footprint=\(footprintMB) MB, budget=\(budgetMB) MB, estimatedNext=\(learnedMB) MB, reserve=\(reserveMB) MB"
+			)
+		}
+		return true
+	}
+
+	private func _beginAdmissionObservation(for id: UUID) {
+		let now = ProcessInfo.processInfo.systemUptime
+		guard let snapshot = _adaptiveMemorySnapshot(at: now) else {
+			_admissionObservation = nil
+			return
+		}
+
+		_recordHeadroomSample(snapshot.availableBytes, at: now)
+		_admissionObservation = _AdmissionObservation(
+			id: id,
+			startedAt: now,
+			startAvailableBytes: snapshot.availableBytes,
+			startFootprintBytes: snapshot.footprintBytes,
+			minimumAvailableBytes: snapshot.availableBytes,
+			maximumFootprintBytes: snapshot.footprintBytes,
+			lastMeaningfulLowAt: now,
+			lastMeaningfulLowBytes: snapshot.availableBytes
+		)
+	}
+
+	// `os_proc_available_memory()` is cheap enough to sample at the admission
+	// cadence; `task_info` is not. Keep available memory fresh on every decision
+	// while sampling physical footprint only twice per second (or explicitly at
+	// release). That preserves the useful budget estimate without turning a large
+	// waiter pool into a storm of expensive Mach calls.
+	private func _adaptiveMemorySnapshot(
+		at now: TimeInterval,
+		forceFootprint: Bool = false
+	) -> _ProcessMemorySnapshot? {
+		let available = UInt64(os_proc_available_memory())
+		let footprint: UInt64
+		let budget: UInt64
+
+		if !forceFootprint,
+		   let cachedFootprint = _cachedFootprintBytes,
+		   let cachedBudget = _cachedBudgetBytes,
+		   now - _cachedFootprintAt < _footprintSampleInterval {
+			footprint = cachedFootprint
+			budget = cachedBudget
+		} else {
+			guard let sampled = _processPhysicalFootprintBytes() else { return nil }
+			let sampledBudget = available &+ sampled
+			_cachedFootprintBytes = sampled
+			_cachedBudgetBytes = sampledBudget
+			_cachedFootprintAt = now
+			footprint = sampled
+			budget = sampledBudget
+		}
+
+		return _ProcessMemorySnapshot(
+			availableBytes: available,
+			footprintBytes: footprint,
+			budgetBytes: budget
+		)
+	}
+
+	private func _updateAdmissionObservation(
+		with snapshot: _ProcessMemorySnapshot,
+		at now: TimeInterval
+	) {
+		guard var observation = _admissionObservation else { return }
+
+		observation.minimumAvailableBytes = min(
+			observation.minimumAvailableBytes,
+			snapshot.availableBytes
+		)
+		observation.maximumFootprintBytes = max(
+			observation.maximumFootprintBytes,
+			snapshot.footprintBytes
+		)
+
+		// Ignore tiny scheduler/cache wiggles when deciding whether the newest job
+		// is still driving headroom lower. "Meaningful" scales with the currently
+		// estimated cost of one build, so it adapts with both device and workload.
+		let estimatedCost = _estimatedNextBuildCost(snapshot: snapshot)
+		let meaningfulDrop = max(1.0, estimatedCost * 0.03)
+		if observation.lastMeaningfulLowBytes > snapshot.availableBytes {
+			let drop = Double(observation.lastMeaningfulLowBytes - snapshot.availableBytes)
+			if drop >= meaningfulDrop {
+				observation.lastMeaningfulLowBytes = snapshot.availableBytes
+				observation.lastMeaningfulLowAt = now
+			}
+		}
+
+		_admissionObservation = observation
+	}
+
+	private func _finalizeAdmissionObservation(now: TimeInterval, force: Bool) {
+		guard let observation = _admissionObservation else { return }
+		if !force {
+			guard now - observation.startedAt >= _admissionObservationWindow else { return }
+			guard now - observation.lastMeaningfulLowAt >= _headroomSettleWindow else { return }
+		}
+
+		let availableDrop = observation.startAvailableBytes > observation.minimumAvailableBytes
+			? observation.startAvailableBytes - observation.minimumAvailableBytes
+			: 0
+		let footprintRise = observation.maximumFootprintBytes > observation.startFootprintBytes
+			? observation.maximumFootprintBytes - observation.startFootprintBytes
+			: 0
+		let observedCost = Double(max(availableDrop, footprintRise))
+
+		if observedCost > 0 {
+			if let learned = _learnedBuildCostBytes {
+				// React quickly when a build is more expensive than expected, but let
+				// the estimate decay slowly when later builds are cheaper. That bias is
+				// deliberate: underestimating the next admission is the dangerous side.
+				if observedCost > learned {
+					_learnedBuildCostBytes = learned * 0.35 + observedCost * 0.65
+				} else {
+					_learnedBuildCostBytes = learned * 0.90 + observedCost * 0.10
+				}
+			} else {
+				_learnedBuildCostBytes = observedCost
+			}
+
+			if let learnedNow = _learnedBuildCostBytes {
+				Logger.misc.info(
+					"Adaptive archive learner observed \(self._bytesToMB(observedCost)) MB; learned build cost=\(self._bytesToMB(learnedNow)) MB"
+				)
+			}
+		}
+
+		_admissionObservation = nil
+	}
+
+	private func _estimatedNextBuildCost(snapshot: _ProcessMemorySnapshot) -> Double {
+		if let learned = _learnedBuildCostBytes, learned > 0 {
+			return learned
+		}
+
+		// Bootstrap without assuming device RAM: before the first build teaches us
+		// its cost, divide the process's *measured current budget* into the desired
+		// concurrency plus one reserve share. The estimate disappears as soon as
+		// real observations are available.
+		return Double(snapshot.budgetBytes) / Double(_configuredMaxConcurrent + 1)
+	}
+
+	private func _dynamicReserveBytes(
+		snapshot: _ProcessMemorySnapshot,
+		estimatedCostBytes: Double
+	) -> Double {
+		// Always retain at least one equal-share slice of the current process
+		// budget. After learning begins, also reserve one whole observed next-build
+		// cost. Recent headroom volatility can enlarge the reserve further.
+		let budgetShare = Double(snapshot.budgetBytes) / Double(_configuredMaxConcurrent + 1)
+		let volatility = _recentHeadroomVolatilityBytes()
+		return max(budgetShare, estimatedCostBytes, volatility)
+	}
+
+	private func _recordHeadroomSample(_ availableBytes: UInt64, at now: TimeInterval) {
+		guard now - _lastHeadroomSampleAt >= _sampleInterval * 0.75 else { return }
+		_lastHeadroomSampleAt = now
+		_recentHeadroom.append(_HeadroomSample(time: now, availableBytes: availableBytes))
+
+		let cutoff = now - _recentTrendWindow
+		_recentHeadroom.removeAll { $0.time < cutoff }
+	}
+
+	private func _recentHeadroomVolatilityBytes() -> Double {
+		guard let first = _recentHeadroom.first else { return 0 }
+		var low = first.availableBytes
+		var high = first.availableBytes
+		for sample in _recentHeadroom.dropFirst() {
+			low = min(low, sample.availableBytes)
+			high = max(high, sample.availableBytes)
+		}
+		return Double(high - low)
+	}
+
+	private func _recentHeadroomIsFalling(
+		estimatedCostBytes: Double,
+		now: TimeInterval
+	) -> Bool {
+		let cutoff = now - _admissionObservationWindow
+		guard let first = _recentHeadroom.first(where: { $0.time >= cutoff }),
+			  let last = _recentHeadroom.last,
+			  last.time > first.time,
+			  first.availableBytes > last.availableBytes else {
+			return false
+		}
+
+		let drop = Double(first.availableBytes - last.availableBytes)
+		return drop >= max(1.0, estimatedCostBytes * 0.25)
+	}
+
+	private func _logAdaptiveHold(
+		_ reason: String,
+		snapshot: _ProcessMemorySnapshot,
+		estimatedCostBytes: Double,
+		reserveBytes: Double? = nil
+	) {
+		let state = "hold:\(reason):\(_holders.count)"
+		guard state != _lastAdaptiveState else { return }
+		_lastAdaptiveState = state
+
+		let availableMB = _bytesToMB(snapshot.availableBytes)
+		let footprintMB = _bytesToMB(snapshot.footprintBytes)
+		let estimatedMB = _bytesToMB(estimatedCostBytes)
+		if let reserveBytes {
+			Logger.misc.notice(
+				"Adaptive archive hold at \(self._holders.count)/\(self._configuredMaxConcurrent): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB, reserve=\(self._bytesToMB(reserveBytes)) MB"
+			)
+		} else {
+			Logger.misc.notice(
+				"Adaptive archive hold at \(self._holders.count)/\(self._configuredMaxConcurrent): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB"
+			)
+		}
+	}
+
+	private func _bytesToMB(_ bytes: UInt64) -> Int {
+		Int(bytes / 1_048_576)
+	}
+
+	private func _bytesToMB(_ bytes: Double) -> Int {
+		Int(max(0, bytes) / 1_048_576)
+	}
+
+	private func _resetAdaptiveLearning() {
+		_admissionObservation = nil
+		_learnedBuildCostBytes = nil
+		_recentHeadroom.removeAll(keepingCapacity: true)
+		_lastHeadroomSampleAt = 0
+		_cachedFootprintBytes = nil
+		_cachedBudgetBytes = nil
+		_cachedFootprintAt = 0
+		_lastAdaptiveState = nil
+		_didLogSnapshotFailure = false
 	}
 
 	// MARK: - Memory pressure
@@ -857,15 +1272,14 @@ final class InstallQueueCoordinator {
 		_ event: DispatchSource.MemoryPressureEvent,
 		availableMB: UInt64
 	) {
-		// Multiple flags may theoretically be present; always honor the most
-		// restrictive state first. A new warning/critical event cancels any
-		// gradual recovery already in flight.
+		// Pressure notifications are deliberately only the emergency brake. The
+		// proactive adaptive gate above should normally have throttled first.
 		if event.contains(.critical) {
 			_memoryRecoveryTask?.cancel()
 			_memoryRecoveryTask = nil
 			_memoryPressureLimit = 0
 			Logger.misc.critical(
-				"Memory pressure CRITICAL; pausing new archive admissions. active=\(self._holders.count), available=\(availableMB) MB"
+				"Memory pressure CRITICAL; blocking new archive admissions. active=\(self._holders.count), available=\(availableMB) MB"
 			)
 			return
 		}
@@ -873,9 +1287,9 @@ final class InstallQueueCoordinator {
 		if event.contains(.warning) {
 			_memoryRecoveryTask?.cancel()
 			_memoryRecoveryTask = nil
-			_memoryPressureLimit = 1
+			_memoryPressureLimit = 0
 			Logger.misc.warning(
-				"Memory pressure WARNING; throttling archive admissions to 1. active=\(self._holders.count), available=\(availableMB) MB"
+				"Memory pressure WARNING; blocking new archive admissions. active=\(self._holders.count), available=\(availableMB) MB"
 			)
 			return
 		}
@@ -887,48 +1301,29 @@ final class InstallQueueCoordinator {
 	private func _beginMemoryRecovery(availableMB: UInt64) {
 		_memoryRecoveryTask?.cancel()
 		Logger.misc.notice(
-			"Memory pressure returned to NORMAL; beginning gradual recovery. active=\(self._holders.count), available=\(availableMB) MB"
+			"Memory pressure returned to NORMAL; holding admissions briefly before adaptive recovery. active=\(self._holders.count), available=\(availableMB) MB"
 		)
 
-		// Keep the current pressure cap for a short cooldown first. In
-		// particular, coming back from critical stays at zero briefly instead of
-		// immediately launching a fresh compressor the instant the kernel flips
-		// back to normal. Then recover 1 -> 2 -> configured limit.
 		_memoryRecoveryTask = Task { @MainActor [weak self] in
 			do {
-				try await Task.sleep(nanoseconds: 3_000_000_000)
+				try await Task.sleep(nanoseconds: 2_000_000_000)
 				guard let self, !Task.isCancelled else { return }
-				self._memoryPressureLimit = 1
-				Logger.misc.notice(
-					"Memory recovery: archive admission cap -> 1; available=\(_availableProcessMemoryMB()) MB"
-				)
-
-				try await Task.sleep(nanoseconds: 3_000_000_000)
-				guard !Task.isCancelled else { return }
-				self._memoryPressureLimit = min(2, self._configuredMaxConcurrent)
-				Logger.misc.notice(
-					"Memory recovery: archive admission cap -> \(self._effectiveMaxConcurrent); available=\(_availableProcessMemoryMB()) MB"
-				)
-
-				try await Task.sleep(nanoseconds: 3_000_000_000)
-				guard !Task.isCancelled else { return }
 				self._memoryPressureLimit = nil
 				self._memoryRecoveryTask = nil
+				// Do not force 1 -> 2 -> 5 here. Clearing the emergency brake merely
+				// hands control back to the measured adaptive admission logic.
 				Logger.misc.notice(
-					"Memory recovery complete; archive admission limit restored to \(self._configuredMaxConcurrent); available=\(_availableProcessMemoryMB()) MB"
+					"Memory-pressure cooldown complete; adaptive archive admission resumed. active=\(self._holders.count), available=\(_availableProcessMemoryMB()) MB"
 				)
 			} catch {
-				// Cancellation means a fresh warning/critical event superseded the
-				// recovery. Its handler already installed the new, safer cap.
+				// A fresh warning/critical event superseded this recovery.
 			}
 		}
 	}
 
 	// The safety net. Any slot held by a job the session no longer knows about
-	// can't ever be released by its owner, because its owner is gone — so the
-	// queue reclaims it. This is why there's no "reset the queue" button: a
-	// leak repairs itself on the next attempt to acquire, rather than needing
-	// someone to notice the queue is wedged and press something.
+	// can't ever be released by its owner, because its owner is gone — reclaim it
+	// on the next acquisition attempt instead of wedging the queue indefinitely.
 	private func _reclaimOrphans() {
 		let live = Set(InstallSession.shared.jobs.map { $0.id })
 		let orphaned = _holders.subtracting(live)
