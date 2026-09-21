@@ -8,6 +8,13 @@ import Combine
 import IDeviceSwift
 import OSLog
 
+// Cheap, advisory headroom for this process. Apple documents
+// `os_proc_available_memory()` as the current app memory limit minus this
+// process's footprint; it can change at any time, so every log samples fresh.
+private func _availableProcessMemoryMB() -> UInt64 {
+	UInt64(os_proc_available_memory()) / 1_048_576
+}
+
 // One app's install.
 //
 // All of this used to live inside `BulkInstallProgressView` as `@State` and
@@ -552,7 +559,16 @@ final class InstallJob: ObservableObject, Identifiable {
 				try await handler.move()
 
 				let workDir = await handler.workDir
+				let archiveLabel = app.name ?? app.identifier ?? "unknown"
+				let beforeArchiveMB = _availableProcessMemoryMB()
+				Logger.misc.info(
+					"Archive memory headroom before packaging [\(archiveLabel, privacy: .public)]: \(beforeArchiveMB) MB"
+				)
 				let packageUrl = try await handler.archive()
+				let afterArchiveMB = _availableProcessMemoryMB()
+				Logger.misc.info(
+					"Archive memory headroom after packaging [\(archiveLabel, privacy: .public)]: \(afterArchiveMB) MB"
+				)
 
 				await MainActor.run { [weak self] in
 					self?._archiveWorkDir = workDir
@@ -726,13 +742,25 @@ final class InstallPromptCoordinator {
 final class InstallQueueCoordinator {
 	static let shared = InstallQueueCoordinator()
 
-	// How many installs may be active at once. Raised to the batch group size
-	// while batching server installs so a whole group can reach `.ready`
-	// together, and set back down otherwise. Driven by `InstallSession`.
-	private var _maxConcurrent = 3
+	// The session's desired concurrency. Memory pressure never overwrites this:
+	// it applies a temporary admission cap on top, so once pressure clears we can
+	// recover to the exact limit the current install mode requested.
+	private var _configuredMaxConcurrent = 3
+
+	// nil = no memory-pressure throttle. warning -> 1, critical -> 0. Existing
+	// holders are deliberately left alone; lowering this only prevents new
+	// archive/install jobs from entering until enough current work has drained.
+	private var _memoryPressureLimit: Int?
+	private var _memoryRecoveryTask: Task<Void, Never>?
+
+	private let _memoryPressureQueue = DispatchQueue(
+		label: "nya.asami.ksign.install-memory-pressure",
+		qos: .userInitiated
+	)
+	private var _memoryPressureSource: DispatchSourceMemoryPressure?
 
 	func setMaxConcurrent(_ n: Int) {
-		_maxConcurrent = max(1, n)
+		_configuredMaxConcurrent = max(1, n)
 	}
 
 	// Who holds a slot, rather than how many are held.
@@ -747,9 +775,18 @@ final class InstallQueueCoordinator {
 	private var _holders: Set<UUID> = []
 	private var _isPaused = false
 
-	private init() {}
+	private init() {
+		_startMemoryPressureMonitoring()
+	}
 
 	var activeCount: Int { _holders.count }
+
+	private var _effectiveMaxConcurrent: Int {
+		guard let pressureLimit = _memoryPressureLimit else {
+			return _configuredMaxConcurrent
+		}
+		return min(_configuredMaxConcurrent, pressureLimit)
+	}
 
 	// Pausing works by simply declining to hand out slots. Jobs already
 	// holding one never consult this again, so anything mid-install runs to
@@ -768,19 +805,117 @@ final class InstallQueueCoordinator {
 
 			_reclaimOrphans()
 
-			if !_isPaused, _holders.count < _maxConcurrent {
+			let effectiveMax = _effectiveMaxConcurrent
+			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax {
 				_holders.insert(id)
 				return true
 			}
-			// Back off while paused. A pause can last minutes, and a big batch
-			// means one waiting task per queued app — no reason to have twenty
-			// of them waking ten times a second to learn nothing has changed.
-			try? await Task.sleep(nanoseconds: _isPaused ? 500_000_000 : 100_000_000)
+			// Back off while paused or critically memory-throttled. A pause can
+			// last minutes, and a big batch means one waiting task per queued app.
+			// There's no reason to wake twenty of them ten times a second while no
+			// admission is possible. Warning pressure still checks at the normal
+			// cadence because a single slot may open as existing work drains.
+			let fullyStopped = _isPaused || effectiveMax == 0
+			try? await Task.sleep(
+				nanoseconds: fullyStopped ? 500_000_000 : 100_000_000
+			)
 		}
 	}
 
 	func release(_ id: UUID) {
 		_holders.remove(id)
+	}
+
+	// MARK: - Memory pressure
+
+	private func _startMemoryPressureMonitoring() {
+		let source = DispatchSource.makeMemoryPressureSource(
+			eventMask: .all,
+			queue: _memoryPressureQueue
+		)
+
+		source.setEventHandler { [weak self] in
+			let event = source.data
+			let availableMB = _availableProcessMemoryMB()
+
+			Task { @MainActor [weak self] in
+				self?._handleMemoryPressure(event, availableMB: availableMB)
+			}
+		}
+
+		_memoryPressureSource = source
+		source.activate()
+	}
+
+	private func _handleMemoryPressure(
+		_ event: DispatchSource.MemoryPressureEvent,
+		availableMB: UInt64
+	) {
+		// Multiple flags may theoretically be present; always honor the most
+		// restrictive state first. A new warning/critical event cancels any
+		// gradual recovery already in flight.
+		if event.contains(.critical) {
+			_memoryRecoveryTask?.cancel()
+			_memoryRecoveryTask = nil
+			_memoryPressureLimit = 0
+			Logger.misc.critical(
+				"Memory pressure CRITICAL; pausing new archive admissions. active=\(self._holders.count), available=\(availableMB) MB"
+			)
+			return
+		}
+
+		if event.contains(.warning) {
+			_memoryRecoveryTask?.cancel()
+			_memoryRecoveryTask = nil
+			_memoryPressureLimit = 1
+			Logger.misc.warning(
+				"Memory pressure WARNING; throttling archive admissions to 1. active=\(self._holders.count), available=\(availableMB) MB"
+			)
+			return
+		}
+
+		guard event.contains(.normal), _memoryPressureLimit != nil else { return }
+		_beginMemoryRecovery(availableMB: availableMB)
+	}
+
+	private func _beginMemoryRecovery(availableMB: UInt64) {
+		_memoryRecoveryTask?.cancel()
+		Logger.misc.notice(
+			"Memory pressure returned to NORMAL; beginning gradual recovery. active=\(self._holders.count), available=\(availableMB) MB"
+		)
+
+		// Keep the current pressure cap for a short cooldown first. In
+		// particular, coming back from critical stays at zero briefly instead of
+		// immediately launching a fresh compressor the instant the kernel flips
+		// back to normal. Then recover 1 -> 2 -> configured limit.
+		_memoryRecoveryTask = Task { @MainActor [weak self] in
+			do {
+				try await Task.sleep(nanoseconds: 3_000_000_000)
+				guard let self, !Task.isCancelled else { return }
+				self._memoryPressureLimit = 1
+				Logger.misc.notice(
+					"Memory recovery: archive admission cap -> 1; available=\(_availableProcessMemoryMB()) MB"
+				)
+
+				try await Task.sleep(nanoseconds: 3_000_000_000)
+				guard !Task.isCancelled else { return }
+				self._memoryPressureLimit = min(2, self._configuredMaxConcurrent)
+				Logger.misc.notice(
+					"Memory recovery: archive admission cap -> \(self._effectiveMaxConcurrent); available=\(_availableProcessMemoryMB()) MB"
+				)
+
+				try await Task.sleep(nanoseconds: 3_000_000_000)
+				guard !Task.isCancelled else { return }
+				self._memoryPressureLimit = nil
+				self._memoryRecoveryTask = nil
+				Logger.misc.notice(
+					"Memory recovery complete; archive admission limit restored to \(self._configuredMaxConcurrent); available=\(_availableProcessMemoryMB()) MB"
+				)
+			} catch {
+				// Cancellation means a fresh warning/critical event superseded the
+				// recovery. Its handler already installed the new, safer cap.
+			}
+		}
 	}
 
 	// The safety net. Any slot held by a job the session no longer knows about
