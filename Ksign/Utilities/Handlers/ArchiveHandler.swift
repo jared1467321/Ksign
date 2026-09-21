@@ -11,6 +11,175 @@ import ASignArchiveKit
 import SwiftUI
 import IDeviceSwift
 
+// Keeps high-frequency package progress from building an unbounded backlog of
+// main-queue blocks while Ksign is backgrounded or while the main thread is
+// temporarily busy. Packaging itself and all non-UI progress reporting continue
+// at full cadence; only the drawer's package-progress delivery hop is coalesced.
+//
+// While active, a producer that the main queue can keep up with still delivers
+// every update. If another value arrives while one delivery is already queued,
+// the queued delivery picks up the newest value instead of adding another block.
+// While inactive, no package-progress blocks are enqueued at all; only the newest
+// value per view model is retained and flushed on didBecomeActive.
+final class PackageProgressUIBridge {
+	static let shared = PackageProgressUIBridge()
+
+	private struct Pending {
+		var latest: (() -> Void)?
+		var deliveryQueued = false
+	}
+
+	private let _lock = NSLock()
+	private var _isAppActive = false
+	private var _pending: [ObjectIdentifier: Pending] = [:]
+	private var _observers: [NSObjectProtocol] = []
+
+	private init() {
+		let center = NotificationCenter.default
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.willResignActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(false)
+		})
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.didEnterBackgroundNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(false)
+		})
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.didBecomeActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(true)
+		})
+
+		// The singleton can first be touched by an archive worker, so take the
+		// UIKit state snapshot on main rather than assuming init ran there.
+		DispatchQueue.main.async { [weak self] in
+			guard let self else { return }
+			self._setAppActive(UIApplication.shared.applicationState == .active)
+		}
+	}
+
+	deinit {
+		for observer in _observers {
+			NotificationCenter.default.removeObserver(observer)
+		}
+	}
+
+	func submit(
+		_ value: Double,
+		to viewModel: InstallerStatusViewModel
+	) {
+		let key = ObjectIdentifier(viewModel)
+		var shouldQueueDelivery = false
+
+		_lock.lock()
+		var entry = _pending[key] ?? Pending()
+		entry.latest = { [weak viewModel] in
+			viewModel?.packageProgress = value
+		}
+
+		if _isAppActive && !entry.deliveryQueued {
+			entry.deliveryQueued = true
+			shouldQueueDelivery = true
+		}
+
+		_pending[key] = entry
+		_lock.unlock()
+
+		if shouldQueueDelivery {
+			_queueDelivery(for: key)
+		}
+	}
+
+	private func _queueDelivery(for key: ObjectIdentifier) {
+		DispatchQueue.main.async { [weak self] in
+			self?._deliverLatest(for: key)
+		}
+	}
+
+	private func _deliverLatest(for key: ObjectIdentifier) {
+		var update: (() -> Void)?
+
+		_lock.lock()
+		guard _isAppActive, var entry = _pending[key] else {
+			if var entry = _pending[key] {
+				entry.deliveryQueued = false
+				_pending[key] = entry
+			}
+			_lock.unlock()
+			return
+		}
+
+		// Consume the newest value available now. A callback arriving while this
+		// assignment runs simply becomes the next latest value for this job.
+		update = entry.latest
+		entry.latest = nil
+		_pending[key] = entry
+		_lock.unlock()
+
+		update?()
+
+		var shouldQueueAgain = false
+		_lock.lock()
+		if var entry = _pending[key] {
+			if _isAppActive, entry.latest != nil {
+				// Keep deliveryQueued true: this key still has exactly one drawer
+				// update outstanding, never an unbounded list of stale updates.
+				shouldQueueAgain = true
+				_pending[key] = entry
+			} else if entry.latest == nil {
+				// No pending value remains, so don't retain idle job identifiers.
+				_pending.removeValue(forKey: key)
+			} else {
+				// The app became inactive while the delivery was running. Keep
+				// only the newest value and let didBecomeActive flush it later.
+				entry.deliveryQueued = false
+				_pending[key] = entry
+			}
+		}
+		_lock.unlock()
+
+		if shouldQueueAgain {
+			_queueDelivery(for: key)
+		}
+	}
+
+	private func _setAppActive(_ active: Bool) {
+		var keysToFlush: [ObjectIdentifier] = []
+
+		_lock.lock()
+		_isAppActive = active
+
+		if active {
+			for key in Array(_pending.keys) {
+				guard var entry = _pending[key],
+					entry.latest != nil,
+					!entry.deliveryQueued
+				else { continue }
+
+				entry.deliveryQueued = true
+				_pending[key] = entry
+				keysToFlush.append(key)
+			}
+		}
+		_lock.unlock()
+
+		for key in keysToFlush {
+			_queueDelivery(for: key)
+		}
+	}
+}
+
 final class ArchiveHandler: NSObject, FileManagerDelegate {
 	@ObservedObject var viewModel: InstallerStatusViewModel
 	
@@ -21,6 +190,7 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	private var _app: AppInfoPresentable
 	private let _uniqueWorkDir: URL
 	private let _progressReporter: ((Double) -> Void)?
+	private let _uiProgressReporter: ((Double) -> Void)?
 
 	// Packaging has two real pieces of work before the install prompt can fire:
 	// preparing Payload (recursive hard-link/copy) and creating the IPA. The
@@ -43,11 +213,13 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	init(
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
-		progressReporter: ((Double) -> Void)? = nil
+		progressReporter: ((Double) -> Void)? = nil,
+		uiProgressReporter: ((Double) -> Void)? = nil
 	) {
 		self.viewModel = viewModel
 		self._app = app
 		self._progressReporter = progressReporter
+		self._uiProgressReporter = uiProgressReporter
 		self._uniqueWorkDir = _fileManager.temporaryDirectory
 			.appendingPathComponent("FeatherInstall_\(_uuid)", isDirectory: true)
 		
@@ -196,8 +368,13 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 		let value = min(1, max(0, progress))
 		_progressReporter?(value)
 
-		Task { @MainActor in
-			self.viewModel.packageProgress = value
+		if let uiProgressReporter = _uiProgressReporter {
+			uiProgressReporter(value)
+		} else {
+			// Preserve the existing behavior for single-install/export callers.
+			Task { @MainActor in
+				self.viewModel.packageProgress = value
+			}
 		}
 	}
 
