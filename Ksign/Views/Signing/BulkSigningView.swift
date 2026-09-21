@@ -266,10 +266,11 @@ extension BulkSigningView {
 		Task.detached(priority: .userInitiated) {
 			var failures: [(name: String, error: Error)] = []
 			var successCount = 0
+			var processedCount = 0
 
 			// Seed one stable batch report before the first worker claims signing.
-			// Signing has no trustworthy sub-step percentage here, so the Live
-			// Activity uses completed-app count as its meaningful progress signal.
+			// Signing has no trustworthy sub-step percentage here, so processed-app
+			// count is converted into the aggregate percentage by the task manager.
 			BackgroundTaskManager.shared.clearReport(.signing)
 			BackgroundTaskManager.shared.claim(.signing)
 			BackgroundTaskManager.shared.report(
@@ -285,6 +286,16 @@ extension BulkSigningView {
 			// the UI completion callback, so the first app could finish in the
 			// background while the loop remained parked until foreground.
 			for config in configs {
+				let currentName = config.app.name ?? .localized("Unknown")
+				BackgroundTaskManager.shared.report(
+					.signing,
+					completed: processedCount,
+					total: configs.count,
+					fraction: nil,
+					detail: "Signing",
+					currentItem: currentName
+				)
+
 				do {
 					try await Self._signOne(
 						config,
@@ -292,33 +303,33 @@ extension BulkSigningView {
 					)
 					successCount += 1
 
-					// Publish the terminal success before any optional MainActor cleanup.
-					// Deleting the original app is UI/storage housekeeping and should not
-					// be able to hold the Island count hostage while backgrounded.
-					BackgroundTaskManager.shared.report(
-						.signing,
-						completed: successCount,
-						total: configs.count,
-						fraction: nil,
-						detail: "Signing"
-					)
-
 					if config.options.removeApp, !config.app.isSigned {
 						await MainActor.run {
 							Storage.shared.deleteApp(for: config.app)
 						}
 					}
 				} catch {
-					failures.append((config.app.name ?? .localized("Unknown"), error))
+					failures.append((currentName, error))
 				}
+
+				processedCount += 1
+				BackgroundTaskManager.shared.report(
+					.signing,
+					completed: processedCount,
+					total: configs.count,
+					fraction: nil,
+					detail: "Signing",
+					currentItem: currentName
+				)
 			}
 
 			BackgroundTaskManager.shared.report(
 				.signing,
-				completed: successCount,
+				completed: processedCount,
 				total: configs.count,
 				fraction: nil,
-				detail: failures.isEmpty ? "Completed" : "Error"
+				detail: failures.isEmpty ? "Completed" : "Error",
+				currentItem: nil
 			)
 			BackgroundTaskManager.shared.release(.signing, success: failures.isEmpty)
 

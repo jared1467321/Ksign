@@ -313,7 +313,8 @@ extension SigningView {
 			completed: 0,
 			total: 1,
 			fraction: nil,
-			detail: "Signing"
+			detail: "Signing",
+			currentItem: app.name
 		)
 
 		FR.signPackageFile(
@@ -324,10 +325,11 @@ extension SigningView {
 			backgroundCompletion: { error in
 				BackgroundTaskManager.shared.report(
 					.signing,
-					completed: error == nil ? 1 : 0,
+					completed: 1,
 					total: 1,
 					fraction: nil,
-					detail: error == nil ? "Completed" : "Error"
+					detail: error == nil ? "Completed" : "Error",
+					currentItem: app.name
 				)
 			}
 		) { [self] error in
