@@ -36,13 +36,16 @@ final class ExtractManager: ObservableObject {
 	private var _completedActivityItemIDs: Set<String> = []
 	private var _failedActivityItemIDs: Set<String> = []
 	private var _activityProgress: [String: Double] = [:]
+	private var _activityNames: [String: String] = [:]
+	private var _activityLastTouched: [String: Int] = [:]
+	private var _activitySequence = 0
 
 	private init() { }
 
 	@discardableResult
 	func start(fileName: String) -> ExtractItem {
 		let item = ExtractItem(fileName: fileName)
-		_startActivity(id: item.id)
+		_startActivity(id: item.id, fileName: fileName)
 		// Submit while this foreground/user-initiated start call is still active;
 		// the main-queue list mutation below remains the UI source of truth.
 		BackgroundTaskManager.shared.claim(.extracting)
@@ -63,6 +66,8 @@ final class ExtractManager: ObservableObject {
 			guard self._activityItemIDs.contains(item.id) else { return }
 			guard self._activityProgress[item.id] != liveFraction else { return }
 			self._activityProgress[item.id] = liveFraction
+			self._activitySequence += 1
+			self._activityLastTouched[item.id] = self._activitySequence
 			self._publishActivity()
 		}
 
@@ -82,19 +87,25 @@ final class ExtractManager: ObservableObject {
 		}
 	}
 
-	private func _startActivity(id: String) {
+	private func _startActivity(id: String, fileName: String) {
 		_activityQueue.sync {
 			if _activeActivityItemIDs.isEmpty {
 				_activityItemIDs.removeAll()
 				_completedActivityItemIDs.removeAll()
 				_failedActivityItemIDs.removeAll()
 				_activityProgress.removeAll()
+				_activityNames.removeAll()
+				_activityLastTouched.removeAll()
+				_activitySequence = 0
 				BackgroundTaskManager.shared.clearReport(.extracting)
 			}
 
 			_activityItemIDs.insert(id)
 			_activeActivityItemIDs.insert(id)
 			_activityProgress[id] = 0
+			_activityNames[id] = fileName
+			_activitySequence += 1
+			_activityLastTouched[id] = _activitySequence
 			_publishActivity()
 		}
 	}
@@ -110,7 +121,11 @@ final class ExtractManager: ObservableObject {
 			} else {
 				_failedActivityItemIDs.insert(id)
 				_completedActivityItemIDs.remove(id)
+				// A failed item is still terminal work for aggregate progress.
+				_activityProgress[id] = 1
 			}
+			_activitySequence += 1
+			_activityLastTouched[id] = _activitySequence
 			_publishActivity()
 		}
 	}
@@ -131,12 +146,19 @@ final class ExtractManager: ObservableObject {
 			)
 		)
 
+		let currentID = _activeActivityItemIDs.max(by: {
+			(_activityLastTouched[$0] ?? 0) < (_activityLastTouched[$1] ?? 0)
+		}) ?? _activityItemIDs.max(by: {
+			(_activityLastTouched[$0] ?? 0) < (_activityLastTouched[$1] ?? 0)
+		})
+
 		BackgroundTaskManager.shared.report(
 			.extracting,
-			completed: completed,
+			completed: terminal,
 			total: total,
 			fraction: aggregateFraction,
-			detail: terminal == total ? (failed == 0 ? "Completed" : "Error") : "Extracting"
+			detail: terminal == total ? (failed == 0 ? "Completed" : "Error") : "Extracting",
+			currentItem: currentID.flatMap { _activityNames[$0] }
 		)
 	}
 

@@ -239,8 +239,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		backgroundCompletion: ((Error?) -> Void)? = nil,
 		completion: @escaping (Error?) -> Void
 	) {
-		// Local/direct imports use one aggregate continued-processing task. A
-		// network download already owns a per-download continued-processing task
+		// Local/direct imports use the import workflow task. Network downloads
+		// already participate in the shared aggregate download task from byte 0
 		// through extraction/import, so don't create a second system Live Activity
 		// for the same work.
 		let tracksImportWorkflow = dl == nil || dl?.onlyArchiving == true
@@ -248,6 +248,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		let activityToken = tracksImportWorkflow ? (liveActivityBatchToken ?? standaloneToken) : nil
 		if let standaloneToken {
 			ImportLiveActivityReporter.shared.begin(token: standaloneToken, total: 1)
+		}
+		if let activityToken {
+			ImportLiveActivityReporter.shared.setCurrentItem(token: activityToken, name: url.lastPathComponent)
 		}
 
 		FR.handlePackageFile(
@@ -438,6 +441,8 @@ final class ImportLiveActivityReporter {
 		var total: Int
 		var completed = 0
 		var failed = 0
+		var currentItem: String?
+		var sequence = 0
 
 		var terminal: Int { completed + failed }
 	}
@@ -448,6 +453,7 @@ final class ImportLiveActivityReporter {
 	)
 	private var batches: [UUID: Batch] = [:]
 	private var activeTokens: Set<UUID> = []
+	private var sequence = 0
 
 	private init() { }
 
@@ -456,12 +462,24 @@ final class ImportLiveActivityReporter {
 		queue.sync {
 			if self.activeTokens.isEmpty {
 				self.batches.removeAll()
+				self.sequence = 0
 				BackgroundTaskManager.shared.clearReport(.importing)
 				BackgroundTaskManager.shared.claim(.importing)
 			}
 
 			self.activeTokens.insert(token)
 			self.batches[token] = Batch(total: total)
+			self.publish()
+		}
+	}
+
+	func setCurrentItem(token: UUID, name: String) {
+		queue.async {
+			guard var batch = self.batches[token] else { return }
+			self.sequence += 1
+			batch.currentItem = name
+			batch.sequence = self.sequence
+			self.batches[token] = batch
 			self.publish()
 		}
 	}
@@ -512,12 +530,18 @@ final class ImportLiveActivityReporter {
 			detail = "Importing"
 		}
 
+		let currentItem = batches.values
+			.filter { $0.terminal < $0.total }
+			.max(by: { $0.sequence < $1.sequence })?.currentItem
+			?? batches.values.max(by: { $0.sequence < $1.sequence })?.currentItem
+
 		BackgroundTaskManager.shared.report(
 			.importing,
-			completed: completed,
+			completed: terminal,
 			total: total,
 			fraction: nil,
-			detail: detail
+			detail: detail,
+			currentItem: currentItem
 		)
 	}
 }
