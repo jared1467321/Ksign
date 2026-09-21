@@ -26,6 +26,7 @@ enum FR {
 		let liveActivityToken = trackLiveActivity ? UUID() : nil
 		if let liveActivityToken {
 			ImportLiveActivityReporter.shared.begin(token: liveActivityToken, total: 1)
+			ImportLiveActivityReporter.shared.setCurrentItem(token: liveActivityToken, name: ipa.lastPathComponent)
 		}
 
 		// A network download already owns a continued-processing task from byte 0

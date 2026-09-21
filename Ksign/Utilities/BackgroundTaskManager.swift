@@ -21,15 +21,23 @@ final class BackgroundTaskManager: ObservableObject {
         case extracting
         case ipaVaultDownloads
 
-        var title: String {
+        func title(total: Int?) -> String {
+            let count = total.flatMap { $0 > 0 ? $0 : nil }
             switch self {
-            case .bulkInstalls:       return "Installing Apps"
-            case .singleInstall:      return "Installing App"
-            case .bulkExport:         return "Exporting Apps"
-            case .importing:          return "Importing Apps"
-            case .signing:            return "Signing Apps"
-            case .extracting:         return "Extracting"
-            case .ipaVaultDownloads:  return "IPA Vault Downloads"
+            case .bulkInstalls:
+                return count.map { "Installing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Installing Apps"
+            case .singleInstall:
+                return "Installing App"
+            case .bulkExport:
+                return count.map { "Exporting \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Exporting Apps"
+            case .importing:
+                return count.map { "Importing \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Importing IPAs"
+            case .signing:
+                return count.map { "Signing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Signing Apps"
+            case .extracting:
+                return count.map { "Extracting \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Extracting IPAs"
+            case .ipaVaultDownloads:
+                return count.map { "Downloading \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "IPA Vault Downloads"
             }
         }
     }
@@ -39,6 +47,7 @@ final class BackgroundTaskManager: ObservableObject {
         var total: Int?
         var fraction: Double?
         var detail: String?
+        var currentItem: String?
     }
 
     private struct WorkflowState {
@@ -54,15 +63,24 @@ final class BackgroundTaskManager: ObservableObject {
         var report = Report()
     }
 
-    private struct DownloadState {
+    private struct DownloadItemState {
+        var filename: String
+        var progress: Double = 0
+        var terminal = false
+        var success = true
+        var sequence = 0
+    }
+
+    private struct DownloadBatchState {
         var task: BGContinuedProcessingTask?
         var identifier: String?
         var handlerRegistered = false
         var requestOutstanding = false
         var submissionToken: UUID?
-        var title: String
-        var subtitle: String
-        var progress: Double = 0
+        var items: [String: DownloadItemState] = [:]
+        var sequence = 0
+        var currentDownloadId: String?
+        var success = true
         var suppressed = false
     }
 
@@ -72,7 +90,7 @@ final class BackgroundTaskManager: ObservableObject {
         qos: .userInitiated
     )
     private var _workflowStates: [Owner: WorkflowState] = [:]
-    private var _downloadStates: [String: DownloadState] = [:]
+    private var _downloadBatchState: DownloadBatchState?
 
     // Keep fraction-backed Progress granular enough that long jobs visibly move
     // even when each callback advances by much less than one percent.
@@ -169,10 +187,15 @@ final class BackgroundTaskManager: ObservableObject {
         completed: Int?,
         total: Int?,
         fraction: Double?,
-        detail: String?
+        detail: String?,
+        currentItem: String? = nil
     ) {
         let normalizedDetail: String? = {
             let value = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }()
+        let normalizedCurrentItem: String? = {
+            let value = currentItem?.trimmingCharacters(in: .whitespacesAndNewlines)
             return value?.isEmpty == false ? value : nil
         }()
         let normalizedFraction = fraction.map { min(1, max(0, $0)) }
@@ -192,7 +215,8 @@ final class BackgroundTaskManager: ObservableObject {
                 return total
             }(),
             fraction: normalizedFraction,
-            detail: normalizedDetail
+            detail: normalizedDetail,
+            currentItem: normalizedCurrentItem
         )
 
         if state.report != next {
@@ -222,7 +246,8 @@ final class BackgroundTaskManager: ObservableObject {
             completed: completed,
             total: total,
             fraction: current?.fraction,
-            detail: current?.detail
+            detail: current?.detail,
+            currentItem: current?.currentItem
         )
     }
 
@@ -233,7 +258,8 @@ final class BackgroundTaskManager: ObservableObject {
             completed: current?.completed,
             total: current?.total,
             fraction: fraction,
-            detail: current?.detail
+            detail: current?.detail,
+            currentItem: current?.currentItem
         )
     }
 
@@ -244,7 +270,8 @@ final class BackgroundTaskManager: ObservableObject {
             completed: current?.completed,
             total: current?.total,
             fraction: current?.fraction,
-            detail: detail
+            detail: detail,
+            currentItem: current?.currentItem
         )
     }
 
@@ -281,39 +308,52 @@ final class BackgroundTaskManager: ObservableObject {
         }
     }
 
-    // MARK: - Per-download API
+    // MARK: - Aggregate download API
 
+    // All regular network downloads share one continued-processing task. The
+    // system Live Activity therefore shows one aggregate percentage for the
+    // whole active batch and the file that most recently made progress.
     func startTask(
         for downloadId: String,
         filename: String,
         subtitle: String = "Downloading"
     ) {
-        _lock.lock()
-        if var state = _downloadStates[downloadId] {
-            state.title = filename
-            state.subtitle = subtitle
+        var task: BGContinuedProcessingTask?
+        var snapshot: (progress: Double, title: String, subtitle: String)?
+        var shouldClaimAudio = false
 
-            if state.suppressed {
-                // An expired/cancelled BG task cannot be reused. A deliberate
-                // resume is a new continued-processing task with a fresh ID.
-                state.task = nil
-                state.identifier = nil
-                state.handlerRegistered = false
-                state.requestOutstanding = false
-                state.submissionToken = nil
-                state.suppressed = false
-            }
-            _downloadStates[downloadId] = state
-        } else {
-            _downloadStates[downloadId] = DownloadState(
-                title: filename,
-                subtitle: subtitle
-            )
+        _lock.lock()
+        if _downloadBatchState == nil || (_downloadBatchState?.suppressed == true && _downloadBatchState?.items.values.allSatisfy(\.terminal) == true) {
+            _downloadBatchState = DownloadBatchState()
+            shouldClaimAudio = true
         }
+
+        guard var state = _downloadBatchState, !state.suppressed else {
+            _lock.unlock()
+            return
+        }
+
+        state.sequence += 1
+        var item = state.items[downloadId] ?? DownloadItemState(filename: filename)
+        item.filename = filename
+        item.terminal = false
+        item.success = true
+        item.sequence = state.sequence
+        state.items[downloadId] = item
+        state.currentDownloadId = downloadId
+        state.success = state.items.values.allSatisfy { !$0.terminal || $0.success }
+        task = state.task
+        snapshot = _downloadPresentation(state)
+        _downloadBatchState = state
         _lock.unlock()
 
-        BackgroundAudioManager.shared.claimSystemTask(_audioKey(forDownload: downloadId))
-        _submitDownloadIfNeeded(downloadId)
+        if shouldClaimAudio {
+            BackgroundAudioManager.shared.claimSystemTask(_downloadAudioKey)
+        }
+        if let task, let snapshot {
+            _applyDownloadProgress(snapshot.progress, title: snapshot.title, subtitle: snapshot.subtitle, to: task)
+        }
+        _submitDownloadIfNeeded()
     }
 
     func updateProgress(for downloadId: String, progress: Double) {
@@ -322,58 +362,93 @@ final class BackgroundTaskManager: ObservableObject {
         // AppFileHandler reaches 100% extraction before its final move/database
         // work has completed. Reserve the system's 100% state for stopTask(), so
         // we don't surrender the continued runtime while that tail is still live.
-        let percent = min(99, Int((rawValue * 100).rounded(.down)))
         let value = min(0.999_999, rawValue)
         var task: BGContinuedProcessingTask?
-        var title = ""
-        var subtitle = ""
+        var snapshot: (progress: Double, title: String, subtitle: String)?
 
         _lock.lock()
-        guard var state = _downloadStates[downloadId] else {
+        guard var state = _downloadBatchState,
+              !state.suppressed,
+              var item = state.items[downloadId],
+              !item.terminal else {
             _lock.unlock()
             return
         }
-        guard value != state.progress else {
+        guard value != item.progress else {
             _lock.unlock()
             return
         }
-        state.progress = value
-        state.subtitle = "\(percent)%"
+
+        state.sequence += 1
+        item.progress = value
+        item.sequence = state.sequence
+        state.items[downloadId] = item
+        state.currentDownloadId = downloadId
         task = state.task
-        title = state.title
-        subtitle = state.subtitle
-        _downloadStates[downloadId] = state
+        snapshot = _downloadPresentation(state)
+        _downloadBatchState = state
         _lock.unlock()
 
-        if let task {
-            _applyDownloadProgress(value, title: title, subtitle: subtitle, to: task)
+        if let task, let snapshot {
+            _applyDownloadProgress(snapshot.progress, title: snapshot.title, subtitle: snapshot.subtitle, to: task)
         }
     }
 
     func stopTask(for downloadId: String, success: Bool) {
-        var stateToFinish: DownloadState?
+        var task: BGContinuedProcessingTask?
+        var cancelIdentifier: String?
+        var snapshot: (progress: Double, title: String, subtitle: String)?
+        var shouldFinish = false
+        var batchSucceeded = true
 
         _lock.lock()
-        stateToFinish = _downloadStates.removeValue(forKey: downloadId)
-        _lock.unlock()
-
-        BackgroundAudioManager.shared.releaseSystemTask(_audioKey(forDownload: downloadId))
-        guard let stateToFinish else { return }
-
-        if stateToFinish.requestOutstanding, let identifier = stateToFinish.identifier {
-            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        guard var state = _downloadBatchState,
+              var item = state.items[downloadId],
+              !item.terminal else {
+            _lock.unlock()
+            return
         }
 
-        if let task = stateToFinish.task {
-            if success {
-                _applyDownloadProgress(
-                    1,
-                    title: stateToFinish.title,
-                    subtitle: "Completed",
-                    to: task
-                )
+        state.sequence += 1
+        item.progress = 1
+        item.terminal = true
+        item.success = success
+        item.sequence = state.sequence
+        state.items[downloadId] = item
+        state.success = state.success && success
+
+        let activeItems = state.items.filter { !$0.value.terminal }
+        if let current = activeItems.max(by: { $0.value.sequence < $1.value.sequence }) {
+            state.currentDownloadId = current.key
+        } else {
+            state.currentDownloadId = downloadId
+        }
+
+        task = state.task
+        snapshot = _downloadPresentation(state)
+        shouldFinish = activeItems.isEmpty
+        batchSucceeded = state.success
+
+        if shouldFinish {
+            if state.requestOutstanding {
+                cancelIdentifier = state.identifier
             }
-            task.setTaskCompleted(success: success)
+            _downloadBatchState = nil
+        } else {
+            _downloadBatchState = state
+        }
+        _lock.unlock()
+
+        if let task, let snapshot {
+            _applyDownloadProgress(snapshot.progress, title: snapshot.title, subtitle: snapshot.subtitle, to: task)
+        }
+
+        if shouldFinish {
+            if let cancelIdentifier {
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: cancelIdentifier)
+            }
+            task?.setTaskCompleted(success: batchSucceeded)
+            BackgroundAudioManager.shared.releaseSystemTask(_downloadAudioKey)
         }
     }
 
@@ -383,9 +458,7 @@ final class BackgroundTaskManager: ObservableObject {
         "workflow:\(owner.rawValue)"
     }
 
-    private func _audioKey(forDownload downloadId: String) -> String {
-        "download:\(downloadId)"
-    }
+    private var _downloadAudioKey: String { "download-batch" }
 
     private func _newWorkflowIdentifier(_ owner: Owner) -> String {
         "\(_baseIdentifier).workflow.\(owner.rawValue).\(UUID().uuidString)"
@@ -665,21 +738,38 @@ final class BackgroundTaskManager: ObservableObject {
     ) -> (title: String, subtitle: String) {
         var pieces: [String] = []
 
-        if let detail = report.detail, !detail.isEmpty {
-            pieces.append(detail)
+        let displayFraction: Double? = {
+            if let fraction = report.fraction {
+                return min(1, max(0, fraction))
+            }
+            guard let total = report.total, total > 0, let completed = report.completed else {
+                return nil
+            }
+            return min(1, max(0, Double(completed) / Double(total)))
+        }()
+
+        if let displayFraction {
+            pieces.append("\(Int((displayFraction * 100).rounded()))%")
         }
 
-        if let total = report.total, total > 0, let completed = report.completed {
-            pieces.append("\(max(0, min(completed, total))) of \(total)")
-        } else if let fraction = report.fraction {
-            pieces.append("\(Int((fraction * 100).rounded()))%")
+        if let currentItem = report.currentItem, !currentItem.isEmpty {
+            pieces.append(currentItem)
+        }
+
+        // The owner title already communicates the active phase. Keep ordinary
+        // subtitles compact ("67% · Apollo.ipa"), but preserve terminal/error
+        // state when it adds information the percentage cannot.
+        if report.detail == "Error" || report.detail == "Cancelled" || report.detail == "Paused" {
+            pieces.append(report.detail!)
+        } else if pieces.isEmpty, let detail = report.detail, !detail.isEmpty {
+            pieces.append(detail)
         }
 
         if pieces.isEmpty {
             pieces.append("Working")
         }
 
-        return (owner.title, pieces.joined(separator: " · "))
+        return (owner.title(total: report.total), pieces.joined(separator: " · "))
     }
 
     // MARK: - Download internals
@@ -688,76 +778,129 @@ final class BackgroundTaskManager: ObservableObject {
         "\(_baseIdentifier).download.\(UUID().uuidString)"
     }
 
+    private func _downloadPresentation(
+        _ state: DownloadBatchState
+    ) -> (progress: Double, title: String, subtitle: String) {
+        let total = state.items.count
+        let progress: Double
+        if total > 0 {
+            progress = min(
+                1,
+                max(0, state.items.values.reduce(0.0) { $0 + $1.progress } / Double(total))
+            )
+        } else {
+            progress = 0
+        }
+
+        let currentID: String? = {
+            if let id = state.currentDownloadId,
+               let item = state.items[id],
+               !item.terminal {
+                return id
+            }
+            return state.items
+                .filter { !$0.value.terminal }
+                .max(by: { $0.value.sequence < $1.value.sequence })?.key
+                ?? state.currentDownloadId
+        }()
+        let filename = currentID.flatMap { state.items[$0]?.filename }
+        let percent = Int((progress * 100).rounded())
+        let title = total == 1 ? "Downloading IPA" : "Downloading \(total) IPAs"
+        let subtitle: String
+        if let filename, !filename.isEmpty {
+            subtitle = "\(percent)% · \(filename)"
+        } else {
+            subtitle = "\(percent)%"
+        }
+        return (progress, title, subtitle)
+    }
+
     private func _downloadDidLaunch(
-        _ downloadId: String,
         identifier: String,
         task: BGContinuedProcessingTask
     ) {
-        var stateToApply: DownloadState?
+        var snapshot: (progress: Double, title: String, subtitle: String)?
 
         _lock.lock()
-        if var state = _downloadStates[downloadId],
+        if var state = _downloadBatchState,
            state.identifier == identifier,
            !state.suppressed {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
-            _downloadStates[downloadId] = state
-            stateToApply = state
+            snapshot = _downloadPresentation(state)
+            _downloadBatchState = state
         }
         _lock.unlock()
 
-        guard let stateToApply else {
+        guard let snapshot else {
             task.setTaskCompleted(success: false)
             return
         }
 
         task.expirationHandler = { [weak self, weak task] in
             guard let self, let task else { return }
-            self._downloadExpired(downloadId, task: task)
+            self._downloadExpired(task: task)
         }
 
         _applyDownloadProgress(
-            stateToApply.progress,
-            title: stateToApply.title,
-            subtitle: stateToApply.subtitle,
+            snapshot.progress,
+            title: snapshot.title,
+            subtitle: snapshot.subtitle,
             to: task
         )
     }
 
-    private func _downloadExpired(_ downloadId: String, task: BGContinuedProcessingTask) {
+    private func _downloadExpired(task: BGContinuedProcessingTask) {
+        var downloadIDs: [String] = []
         var ownsTask = false
+        var releaseAudioImmediately = false
 
         _lock.lock()
-        if var state = _downloadStates[downloadId], state.task === task {
+        if var state = _downloadBatchState, state.task === task {
             state.task = nil
             state.requestOutstanding = false
             state.submissionToken = nil
+            state.success = false
             state.suppressed = true
-            _downloadStates[downloadId] = state
+            downloadIDs = state.items.compactMap { $0.value.terminal ? nil : $0.key }
+            releaseAudioImmediately = downloadIDs.isEmpty
+            if releaseAudioImmediately {
+                _downloadBatchState = nil
+            } else {
+                _downloadBatchState = state
+            }
             ownsTask = true
         }
         _lock.unlock()
 
         guard ownsTask else { return }
 
+        task.setTaskCompleted(success: false)
+        if releaseAudioImmediately {
+            BackgroundAudioManager.shared.releaseSystemTask(_downloadAudioKey)
+            return
+        }
+
         DispatchQueue.main.async {
-            if let download = DownloadManager.shared.getDownload(by: downloadId) {
-                DownloadManager.shared.cancelDownload(download)
+            for downloadID in downloadIDs {
+                if let download = DownloadManager.shared.getDownload(by: downloadID) {
+                    DownloadManager.shared.cancelDownload(download)
+                }
             }
         }
-        task.setTaskCompleted(success: false)
     }
 
-    private func _submitDownloadIfNeeded(_ downloadId: String) {
+    private func _submitDownloadIfNeeded() {
         var request: BGContinuedProcessingTaskRequest?
         var submissionToken: UUID?
         var identifier: String?
         var mustRegister = false
 
         _lock.lock()
-        if var state = _downloadStates[downloadId],
+        if var state = _downloadBatchState,
            !state.suppressed,
+           !state.items.isEmpty,
            state.task == nil,
            !state.requestOutstanding {
             let token = UUID()
@@ -766,12 +909,13 @@ final class BackgroundTaskManager: ObservableObject {
             state.requestOutstanding = true
             state.submissionToken = token
             mustRegister = !state.handlerRegistered
-            _downloadStates[downloadId] = state
+            let snapshot = _downloadPresentation(state)
+            _downloadBatchState = state
 
             let newRequest = BGContinuedProcessingTaskRequest(
                 identifier: taskIdentifier,
-                title: state.title,
-                subtitle: state.subtitle
+                title: snapshot.title,
+                subtitle: snapshot.subtitle
             )
             newRequest.strategy = .queue
             request = newRequest
@@ -793,41 +937,35 @@ final class BackgroundTaskManager: ObservableObject {
                 else { return }
 
                 self._downloadDidLaunch(
-                    downloadId,
                     identifier: identifier,
                     task: continuedTask
                 )
             }
 
             guard registered else {
-                _downloadRegistrationFailed(
-                    downloadId,
-                    token: submissionToken,
-                    identifier: identifier
-                )
+                _downloadRegistrationFailed(token: submissionToken, identifier: identifier)
                 return
             }
 
             _lock.lock()
-            if var state = _downloadStates[downloadId],
+            if var state = _downloadBatchState,
                state.submissionToken == submissionToken,
                state.identifier == identifier {
                 state.handlerRegistered = true
-                _downloadStates[downloadId] = state
+                _downloadBatchState = state
             }
             _lock.unlock()
         }
 
         _submissionQueue.async { [weak self] in
             guard let self,
-                  self._downloadSubmissionIsCurrent(downloadId, token: submissionToken)
+                  self._downloadSubmissionIsCurrent(token: submissionToken)
             else { return }
 
             do {
                 try BGTaskScheduler.shared.submit(request)
             } catch {
                 self._downloadSubmissionCompleted(
-                    downloadId,
                     token: submissionToken,
                     identifier: identifier,
                     error: error
@@ -837,36 +975,35 @@ final class BackgroundTaskManager: ObservableObject {
     }
 
     private func _downloadRegistrationFailed(
-        _ downloadId: String,
         token: UUID,
         identifier: String
     ) {
         _lock.lock()
-        if var state = _downloadStates[downloadId],
+        if var state = _downloadBatchState,
            state.submissionToken == token,
            state.identifier == identifier,
            state.task == nil {
             state.requestOutstanding = false
             state.submissionToken = nil
-            _downloadStates[downloadId] = state
+            _downloadBatchState = state
         }
         _lock.unlock()
 
         print("BGContinuedProcessingTask registration failed for \(identifier)")
     }
 
-    private func _downloadSubmissionIsCurrent(_ downloadId: String, token: UUID) -> Bool {
+    private func _downloadSubmissionIsCurrent(token: UUID) -> Bool {
         _lock.lock(); defer { _lock.unlock() }
-        guard let state = _downloadStates[downloadId] else { return false }
+        guard let state = _downloadBatchState else { return false }
         return state.submissionToken == token
             && state.requestOutstanding
             && state.task == nil
             && state.handlerRegistered
             && !state.suppressed
+            && !state.items.isEmpty
     }
 
     private func _downloadSubmissionCompleted(
-        _ downloadId: String,
         token: UUID,
         identifier: String,
         error: Error?
@@ -875,13 +1012,13 @@ final class BackgroundTaskManager: ObservableObject {
 
         var isCurrent = false
         _lock.lock()
-        if var state = _downloadStates[downloadId],
+        if var state = _downloadBatchState,
            state.submissionToken == token,
            state.identifier == identifier,
            state.task == nil {
             state.requestOutstanding = false
             state.submissionToken = nil
-            _downloadStates[downloadId] = state
+            _downloadBatchState = state
             isCurrent = true
         }
         _lock.unlock()
