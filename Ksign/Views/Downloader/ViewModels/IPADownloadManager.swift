@@ -221,10 +221,12 @@ class IPADownloadManager: NSObject, ObservableObject {
         let total: Int
         let fraction: Double
         let detail: String
+        let currentItem: String?
     }
 
     private var ipavaultActivityItemIDs: Set<String> = []
     private var completedIPAVaultActivityItemIDs: Set<String> = []
+    private var ipavaultCurrentActivityItemID: String?
     private var ipavaultBackgroundTaskSnapshot: IPAVaultBackgroundTaskSnapshot?
 
     private var ipavaultTransfersRootURL: URL {
@@ -443,6 +445,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
             ipavaultActivityItemIDs.removeAll()
             completedIPAVaultActivityItemIDs.removeAll()
+            ipavaultCurrentActivityItemID = nil
             ipavaultBackgroundTaskSnapshot = nil
             stopIPAVaultAdaptiveController()
             endIPAVaultBatch()
@@ -484,11 +487,27 @@ class IPADownloadManager: NSObject, ObservableObject {
             )
         )
 
+        let currentItemID: String? = {
+            if let current = ipavaultCurrentActivityItemID,
+               ipavaultActivityItemIDs.contains(current),
+               !completedIPAVaultActivityItemIDs.contains(current) {
+                return current
+            }
+            if let active = activeIPAVaultDownloadIDs.first {
+                return active
+            }
+            return pendingIPAVaultDownloads.first?.itemID
+        }()
+        let currentItem = currentItemID.flatMap { itemID in
+            downloadItems.first(where: { $0.id.uuidString == itemID })?.title
+        }
+
         let snapshot = IPAVaultBackgroundTaskSnapshot(
             completed: completed,
             total: total,
             fraction: aggregateFraction,
-            detail: detail
+            detail: detail,
+            currentItem: currentItem
         )
         guard snapshot != ipavaultBackgroundTaskSnapshot else { return }
         ipavaultBackgroundTaskSnapshot = snapshot
@@ -498,7 +517,8 @@ class IPADownloadManager: NSObject, ObservableObject {
             completed: completed,
             total: total,
             fraction: aggregateFraction,
-            detail: detail
+            detail: detail,
+            currentItem: currentItem
         )
     }
 
@@ -618,6 +638,9 @@ class IPADownloadManager: NSObject, ObservableObject {
         cancelIPAVaultStreams(job, requeueUnfinished: false)
         closeIPAVaultFileIfNeeded(job)
         activeIPAVaultDownloadIDs.remove(itemID)
+        if ipavaultCurrentActivityItemID == itemID {
+            ipavaultCurrentActivityItemID = nil
+        }
         downloadItems.removeAll { $0.id.uuidString == itemID }
         ipavaultActivityItemIDs.remove(itemID)
         completedIPAVaultActivityItemIDs.remove(itemID)
@@ -700,6 +723,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             )
             ipavaultJobs[pending.itemID] = job
             activeIPAVaultDownloadIDs.insert(pending.itemID)
+            ipavaultCurrentActivityItemID = pending.itemID
             pausedIPAVaultDownloadIDs.remove(pending.itemID)
             setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
             resetIPAVaultAdaptiveMeasurements(for: job)
@@ -894,6 +918,8 @@ class IPADownloadManager: NSObject, ObservableObject {
             return partial + max(0, metadata.currentPosition - metadata.committedEnd)
         }
         let downloaded = min(job.totalBytes, max(0, job.committedBytes + uncommittedInFlight))
+
+        ipavaultCurrentActivityItemID = job.itemID
 
         var item = downloadItems[index]
         item.totalBytes = job.totalBytes
@@ -1098,6 +1124,9 @@ class IPADownloadManager: NSObject, ObservableObject {
                 downloadItems[index] = item
 
                 completedIPAVaultActivityItemIDs.insert(itemID)
+                if ipavaultCurrentActivityItemID == itemID {
+                    ipavaultCurrentActivityItemID = nil
+                }
                 ipavaultJobs.removeValue(forKey: itemID)
                 activeIPAVaultDownloadIDs.remove(itemID)
                 pausedIPAVaultDownloadIDs.remove(itemID)
