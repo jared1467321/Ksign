@@ -246,11 +246,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
 		let tracksImportWorkflow = dl == nil || dl?.onlyArchiving == true
 		let standaloneToken = tracksImportWorkflow && liveActivityBatchToken == nil ? UUID() : nil
 		let activityToken = tracksImportWorkflow ? (liveActivityBatchToken ?? standaloneToken) : nil
+		let activityItemID = activityToken.map { _ in UUID() }
 		if let standaloneToken {
 			ImportLiveActivityReporter.shared.begin(token: standaloneToken, total: 1)
 		}
-		if let activityToken {
-			ImportLiveActivityReporter.shared.setCurrentItem(token: activityToken, name: url.lastPathComponent)
+		if let activityToken, let activityItemID {
+			ImportLiveActivityReporter.shared.startItem(
+				token: activityToken,
+				itemID: activityItemID,
+				name: url.lastPathComponent
+			)
 		}
 
 		FR.handlePackageFile(
@@ -261,9 +266,10 @@ extension DownloadManager: URLSessionDownloadDelegate {
 				if let dl, !dl.onlyArchiving {
 					BackgroundTaskManager.shared.stopTask(for: dl.id, success: err == nil)
 				}
-				if let activityToken {
+				if let activityToken, let activityItemID {
 					ImportLiveActivityReporter.shared.finishItem(
 						token: activityToken,
+						itemID: activityItemID,
 						succeeded: err == nil
 					)
 				}
@@ -437,12 +443,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
 final class ImportLiveActivityReporter {
 	static let shared = ImportLiveActivityReporter()
 
+	private struct Item {
+		var name: String
+		var order: Int
+	}
+
 	private struct Batch {
 		var total: Int
 		var completed = 0
 		var failed = 0
-		var currentItem: String?
-		var sequence = 0
+		var activeItems: [UUID: Item] = [:]
 
 		var terminal: Int { completed + failed }
 	}
@@ -454,6 +464,7 @@ final class ImportLiveActivityReporter {
 	private var batches: [UUID: Batch] = [:]
 	private var activeTokens: Set<UUID> = []
 	private var sequence = 0
+	private var currentItem: (token: UUID, itemID: UUID)?
 
 	private init() { }
 
@@ -463,6 +474,7 @@ final class ImportLiveActivityReporter {
 			if self.activeTokens.isEmpty {
 				self.batches.removeAll()
 				self.sequence = 0
+				self.currentItem = nil
 				BackgroundTaskManager.shared.clearReport(.importing)
 				BackgroundTaskManager.shared.claim(.importing)
 			}
@@ -473,35 +485,48 @@ final class ImportLiveActivityReporter {
 		}
 	}
 
-	func setCurrentItem(token: UUID, name: String) {
+	func startItem(token: UUID, itemID: UUID, name: String) {
 		queue.async {
-			guard var batch = self.batches[token] else { return }
+			guard var batch = self.batches[token], batch.terminal < batch.total else { return }
 			self.sequence += 1
-			batch.currentItem = name
-			batch.sequence = self.sequence
+			batch.activeItems[itemID] = Item(name: name, order: self.sequence)
 			self.batches[token] = batch
+			if self.currentItem == nil {
+				self.currentItem = (token, itemID)
+			}
 			self.publish()
 		}
 	}
 
-	func finishItem(token: UUID, succeeded: Bool) {
+	func finishItem(token: UUID, itemID: UUID, succeeded: Bool) {
 		queue.async {
 			guard var batch = self.batches[token], batch.terminal < batch.total else { return }
+			batch.activeItems.removeValue(forKey: itemID)
 			if succeeded {
 				batch.completed += 1
 			} else {
 				batch.failed += 1
 			}
 			self.batches[token] = batch
+
+			if self.currentItem?.token == token && self.currentItem?.itemID == itemID {
+				self.currentItem = self.nextActiveItem()
+			}
 			self.publish()
 		}
 	}
 
 	func end(token: UUID) {
 		queue.async {
-			if var batch = self.batches[token], batch.terminal < batch.total {
-				batch.failed += batch.total - batch.terminal
+			if var batch = self.batches[token] {
+				if batch.terminal < batch.total {
+					batch.failed += batch.total - batch.terminal
+				}
+				batch.activeItems.removeAll()
 				self.batches[token] = batch
+			}
+			if self.currentItem?.token == token {
+				self.currentItem = self.nextActiveItem(excluding: token)
 			}
 			self.activeTokens.remove(token)
 			self.publish()
@@ -512,8 +537,34 @@ final class ImportLiveActivityReporter {
 				let succeeded = self.batches.values.allSatisfy { $0.failed == 0 && $0.terminal >= $0.total }
 				BackgroundTaskManager.shared.release(.importing, success: succeeded)
 				self.batches.removeAll()
+				self.currentItem = nil
 			}
 		}
+	}
+
+	private func nextActiveItem(excluding excludedToken: UUID? = nil) -> (token: UUID, itemID: UUID)? {
+		var best: (token: UUID, itemID: UUID, order: Int)?
+		for (token, batch) in batches where token != excludedToken {
+			for (itemID, item) in batch.activeItems {
+				if best == nil || item.order < best!.order {
+					best = (token, itemID, item.order)
+				}
+			}
+		}
+		return best.map { ($0.token, $0.itemID) }
+	}
+
+	private func currentItemName() -> String? {
+		if let currentItem,
+		   let batch = batches[currentItem.token],
+		   let item = batch.activeItems[currentItem.itemID] {
+			return item.name
+		}
+		currentItem = nextActiveItem()
+		guard let currentItem,
+		      let batch = batches[currentItem.token],
+		      let item = batch.activeItems[currentItem.itemID] else { return nil }
+		return item.name
 	}
 
 	private func publish() {
@@ -530,18 +581,13 @@ final class ImportLiveActivityReporter {
 			detail = "Importing"
 		}
 
-		let currentItem = batches.values
-			.filter { $0.terminal < $0.total }
-			.max(by: { $0.sequence < $1.sequence })?.currentItem
-			?? batches.values.max(by: { $0.sequence < $1.sequence })?.currentItem
-
 		BackgroundTaskManager.shared.report(
 			.importing,
 			completed: terminal,
 			total: total,
 			fraction: nil,
 			detail: detail,
-			currentItem: currentItem
+			currentItem: currentItemName()
 		)
 	}
 }
