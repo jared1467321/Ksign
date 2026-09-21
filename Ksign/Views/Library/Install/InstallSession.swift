@@ -544,6 +544,7 @@ final class BulkInstallLiveActivityReporter {
 	private var _paused = false
 	private var _active = false
 	private var _sequence = 0
+	private var _currentJobID: UUID?
 
 	private init() { }
 
@@ -553,6 +554,7 @@ final class BulkInstallLiveActivityReporter {
 			self._paused = false
 			self._active = true
 			self._sequence = 0
+			self._currentJobID = nil
 
 			BackgroundTaskManager.shared.clearReport(.bulkInstalls)
 		}
@@ -564,6 +566,9 @@ final class BulkInstallLiveActivityReporter {
 			if self._jobs[id] == nil {
 				self._sequence += 1
 				self._jobs[id] = _Job(name: name, sequence: self._sequence)
+				if self._currentJobID == nil {
+					self._currentJobID = id
+				}
 			}
 			self._publish()
 		}
@@ -572,6 +577,11 @@ final class BulkInstallLiveActivityReporter {
 	func remove(_ id: UUID) {
 		_queue.async {
 			self._jobs.removeValue(forKey: id)
+			if self._currentJobID == id {
+				self._currentJobID = self._jobs
+					.filter { !$0.value.isTerminal }
+					.min(by: { $0.value.sequence < $1.value.sequence })?.key
+			}
 			self._publish()
 		}
 	}
@@ -596,8 +606,6 @@ final class BulkInstallLiveActivityReporter {
 				job.stage = .packaging
 				job.fraction = min(1, max(job.fraction, value * 0.5))
 			}
-			self._sequence += 1
-			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._publish()
@@ -621,8 +629,6 @@ final class BulkInstallLiveActivityReporter {
 			job.installProgress = value
 			job.stage = .installing
 			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
-			self._sequence += 1
-			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._publish()
@@ -672,8 +678,6 @@ final class BulkInstallLiveActivityReporter {
 			}
 
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
-			self._sequence += 1
-			job.sequence = self._sequence
 			self._jobs[jobID] = job
 			self._publish()
 		}
@@ -709,13 +713,26 @@ final class BulkInstallLiveActivityReporter {
 			detail = "Installing"
 		}
 
-		let currentItem = _jobs.values
-			.filter { !$0.isTerminal && $0.stage != .queued }
-			.max(by: { $0.sequence < $1.sequence })?.name
-			?? _jobs.values
-				.filter { !$0.isTerminal }
-				.max(by: { $0.sequence < $1.sequence })?.name
-			?? _jobs.values.max(by: { $0.sequence < $1.sequence })?.name
+		let currentItem: String? = {
+			if let currentID = _currentJobID,
+			   let current = _jobs[currentID],
+			   !current.isTerminal {
+				return current.name
+			}
+
+			if let next = _jobs
+				.filter({ !$0.value.isTerminal })
+				.min(by: { $0.value.sequence < $1.value.sequence }) {
+				_currentJobID = next.key
+				return next.value.name
+			}
+
+			// Preserve the final item's name for the terminal 100% snapshot.
+			if let currentID = _currentJobID {
+				return _jobs[currentID]?.name
+			}
+			return _jobs.min(by: { $0.value.sequence < $1.value.sequence })?.value.name
+		}()
 
 		BackgroundTaskManager.shared.report(
 			.bulkInstalls,
