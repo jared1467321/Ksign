@@ -24,9 +24,14 @@ enum FR {
 		completion: @escaping (Error?) -> Void
 	) {
 		let liveActivityToken = trackLiveActivity ? UUID() : nil
-		if let liveActivityToken {
+		let liveActivityItemID = liveActivityToken.map { _ in UUID() }
+		if let liveActivityToken, let liveActivityItemID {
 			ImportLiveActivityReporter.shared.begin(token: liveActivityToken, total: 1)
-			ImportLiveActivityReporter.shared.setCurrentItem(token: liveActivityToken, name: ipa.lastPathComponent)
+			ImportLiveActivityReporter.shared.startItem(
+				token: liveActivityToken,
+				itemID: liveActivityItemID,
+				name: ipa.lastPathComponent
+			)
 		}
 
 		// A network download already owns a continued-processing task from byte 0
@@ -61,8 +66,12 @@ enum FR {
 				// Publish the terminal result from the worker before hopping to
 				// MainActor. Batch/Live Activity state then keeps advancing even when
 				// the foreground UI is heavily throttled in the background.
-				if let liveActivityToken {
-					ImportLiveActivityReporter.shared.finishItem(token: liveActivityToken, succeeded: true)
+				if let liveActivityToken, let liveActivityItemID {
+					ImportLiveActivityReporter.shared.finishItem(
+						token: liveActivityToken,
+						itemID: liveActivityItemID,
+						succeeded: true
+					)
 					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
 				}
 				backgroundSucceeded = true
@@ -73,8 +82,12 @@ enum FR {
 			} catch {
 				try? await handler.clean()
 				await TempMaintenance.shared.endOperation()
-				if let liveActivityToken {
-					ImportLiveActivityReporter.shared.finishItem(token: liveActivityToken, succeeded: false)
+				if let liveActivityToken, let liveActivityItemID {
+					ImportLiveActivityReporter.shared.finishItem(
+						token: liveActivityToken,
+						itemID: liveActivityItemID,
+						succeeded: false
+					)
 					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
 				}
 				backgroundCompletion?(error)

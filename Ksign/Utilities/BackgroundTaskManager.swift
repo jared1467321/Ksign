@@ -312,7 +312,9 @@ final class BackgroundTaskManager: ObservableObject {
 
     // All regular network downloads share one continued-processing task. The
     // system Live Activity therefore shows one aggregate percentage for the
-    // whole active batch and the file that most recently made progress.
+    // whole active batch while keeping one displayed filename sticky until that
+    // specific download terminates. Concurrent callbacks therefore cannot make
+    // the system Live Activity rapidly alternate between filenames.
     func startTask(
         for downloadId: String,
         filename: String,
@@ -333,14 +335,22 @@ final class BackgroundTaskManager: ObservableObject {
             return
         }
 
-        state.sequence += 1
+        let isNewItem = state.items[downloadId] == nil
         var item = state.items[downloadId] ?? DownloadItemState(filename: filename)
+        if isNewItem {
+            state.sequence += 1
+            item.sequence = state.sequence
+        }
         item.filename = filename
         item.terminal = false
         item.success = true
-        item.sequence = state.sequence
         state.items[downloadId] = item
-        state.currentDownloadId = downloadId
+        if let currentID = state.currentDownloadId,
+           state.items[currentID]?.terminal == false {
+            // Keep the existing displayed filename pinned while it is active.
+        } else {
+            state.currentDownloadId = downloadId
+        }
         state.success = state.items.values.allSatisfy { !$0.terminal || $0.success }
         task = state.task
         snapshot = _downloadPresentation(state)
@@ -379,11 +389,8 @@ final class BackgroundTaskManager: ObservableObject {
             return
         }
 
-        state.sequence += 1
         item.progress = value
-        item.sequence = state.sequence
         state.items[downloadId] = item
-        state.currentDownloadId = downloadId
         task = state.task
         snapshot = _downloadPresentation(state)
         _downloadBatchState = state
@@ -409,19 +416,20 @@ final class BackgroundTaskManager: ObservableObject {
             return
         }
 
-        state.sequence += 1
         item.progress = 1
         item.terminal = true
         item.success = success
-        item.sequence = state.sequence
         state.items[downloadId] = item
         state.success = state.success && success
 
         let activeItems = state.items.filter { !$0.value.terminal }
-        if let current = activeItems.max(by: { $0.value.sequence < $1.value.sequence }) {
-            state.currentDownloadId = current.key
-        } else {
-            state.currentDownloadId = downloadId
+        if state.currentDownloadId == downloadId {
+            if let next = activeItems.min(by: { $0.value.sequence < $1.value.sequence }) {
+                state.currentDownloadId = next.key
+            } else {
+                // Keep the last filename available for the terminal 100% update.
+                state.currentDownloadId = downloadId
+            }
         }
 
         task = state.task
@@ -800,7 +808,7 @@ final class BackgroundTaskManager: ObservableObject {
             }
             return state.items
                 .filter { !$0.value.terminal }
-                .max(by: { $0.value.sequence < $1.value.sequence })?.key
+                .min(by: { $0.value.sequence < $1.value.sequence })?.key
                 ?? state.currentDownloadId
         }()
         let filename = currentID.flatMap { state.items[$0]?.filename }
