@@ -526,6 +526,8 @@ final class BulkInstallLiveActivityReporter {
 		var installProgress: Double = 0
 		var fraction: Double = 0
 		var sequence: Int = 0
+		var lastPackageProgressSequence: Int = 0
+		var lastInstallProgressSequence: Int = 0
 
 		var isCompleted: Bool { stage == .completed }
 		var isFailed: Bool { stage == .failed }
@@ -544,7 +546,10 @@ final class BulkInstallLiveActivityReporter {
 	private var _paused = false
 	private var _active = false
 	private var _sequence = 0
+	private var _progressSequence = 0
 	private var _currentJobID: UUID?
+	private var _currentSelectionProgressSequence = 0
+	private var _lastDisplayedName: String?
 
 	private init() { }
 
@@ -554,7 +559,10 @@ final class BulkInstallLiveActivityReporter {
 			self._paused = false
 			self._active = true
 			self._sequence = 0
+			self._progressSequence = 0
 			self._currentJobID = nil
+			self._currentSelectionProgressSequence = 0
+			self._lastDisplayedName = nil
 
 			BackgroundTaskManager.shared.clearReport(.bulkInstalls)
 		}
@@ -566,9 +574,6 @@ final class BulkInstallLiveActivityReporter {
 			if self._jobs[id] == nil {
 				self._sequence += 1
 				self._jobs[id] = _Job(name: name, sequence: self._sequence)
-				if self._currentJobID == nil {
-					self._currentJobID = id
-				}
 			}
 			self._publish()
 		}
@@ -578,9 +583,7 @@ final class BulkInstallLiveActivityReporter {
 		_queue.async {
 			self._jobs.removeValue(forKey: id)
 			if self._currentJobID == id {
-				self._currentJobID = self._jobs
-					.filter { !$0.value.isTerminal }
-					.min(by: { $0.value.sequence < $1.value.sequence })?.key
+				self._handoffCurrentJob()
 			}
 			self._publish()
 		}
@@ -606,8 +609,17 @@ final class BulkInstallLiveActivityReporter {
 				job.stage = .packaging
 				job.fraction = min(1, max(job.fraction, value * 0.5))
 			}
+
+			let madeGenuineProgress = job.fraction > before.fraction
+			if madeGenuineProgress {
+				self._progressSequence += 1
+				job.lastPackageProgressSequence = self._progressSequence
+			}
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
+			if madeGenuineProgress {
+				self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastPackageProgressSequence)
+			}
 			self._publish()
 		}
 	}
@@ -629,8 +641,17 @@ final class BulkInstallLiveActivityReporter {
 			job.installProgress = value
 			job.stage = .installing
 			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
+
+			let madeGenuineProgress = job.fraction > before.fraction
+			if madeGenuineProgress {
+				self._progressSequence += 1
+				job.lastInstallProgressSequence = self._progressSequence
+			}
 			self._jobs[jobID] = job
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
+			if madeGenuineProgress {
+				self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastInstallProgressSequence)
+			}
 			self._publish()
 		}
 	}
@@ -679,6 +700,9 @@ final class BulkInstallLiveActivityReporter {
 
 			guard job.stage != before.stage || job.fraction != before.fraction else { return }
 			self._jobs[jobID] = job
+			if job.isTerminal, self._currentJobID == jobID {
+				self._handoffCurrentJob()
+			}
 			self._publish()
 		}
 	}
@@ -688,6 +712,51 @@ final class BulkInstallLiveActivityReporter {
 			guard self._active else { return }
 			self._paused = false
 			self._publish(forceTerminal: true)
+		}
+	}
+
+	private func _claimCurrentJobIfNeeded(_ jobID: UUID, progressSequence: Int) {
+		guard _currentJobID == nil else { return }
+		guard let job = _jobs[jobID], !job.isTerminal else { return }
+
+		_currentJobID = jobID
+		_currentSelectionProgressSequence = progressSequence
+		if let name = job.name {
+			_lastDisplayedName = name
+		}
+	}
+
+	private func _handoffCurrentJob() {
+		let previousSelectionSequence = _currentSelectionProgressSequence
+		_currentJobID = nil
+
+		// Prefer an app that has made genuine install-phase progress since the
+		// current display owner was selected. If none qualifies, fall back to an
+		// app that has made genuine packaging progress in that same window.
+		// Otherwise leave the slot empty until the next real progress event.
+		let installCandidate = _jobs
+			.filter { !$0.value.isTerminal && $0.value.lastInstallProgressSequence > previousSelectionSequence }
+			.max { lhs, rhs in
+				lhs.value.lastInstallProgressSequence < rhs.value.lastInstallProgressSequence
+			}
+
+		let packageCandidate = _jobs
+			.filter { !$0.value.isTerminal && $0.value.lastPackageProgressSequence > previousSelectionSequence }
+			.max { lhs, rhs in
+				lhs.value.lastPackageProgressSequence < rhs.value.lastPackageProgressSequence
+			}
+
+		if let candidate = installCandidate ?? packageCandidate {
+			_currentJobID = candidate.key
+			_currentSelectionProgressSequence = max(
+				candidate.value.lastInstallProgressSequence,
+				candidate.value.lastPackageProgressSequence
+			)
+			if let name = candidate.value.name {
+				_lastDisplayedName = name
+			}
+		} else {
+			_currentSelectionProgressSequence = _progressSequence
 		}
 	}
 
@@ -717,21 +786,16 @@ final class BulkInstallLiveActivityReporter {
 			if let currentID = _currentJobID,
 			   let current = _jobs[currentID],
 			   !current.isTerminal {
+				if let name = current.name {
+					_lastDisplayedName = name
+				}
 				return current.name
 			}
 
-			if let next = _jobs
-				.filter({ !$0.value.isTerminal })
-				.min(by: { $0.value.sequence < $1.value.sequence }) {
-				_currentJobID = next.key
-				return next.value.name
-			}
-
-			// Preserve the final item's name for the terminal 100% snapshot.
-			if let currentID = _currentJobID {
-				return _jobs[currentID]?.name
-			}
-			return _jobs.min(by: { $0.value.sequence < $1.value.sequence })?.value.name
+			// While work is still active, never invent a name from queue order.
+			// A new owner is selected only by genuine progress. Preserve the last
+			// displayed app solely for the terminal snapshot.
+			return allTerminal || forceTerminal ? _lastDisplayedName : nil
 		}()
 
 		BackgroundTaskManager.shared.report(
