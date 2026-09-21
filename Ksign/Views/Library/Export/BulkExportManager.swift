@@ -46,7 +46,7 @@ final class BulkExportManager: ObservableObject {
 	// single app has no sub-progress to offer.
 	private func _reportProgress() {
 		// The archiver doesn't expose trustworthy sub-file zip progress here, so
-		// completed-app count is the meaningful progress signal for this workflow.
+		// processed-app position is the meaningful percentage signal for this workflow.
 		let detail: String?
 		if isExporting {
 			detail = "Exporting"
@@ -61,10 +61,11 @@ final class BulkExportManager: ObservableObject {
 		}
 		BackgroundTaskManager.shared.report(
 			.bulkExport,
-			completed: exportURLs.count,
+			completed: completed,
 			total: total > 0 ? total : nil,
-			fraction: nil,
-			detail: detail
+			fraction: total > 0 ? overallProgress : nil,
+			detail: detail,
+			currentItem: currentName.isEmpty ? nil : currentName
 		)
 	}
 
@@ -106,6 +107,7 @@ final class BulkExportManager: ObservableObject {
 			if _cancelled { break }
 
 			currentName = app.name ?? .localized("Unknown")
+			_reportProgress()
 
 			let viewModel = InstallerStatusViewModel(isIdevice: false)
 
