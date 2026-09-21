@@ -60,6 +60,8 @@ final class BackgroundTaskManager: ObservableObject {
         var count = 0
         var success = true
         var suppressed = false
+        var heartbeatToken: UUID?
+        var lastMeaningfulProgressAt: Date?
         var report = Report()
     }
 
@@ -82,9 +84,16 @@ final class BackgroundTaskManager: ObservableObject {
         var currentDownloadId: String?
         var success = true
         var suppressed = false
+        var heartbeatToken: UUID?
+        var lastMeaningfulProgressAt: Date?
     }
 
     private let _lock = NSLock()
+    private let _taskProgressLock = NSLock()
+    private let _heartbeatQueue = DispatchQueue(
+        label: "AppAssassin.signer.ipa.background-task-heartbeat",
+        qos: .utility
+    )
     private let _submissionQueue = DispatchQueue(
         label: "AppAssassin.signer.ipa.background-task-submission",
         qos: .userInitiated
@@ -92,9 +101,12 @@ final class BackgroundTaskManager: ObservableObject {
     private var _workflowStates: [Owner: WorkflowState] = [:]
     private var _downloadBatchState: DownloadBatchState?
 
-    // Keep fraction-backed Progress granular enough that long jobs visibly move
-    // even when each callback advances by much less than one percent.
-    private static let _fractionProgressUnits: Int64 = 1_000_000
+    // Keep the system Progress extremely granular so a heartbeat can advance it
+    // without changing the user-visible integer percentage. One heartbeat unit is
+    // 0.0000001 percentage points.
+    private static let _fractionProgressUnits: Int64 = 1_000_000_000
+    private static let _activeProgressCeiling = 0.999_999
+    private static let _heartbeatInterval: TimeInterval = 10
 
     private let _baseIdentifier: String
 
@@ -220,6 +232,17 @@ final class BackgroundTaskManager: ObservableObject {
         )
 
         if state.report != next {
+            let previousUnits = _progressUnits(
+                for: _progressFraction(for: state.report),
+                allowComplete: false
+            )
+            let nextUnits = _progressUnits(
+                for: _progressFraction(for: next),
+                allowComplete: false
+            )
+            if previousUnits != nextUnits {
+                state.lastMeaningfulProgressAt = Date()
+            }
             state.report = next
             if normalizedDetail == "Error" || normalizedDetail == "Cancelled" {
                 state.success = false
@@ -302,7 +325,9 @@ final class BackgroundTaskManager: ObservableObject {
         if let cancelIdentifier {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: cancelIdentifier)
         }
-        staleTask?.setTaskCompleted(success: false)
+        if let staleTask {
+            _completeTask(staleTask, success: false)
+        }
         if removedState {
             BackgroundAudioManager.shared.releaseSystemTask(_audioKey(for: owner))
         }
@@ -352,6 +377,9 @@ final class BackgroundTaskManager: ObservableObject {
             state.currentDownloadId = downloadId
         }
         state.success = state.items.values.allSatisfy { !$0.terminal || $0.success }
+        if state.task != nil {
+            state.lastMeaningfulProgressAt = Date()
+        }
         task = state.task
         snapshot = _downloadPresentation(state)
         _downloadBatchState = state
@@ -391,6 +419,7 @@ final class BackgroundTaskManager: ObservableObject {
 
         item.progress = value
         state.items[downloadId] = item
+        state.lastMeaningfulProgressAt = Date()
         task = state.task
         snapshot = _downloadPresentation(state)
         _downloadBatchState = state
@@ -421,6 +450,7 @@ final class BackgroundTaskManager: ObservableObject {
         item.success = success
         state.items[downloadId] = item
         state.success = state.success && success
+        state.lastMeaningfulProgressAt = Date()
 
         let activeItems = state.items.filter { !$0.value.terminal }
         if state.currentDownloadId == downloadId {
@@ -448,14 +478,22 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         if let task, let snapshot {
-            _applyDownloadProgress(snapshot.progress, title: snapshot.title, subtitle: snapshot.subtitle, to: task)
+            _applyDownloadProgress(
+                snapshot.progress,
+                title: snapshot.title,
+                subtitle: snapshot.subtitle,
+                to: task,
+                allowComplete: shouldFinish
+            )
         }
 
         if shouldFinish {
             if let cancelIdentifier {
                 BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: cancelIdentifier)
             }
-            task?.setTaskCompleted(success: batchSucceeded)
+            if let task {
+                _completeTask(task, success: batchSucceeded)
+            }
             BackgroundAudioManager.shared.releaseSystemTask(_downloadAudioKey)
         }
     }
@@ -479,6 +517,7 @@ final class BackgroundTaskManager: ObservableObject {
     ) {
         var report = Report()
         var shouldReject = false
+        var heartbeatToken: UUID?
 
         _lock.lock()
         if var state = _workflowStates[owner],
@@ -487,6 +526,10 @@ final class BackgroundTaskManager: ObservableObject {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
+            let token = UUID()
+            state.heartbeatToken = token
+            state.lastMeaningfulProgressAt = Date()
+            heartbeatToken = token
             report = state.report
             _workflowStates[owner] = state
         } else {
@@ -495,7 +538,7 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         if shouldReject {
-            task.setTaskCompleted(success: false)
+            _completeTask(task, success: false)
             return
         }
 
@@ -505,6 +548,9 @@ final class BackgroundTaskManager: ObservableObject {
         }
 
         _apply(owner: owner, report: report, to: task)
+        if let heartbeatToken {
+            _scheduleWorkflowHeartbeat(owner, task: task, token: heartbeatToken)
+        }
     }
 
     private func _workflowExpired(_ owner: Owner, task: BGContinuedProcessingTask) {
@@ -517,13 +563,15 @@ final class BackgroundTaskManager: ObservableObject {
             state.submissionToken = nil
             state.success = false
             state.suppressed = true
+            state.heartbeatToken = nil
             _workflowStates[owner] = state
             ownsTask = true
         }
         _lock.unlock()
 
         if ownsTask {
-            task.setTaskCompleted(success: false)
+            print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
+            _completeTask(task, success: false)
         }
     }
 
@@ -705,9 +753,9 @@ final class BackgroundTaskManager: ObservableObject {
                 } else if let total = completedReport.total, total > 0 {
                     completedReport.completed = total
                 }
-                _apply(owner: owner, report: completedReport, to: task)
+                _apply(owner: owner, report: completedReport, to: task, allowComplete: true)
             }
-            task.setTaskCompleted(success: success)
+            _completeTask(task, success: success)
         }
 
         BackgroundAudioManager.shared.releaseSystemTask(_audioKey(for: owner))
@@ -718,25 +766,95 @@ final class BackgroundTaskManager: ObservableObject {
         return _workflowStates[owner]?.report
     }
 
+    private func _progressFraction(for report: Report) -> Double? {
+        if let fraction = report.fraction {
+            return min(1, max(0, fraction))
+        }
+        guard let total = report.total, total > 0, let completed = report.completed else {
+            return nil
+        }
+        return min(1, max(0, Double(completed) / Double(total)))
+    }
+
+    private func _progressUnits(for fraction: Double?, allowComplete: Bool) -> Int64 {
+        let value = min(1, max(0, fraction ?? 0))
+        let capped = allowComplete ? value : min(value, Self._activeProgressCeiling)
+        let units = Int64((capped * Double(Self._fractionProgressUnits)).rounded(.down))
+        return min(Self._fractionProgressUnits, max(0, units))
+    }
+
     private func _apply(
         owner: Owner,
         report: Report,
-        to task: BGContinuedProcessingTask
+        to task: BGContinuedProcessingTask,
+        allowComplete: Bool = false
     ) {
         let presentation = _presentation(owner: owner, report: report)
-        task.updateTitle(presentation.title, subtitle: presentation.subtitle)
+        let targetUnits = _progressUnits(
+            for: _progressFraction(for: report),
+            allowComplete: allowComplete
+        )
 
-        if let fraction = report.fraction {
-            task.progress.totalUnitCount = Self._fractionProgressUnits
-            task.progress.completedUnitCount = Int64(
-                (fraction * Double(Self._fractionProgressUnits)).rounded(.down)
-            )
-        } else if let total = report.total, total > 0, let completed = report.completed {
-            task.progress.totalUnitCount = Int64(total)
-            task.progress.completedUnitCount = Int64(max(0, min(completed, total)))
-        } else {
-            task.progress.totalUnitCount = 1
-            task.progress.completedUnitCount = 0
+        _taskProgressLock.lock()
+        task.updateTitle(presentation.title, subtitle: presentation.subtitle)
+        let previousUnits = task.progress.totalUnitCount == Self._fractionProgressUnits
+            ? task.progress.completedUnitCount
+            : 0
+        task.progress.totalUnitCount = Self._fractionProgressUnits
+        task.progress.completedUnitCount = allowComplete
+            ? targetUnits
+            : max(previousUnits, targetUnits)
+        _taskProgressLock.unlock()
+    }
+
+    private func _completeTask(_ task: BGContinuedProcessingTask, success: Bool) {
+        _taskProgressLock.lock()
+        task.setTaskCompleted(success: success)
+        _taskProgressLock.unlock()
+    }
+
+    private func _pulseProgress(_ task: BGContinuedProcessingTask) {
+        _taskProgressLock.lock()
+        defer { _taskProgressLock.unlock() }
+
+        guard task.progress.totalUnitCount == Self._fractionProgressUnits else { return }
+        let ceiling = Self._fractionProgressUnits - 1
+        guard task.progress.completedUnitCount < ceiling else { return }
+        task.progress.completedUnitCount += 1
+    }
+
+    private func _scheduleWorkflowHeartbeat(
+        _ owner: Owner,
+        task: BGContinuedProcessingTask,
+        token: UUID
+    ) {
+        _heartbeatQueue.asyncAfter(deadline: .now() + Self._heartbeatInterval) { [weak self, weak task] in
+            guard let self, let task else { return }
+
+            var remainsActive = false
+            var shouldPulse = false
+            let now = Date()
+
+            self._lock.lock()
+            if let state = self._workflowStates[owner],
+               state.task === task,
+               state.heartbeatToken == token,
+               !state.suppressed,
+               state.identityClaimed || state.count > 0 {
+                remainsActive = true
+                if let last = state.lastMeaningfulProgressAt {
+                    shouldPulse = now.timeIntervalSince(last) >= Self._heartbeatInterval
+                } else {
+                    shouldPulse = true
+                }
+            }
+            self._lock.unlock()
+
+            guard remainsActive else { return }
+            if shouldPulse {
+                self._pulseProgress(task)
+            }
+            self._scheduleWorkflowHeartbeat(owner, task: task, token: token)
         }
     }
 
@@ -746,15 +864,7 @@ final class BackgroundTaskManager: ObservableObject {
     ) -> (title: String, subtitle: String) {
         var pieces: [String] = []
 
-        let displayFraction: Double? = {
-            if let fraction = report.fraction {
-                return min(1, max(0, fraction))
-            }
-            guard let total = report.total, total > 0, let completed = report.completed else {
-                return nil
-            }
-            return min(1, max(0, Double(completed) / Double(total)))
-        }()
+        let displayFraction = _progressFraction(for: report)
 
         if let displayFraction {
             pieces.append("\(Int((displayFraction * 100).rounded()))%")
@@ -828,6 +938,7 @@ final class BackgroundTaskManager: ObservableObject {
         task: BGContinuedProcessingTask
     ) {
         var snapshot: (progress: Double, title: String, subtitle: String)?
+        var heartbeatToken: UUID?
 
         _lock.lock()
         if var state = _downloadBatchState,
@@ -836,13 +947,17 @@ final class BackgroundTaskManager: ObservableObject {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
+            let token = UUID()
+            state.heartbeatToken = token
+            state.lastMeaningfulProgressAt = Date()
+            heartbeatToken = token
             snapshot = _downloadPresentation(state)
             _downloadBatchState = state
         }
         _lock.unlock()
 
         guard let snapshot else {
-            task.setTaskCompleted(success: false)
+            _completeTask(task, success: false)
             return
         }
 
@@ -857,6 +972,9 @@ final class BackgroundTaskManager: ObservableObject {
             subtitle: snapshot.subtitle,
             to: task
         )
+        if let heartbeatToken {
+            _scheduleDownloadHeartbeat(task: task, token: heartbeatToken)
+        }
     }
 
     private func _downloadExpired(task: BGContinuedProcessingTask) {
@@ -871,6 +989,7 @@ final class BackgroundTaskManager: ObservableObject {
             state.submissionToken = nil
             state.success = false
             state.suppressed = true
+            state.heartbeatToken = nil
             downloadIDs = state.items.compactMap { $0.value.terminal ? nil : $0.key }
             releaseAudioImmediately = downloadIDs.isEmpty
             if releaseAudioImmediately {
@@ -884,7 +1003,8 @@ final class BackgroundTaskManager: ObservableObject {
 
         guard ownsTask else { return }
 
-        task.setTaskCompleted(success: false)
+        print("BGContinuedProcessingTask expired for aggregate downloads")
+        _completeTask(task, success: false)
         if releaseAudioImmediately {
             BackgroundAudioManager.shared.releaseSystemTask(_downloadAudioKey)
             return
@@ -1036,16 +1156,59 @@ final class BackgroundTaskManager: ObservableObject {
         }
     }
 
+    private func _scheduleDownloadHeartbeat(
+        task: BGContinuedProcessingTask,
+        token: UUID
+    ) {
+        _heartbeatQueue.asyncAfter(deadline: .now() + Self._heartbeatInterval) { [weak self, weak task] in
+            guard let self, let task else { return }
+
+            var remainsActive = false
+            var shouldPulse = false
+            let now = Date()
+
+            self._lock.lock()
+            if let state = self._downloadBatchState,
+               state.task === task,
+               state.heartbeatToken == token,
+               !state.suppressed,
+               state.items.values.contains(where: { !$0.terminal }) {
+                remainsActive = true
+                if let last = state.lastMeaningfulProgressAt {
+                    shouldPulse = now.timeIntervalSince(last) >= Self._heartbeatInterval
+                } else {
+                    shouldPulse = true
+                }
+            }
+            self._lock.unlock()
+
+            guard remainsActive else { return }
+            if shouldPulse {
+                self._pulseProgress(task)
+            }
+            self._scheduleDownloadHeartbeat(task: task, token: token)
+        }
+    }
+
     private func _applyDownloadProgress(
         _ progress: Double,
         title: String,
         subtitle: String,
-        to task: BGContinuedProcessingTask
+        to task: BGContinuedProcessingTask,
+        allowComplete: Bool = false
     ) {
+        let targetUnits = _progressUnits(for: progress, allowComplete: allowComplete)
+
+        _taskProgressLock.lock()
+        let previousUnits = task.progress.totalUnitCount == Self._fractionProgressUnits
+            ? task.progress.completedUnitCount
+            : 0
         task.progress.totalUnitCount = Self._fractionProgressUnits
-        task.progress.completedUnitCount = Int64(
-            (min(1, max(0, progress)) * Double(Self._fractionProgressUnits)).rounded(.down)
-        )
+        task.progress.completedUnitCount = allowComplete
+            ? targetUnits
+            : max(previousUnits, targetUnits)
         task.updateTitle(title, subtitle: subtitle)
+        _taskProgressLock.unlock()
     }
+
 }
