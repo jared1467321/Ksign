@@ -8,6 +8,7 @@
 
 import BackgroundTasks
 import Foundation
+import UIKit
 
 final class BackgroundTaskManager: ObservableObject {
     static let shared = BackgroundTaskManager()
@@ -100,6 +101,7 @@ final class BackgroundTaskManager: ObservableObject {
     )
     private var _workflowStates: [Owner: WorkflowState] = [:]
     private var _downloadBatchState: DownloadBatchState?
+    private var _lifecycleObservers: [NSObjectProtocol] = []
 
     // Keep the system Progress extremely granular so a heartbeat can advance it
     // without changing the user-visible integer percentage. One heartbeat unit is
@@ -113,6 +115,16 @@ final class BackgroundTaskManager: ObservableObject {
     private init() {
         let bundleID = Bundle.main.bundleIdentifier ?? "AppAssassin.signer.ipa"
         _baseIdentifier = "\(bundleID).userTask"
+
+        _lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?._recoverBulkInstallTaskIfNeeded()
+            }
+        )
     }
 
     // MARK: - Workflow ownership
@@ -555,24 +567,69 @@ final class BackgroundTaskManager: ObservableObject {
 
     private func _workflowExpired(_ owner: Owner, task: BGContinuedProcessingTask) {
         var ownsTask = false
+        var shouldRecoverBulkInstall = false
 
         _lock.lock()
         if var state = _workflowStates[owner], state.task === task {
             state.task = nil
             state.requestOutstanding = false
             state.submissionToken = nil
-            state.success = false
-            state.suppressed = true
             state.heartbeatToken = nil
+
+            if owner == .bulkInstalls {
+                // The continued-processing task is only the system execution /
+                // Live Activity lease. InstallSession owns the actual batch. If
+                // iOS expires this lease while the batch is still running, keep
+                // the batch state intact and retire the identifier so the next
+                // foreground recovery gets a completely fresh task.
+                state.identifier = nil
+                state.handlerRegistered = false
+                shouldRecoverBulkInstall = state.identityClaimed || state.count > 0
+            } else {
+                // Preserve the existing behavior for the other workflows. This
+                // recovery path is intentionally scoped to bulk installation.
+                state.success = false
+                state.suppressed = true
+            }
+
             _workflowStates[owner] = state
             ownsTask = true
         }
         _lock.unlock()
 
-        if ownsTask {
-            print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
-            _completeTask(task, success: false)
+        guard ownsTask else { return }
+
+        print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
+        _completeTask(task, success: false)
+
+        // A new BGContinuedProcessingTask must be submitted while the app is
+        // active. If expiration happened in the background, didBecomeActive
+        // below will recover it when the user opens Ksign. If it happened while
+        // Ksign was already active, recover immediately.
+        if shouldRecoverBulkInstall {
+            DispatchQueue.main.async { [weak self] in
+                guard UIApplication.shared.applicationState == .active else { return }
+                self?._recoverBulkInstallTaskIfNeeded()
+            }
         }
+    }
+
+    private func _recoverBulkInstallTaskIfNeeded() {
+        var shouldSubmit = false
+
+        _lock.lock()
+        if let state = _workflowStates[.bulkInstalls],
+           (state.identityClaimed || state.count > 0),
+           state.task == nil,
+           !state.requestOutstanding,
+           !state.suppressed {
+            shouldSubmit = true
+        }
+        _lock.unlock()
+
+        guard shouldSubmit else { return }
+        print("Recovering bulk install BGContinuedProcessingTask while app is active")
+        _submitWorkflowIfNeeded(.bulkInstalls)
     }
 
     private func _submitWorkflowIfNeeded(_ owner: Owner) {
