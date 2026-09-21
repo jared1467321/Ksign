@@ -554,6 +554,12 @@ final class InstallJob: ObservableObject, Identifiable {
 							jobID: jobID,
 							progress: progress
 						)
+					},
+					uiProgressReporter: { progress in
+						PackageProgressUIBridge.shared.submit(
+							progress,
+							to: viewModel
+						)
 					}
 				)
 				try await handler.move()
