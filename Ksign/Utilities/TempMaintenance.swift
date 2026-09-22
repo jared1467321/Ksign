@@ -75,24 +75,48 @@ final class TempMaintenance {
         _scheduleIdleSweep()
     }
 
+    // MARK: - Work cache cleanup
+
+    // Removes disposable work files only. Besides tmp (sign/import/install
+    // staging), IPA Vault keeps ranged-download partials in Application Support
+    // so interrupted downloads can otherwise survive a crash/force-quit and
+    // consume gigabytes without appearing in the Files app.
+    @discardableResult
+    nonisolated static func clearWorkCache() -> Int {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let ipaVaultTransfers = applicationSupport
+            .appendingPathComponent("KsignIPAVault", isDirectory: true)
+            .appendingPathComponent("transfers", isDirectory: true)
+
+        var removed = 0
+        for root in [fileManager.temporaryDirectory, ipaVaultTransfers] {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil
+            ) else { continue }
+
+            for url in entries {
+                do {
+                    try fileManager.removeItem(at: url)
+                    removed += 1
+                } catch {
+                    // Best-effort cleanup. A later launch/manual sweep can retry.
+                }
+            }
+        }
+        return removed
+    }
+
     // MARK: - Launch sweep (non-blocking)
 
     // Called from `didFinishLaunching`. At cold launch nothing is in flight, so
-    // everything currently in tmp is stale and safe to remove. The listing and
-    // the deletes both run off the main thread, so launch never blocks on it.
+    // existing tmp work and IPA Vault transfer staging are stale. Keep the
+    // recursive deletes off the main thread so a large abandoned job cannot
+    // stall the first frame.
     func cleanAtLaunch() {
-        let tmp = FileManager.default.temporaryDirectory
         Task.detached(priority: .utility) {
-            guard let entries = try? FileManager.default.contentsOfDirectory(
-                at: tmp,
-                includingPropertiesForKeys: nil
-            ) else { return }
-
-            var removed = 0
-            for url in entries {
-                do { try FileManager.default.removeItem(at: url); removed += 1 }
-                catch { /* best-effort */ }
-            }
+            let removed = Self.clearWorkCache()
             // print (stdout), not Logger — LogsManager captures stdout, so
             // this shows up in the in-app Logs screen.
             print("[TempMaintenance] Launch sweep removed \(removed) item(s)")
