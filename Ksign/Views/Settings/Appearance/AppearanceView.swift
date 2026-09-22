@@ -229,7 +229,9 @@ private struct ThemeProfileEditorView: View {
                 themeManager.selectTheme(id: themeID)
             }
         }
-        .onDisappear(_saveName)
+        .onDisappear {
+            _saveName()
+        }
     }
 
     private func _saveName() {
