@@ -10,7 +10,7 @@ import SwiftUI
 struct DownloadItem: Identifiable {
     let id = UUID()
     let title: String
-    let url: URL
+    var url: URL
     let localPath: URL
     var isFinished: Bool
     var progress: Double
@@ -29,4 +29,4 @@ struct DownloadItem: Identifiable {
         let progressDescription = "\(downloadedStr) / \(totalStr) (\(Int(progress * 100))%)"
         return isPaused ? "Paused • \(progressDescription)" : progressDescription
     }
-} 
+}

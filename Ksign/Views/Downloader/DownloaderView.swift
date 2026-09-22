@@ -227,12 +227,9 @@ struct DownloaderView: View {
                 guard !libraryManager.isImporting else { return }
                 downloadManager.loadDownloadedIPAs()
             }
-            .onChange(of: downloadManager.activeItems.count) { _ in
-                // Same guard as the one above: never rescan the disk and
-                // reorder the list while an import is running.
-                guard !libraryManager.isImporting else { return }
-                downloadManager.loadDownloadedIPAs()
-            }
+            // IPADownloadManager publishes its own completed rows. Rescanning
+            // those files here caused a second list update while SwiftUI was
+            // moving the last row out of the disappearing Downloading section.
             .fullScreenCover(item: $webViewURL) { url in
                 webViewSheet(url: url)
             }

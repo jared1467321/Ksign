@@ -14,7 +14,7 @@ ZMachO::ZMachO()
 
 ZMachO::~ZMachO()
 {
-	FreeArchOes();
+	Free();
 }
 
 bool ZMachO::Init(const char* szFile)
@@ -52,14 +52,14 @@ void ZMachO::FreeArchOes()
 		ZArchO* archo = m_arrArchOes[i];
 		delete archo;
 	}
-	m_pBase = NULL;
-	m_sSize = 0;
 	m_arrArchOes.clear();
 }
 
 bool ZMachO::OpenFile(const char* szPath)
 {
-	FreeArchOes();
+	if (!Free()) {
+		return false;
+	}
 
 	m_sSize = 0;
 	m_pBase = (uint8_t*)ZFile::MapFile(szPath, 0, 0, &m_sSize, false);
@@ -94,13 +94,17 @@ bool ZMachO::OpenFile(const char* szPath)
 bool ZMachO::CloseFile()
 {
 	if (NULL == m_pBase || m_sSize <= 0) {
-		return false;
+		return true;
 	}
 
 	if (!ZFile::UnmapFile((void*)m_pBase, m_sSize)) {
 		ZLog::ErrorV(">>> CodeSign write(munmap) failed! Error: %p, %lu, %s\n", m_pBase, m_sSize, strerror(errno));
 		return false;
 	}
+	// Only forget the mapping after munmap succeeds. FreeArchOes must not
+	// clear it first, and subsequent Free/destructor calls must be harmless.
+	m_pBase = NULL;
+	m_sSize = 0;
 	return true;
 }
 

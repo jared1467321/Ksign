@@ -271,8 +271,11 @@ class IPADownloadManager: NSObject, ObservableObject {
         let downloadDirectory = URL.documentsDirectory.appendingPathComponent("Downloads")
         
         let activeDownloads = downloadItems.filter { !$0.isFinished }
-        downloadItems.removeAll()
-        downloadItems.append(contentsOf: activeDownloads)
+        // Build one snapshot and keep existing local row identities. Publishing
+        // an empty list followed by one append per IPA churns every row when a
+        // download finishes (including when the active section disappears).
+        let existingDownloads = downloadItems.filter { $0.isFinished }
+        var refreshedItems = activeDownloads
         
         do {
             try fileManager.createDirectoryIfNeeded(at: downloadDirectory)
@@ -286,6 +289,14 @@ class IPADownloadManager: NSObject, ObservableObject {
                     
                     let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
                     let fileSize = attributes[.size] as? Int64 ?? 0
+
+                    if var existing = existingDownloads.first(where: { $0.localPath == fileURL }) {
+                        existing.url = fileURL
+                        existing.totalBytes = fileSize
+                        existing.bytesDownloaded = fileSize
+                        refreshedItems.append(existing)
+                        continue
+                    }
                     
                     let item = DownloadItem(
                         title: fileURL.lastPathComponent,
@@ -296,10 +307,10 @@ class IPADownloadManager: NSObject, ObservableObject {
                         totalBytes: fileSize,
                         bytesDownloaded: fileSize
                     )
-                    downloadItems.append(item)
+                    refreshedItems.append(item)
                 }
             }
-            
+            downloadItems = refreshedItems
         } catch {
             print("Failed to load downloaded IPAs: \(error)")
         }
@@ -1124,6 +1135,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 try FileManager.default.moveItem(at: temporaryURL, to: destination)
 
                 var item = downloadItems[index]
+                item.url = destination
                 item.isFinished = true
                 item.progress = 1
                 item.totalBytes = job.totalBytes
@@ -1950,6 +1962,7 @@ extension IPADownloadManager: URLSessionDownloadDelegate, URLSessionDataDelegate
                 guard let self = self else { return }
 
                 var updatedItem = item
+                updatedItem.url = item.localPath
                 updatedItem.isFinished = true
                 updatedItem.progress = 1.0
                 if let fileSize = try? FileManager.default.attributesOfItem(atPath: item.localPath.path)[.size] as? Int64 {
