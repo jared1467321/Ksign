@@ -478,19 +478,27 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
+        let loadedThemes: [NBThemeProfile]
         if let data = defaults.data(forKey: Self.profilesKey),
            let themes = try? JSONDecoder().decode([NBThemeProfile].self, from: data) {
-            self.customThemes = themes.filter { !$0.isBuiltIn }
+            loadedThemes = themes.filter { !$0.isBuiltIn }
         } else {
-            self.customThemes = []
+            loadedThemes = []
         }
 
         let stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.halloweenID
-        if stored == NBThemeProfile.halloweenID || customThemes.contains(where: { $0.id == stored }) {
-            self.selectedThemeID = stored
+        let initialThemeID: String
+        if stored == NBThemeProfile.halloweenID || loadedThemes.contains(where: { $0.id == stored }) {
+            initialThemeID = stored
         } else {
-            self.selectedThemeID = NBThemeProfile.halloweenID
+            initialThemeID = NBThemeProfile.halloweenID
         }
+
+        // Initialize the @Published backing storage directly so Swift 6 does not
+        // treat the wrapped-property access as a use of `self` before every
+        // stored property has been initialized.
+        self._customThemes = Published(initialValue: loadedThemes)
+        self._selectedThemeID = Published(initialValue: initialThemeID)
     }
 
     public func profile(id: String) -> NBThemeProfile? {
