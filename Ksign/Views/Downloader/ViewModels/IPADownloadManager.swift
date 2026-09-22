@@ -518,6 +518,15 @@ class IPADownloadManager: NSObject, ObservableObject {
             )
         )
 
+        // IPA Vault can receive many data callbacks per second. Reporting every tiny
+        // fraction change to BGContinuedProcessingTask needlessly floods the system
+        // Live Activity path. Keep system progress at whole-percent granularity, and
+        // reserve 100% for the real terminal snapshot so completion is never shown early.
+        let reportedPercent = completed >= total
+            ? 100
+            : min(99, Int((aggregateFraction * 100).rounded(.down)))
+        let reportedFraction = Double(reportedPercent) / 100
+
         let currentItemID = stickyIPAVaultActivityItemID()
         let currentItem = currentItemID.flatMap { itemID in
             downloadItems.first(where: { $0.id.uuidString == itemID })?.title
@@ -526,7 +535,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         let snapshot = IPAVaultBackgroundTaskSnapshot(
             completed: completed,
             total: total,
-            fraction: aggregateFraction,
+            fraction: reportedFraction,
             detail: detail,
             currentItem: currentItem
         )
@@ -537,7 +546,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             .ipaVaultDownloads,
             completed: completed,
             total: total,
-            fraction: aggregateFraction,
+            fraction: reportedFraction,
             detail: detail,
             currentItem: currentItem
         )
