@@ -542,6 +542,10 @@ final class BulkInstallLiveActivityReporter {
 	// One background-safe mirror per stable job ID. Each job contributes a
 	// monotonic 0...1 value to the batch aggregate, so the Live Activity can use
 	// the real package/install progress without depending on the MainActor drawer.
+	private let _packageProgressLock = NSLock()
+	private var _pendingPackageProgress: [UUID: (value: Double, isCurrent: () -> Bool)] = [:]
+	private var _packageDrainQueued = false
+
 	private var _jobs: [UUID: _Job] = [:]
 	private var _paused = false
 	private var _active = false
@@ -597,31 +601,52 @@ final class BulkInstallLiveActivityReporter {
 		}
 	}
 
-	func updatePackage(jobID: UUID, progress: Double) {
-		_queue.async {
-			guard var job = self._jobs[jobID], !job.isTerminal else { return }
-			let value = min(1, max(0, progress))
-			guard value != job.packageProgress else { return }
+	func updatePackage(jobID: UUID, progress: Double, isCurrent: @escaping () -> Bool = { true }) {
+		guard isCurrent() else { return }
+		_packageProgressLock.lock()
+		_pendingPackageProgress[jobID] = (progress, isCurrent)
+		let enqueue = !_packageDrainQueued
+		_packageDrainQueued = true
+		_packageProgressLock.unlock()
+		if enqueue { _queue.async { self._drainPackageProgress() } }
+	}
 
-			let before = job
-			job.packageProgress = value
-			if job.stage == .queued || job.stage == .packaging {
-				job.stage = .packaging
-				job.fraction = min(1, max(job.fraction, value * 0.5))
-			}
-
-			let madeGenuineProgress = job.fraction > before.fraction
-			if madeGenuineProgress {
-				self._progressSequence += 1
-				job.lastPackageProgressSequence = self._progressSequence
-			}
-			self._jobs[jobID] = job
-			guard job.stage != before.stage || job.fraction != before.fraction else { return }
-			if madeGenuineProgress {
-				self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastPackageProgressSequence)
-			}
-			self._publish()
+	private func _drainPackageProgress() {
+		_packageProgressLock.lock()
+		let updates = _pendingPackageProgress
+		_pendingPackageProgress.removeAll(keepingCapacity: true)
+		_packageDrainQueued = false
+		_packageProgressLock.unlock()
+		for (id, update) in updates where update.isCurrent() {
+			_applyPackageProgress(jobID: id, progress: update.value)
 		}
+	}
+
+	// Runs only on _queue. Status transitions still use their original ordered
+	// delivery; only replaceable numeric packaging updates share this mailbox.
+	private func _applyPackageProgress(jobID: UUID, progress: Double) {
+		guard var job = self._jobs[jobID], !job.isTerminal else { return }
+		let value = min(1, max(0, progress))
+		guard value != job.packageProgress else { return }
+
+		let before = job
+		job.packageProgress = value
+		if job.stage == .queued || job.stage == .packaging {
+			job.stage = .packaging
+			job.fraction = min(1, max(job.fraction, value * 0.5))
+		}
+
+		let madeGenuineProgress = job.fraction > before.fraction
+		if madeGenuineProgress {
+			self._progressSequence += 1
+			job.lastPackageProgressSequence = self._progressSequence
+		}
+		self._jobs[jobID] = job
+		guard job.stage != before.stage || job.fraction != before.fraction else { return }
+		if madeGenuineProgress {
+			self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastPackageProgressSequence)
+		}
+		self._publish()
 	}
 
 	func updateInstall(jobID: UUID, progress: Double) {
@@ -658,10 +683,11 @@ final class BulkInstallLiveActivityReporter {
 
 	func updateStatus(
 		jobID: UUID,
-		status: InstallerStatusViewModel.InstallerStatus
+		status: InstallerStatusViewModel.InstallerStatus,
+		isCurrent: @escaping () -> Bool = { true }
 	) {
 		_queue.async {
-			guard var job = self._jobs[jobID] else { return }
+			guard isCurrent(), var job = self._jobs[jobID] else { return }
 			let before = job
 
 			switch status {

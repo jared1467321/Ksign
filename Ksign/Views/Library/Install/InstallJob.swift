@@ -48,6 +48,29 @@ private func _processPhysicalFootprintBytes() -> UInt64? {
 	return UInt64(info.phys_footprint)
 }
 
+// A status may already be enqueued on MainActor when Retry/Cancel arrives.
+// Capture its generation on the publisher's queue, before that delivery hop.
+private final class InstallStatusEpoch: @unchecked Sendable {
+	private let lock = NSLock()
+	private var value: UUID? = UUID()
+	var current: UUID? {
+		lock.lock()
+		defer { lock.unlock() }
+		return value
+	}
+	func advance() {
+		lock.lock()
+		value = UUID()
+		lock.unlock()
+	}
+	func cancel() {
+		lock.lock()
+		value = nil
+		lock.unlock()
+	}
+	func matches(_ epoch: UUID?) -> Bool { epoch != nil && current == epoch }
+}
+
 // One app's install.
 //
 // All of this used to live inside `BulkInstallProgressView` as `@State` and
@@ -104,6 +127,10 @@ final class InstallJob: ObservableObject, Identifiable {
 
 	private var _cancellables = Set<AnyCancellable>()
 	private var _installTask: Task<Void, Never>?
+	private var _packagingTask: Task<Void, Never>?
+	private var _packagingAttempt: PackagingAttempt?
+	private var _retryAfterPackaging = false
+	private let _statusEpoch = InstallStatusEpoch()
 
 	// MARK: Install queue
 	// One flag instead of the `_hasSlot`/`_slotReleased` pair. The coordinator
@@ -212,24 +239,21 @@ final class InstallJob: ObservableObject, Identifiable {
 		// hopping to MainActor for the drawer. This subscription remains alive with
 		// the job even when no install view is currently being rendered.
 		let liveActivityJobID = id
+		let statusEpoch = _statusEpoch
 		viewModel.$status
 			.sink { status in
+				let epoch = statusEpoch.current
 				BulkInstallLiveActivityReporter.shared.updateStatus(
 					jobID: liveActivityJobID,
-					status: status
+					status: status,
+					isCurrent: { statusEpoch.matches(epoch) }
 				)
 			}
 			.store(in: &_cancellables)
 
-		viewModel.$packageProgress
-			.removeDuplicates()
-			.sink { progress in
-				BulkInstallLiveActivityReporter.shared.updatePackage(
-					jobID: liveActivityJobID,
-					progress: progress
-				)
-			}
-			.store(in: &_cancellables)
+		// Packaging reports directly from its attempt. Echoing delayed UI progress
+		// back into that reporter could replace a newer worker value with an old
+		// one, and would lose the attempt's cancellation guard.
 
 		viewModel.$installProgress
 			.removeDuplicates()
@@ -243,9 +267,13 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		// UI state and queue coordination still belong on MainActor.
 		viewModel.$status
+			.map { (status: $0, epoch: statusEpoch.current) }
 			.receive(on: DispatchQueue.main)
-			.sink { [weak self] status in
-				Task { @MainActor in self?._handleStatus(status) }
+			.sink { [weak self] event in
+				Task { @MainActor in
+					guard statusEpoch.matches(event.epoch) else { return }
+					self?._handleStatus(event.status)
+				}
 			}
 			.store(in: &_cancellables)
 
@@ -330,6 +358,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// simply sitting idle at `.sendingManifest` waiting for a payload request
 	// that will never come. Nothing is broken, so nothing needs rebuilding.
 	func retry() {
+		_statusEpoch.advance()
 		// A manual retry always re-prompts this one app on its own — the shared
 		// group prompt has already happened, so fold it back to a solo install.
 		if batchRole == .host { installer?.setHosted([]) }
@@ -340,6 +369,12 @@ final class InstallJob: ObservableObject, Identifiable {
 		ServerInstallProgressMonitor.shared.stop(id: id)
 		_installTask?.cancel()
 		_installTask = nil
+		_packagingAttempt?.cancel()
+		if _packagingTask != nil {
+			_retryAfterPackaging = true
+			_packagingTask?.cancel()
+			return
+		}
 
 		// Slot handling follows what the job is *currently holding*, not which
 		// path it's about to take — those are separate questions. A job stuck
@@ -406,6 +441,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Drops a batched app back into the ready pool so the session can fold it
 	// into a fresh manifest with whatever else is waiting or still building.
 	func rejoinPool() {
+		_statusEpoch.advance()
 		// Shed any role from the manifest it was just in. A demoted host also
 		// stops serving — a fresh host will serve the regrouped manifest.
 		if batchRole == .host {
@@ -452,6 +488,10 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Replaces the view's `.onDisappear`. Only called when the session is
 	// actually tearing the job down — *not* when the drawer collapses.
 	func cancel() {
+		_statusEpoch.cancel()
+		_retryAfterPackaging = false
+		_packagingAttempt?.cancel()
+		_packagingTask?.cancel()
 		_installTask?.cancel()
 		_installTask = nil
 		ServerInstallProgressMonitor.shared.stop(id: id)
@@ -509,6 +549,12 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		switch newStatus {
 		case .completed, .broken:
+			if case .broken = newStatus, _packagingTask != nil {
+				// An external installer failure may arrive before packaging ends.
+				// Its worker must not subsequently resurrect the job as .ready.
+				_packagingAttempt?.cancel()
+				_packagingTask?.cancel()
+			}
 			ServerInstallProgressMonitor.shared.stop(id: id)
 			// This one was missed before. A job that failed while still queued
 			// left its task sitting in `acquire()`, which would later claim a
@@ -571,71 +617,104 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _install() {
+		// Rejoin/retry can arrive while a synchronous native writer is alive.
+		// Invalidate it now, but restart only after its worker has cleaned up.
+		if _packagingTask != nil {
+			_retryAfterPackaging = true
+			_packagingAttempt?.cancel()
+			_packagingTask?.cancel()
+			return
+		}
 		let app = self.app
 		let viewModel = self.viewModel
 		let method = _installationMethod
 		let installer = self.installer
 		let jobID = self.id
+		_statusEpoch.advance()
+		_packagingAttempt?.cancel()
+		let attempt = PackagingAttempt()
+		_packagingAttempt = attempt
 
-		Task.detached {
+		_packagingTask = Task.detached { [weak self] in
+			let handler = ArchiveHandler(
+				app: app,
+				viewModel: viewModel,
+				progressReporter: { progress in
+					BulkInstallLiveActivityReporter.shared.updatePackage(
+						jobID: jobID, progress: progress, isCurrent: { attempt.isCurrent }
+					)
+				},
+				attempt: attempt,
+				jobID: jobID
+			)
+			var handedOff = false
+			var failure: Error?
 			do {
-				let handler = await ArchiveHandler(
-					app: app,
-					viewModel: viewModel,
-					progressReporter: { progress in
-						BulkInstallLiveActivityReporter.shared.updatePackage(
-							jobID: jobID,
-							progress: progress
-						)
-					}
-				)
 				try await handler.move()
-
-				let workDir = await handler.workDir
-				let archiveLabel = app.name ?? app.identifier ?? "unknown"
-				let beforeArchiveMB = _availableProcessMemoryMB()
-				Logger.misc.info(
-					"Archive memory headroom before packaging [\(archiveLabel, privacy: .public)]: \(beforeArchiveMB) MB"
-				)
-				let packageUrl = try await handler.archive()
-				let afterArchiveMB = _availableProcessMemoryMB()
-				Logger.misc.info(
-					"Archive memory headroom after packaging [\(archiveLabel, privacy: .public)]: \(afterArchiveMB) MB"
-				)
-
-				await MainActor.run { [weak self] in
-					self?._archiveWorkDir = workDir
-				}
+				try Task.checkCancellation()
+				let packageURL = try await handler.archive()
+				try Task.checkCancellation()
+				guard attempt.isCurrent else { throw CancellationError() }
 
 				if method == 0 {
 					BulkInstallLiveActivityReporter.shared.updateStatus(
-						jobID: jobID,
-						status: .ready
+						jobID: jobID, status: .ready, isCurrent: { attempt.isCurrent }
 					)
-					await MainActor.run {
-						installer?.packageUrl = packageUrl
+					let workDir = handler.workDir
+					handedOff = await MainActor.run { [weak self] in
+						guard let self, self._packagingAttempt?.id == attempt.id,
+						      attempt.isCurrent else { return false }
+						// Ownership transfers atomically with .ready. Until this point
+						// only the worker may delete its work directory.
+						self._archiveWorkDir = workDir
+						installer?.packageUrl = packageURL
+						viewModel.packageProgress = 1
 						viewModel.status = .ready
+						return true
 					}
 				} else if method == 1 {
 					let proxy = await InstallationProxy(viewModel: viewModel)
-					try await proxy.install(
-						at: packageUrl,
-						suspend: app.identifier == Bundle.main.bundleIdentifier!
-					)
+					try Task.checkCancellation()
+					try await proxy.install(at: packageURL, suspend: app.identifier == Bundle.main.bundleIdentifier!)
+					// Keep worker ownership until idevice finishes consuming the IPA.
 				}
+			} catch let error as CancellationError {
+				// Cancellation is not an install failure, including a queued lease.
+				// An unrelated dependency cancellation still needs a terminal state.
+				if !Task.isCancelled && attempt.isCurrent { failure = error }
 			} catch {
-				BulkInstallLiveActivityReporter.shared.updateStatus(
-					jobID: jobID,
-					status: .broken(error)
-				)
-				// A failed install used to be indistinguishable from one still
-				// running. `.broken` also lets the status handler free the slot.
-				Logger.misc.error("Install failed for \(app.identifier ?? "?"): \(error.localizedDescription)")
-				await MainActor.run {
-					viewModel.status = .broken(error)
-					HeartbeatManager.shared.start(true)
-				}
+				failure = error
 			}
+			if !handedOff { handler.cleanup() }
+			let packagingError = failure
+			if let packagingError {
+				BulkInstallLiveActivityReporter.shared.updateStatus(
+					jobID: jobID, status: .broken(packagingError), isCurrent: { attempt.isCurrent }
+				)
+			}
+			await MainActor.run { [weak self] in
+				self?._packagingFinished(attempt, error: packagingError)
+			}
+		}
+	}
+
+	private func _packagingFinished(_ attempt: PackagingAttempt, error: Error?) {
+		guard _packagingAttempt?.id == attempt.id else { return }
+		_packagingTask = nil
+		// Retain the last token until replacement/cancellation, so pending UI
+		// deliveries from a finished attempt can also be invalidated on retry.
+		if _retryAfterPackaging {
+			_retryAfterPackaging = false
+			if _holdsSlot {
+				phase = .running
+				_resume()
+			} else {
+				_reacquireAndResume()
+			}
+		} else if attempt.isCurrent, let error {
+			Logger.misc.error("Install failed for \(self.app.identifier ?? "?"): \(error.localizedDescription)")
+			viewModel.status = .broken(error)
+			HeartbeatManager.shared.start(true)
 		}
 	}
 
@@ -890,6 +969,7 @@ final class InstallQueueCoordinator {
 			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax {
 				if !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: id) {
 					_holders.insert(id)
+					ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 					if _usesAdaptiveMemoryAdmission {
 						_beginAdmissionObservation(for: id)
 					}
@@ -911,6 +991,7 @@ final class InstallQueueCoordinator {
 
 	func release(_ id: UUID) {
 		guard _holders.remove(id) != nil else { return }
+		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 
 		// Capture one last sample while the just-finished job's footprint is still
 		// representative. If this was the newest admission, its observation can
@@ -1330,6 +1411,7 @@ final class InstallQueueCoordinator {
 		guard !orphaned.isEmpty else { return }
 
 		_holders.subtract(orphaned)
+		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 		Logger.misc.info("Install queue reclaimed \(orphaned.count) orphaned slot(s)")
 	}
 }

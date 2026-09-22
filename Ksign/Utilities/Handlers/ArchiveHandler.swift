@@ -8,8 +8,56 @@
 import Foundation
 import UIKit.UIApplication
 import ASignArchiveKit
-import SwiftUI
 import IDeviceSwift
+
+// Shared with the job owner: invalidation is synchronous, including while a
+// native worker cannot cooperatively cancel. Pending progress checks it again
+// at delivery time so old attempts cannot update a retry's UI.
+final class PackagingAttempt: @unchecked Sendable {
+	let id = UUID()
+	private let lock = NSLock()
+	private var cancelled = false
+	var isCurrent: Bool {
+		lock.lock()
+		defer { lock.unlock() }
+		return !cancelled
+	}
+	func cancel() {
+		lock.lock()
+		cancelled = true
+		lock.unlock()
+	}
+}
+
+// At most one scheduled delivery and one latest value per producer. This also
+// bounds callback/autorelease work for directories with thousands of entries.
+private final class PackageProgressDelivery {
+	private static let queue = DispatchQueue(label: "nya.asami.ksign.package-progress", qos: .userInitiated)
+	private let lock = NSLock()
+	private var latest: Double?
+	private var scheduled = false
+	private let deliver: (Double) -> Void
+	init(deliver: @escaping (Double) -> Void) { self.deliver = deliver }
+	func submit(_ value: Double) {
+		lock.lock()
+		latest = value
+		let enqueue = !scheduled
+		scheduled = true
+		lock.unlock()
+		if enqueue {
+			Self.queue.asyncAfter(deadline: .now() + 0.1) { self.drain() }
+		}
+	}
+	func flush() { Self.queue.sync { drain() } }
+	private func drain() {
+		lock.lock()
+		let value = latest
+		latest = nil
+		scheduled = false
+		lock.unlock()
+		if let value { autoreleasepool { deliver(value) } }
+	}
+}
 
 // Keeps high-frequency package progress from building an unbounded backlog of
 // main-queue blocks while Ksign is backgrounded or while the main thread is
@@ -77,7 +125,8 @@ final class PackageProgressUIBridge {
 
 	func submit(
 		_ value: Double,
-		to viewModel: InstallerStatusViewModel
+		to viewModel: InstallerStatusViewModel,
+		isCurrent: @escaping () -> Bool = { true }
 	) {
 		let key = ObjectIdentifier(viewModel)
 		var shouldQueueDelivery = false
@@ -85,7 +134,7 @@ final class PackageProgressUIBridge {
 		_lock.lock()
 		var entry = _pending[key] ?? Pending()
 		entry.latest = { [weak viewModel] in
-			viewModel?.packageProgress = value
+			if isCurrent() { viewModel?.packageProgress = value }
 		}
 
 		if _isAppActive && !entry.deliveryQueued {
@@ -181,7 +230,9 @@ final class PackageProgressUIBridge {
 }
 
 final class ArchiveHandler: NSObject, FileManagerDelegate {
-	@ObservedObject var viewModel: InstallerStatusViewModel
+	// This is a worker-owned helper, not a SwiftUI view. Avoid property-wrapper
+	// actor inference here; PackageProgressUIBridge owns all UI assignments.
+	let viewModel: InstallerStatusViewModel
 	
 	private let _fileManager = FileManager()
 	private let _uuid = UUID().uuidString
@@ -191,6 +242,12 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	private let _uniqueWorkDir: URL
 	private let _progressReporter: ((Double) -> Void)?
 	private let _uiProgressReporter: ((Double) -> Void)?
+	private let _attempt: PackagingAttempt
+	private let _jobID: UUID
+	private var _workload = ArchiveWorkload()
+	private lazy var _progressDelivery = PackageProgressDelivery { [weak self] value in
+		self?._deliverPackagingProgress(value)
+	}
 
 	// Packaging has two real pieces of work before the install prompt can fire:
 	// preparing Payload (recursive hard-link/copy) and creating the IPA. The
@@ -214,12 +271,16 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
 		progressReporter: ((Double) -> Void)? = nil,
-		uiProgressReporter: ((Double) -> Void)? = nil
+		uiProgressReporter: ((Double) -> Void)? = nil,
+		attempt: PackagingAttempt = PackagingAttempt(),
+		jobID: UUID = UUID()
 	) {
 		self.viewModel = viewModel
 		self._app = app
 		self._progressReporter = progressReporter
 		self._uiProgressReporter = uiProgressReporter
+		self._attempt = attempt
+		self._jobID = jobID
 		self._uniqueWorkDir = _fileManager.temporaryDirectory
 			.appendingPathComponent("FeatherInstall_\(_uuid)", isDirectory: true)
 		
@@ -234,7 +295,7 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	// the payload from this directory, so it has to survive until the install
 	// reaches a terminal state.
 	static func cleanup(workDir: URL) {
-		try? FileManager.default.removeItem(at: workDir)
+		autoreleasepool { try? FileManager.default.removeItem(at: workDir) }
 	}
 	
 	func cleanup() {
@@ -242,6 +303,7 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	}
 	
 	func move() async throws {
+		try Task.checkCancellation()
 		guard let appUrl = Storage.shared.getAppDirectory(for: _app) else {
 			throw SigningFileHandlerError.appNotFound
 		}
@@ -250,72 +312,106 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 		let movedAppURL = payloadUrl.appendingPathComponent(appUrl.lastPathComponent)
 
 		try _fileManager.createDirectoryIfNeeded(at: payloadUrl)
-		_beginPreparationProgress(for: appUrl)
+		try _beginPreparationProgress(for: appUrl)
 		defer { _preparationReporting = false }
 		
 		// Hard links rather than a copy. FileManager recursively links directory
 		// contents and invokes our delegate for each item, so this formerly silent
 		// setup phase now contributes real package/BGTask progress too.
-		do {
-			try _fileManager.linkItem(at: appUrl, to: movedAppURL)
-		} catch {
-			// Falls back to the old behaviour if linking isn't possible. Recursive
-			// copy uses the same delegate progress path, so BGTaskManager continues
-			// seeing forward movement here as well.
-			try _fileManager.copyItem(at: appUrl, to: movedAppURL)
+		try autoreleasepool {
+			do {
+				try _fileManager.linkItem(at: appUrl, to: movedAppURL)
+			} catch {
+				try Task.checkCancellation()
+				// Recursive copy uses the same delegate progress path.
+				try _fileManager.copyItem(at: appUrl, to: movedAppURL)
+			}
 		}
+		try Task.checkCancellation()
 
 		_reportPackagingProgress(Self._preparationWeight)
 		_payloadUrl = payloadUrl
 	}
 	
 	func archive() async throws -> URL {
-		// `.userInitiated`, not `.background`.
-		//
-		// Zipping the payload is the most CPU-heavy step in the install
-		// pipeline, and it was running at the lowest quality of service iOS
-		// offers. `.background` isn't just "a bit lower" — it's the tier the
-		// system throttles on purpose: reduced scheduling priority, throttled
-		// disk I/O, and deferral outright when the device is under thermal or
-		// CPU pressure. That's the correct tier for work nobody is waiting on,
-		// and precisely the wrong one for work with a progress bar attached to
-		// it that the user is staring at.
-		//
-		// `.userInitiated` is the right level — the user asked for this and is
-		// blocked until it finishes. Not `.userInteractive`, which is reserved
-		// for keeping the UI itself responsive.
-		return try await Task.detached(priority: .userInitiated) { [self] in
-			guard let payloadUrl = await self._payloadUrl else {
-				throw SigningFileHandlerError.appNotFound
+		let attempt = _attempt
+		let worker = Task.detached(priority: .userInitiated) { [self] in
+			let gate = ArchiveMemoryCoordinator.shared
+			let compression = ASignArchiveCompression(rawValue: Self.getCompressionLevel()) ?? .none
+			var workload = self._workload
+			workload.compression = compression.rawValue
+			let lease: ArchiveMemoryCoordinator.Lease
+			do {
+				try Task.checkCancellation()
+				guard attempt.isCurrent else { throw CancellationError() }
+				lease = try await gate.acquire(job: self._jobID, attempt: attempt.id, workload: workload)
+			} catch {
+				self.cleanup()
+				throw error
 			}
-			
-			let zipUrl = self._uniqueWorkDir.appendingPathComponent("Archive.zip")
-			let ipaUrl = self._uniqueWorkDir.appendingPathComponent("Archive.ipa")
-			
-			let compression = ASignArchiveCompression(
-				rawValue: ArchiveHandler.getCompressionLevel()
-			) ?? .none
 
-			try ASignArchive.create(
-				from: payloadUrl,
-				at: zipUrl,
-				compression: compression,
-				progress: { progress in
-					// Payload preparation owns the first slice of package progress. Map
-					// minizip's real byte progress across the remainder so the combined
-					// value never resets when archiving begins.
-					let mapped = Self._preparationWeight
-						+ (progress * (1 - Self._preparationWeight))
-					self._reportPackagingProgress(mapped)
+			var result: Result<URL, Error>
+			do {
+				let package = try autoreleasepool {
+					// Cancellation after grant still owns a lease, even if no native
+					// work has begun. The common exit below always releases it.
+					try Task.checkCancellation()
+					guard attempt.isCurrent else { throw CancellationError() }
+					guard let payloadUrl = self._payloadUrl else {
+						throw SigningFileHandlerError.appNotFound
+					}
+					let zipUrl = self._uniqueWorkDir.appendingPathComponent("Archive.zip")
+					let ipaUrl = self._uniqueWorkDir.appendingPathComponent("Archive.ipa")
+					gate.checkpoint(lease, "before archive lifecycle")
+					try ASignArchive.create(
+						from: payloadUrl, at: zipUrl, compression: compression,
+						beforeNative: {
+							try Task.checkCancellation()
+							guard attempt.isCurrent else { throw CancellationError() }
+							gate.checkpoint(lease, "before native")
+						},
+						afterNative: { gate.checkpoint(lease, "native returned") },
+						progress: { progress in
+							self._reportPackagingProgress(Self._preparationWeight + progress * (1 - Self._preparationWeight))
+						}
+					)
+					// Never interrupt synchronous minizip. A cancelled writer gets
+					// here normally and its closed output is discarded below.
+					try Task.checkCancellation()
+					guard attempt.isCurrent else { throw CancellationError() }
+					try FileManager.default.moveItem(at: zipUrl, to: ipaUrl)
+					return ipaUrl
 				}
-			)
-			
-			try FileManager.default.moveItem(at: zipUrl, to: ipaUrl)
-			self._reportPackagingProgress(1)
-			return ipaUrl
-		}.value
+				result = .success(package)
+			} catch {
+				result = .failure(error)
+			}
+			if case .success = result { self._reportPackagingProgress(1) }
+			self._progressDelivery.flush()
+			gate.checkpoint(lease, "temporary objects released")
+			await gate.settle()
+			if Task.isCancelled || !attempt.isCurrent { result = .failure(CancellationError()) }
+			let succeeded: Bool
+			switch result {
+			case .success:
+				succeeded = true
+			case .failure:
+				succeeded = false
+				// No writer is alive now. Keep the lease until file cleanup ends.
+				self.cleanup()
+			}
+			gate.checkpoint(lease, "settled and cleanup complete")
+			gate.finish(lease, succeeded: succeeded)
+			return try result.get()
+		}
+		return try await withTaskCancellationHandler {
+			try await worker.value
+		} onCancel: {
+			attempt.cancel()
+			worker.cancel()
+		}
 	}
-	
+
 	func moveToArchive(_ package: URL, shouldOpen: Bool = false) async throws -> URL? {
 		let appendingString = "\(_app.name!)_\(_app.version!)_\(Int(Date().timeIntervalSince1970)).ipa"
 		let dest = _fileManager.archives.appendingPathComponent(appendingString)
@@ -337,18 +433,33 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 
 	// MARK: - Packaging progress
 
-	private func _beginPreparationProgress(for appURL: URL) {
-		var count = 1 // The .app directory itself.
+	private func _beginPreparationProgress(for appURL: URL) throws {
+		_workload = ArchiveWorkload(entries: 1, pathBytes: Double(appURL.path.utf8.count))
+		let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
 		if let enumerator = _fileManager.enumerator(
 			at: appURL,
-			includingPropertiesForKeys: nil,
+			includingPropertiesForKeys: Array(keys),
 			options: [],
-			errorHandler: { _, _ in true }
+			errorHandler: { [self] _, _ in self._workload.complete = false; return true }
 		) {
-			while enumerator.nextObject() != nil { count += 1 }
-		}
+			// nextObject belongs inside the pool too: enumerated NSURLs and
+			// prefetched resource values must not accumulate across the scan.
+			while try autoreleasepool(invoking: {
+				try Task.checkCancellation()
+				guard let url = enumerator.nextObject() as? URL else { return false }
+				_workload.entries += 1
+				_workload.pathBytes += Double(url.path.utf8.count)
+				do {
+					let values = try url.resourceValues(forKeys: keys)
+					if values.isRegularFile == true && values.isSymbolicLink != true {
+						_workload.uncompressedBytes += Double(values.fileSize ?? 0)
+					}
+				} catch { _workload.complete = false }
+				return true
+			}) { }
+		} else { _workload.complete = false }
 
-		_preparationTotalItems = max(1, count)
+		_preparationTotalItems = max(1, Int(_workload.entries))
 		_preparationVisitedItems = 0
 		_preparationReporting = true
 		_reportPackagingProgress(0)
@@ -365,16 +476,18 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	}
 
 	private func _reportPackagingProgress(_ progress: Double) {
-		let value = min(1, max(0, progress))
-		_progressReporter?(value)
+		guard _attempt.isCurrent else { return }
+		_progressDelivery.submit(min(1, max(0, progress)))
+	}
 
+	private func _deliverPackagingProgress(_ value: Double) {
+		guard _attempt.isCurrent else { return }
+		_progressReporter?(value)
 		if let uiProgressReporter = _uiProgressReporter {
 			uiProgressReporter(value)
 		} else {
-			// Preserve the existing behavior for single-install/export callers.
-			Task { @MainActor in
-				self.viewModel.packageProgress = value
-			}
+			let attempt = _attempt
+			PackageProgressUIBridge.shared.submit(value, to: viewModel, isCurrent: { attempt.isCurrent })
 		}
 	}
 

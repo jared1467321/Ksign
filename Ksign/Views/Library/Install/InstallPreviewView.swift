@@ -119,12 +119,8 @@ struct InstallPreviewView: View {
 			}
 			.store(in: &_activityCancellables)
 
-		viewModel.$packageProgress
-			.removeDuplicates()
-			.sink { progress in
-				SingleInstallLiveActivityReporter.shared.updatePackage(progress)
-			}
-			.store(in: &_activityCancellables)
+		// ArchiveHandler sends coalesced packaging progress directly. Do not echo
+		// potentially delayed UI values back over newer worker measurements.
 
 		viewModel.$installProgress
 			.removeDuplicates()
@@ -163,7 +159,7 @@ struct InstallPreviewView: View {
 
 		Task.detached {
 			do {
-				let handler = await ArchiveHandler(
+				let handler = ArchiveHandler(
 					app: app,
 					viewModel: viewModel,
 					progressReporter: { progress in
@@ -172,7 +168,7 @@ struct InstallPreviewView: View {
 				)
 				try await handler.move()
 				
-				let workDir = await handler.workDir
+				let workDir = handler.workDir
 				let packageUrl = try await handler.archive()
 				
 				await MainActor.run {
@@ -262,6 +258,10 @@ final class SingleInstallLiveActivityReporter {
 		qos: .userInitiated
 	)
 
+	private let _packageProgressLock = NSLock()
+	private var _pendingPackageProgress: Double?
+	private var _packageDrainQueued = false
+
 	private var _active = false
 	private var _stage: _Stage = .packaging
 	private var _packageProgress: Double = 0
@@ -287,19 +287,32 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	func updatePackage(_ progress: Double) {
-		_queue.async {
-			guard self._active else { return }
-			let value = min(1, max(0, progress))
-			guard value != self._packageProgress else { return }
+		_packageProgressLock.lock()
+		_pendingPackageProgress = progress
+		let enqueue = !_packageDrainQueued
+		_packageDrainQueued = true
+		_packageProgressLock.unlock()
+		if enqueue { _queue.async { self._drainPackageProgress() } }
+	}
 
-			self._packageProgress = value
-			guard self._stage == .packaging else { return }
+	private func _drainPackageProgress() {
+		_packageProgressLock.lock()
+		let progress = _pendingPackageProgress
+		_pendingPackageProgress = nil
+		_packageDrainQueued = false
+		_packageProgressLock.unlock()
+		guard let progress else { return }
+		guard self._active else { return }
+		let value = min(1, max(0, progress))
+		guard value != self._packageProgress else { return }
 
-			let next = min(1, max(self._fraction, value * 0.5))
-			guard next != self._fraction else { return }
-			self._fraction = next
-			self._publish()
-		}
+		self._packageProgress = value
+		guard self._stage == .packaging else { return }
+
+		let next = min(1, max(self._fraction, value * 0.5))
+		guard next != self._fraction else { return }
+		self._fraction = next
+		self._publish()
 	}
 
 	func updateInstall(_ progress: Double) {
@@ -424,4 +437,3 @@ final class SingleInstallLiveActivityReporter {
 		)
 	}
 }
-

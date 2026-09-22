@@ -77,6 +77,8 @@ public enum ASignArchive {
         from sourceURL: URL,
         at archiveURL: URL,
         compression: ASignArchiveCompression,
+        beforeNative: (() throws -> Void)? = nil,
+        afterNative: (() -> Void)? = nil,
         progress: ((Double) -> Void)? = nil
     ) throws {
         let fileManager = FileManager.default
@@ -94,6 +96,10 @@ public enum ASignArchive {
         let opaque = Unmanaged.passRetained(context).toOpaque()
         defer { Unmanaged<ProgressContext>.fromOpaque(opaque).release() }
 
+        // The caller holds its archive lease across this size scan, native
+        // creation and resource release. Cancellation may stop before C starts;
+        // after that, the synchronous writer must close normally.
+        try beforeNative?()
         let status: Int32 = archiveURL.path.withCString { archivePath in
             sourceURL.path.withCString { sourcePath in
                 asign_archive_create(
@@ -106,6 +112,8 @@ public enum ASignArchive {
                 )
             }
         }
+
+        afterNative?()
 
         guard status == 0 else {
             try? fileManager.removeItem(at: archiveURL)
@@ -134,16 +142,17 @@ public enum ASignArchive {
             return 0
         }
 
+        let resourceKeys = Set(keys)
         var total: Int64 = 0
-        for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: Set(keys))
-            guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
-            let size = Int64(values.fileSize ?? 0)
-            if Int64.max - total < size {
-                return Int64.max
+        while try autoreleasepool(invoking: {
+            guard let url = enumerator.nextObject() as? URL else { return false }
+            let values = try url.resourceValues(forKeys: resourceKeys)
+            if values.isRegularFile == true, values.isSymbolicLink != true {
+                let size = Int64(values.fileSize ?? 0)
+                total = Int64.max - total < size ? Int64.max : total + size
             }
-            total += size
-        }
+            return total != Int64.max
+        }) { }
         return total
     }
 }
