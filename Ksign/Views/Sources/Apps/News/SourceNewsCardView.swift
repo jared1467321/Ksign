@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import AltSourceKit
 import NukeUI
 
@@ -15,7 +16,7 @@ struct SourceNewsCardView: View {
 	var body: some View {
 		ZStack(alignment: .bottomLeading) {
 			let placeholderView = {
-				Color.gray.opacity(0.2)
+				NBHalloween.controlFill
 			}()
 			
 			if let iconURL = new.imageURL {
@@ -35,7 +36,7 @@ struct SourceNewsCardView: View {
 			}
 			
 			LinearGradient(
-				gradient: Gradient(colors: [.black.opacity(0.6), .clear]),
+				gradient: Gradient(colors: [NBHalloween.imageScrim, .clear]),
 				startPoint: .bottom,
 				endPoint: .top
 			)
@@ -45,16 +46,16 @@ struct SourceNewsCardView: View {
 			
 			Text(new.title)
 				.font(.headline)
-				.foregroundColor(.white)
+				.foregroundColor(NBHalloween.overlayText)
 				.lineLimit(2)
 				.padding()
 		}
 		.frame(width: 250, height: 150)
-		.background(new.tintColor ?? Color.secondary)
+		.background(new.tintColor ?? NBHalloween.textSecondary)
 		.clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 		.overlay(
 			RoundedRectangle(cornerRadius: 12, style: .continuous)
-				.strokeBorder(Color.gray.opacity(0.2), lineWidth: 1)
+				.strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
 		)
 	}
 }

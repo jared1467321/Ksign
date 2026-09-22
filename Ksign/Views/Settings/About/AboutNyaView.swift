@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import NimbleJSON
 
@@ -26,14 +27,14 @@ struct AboutNyaView: View {
                     Text(Bundle.main.exec)
                         .font(.largeTitle)
                         .bold()
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(NBHalloween.accent)
                     
                     HStack(spacing: 4) {
                         Text("Version")
                         Text(Bundle.main.version)
                     }
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
                     
                     Button {
                         _showPatchNotes()
@@ -42,7 +43,7 @@ struct AboutNyaView: View {
                     }
                     .font(.footnote)
                     .padding(.top, 4)
-                    .tint(.accent)
+                    .tint(NBHalloween.accent)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -55,7 +56,7 @@ struct AboutNyaView: View {
 			NBSection("Special thanks!") {
 				Group {
 					Text(.localized("This couldn't have been done without the original Feather devs! ❤️"))
-						.foregroundStyle(.secondary)
+						.foregroundStyle(NBHalloween.textSecondary)
 						.padding(.vertical, 2)
 				}
 				.transition(.slide)
@@ -107,7 +108,7 @@ extension AboutNyaView {
 			iconUrl: URL(string: "https://github.com/\(github).png")!,
 			trailing: AnyView(
 				Image(systemName: "arrow.up.right")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			)
 		)
 		.onTapGesture {

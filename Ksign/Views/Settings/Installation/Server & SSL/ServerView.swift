@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 struct ServerView: View {
@@ -40,7 +41,7 @@ struct ServerView: View {
 						Text(.localized("Apps per prompt"))
 						Spacer()
 						Text("\(_batchGroupSize)")
-							.foregroundStyle(.secondary)
+							.foregroundStyle(NBHalloween.textSecondary)
 					}
 				}
 				.disabled(_serverMethod != 0)

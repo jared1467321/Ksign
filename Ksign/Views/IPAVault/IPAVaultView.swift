@@ -1,4 +1,5 @@
 import SwiftUI
+import NimbleExtensions
 
 // Owns IPA Vault presentation at the tab-bar root, just like InstallSession
 // owns the install drawer. Dismissing the sheet is a minimize operation: the
@@ -80,24 +81,24 @@ struct IPAVaultDrawerView: View {
             HStack(spacing: 10) {
                 Image(systemName: "externaldrive.badge.wifi")
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(NBHalloween.accent)
 
                 Text("IPA Vault")
                     .font(.footnote.weight(.medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(NBHalloween.text)
 
                 Image(systemName: "chevron.up")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 11)
-            .background(.regularMaterial, in: Capsule())
+            .background(NBHalloween.overlaySurface, in: Capsule())
             .overlay(
                 Capsule()
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    .stroke(NBHalloween.text.opacity(0.08), lineWidth: 0.5)
             )
-            .shadow(color: Color.black.opacity(0.16), radius: 10, y: 3)
+            .shadow(color: NBHalloween.shadow, radius: 10, y: 3)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Restore IPA Vault")
@@ -341,7 +342,7 @@ struct IPAVaultView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 10)
 
-                Divider()
+                Divider().overlay(NBHalloween.hairline)
 
                 if mode == .download {
                     remoteContent
@@ -496,12 +497,12 @@ struct IPAVaultView: View {
             VStack(spacing: 10) {
                 Image(systemName: "externaldrive.badge.wifi")
                     .font(.system(size: 38))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
                 Text("No IPA files found")
                     .font(.headline)
                 Text("Check the server address or add IPA files to the VPS folder.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
                     .multilineTextAlignment(.center)
             }
             .padding()
@@ -512,7 +513,7 @@ struct IPAVaultView: View {
                     Section {
                         Text(statusMessage)
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NBHalloween.textSecondary)
                     }
                 }
 
@@ -523,14 +524,14 @@ struct IPAVaultView: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: presentationSession.selectedRemoteIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(presentationSession.selectedRemoteIDs.contains(file.id) ? Color.accentColor : Color.secondary)
+                                    .foregroundStyle(presentationSession.selectedRemoteIDs.contains(file.id) ? NBHalloween.accent : NBHalloween.textSecondary)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(file.name)
-                                        .foregroundStyle(.primary)
+                                        .foregroundStyle(NBHalloween.text)
                                         .lineLimit(2)
                                     Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(NBHalloween.textSecondary)
                                 }
                                 Spacer()
                             }
@@ -594,7 +595,7 @@ struct IPAVaultView: View {
             Section {
                 if localFiles.isEmpty {
                     Text("No files are in Ksign's Downloads folder.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NBHalloween.textSecondary)
                 } else {
                     ForEach(localFiles) { file in
                         Button {
@@ -602,14 +603,14 @@ struct IPAVaultView: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: presentationSession.selectedLocalIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(presentationSession.selectedLocalIDs.contains(file.id) ? Color.accentColor : Color.secondary)
+                                    .foregroundStyle(presentationSession.selectedLocalIDs.contains(file.id) ? NBHalloween.accent : NBHalloween.textSecondary)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(file.name)
-                                        .foregroundStyle(.primary)
+                                        .foregroundStyle(NBHalloween.text)
                                         .lineLimit(2)
                                     Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(NBHalloween.textSecondary)
                                 }
                                 Spacer()
                             }
@@ -642,7 +643,7 @@ struct IPAVaultView: View {
     private var actionBar: some View {
         if mode == .download && !presentationSession.selectedRemoteIDs.isEmpty {
             VStack(spacing: 0) {
-                Divider()
+                Divider().overlay(NBHalloween.hairline)
                 HStack(spacing: 10) {
                     Button {
                         downloadSelected()
@@ -673,11 +674,11 @@ struct IPAVaultView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 10)
-                .background(.bar)
+                .background(NBHalloween.overlaySurface)
             }
         } else if mode == .upload && !presentationSession.selectedLocalIDs.isEmpty {
             VStack(spacing: 0) {
-                Divider()
+                Divider().overlay(NBHalloween.hairline)
                 Button {
                     uploadSelected()
                 } label: {
@@ -692,7 +693,7 @@ struct IPAVaultView: View {
                 .buttonStyle(.borderedProminent)
                 .padding(.horizontal)
                 .padding(.vertical, 10)
-                .background(.bar)
+                .background(NBHalloween.overlaySurface)
             }
         }
     }
@@ -937,7 +938,7 @@ private struct IPAVaultUploadRow: View {
                         .lineLimit(1)
                     Text(detail)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NBHalloween.textSecondary)
                 }
                 Spacer()
                 control
@@ -985,10 +986,10 @@ private struct IPAVaultUploadRow: View {
             .buttonStyle(.borderless)
         case .completed:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(NBHalloween.ok)
         case .cancelled:
             Image(systemName: "xmark.circle")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NBHalloween.textSecondary)
         }
     }
 }
@@ -1334,13 +1335,13 @@ private struct IPAVaultSettingsView: View {
                     if hasActiveVaultDownloads && !calibrationRunning {
                         Text("Finish or cancel active IPA Vault downloads before calibrating so they do not distort the result.")
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NBHalloween.textSecondary)
                     }
 
                     if let calibrationStatus {
                         Text(calibrationStatus)
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NBHalloween.textSecondary)
                     }
 
                     if let result = calibrationResult {
@@ -1354,14 +1355,14 @@ private struct IPAVaultSettingsView: View {
                             }
                             Text(formatSpeed(result.bytesPerSecond))
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(NBHalloween.textSecondary)
                         }
                     }
 
                     if let calibrationError {
                         Text(calibrationError)
                             .font(.footnote)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(NBHalloween.danger)
                     }
                 } header: {
                     Text("Calibration")

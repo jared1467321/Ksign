@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - Models
@@ -65,17 +66,17 @@ extension AppIconView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(iconOption.title)
                         .font(.headline)
-                        .foregroundColor(.primary)
+                        .foregroundColor(NBHalloween.text)
                     Text(iconOption.subtitle)
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                 }
                 
                 Spacer()
                 
                 if selectedIcon == iconOption.alternateIconName {
                     Image(systemName: "checkmark")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                         .font(.headline)
                 }
             }

@@ -7,6 +7,7 @@
 
 
 import SwiftUI
+import NimbleExtensions
 
 struct ExpandableText: View {
 	let text: String
@@ -46,7 +47,7 @@ struct ExpandableText: View {
 				}) {
 					Text(expanded ? .localized("Less") : .localized("More"))
 						.font(.caption)
-						.foregroundColor(.accentColor)
+						.foregroundColor(NBHalloween.accent)
 				}
 			}
 		}

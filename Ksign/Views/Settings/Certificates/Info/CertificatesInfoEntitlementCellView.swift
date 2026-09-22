@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 // MARK: - View
 struct CertificatesInfoEntitlementCellView: View {
@@ -24,7 +25,7 @@ struct CertificatesInfoEntitlementCellView: View {
 				Text(key)
 				Spacer()
 				Text(_formatted(value))
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			}
 		}
 	}

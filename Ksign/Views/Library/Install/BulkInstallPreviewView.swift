@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // The grid of in-flight installs shown inside the drawer.
@@ -43,7 +44,7 @@ struct BulkInstallPreviewView: View {
 		}
 		.frame(maxWidth: .infinity, alignment: .center)
 		.padding(.vertical, 24)
-		.background(Color(UIColor.secondarySystemBackground))
+		.background(NBHalloween.elevated)
 		.cornerRadius(22.5)
 		.padding(.horizontal)
 	}

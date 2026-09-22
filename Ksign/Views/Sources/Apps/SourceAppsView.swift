@@ -110,7 +110,7 @@ struct SourceAppsView: View {
                 }
             }
             
-            Divider()
+            Divider().overlay(NBHalloween.hairline)
             
             Button(.localized("Copy"), systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = object.map {

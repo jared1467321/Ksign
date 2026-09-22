@@ -24,7 +24,7 @@ extension Date {
 		guard timeLeft > 0 else {
 			return ExpirationInfo(
 				formatted: .localized("Expired"),
-				color: .gray,
+				color: NBHalloween.expired,
 				icon: "xmark.octagon"
 			)
 		}

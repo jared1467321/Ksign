@@ -57,7 +57,7 @@ struct DefaultTweaksView: View {
 					}
 				} else {
 					Text(.localized("Import your .dylib, .deb or .framework files, then toggle the ones you want injected into every app."))
-						.foregroundColor(.secondary)
+						.foregroundColor(NBHalloween.textSecondary)
 						.frame(maxWidth: .infinity, alignment: .center)
 						.padding()
 				}

@@ -106,18 +106,18 @@ extension CertificatesView {
 			.padding()
 			.background(
 				RoundedRectangle(cornerRadius: _cornerRadius)
-					.fill(Color(uiColor: .quaternarySystemFill))
+					.fill(NBHalloween.controlFill)
 			)
 			.overlay(
 				RoundedRectangle(cornerRadius: _cornerRadius)
 					.strokeBorder(
-						_selectedCertBinding.wrappedValue == index ? Color.accentColor : Color.clear,
+						_selectedCertBinding.wrappedValue == index ? NBHalloween.accent : Color.clear,
 						lineWidth: 2
 					)
 			)
 			.contextMenu {
 				_contextActions(for: cert)
-				Divider()
+				Divider().overlay(NBHalloween.hairline)
 				_actions(for: cert)
 			}
 			.animation(.smooth, value: _selectedCertBinding.wrappedValue)

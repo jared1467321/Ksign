@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -109,7 +110,7 @@ extension CertificatesInfoView {
 		DisclosureGroup(title) {
 			ForEach(keys, id: \.self) { key in
 				Text(key)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			}
 		}
 	}

@@ -29,7 +29,7 @@
                             </imageView>
                         </subviews>
                         <viewLayoutGuide key="safeArea" id="Bcu-3y-fUS"/>
-                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                        <color key="backgroundColor" red="0.027450980392156862" green="0.043137254901960784" blue="0.031372549019607843" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <constraints>
                             <constraint firstItem="lQc-Py-TkU" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="Um3-kF-JBq"/>
                             <constraint firstItem="lQc-Py-TkU" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="cZT-is-IW4"/>
@@ -44,10 +44,7 @@
     <resources>
         <image name="ksign_extension.png" width="777" height="777"/>
         <namedColor name="AccentColor">
-            <color red="0.32549019607843138" green="0.58039215686274515" blue="0.96862745098039216" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+            <color red="0.29803921568627451" green="0.90196078431372551" blue="0.29803921568627451" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
         </namedColor>
-        <systemColor name="systemBackgroundColor">
-            <color white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
-        </systemColor>
     </resources>
 </document>

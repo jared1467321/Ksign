@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 extension Image {
     /// Applies a certain style to an image
@@ -24,7 +25,7 @@ extension Image {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: isCircle ? (size * 2) : (size * 0.2337), style: .continuous)
-                    .strokeBorder(.gray.opacity(0.3), lineWidth: lineWidth)
+                    .strokeBorder(NBHalloween.imageBorder, lineWidth: lineWidth)
             }
             .clipShape(RoundedRectangle(cornerRadius: isCircle ? (size * 2) : (size * 0.2337), style: .continuous))
     }

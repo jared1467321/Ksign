@@ -10,6 +10,7 @@ import SwiftUI
 import WebKit
 import ZIPFoundation
 import NimbleViews
+import NimbleExtensions
 
 enum CryptCheckError: LocalizedError {
     case invalidArchive
@@ -924,6 +925,8 @@ enum CryptCheckAnalyzer {
             """
         }.joined(separator: "\n")
 
+        let theme = NBThemeManager.shared.activeTheme
+
         return """
         <!DOCTYPE html>
         <html lang="en">
@@ -934,10 +937,29 @@ enum CryptCheckAnalyzer {
         <style>
           :root {
             color-scheme: dark;
-            --bg:#0a0a0f; --card:#12121a; --border:#1e1e2e; --text:#c8c8d4;
-            --dim:#66667a; --green:#4ade80; --red:#f87171; --orange:#fb923c;
-            --cyan:#22d3ee; --pink:#f472b6; --purple:#a78bfa; --blue:#60a5fa;
-            --lime:#a3e635;
+            --bg:\(theme.color(for: .reportBackground).cssRGBA);
+            --card:\(theme.color(for: .reportCard).cssRGBA);
+            --border:\(theme.color(for: .reportBorder).cssRGBA);
+            --text:\(theme.color(for: .reportText).cssRGBA);
+            --dim:\(theme.color(for: .reportDim).cssRGBA);
+            --green:\(theme.color(for: .reportSuccess).cssRGBA);
+            --red:\(theme.color(for: .reportDanger).cssRGBA);
+            --orange:\(theme.color(for: .reportWarning).cssRGBA);
+            --green-fill:\(theme.color(for: .reportSuccessFill).cssRGBA);
+            --orange-fill:\(theme.color(for: .reportWarningFill).cssRGBA);
+            --red-fill:\(theme.color(for: .reportDangerFill).cssRGBA);
+            --tap-highlight:\(theme.color(for: .reportTapHighlight).cssRGBA);
+            --cyan:\(theme.color(for: .reportAccent).cssRGBA);
+            --pink:\(theme.color(for: .reportPink).cssRGBA);
+            --purple:\(theme.color(for: .reportPurple).cssRGBA);
+            --blue:\(theme.color(for: .reportBlue).cssRGBA);
+            --lime:\(theme.color(for: .reportLime).cssRGBA);
+            --interactive-fill:\(theme.color(for: .reportInteractiveFill).cssRGBA);
+            --interactive-border:\(theme.color(for: .reportInteractiveBorder).cssRGBA);
+            --selected-fill:\(theme.color(for: .reportSelectedFill).cssRGBA);
+            --selected-text:\(theme.color(for: .reportSelectedText).cssRGBA);
+            --dropdown:\(theme.color(for: .reportDropdown).cssRGBA);
+            --shadow:\(theme.color(for: .reportShadow).cssRGBA);
           }
           * { box-sizing:border-box; }
           html { scroll-behavior:smooth; }
@@ -958,26 +980,26 @@ enum CryptCheckAnalyzer {
           @media (min-width:500px) { .summary { grid-template-columns:repeat(4,1fr); } }
           .stat {
             position:relative; text-align:center; padding:14px 10px; border-radius:14px;
-            background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.01)),var(--card);
-            border:1px solid var(--border); -webkit-tap-highlight-color:transparent;
+            background:linear-gradient(180deg,var(--interactive-fill),var(--card));
+            border:1px solid var(--border); -webkit-tap-highlight-color:var(--tap-highlight);
           }
           .stat-btn { cursor:pointer; }
-          .stat.active { border-color:rgba(255,255,255,.2); z-index:20; }
+          .stat.active { border-color:var(--interactive-border); z-index:20; }
           .num { font:700 1.55rem ui-monospace,SFMono-Regular,Menlo,monospace; line-height:1; }
           .lbl { color:var(--dim); font-size:.67rem; text-transform:uppercase; letter-spacing:.06em; margin-top:5px; }
           .num-dec{color:var(--green)} .num-enc{color:var(--red)} .num-likely{color:var(--orange)}
           .dropdown {
             position:absolute; visibility:hidden; opacity:0; pointer-events:none; left:50%; top:calc(100% + 9px);
             transform:translateX(-50%) translateY(5px); min-width:270px; max-width:92vw; max-height:360px;
-            overflow:auto; background:rgba(22,22,35,.96); border:.5px solid rgba(255,255,255,.18);
-            border-radius:18px; padding:5px 0; box-shadow:0 16px 44px rgba(0,0,0,.5); text-align:left;
+            overflow:auto; background:var(--dropdown); border:.5px solid var(--interactive-border);
+            border-radius:18px; padding:5px 0; box-shadow:0 16px 44px var(--shadow); text-align:left;
             transition:opacity .16s ease, transform .16s ease;
           }
           .stat.active .dropdown { visibility:visible; opacity:1; pointer-events:auto; transform:translateX(-50%) translateY(0); }
-          .filter-bar { display:flex; gap:6px; flex-wrap:wrap; padding:9px 11px 8px; border-bottom:.5px solid rgba(255,255,255,.07); }
-          .filter-pill { border:.5px solid rgba(255,255,255,.09); border-radius:100px; padding:5px 12px; background:rgba(255,255,255,.05); color:var(--dim); font:600 .67rem -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; }
-          .filter-pill.active { background:rgba(255,255,255,.16); border-color:rgba(255,255,255,.24); color:#fff; }
-          .dd-item { display:flex; gap:8px; padding:11px 14px; color:var(--text); text-decoration:none; font: .73rem ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; border-bottom:.5px solid rgba(255,255,255,.04); }
+          .filter-bar { display:flex; gap:6px; flex-wrap:wrap; padding:9px 11px 8px; border-bottom:.5px solid var(--interactive-border); }
+          .filter-pill { border:.5px solid var(--interactive-border); border-radius:100px; padding:5px 12px; background:var(--interactive-fill); color:var(--dim); font:600 .67rem -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; }
+          .filter-pill.active { background:var(--selected-fill); border-color:var(--interactive-border); color:var(--selected-text); }
+          .dd-item { display:flex; gap:8px; padding:11px 14px; color:var(--text); text-decoration:none; font: .73rem ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; border-bottom:.5px solid var(--interactive-border); }
           .dd-item:last-child{border-bottom:0}.dd-item.dd-hidden{display:none}.dd-icon{color:var(--dim);width:13px;text-align:center}.dd-empty{padding:16px;color:var(--dim);font-size:.75rem;text-align:center}
           .card { scroll-margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:13px; padding:18px 16px; margin-bottom:16px; }
           .card-head { font:700 .84rem ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; }
@@ -987,9 +1009,9 @@ enum CryptCheckAnalyzer {
           .slice:first-of-type { border-top:0; padding-top:0; margin-top:0; }
           .slice-head { color:var(--dim); font:700 .78rem ui-monospace,SFMono-Regular,Menlo,monospace; }
           .tag { display:inline-block; font:700 .83rem ui-monospace,SFMono-Regular,Menlo,monospace; padding:4px 10px; border-radius:7px; margin:7px 0 10px; }
-          .status-dec{background:rgba(74,222,128,.12);color:var(--green)}
-          .status-enc{background:rgba(248,113,113,.12);color:var(--red)}
-          .status-likely{background:rgba(251,146,60,.12);color:var(--orange)}
+          .status-dec{background:var(--green-fill);color:var(--green)}
+          .status-enc{background:var(--red-fill);color:var(--red)}
+          .status-likely{background:var(--orange-fill);color:var(--orange)}
           .meta { display:flex; gap:14px; flex-wrap:wrap; color:var(--dim); font:.7rem ui-monospace,SFMono-Regular,Menlo,monospace; margin-bottom:10px; }
           .entropy-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}.entropy-bar{flex:1;height:6px;background:var(--border);border-radius:4px;overflow:hidden}.entropy-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--orange),var(--red))}.entropy-val{white-space:nowrap;color:var(--dim);font:.7rem ui-monospace,SFMono-Regular,Menlo,monospace}
           .stats{color:var(--dim);font-size:.74rem;margin-bottom:9px}.instr{border-collapse:collapse;margin:8px 0;font-size:.74rem}.instr td{padding:2px 10px 2px 0}.op-name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;color:var(--cyan)}.op-desc{color:var(--dim)}.op-count{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -1432,8 +1454,9 @@ private struct CryptCheckHTMLView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let webView = WKWebView(frame: .zero)
         webView.isOpaque = false
-        webView.backgroundColor = .black
-        webView.scrollView.backgroundColor = .black
+        let background = NBHalloween.uiColor(.reportBackground)
+        webView.backgroundColor = background
+        webView.scrollView.backgroundColor = background
         webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         return webView
     }

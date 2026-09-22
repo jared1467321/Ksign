@@ -9,13 +9,14 @@ import SwiftUI
 import Nuke
 import OSLog
 import IDeviceSwift
+import NimbleExtensions
 
 @main
 struct FeatherApp: App {
 	@UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 	let heartbeat = HeartbeatManager.shared
 	@StateObject var downloadManager = DownloadManager.shared
-	@StateObject var accentColorManager = AccentColorManager.shared
+	@StateObject var themeManager = NBThemeManager.shared
     @StateObject var extractManager = ExtractManager.shared
 	@StateObject var logsManager = LogsManager.shared
 	let storage = Storage.shared
@@ -36,13 +37,21 @@ struct FeatherApp: App {
 					.onOpenURL(perform: _handleURL)
 					.transition(.move(edge: .top).combined(with: .opacity))
 			}
+			.tint(NBHalloween.accent)
 			.animation(.smooth, value: downloadManager.manualDownloads.description)
             .animation(.smooth, value: extractManager.extractItems.description)
-			.onReceive(accentColorManager.objectWillChange) { _ in
-				accentColorManager.updateGlobalTintColor()
+			.onReceive(themeManager.objectWillChange) { _ in
+				// @Published emits before its value changes. Refresh UIKit on the next
+				// main-loop turn so the appearance bridge reads the new profile.
+				DispatchQueue.main.async {
+					HalloweenAppearance.apply(refreshExistingViews: true)
+					if #available(iOS 16.2, *) {
+						KeepAliveActivityController.shared.refreshTheme()
+					}
+				}
 			}
 			.onAppear {
-				accentColorManager.updateGlobalTintColor()
+				HalloweenAppearance.apply(refreshExistingViews: true)
 				if logsManager.isCapturing { logsManager.startCapture() }
 			}
 		}

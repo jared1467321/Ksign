@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import IDeviceSwift
 import NimbleViews
 
@@ -52,11 +53,11 @@ struct InstallDrawerView: View {
 			HStack(spacing: 10) {
 				ZStack {
 					Circle()
-						.stroke(Color.secondary.opacity(0.25), lineWidth: 3)
+						.stroke(NBHalloween.textSecondary.opacity(0.25), lineWidth: 3)
 
 					Circle()
 						.trim(from: 0, to: max(0.02, session.aggregateProgress))
-						.stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+						.stroke(NBHalloween.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
 						.rotationEffect(.degrees(-90))
 				}
 				.frame(width: 18, height: 18)
@@ -69,20 +70,20 @@ struct InstallDrawerView: View {
 					 ? String.localized("Paused")
 					 : "\(session.completedCount) of \(session.totalCount) installed")
 					.font(.footnote.weight(.medium))
-					.foregroundStyle(.primary)
+					.foregroundStyle(NBHalloween.text)
 
 				Image(systemName: "chevron.up")
 					.font(.caption2.weight(.bold))
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			}
 			.padding(.horizontal, 16)
 			.padding(.vertical, 11)
-			.background(.regularMaterial, in: Capsule())
+			.background(NBHalloween.overlaySurface, in: Capsule())
 			.overlay(
 				Capsule()
-					.stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+					.stroke(NBHalloween.text.opacity(0.08), lineWidth: 0.5)
 			)
-			.shadow(color: Color.black.opacity(0.16), radius: 10, y: 3)
+			.shadow(color: NBHalloween.shadow, radius: 10, y: 3)
 		}
 		.buttonStyle(.plain)
 	}
@@ -110,7 +111,7 @@ struct InstallDrawerSheet: View {
 						} label: {
 							Image(systemName: session.isPaused ? "play.circle.fill" : "pause.circle.fill")
 								.font(.title3)
-								.foregroundStyle(session.isPaused ? Color.accentColor : Color.secondary)
+								.foregroundStyle(session.isPaused ? NBHalloween.accent : NBHalloween.textSecondary)
 						}
 						.buttonStyle(.plain)
 					}
@@ -121,7 +122,7 @@ struct InstallDrawerSheet: View {
 						} label: {
 							Image(systemName: "xmark.circle.fill")
 								.font(.title3)
-								.foregroundStyle(.secondary)
+								.foregroundStyle(NBHalloween.textSecondary)
 						}
 						.buttonStyle(.plain)
 					}
@@ -138,14 +139,14 @@ struct InstallDrawerSheet: View {
 					// answers "how far in".
 					Text("\(session.runningCount)/\(session.remainingCount)")
 						.font(.caption.monospacedDigit())
-						.foregroundStyle(.secondary)
+						.foregroundStyle(NBHalloween.textSecondary)
 				}
 
 				if session.isPaused, session.waitingCount > 0 {
 					HStack {
 						Text("\(session.waitingCount) waiting")
 							.font(.caption)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(NBHalloween.textSecondary)
 
 						Spacer(minLength: 0)
 					}
@@ -165,7 +166,7 @@ struct InstallDrawerSheet: View {
 					}
 					.buttonStyle(.bordered)
 					.controlSize(.small)
-					.tint(.accentColor)
+					.tint(NBHalloween.accent)
 					.padding(.top, 2)
 				}
 			}

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import Combine
 
 struct DownloadHeaderView: View {
@@ -37,7 +38,7 @@ struct DownloadHeaderView: View {
 									Spacer()
 									Text(verbatim: "+\(_remainingCount)")
 										.font(.caption)
-										.foregroundColor(.secondary)
+										.foregroundColor(NBHalloween.textSecondary)
 										.contentTransition(.numericText())
 										.padding(.vertical, 4)
 								}
@@ -80,7 +81,7 @@ struct DownloadItemView: View {
 				}
 			}
 			.font(.caption)
-			.foregroundColor(.secondary)
+			.foregroundColor(NBHalloween.textSecondary)
 		}
 		.padding(.vertical, 4)
 		.onReceive(download.$progress) { self.progress = $0 }

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import AltSourceKit
 
 // MARK: - VersionHistoryView
@@ -25,7 +26,7 @@ struct VersionHistoryView: View {
                         description: version.localizedDescription ?? .localized("No release notes available")
                     )
                     .padding(.horizontal)
-                    .background(Color(.systemBackground))
+                    .background(NBHalloween.background)
                     .contextMenu {
                         if let downloadURL = version.downloadURL {
                             Button {
@@ -46,7 +47,7 @@ struct VersionHistoryView: View {
                         }
                     }
                     
-                    Divider().padding(.horizontal)
+                    Divider().overlay(NBHalloween.hairline).padding(.horizontal)
                 }
             }
             .padding(.top, 8)

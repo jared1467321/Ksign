@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import NimbleJSON
 
@@ -46,7 +47,7 @@ extension AboutView {
 			iconUrl: URL(string: "https://github.com/\(github).png")!,
 			trailing: AnyView(
 				Image(systemName: "arrow.up.right")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			)
 		)
 		.onTapGesture {

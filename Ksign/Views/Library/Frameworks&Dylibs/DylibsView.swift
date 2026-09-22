@@ -53,14 +53,14 @@ struct DylibsView: View {
                         VStack(spacing: 15) {
                             Image(systemName: "doc.text.magnifyingglass")
                                 .font(.largeTitle)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(NBHalloween.textSecondary)
                             
                             Text(.localized("No Frameworks"))
                                 .font(.headline)
                             
                             Text(.localized("No frameworks or dylibs found in this app"))
                                 .font(.subheadline)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(NBHalloween.textSecondary)
                                 .multilineTextAlignment(.center)
                         }
                         .padding()

@@ -7,6 +7,7 @@
 
 //#if !NIGHTLY && !DEBUG
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 struct SettingsDonationCellView: View {
@@ -56,7 +57,7 @@ struct SettingsDonationCellView: View {
 		HStack(alignment: .center, spacing: 14) {
 			Image(systemName: systemName)
 				.font(.system(size: 32))
-				.foregroundStyle(.tint)
+				.foregroundStyle(NBHalloween.accent)
 				.frame(width: 39, alignment: .center)
 			
 			NBTitleWithSubtitleView(
@@ -70,8 +71,8 @@ struct SettingsDonationCellView: View {
 	private func _sheetButton(_ title: String) -> some View {
 		Text(title)
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
-			.background(Color.accentColor)
-			.foregroundColor(.white)
+			.background(NBHalloween.accent)
+			.foregroundColor(NBHalloween.onAccent)
 			.clipShape(
 				RoundedRectangle(cornerRadius: 12, style: .continuous)
 			)

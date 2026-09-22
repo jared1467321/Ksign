@@ -2,133 +2,206 @@
 //  HalloweenAppearance.swift
 //  Ksign
 //
-//  Everything SwiftUI can't reach.
-//
-//  Nav bars, tab bars, search fields and segmented controls are UIKit views
-//  that SwiftUI wraps but does not restyle. They keep using the system's own
-//  dark-mode greys no matter what the app tint is, which is why those parts of
-//  the UI stayed black-and-white while the SwiftUI parts turned green.
-//
-//  The appearance proxy is the only way at them, and it has to run before any
-//  window exists — proxies apply at view-creation time, so anything already on
-//  screen keeps the old look. Hence the call from didFinishLaunching.
+//  UIKit appearance bridge for the currently selected Ksign theme.
 //
 
 import UIKit
 import NimbleExtensions
 
 enum HalloweenAppearance {
-	static func apply() {
-		_navigationBars()
-		_tabBars()
-		_searchFields()
-		_segmentedControls()
-		_barButtons()
-	}
+    static func apply(refreshExistingViews: Bool = false) {
+        _navigationBars()
+        _tabBars()
+        _searchFields()
+        _segmentedControls()
+        _barButtons()
 
-	// MARK: - Navigation bars
+        if refreshExistingViews {
+            _refreshExistingViews()
+        }
+    }
 
-	private static func _navigationBars() {
-		let appearance = UINavigationBarAppearance()
+    // MARK: - Navigation bars
 
-		// Opaque rather than the default blur. The blur samples the content
-		// behind it and lightens toward grey, which is the haze sitting behind
-		// the search field.
-		appearance.configureWithOpaqueBackground()
-		appearance.backgroundColor = NBHalloween.uiBackground
-		appearance.shadowColor = .clear
+    private static func _navigationAppearance() -> UINavigationBarAppearance {
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = NBHalloween.uiColor(.navigationBackground)
+        appearance.shadowColor = NBHalloween.uiColor(.navigationShadow)
+        appearance.largeTitleTextAttributes = [
+            .foregroundColor: NBHalloween.uiColor(.navigationTitle)
+        ]
+        appearance.titleTextAttributes = [
+            .foregroundColor: NBHalloween.uiColor(.navigationText)
+        ]
+        return appearance
+    }
 
-		appearance.largeTitleTextAttributes = [.foregroundColor: NBHalloween.uiTitle]
-		appearance.titleTextAttributes = [.foregroundColor: NBHalloween.uiText]
+    private static func _navigationBars() {
+        let appearance = _navigationAppearance()
+        let bar = UINavigationBar.appearance()
+        bar.standardAppearance = appearance
+        bar.scrollEdgeAppearance = appearance
+        bar.compactAppearance = appearance
+        bar.compactScrollEdgeAppearance = appearance
+        bar.tintColor = NBHalloween.uiColor(.navigationTint)
+    }
 
-		let bar = UINavigationBar.appearance()
-		bar.standardAppearance = appearance
-		bar.scrollEdgeAppearance = appearance
-		bar.compactAppearance = appearance
-		bar.compactScrollEdgeAppearance = appearance
-		bar.tintColor = NBHalloween.uiAccent
-	}
+    // MARK: - Tab bars
 
-	// MARK: - Tab bars
+    private static func _tabAppearance() -> UITabBarAppearance {
+        let appearance = UITabBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = NBHalloween.uiColor(.tabBackground)
+        appearance.shadowColor = NBHalloween.uiColor(.tabShadow)
 
-	private static func _tabBars() {
-		let appearance = UITabBarAppearance()
-		appearance.configureWithOpaqueBackground()
-		appearance.backgroundColor = NBHalloween.uiElevated
-		appearance.shadowColor = .clear
+        for layout in [
+            appearance.stackedLayoutAppearance,
+            appearance.inlineLayoutAppearance,
+            appearance.compactInlineLayoutAppearance
+        ] {
+            layout.normal.iconColor = NBHalloween.uiColor(.tabUnselected)
+            layout.normal.titleTextAttributes = [
+                .foregroundColor: NBHalloween.uiColor(.tabUnselected)
+            ]
+            layout.selected.iconColor = NBHalloween.uiColor(.tabSelected)
+            layout.selected.titleTextAttributes = [
+                .foregroundColor: NBHalloween.uiColor(.tabSelected)
+            ]
+        }
 
-		// Set on each layout because a tab bar picks its layout from size class
-		// and item count at runtime; missing one leaves those items white.
-		for layout in [
-			appearance.stackedLayoutAppearance,
-			appearance.inlineLayoutAppearance,
-			appearance.compactInlineLayoutAppearance
-		] {
-			layout.normal.iconColor = NBHalloween.uiPumpkin
-			layout.normal.titleTextAttributes = [.foregroundColor: NBHalloween.uiPumpkin]
-			layout.selected.iconColor = NBHalloween.uiAccent
-			layout.selected.titleTextAttributes = [.foregroundColor: NBHalloween.uiAccent]
-		}
+        return appearance
+    }
 
-		let bar = UITabBar.appearance()
-		bar.standardAppearance = appearance
-		bar.scrollEdgeAppearance = appearance
-		bar.tintColor = NBHalloween.uiAccent
-		bar.unselectedItemTintColor = NBHalloween.uiPumpkin
+    private static func _tabBars() {
+        let appearance = _tabAppearance()
+        let bar = UITabBar.appearance()
+        bar.standardAppearance = appearance
+        bar.scrollEdgeAppearance = appearance
+        bar.tintColor = NBHalloween.uiColor(.tabSelected)
+        bar.unselectedItemTintColor = NBHalloween.uiColor(.tabUnselected)
 
-		// A second, older proxy that some tab bar implementations read instead
-		// of the appearance object. Harmless if the appearance above already
-		// won; the point is to cover both paths rather than guess which one
-		// iOS 26's floating tab bar actually consults.
-		let item = UITabBarItem.appearance()
-		item.setTitleTextAttributes([.foregroundColor: NBHalloween.uiPumpkin], for: .normal)
-		item.setTitleTextAttributes([.foregroundColor: NBHalloween.uiAccent], for: .selected)
-	}
+        let item = UITabBarItem.appearance()
+        item.setTitleTextAttributes(
+            [.foregroundColor: NBHalloween.uiColor(.tabUnselected)],
+            for: .normal
+        )
+        item.setTitleTextAttributes(
+            [.foregroundColor: NBHalloween.uiColor(.tabSelected)],
+            for: .selected
+        )
+    }
 
-	// MARK: - Search
+    // MARK: - Search
 
-	private static func _searchFields() {
-		let field = UISearchTextField.appearance()
-		field.backgroundColor = NBHalloween.uiElevated
-		field.textColor = NBHalloween.uiText
-		field.tintColor = NBHalloween.uiAccent
+    private static func _searchFields() {
+        let field = UISearchTextField.appearance()
+        field.backgroundColor = NBHalloween.uiColor(.searchBackground)
+        field.textColor = NBHalloween.uiColor(.searchText)
+        field.tintColor = NBHalloween.uiColor(.searchTint)
 
-		// The magnifier and the clear button are template images tinted by the
-		// field's own tint, but the placeholder is drawn from an attributed
-		// string the proxy can't reach — so it's set per-instance below.
-		UISearchBar.appearance().tintColor = NBHalloween.uiAccent
-		UISearchBar.appearance().searchTextField.attributedPlaceholder = NSAttributedString(
-			string: "",
-			attributes: [.foregroundColor: NBHalloween.uiTextSecondary]
-		)
-	}
+        let searchBar = UISearchBar.appearance()
+        searchBar.tintColor = NBHalloween.uiColor(.searchTint)
+        searchBar.searchTextField.attributedPlaceholder = NSAttributedString(
+            string: "",
+            attributes: [.foregroundColor: NBHalloween.uiColor(.searchPlaceholder)]
+        )
+    }
 
-	// MARK: - Segmented controls
+    // MARK: - Segmented controls
 
-	private static func _segmentedControls() {
-		let control = UISegmentedControl.appearance()
+    private static func _configure(_ control: UISegmentedControl) {
+        control.selectedSegmentTintColor = NBHalloween.uiColor(.segmentSelectedBackground)
+        control.backgroundColor = NBHalloween.uiColor(.segmentBackground)
+        control.setTitleTextAttributes(
+            [.foregroundColor: NBHalloween.uiColor(.segmentText)],
+            for: .normal
+        )
+        control.setTitleTextAttributes(
+            [.foregroundColor: NBHalloween.uiColor(.segmentSelectedText)],
+            for: .selected
+        )
+    }
 
-		// Purple rather than green: this sits directly under the nav bar, and a
-		// green pill there reads as a second tint fighting the first.
-		control.selectedSegmentTintColor = NBHalloween.uiPurple
-		control.backgroundColor = NBHalloween.uiElevated
+    private static func _segmentedControls() {
+        _configure(UISegmentedControl.appearance())
+    }
 
-		control.setTitleTextAttributes(
-			[.foregroundColor: NBHalloween.uiTextSecondary],
-			for: .normal
-		)
-		control.setTitleTextAttributes(
-			[.foregroundColor: UIColor.white],
-			for: .selected
-		)
-	}
+    // MARK: - Bar buttons
 
-	// MARK: - Bar buttons
+    private static func _barButtons() {
+        let item = UIBarButtonItem.appearance()
+        let tint = NBHalloween.uiColor(.barButtonTint)
+        item.tintColor = tint
+        item.setTitleTextAttributes([.foregroundColor: tint], for: .normal)
+        item.setTitleTextAttributes([.foregroundColor: tint], for: .highlighted)
+    }
 
-	private static func _barButtons() {
-		let item = UIBarButtonItem.appearance()
-		item.tintColor = NBHalloween.uiAccent
-		item.setTitleTextAttributes([.foregroundColor: NBHalloween.uiAccent], for: .normal)
-		item.setTitleTextAttributes([.foregroundColor: NBHalloween.uiAccent], for: .highlighted)
-	}
+    // MARK: - Existing UIKit wrappers
+
+    /// Appearance proxies only affect UIKit views created after the proxy is
+    /// changed. A person editing a theme should see those changes immediately,
+    /// so update the wrappers that already exist in the current windows too.
+    private static func _refreshExistingViews() {
+        let navigation = _navigationAppearance()
+        let tabs = _tabAppearance()
+
+        for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+            for window in scene.windows {
+                window.tintColor = NBHalloween.uiColor(.accent)
+                _refresh(
+                    view: window,
+                    navigationAppearance: navigation,
+                    tabAppearance: tabs
+                )
+            }
+        }
+    }
+
+    private static func _refresh(
+        view: UIView,
+        navigationAppearance: UINavigationBarAppearance,
+        tabAppearance: UITabBarAppearance
+    ) {
+        switch view {
+        case let bar as UINavigationBar:
+            bar.standardAppearance = navigationAppearance
+            bar.scrollEdgeAppearance = navigationAppearance
+            bar.compactAppearance = navigationAppearance
+            bar.compactScrollEdgeAppearance = navigationAppearance
+            bar.tintColor = NBHalloween.uiColor(.navigationTint)
+
+        case let bar as UITabBar:
+            bar.standardAppearance = tabAppearance
+            bar.scrollEdgeAppearance = tabAppearance
+            bar.tintColor = NBHalloween.uiColor(.tabSelected)
+            bar.unselectedItemTintColor = NBHalloween.uiColor(.tabUnselected)
+
+        case let field as UISearchTextField:
+            field.backgroundColor = NBHalloween.uiColor(.searchBackground)
+            field.textColor = NBHalloween.uiColor(.searchText)
+            field.tintColor = NBHalloween.uiColor(.searchTint)
+            field.attributedPlaceholder = NSAttributedString(
+                string: field.placeholder ?? "",
+                attributes: [.foregroundColor: NBHalloween.uiColor(.searchPlaceholder)]
+            )
+
+        case let searchBar as UISearchBar:
+            searchBar.tintColor = NBHalloween.uiColor(.searchTint)
+
+        case let control as UISegmentedControl:
+            _configure(control)
+
+        default:
+            break
+        }
+
+        for child in view.subviews {
+            _refresh(
+                view: child,
+                navigationAppearance: navigationAppearance,
+                tabAppearance: tabAppearance
+            )
+        }
+    }
 }

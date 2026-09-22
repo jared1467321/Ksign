@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct DylibRowView: View {
     let fileURL: URL
@@ -15,7 +16,7 @@ struct DylibRowView: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: fileURL.pathExtension.lowercased() == "framework" ? "shippingbox" : "doc.circle")
-                .foregroundColor(.accentColor)
+                .foregroundColor(NBHalloween.accent)
                 .frame(width: 32, height: 32)
             
             VStack(alignment: .leading) {
@@ -24,14 +25,14 @@ struct DylibRowView: View {
                 
                 Text(fileURL.pathExtension.uppercased())
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(NBHalloween.textSecondary)
             }
             
             Spacer()
             
             if isSelected {
                 Image(systemName: "checkmark")
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
             }
         }
         .contentShape(Rectangle())

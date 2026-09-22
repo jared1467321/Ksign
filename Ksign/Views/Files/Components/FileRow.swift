@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct FileRow: View {
     let file: FileItem
@@ -61,28 +62,28 @@ struct FileRow: View {
                 if file.isDirectory {
                     if file.isAppDirectory {
                         Image(systemName: "app.badge")
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(NBHalloween.accent)
                     } else {
                         Image(systemName: "folder")
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(NBHalloween.accent)
                     }
                 } else if file.isImageFile {
                     ImageRow(file: file)
                 } else if file.isArchive {
                     Image(systemName: "doc.zipper")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                 } else if file.isPlistFile {
                     Image(systemName: "list.bullet")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                 } else if file.isP12Certificate {
                     Image(systemName: "key")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                 } else if file.isKsignFile {
                     Image(systemName: "questionmark")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                 } else {
                     Image(systemName: "doc")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                 }
             }
             .font(.title2)
@@ -99,17 +100,17 @@ struct FileRow: View {
                     if !file.isDirectory {
                         Text(file.formattedSize)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(NBHalloween.textSecondary)
                     }
                     if let date = file.creationDate {
                         if !file.isDirectory {
                             Text("•")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(NBHalloween.textSecondary)
                         }
                         Text(date, style: .date)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(NBHalloween.textSecondary)
                     }
                 }
             }
@@ -118,19 +119,19 @@ struct FileRow: View {
             if viewModel.isEditMode == .inactive {
                 if file.isDirectory {
                     Image(systemName: "chevron.right")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                         .font(.system(size: 12))
                 }
             }
             else {
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                         .font(.system(size: 22))
                 }
                 else {
                     Image(systemName: "circle")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                         .font(.system(size: 22))
                 }
             }

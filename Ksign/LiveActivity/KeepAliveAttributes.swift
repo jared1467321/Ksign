@@ -6,6 +6,23 @@
 import ActivityKit
 import Foundation
 
+
+struct KeepAliveThemeColor: Codable, Hashable {
+	var red: Double
+	var green: Double
+	var blue: Double
+	var alpha: Double
+}
+
+struct KeepAliveThemeSnapshot: Codable, Hashable {
+	var background: KeepAliveThemeColor
+	var actionText: KeepAliveThemeColor
+	var primaryText: KeepAliveThemeColor
+	var secondaryText: KeepAliveThemeColor
+	var running: KeepAliveThemeColor
+	var idle: KeepAliveThemeColor
+}
+
 // Shared ActivityKit state. This file is compiled into both the app and widget
 // targets, so every field must remain identical on both sides.
 @available(iOS 16.2, *)
@@ -29,6 +46,10 @@ struct KeepAliveAttributes: ActivityAttributes {
 		// as an elapsed timer without requiring per-second app updates.
 		var detail: String?
 		var detailStartedAt: Date?
+
+		// Snapshot the selected profile into ActivityKit state because the widget
+		// extension does not share the app process or its UserDefaults instance.
+		var theme: KeepAliveThemeSnapshot
 
 		var shortLabel: String {
 			owners.first ?? (isRunning ? "Awake" : "Idle")

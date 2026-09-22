@@ -7,6 +7,7 @@
 //  ORIGINALLY LICENSED UNDER GPL-3.0, MODIFIED FOR USE FOR FEATHER
 //
 
+import NimbleExtensions
 import Foundation
 import UIKit.UIGraphicsImageRenderer
 
@@ -93,7 +94,7 @@ extension ServerInstaller {
 
 		let renderer = UIGraphicsImageRenderer(size: .init(width: r, height: r))
 		let image = renderer.image { ctx in
-			UIColor.accent.setFill()
+			NBHalloween.uiAccent.setFill()
 			ctx.fill(.init(x: 0, y: 0, width: r, height: r))
 		}
 		return image.pngData()!

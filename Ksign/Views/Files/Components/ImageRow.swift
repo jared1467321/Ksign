@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct ImageRow: View {
     let file: FileItem
@@ -25,12 +26,12 @@ struct ImageRow: View {
                     .scaleEffect(0.6)
             } else {
                 Image(systemName: "photo")
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
                     .font(.title2)
             }
         }
         .frame(width: 32, height: 32)
-        .background(Color(.systemGray6))
+        .background(NBHalloween.controlFill)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .onAppear {
             loadImage()

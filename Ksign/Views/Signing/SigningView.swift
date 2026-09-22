@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import PhotosUI
 import NimbleViews
 
@@ -80,7 +81,7 @@ struct SigningView: View {
 					} label: {
 						NBSheetButton(title: .localized("Show Logs"))
 					}
-					.tint(.secondary)
+					.tint(NBHalloween.textSecondary)
 					.compatMatchedTransitionSource(id: "showLogs", ns: _namespace)
 				} else {
 					Button() {

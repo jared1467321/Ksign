@@ -115,7 +115,7 @@ struct SigningTweaksView: View {
 					}
 				} else {
 					Text(.localized("Importing your .dylib, .deb or .framework files \n These will also be automatically added to Tweaks folder"))
-						.foregroundColor(.secondary)
+						.foregroundColor(NBHalloween.textSecondary)
 						.frame(maxWidth: .infinity, alignment: .center)
 						.padding()
 				}
@@ -250,7 +250,7 @@ extension SigningTweaksView {
 				} else if isDefault {
 					Text(.localized("Default"))
 						.font(.caption)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(NBHalloween.textSecondary)
 				}
 			}
 			.frame(maxWidth: .infinity, alignment: .leading)

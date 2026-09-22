@@ -74,8 +74,8 @@ final class ToolbarTapGate {
 struct SelectionCheckIcon: View {
 	let isSelected: Bool
 	var diameter: CGFloat = 21
-	var ringColor: Color = .accentColor
-	var fillColor: Color = .accentColor
+	var ringColor: Color = NBHalloween.accent
+	var fillColor: Color = NBHalloween.accent
 
 	var body: some View {
 		// All three layers are always present; only opacity changes, so the view's
@@ -91,7 +91,7 @@ struct SelectionCheckIcon: View {
 
 			Image(systemName: "checkmark")
 				.font(.system(size: diameter * 0.5, weight: .heavy))
-				.foregroundStyle(Color(uiColor: .systemBackground))
+				.foregroundStyle(NBHalloween.onAccent)
 				.opacity(isSelected ? 1 : 0)
 		}
 		.frame(width: diameter, height: diameter)
@@ -311,7 +311,7 @@ struct LibraryView: View {
             .overlay {
                 if _exportManager.isExporting {
                     ZStack {
-                        Color.black.opacity(0.25).ignoresSafeArea()
+                        NBHalloween.overlayScrim.ignoresSafeArea()
                         BulkExportProgressView(manager: _exportManager)
                     }
                     .transition(.opacity)
@@ -319,7 +319,7 @@ struct LibraryView: View {
                     ProgressView("Running Crypt Check Extracted…")
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: _exportManager.isExporting)

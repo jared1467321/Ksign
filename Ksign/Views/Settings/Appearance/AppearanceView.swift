@@ -1,70 +1,32 @@
 //
 //  AppearanceView.swift
-//  Feather
+//  Ksign
 //
-//  Created by samara on 7.05.2025.
+//  Theme profile selection and editing.
 //
 
 import SwiftUI
+import UIKit
 import NimbleViews
 import NimbleExtensions
 
 struct AppearanceView: View {
-    @AppStorage("Feather.userInterfaceStyle") private var _userIntefacerStyle: Int = UIUserInterfaceStyle.unspecified.rawValue
-    
-	@AppStorage("Feather.libraryCellAppearance") private var _libraryCellAppearance: Int = 0
-	
-	private let _libraryCellAppearanceMethods: [String] = [
-		.localized("Standard"),
-		.localized("Pill")
-	]
-	
-	@AppStorage("Feather.storeCellAppearance") private var _storeCellAppearance: Int = 1
-	
-	private let _storeCellAppearanceMethods: [String] = [
-		.localized("Standard"),
-		.localized("Big Description")
-	]
-	
-	@AppStorage("Feather.accentColor") private var _selectedAccentColor: Int = 0
-	@StateObject private var accentColorManager = AccentColorManager.shared
-    
-	// Order must stay in lockstep with AccentColorManager._accentColors —
-	// the picker binds to the raw index, so a mismatch here shows one swatch
-	// and applies another.
-	private let _accentColors: [(name: String, color: Color)] = [
-		(.localized("Neon Green"), NBHalloween.accent),
-		(.localized("Pumpkin"), NBHalloween.pumpkin),
-		(.localized("Blood"), NBHalloween.blood),
-		(.localized("Ksign Blue"), Color(red: 0x53/255, green: 0x94/255, blue: 0xF7/255)),
-		(.localized("Cherry"), Color(red: 0xFF/255, green: 0x8B/255, blue: 0x92/255)),
-		(.localized("Red"), .red),
-		(.localized("Orange"), .orange),
-		(.localized("Yellow"), .yellow),
-		(.localized("Green"), .green),
-		(.localized("Blue"), .blue),
-		(.localized("Purple"), .purple),
-		(.localized("Pink"), .pink),
-		(.localized("Indigo"), .indigo),
-		(.localized("Mint"), .mint),
-		(.localized("Cyan"), .cyan),
-		(.localized("Teal"), .teal)
-	]
-	
-	private var currentAccentColor: Color {
-		accentColorManager.currentAccentColor
-	}
+    @AppStorage("Feather.userInterfaceStyle") private var _userInterfaceStyle: Int = UIUserInterfaceStyle.unspecified.rawValue
+    @AppStorage("Feather.storeCellAppearance") private var _storeCellAppearance: Int = 1
+
+    @StateObject private var themeManager = NBThemeManager.shared
+    @State private var showDeleteConfirmation = false
+    @State private var showResetConfirmation = false
+
+    private let _storeCellAppearanceMethods: [String] = [
+        .localized("Standard"),
+        .localized("Big Description")
+    ]
 
     var body: some View {
         NBList(.localized("Appearance")) {
-            
-            // Info.plist pins UIUserInterfaceStyle to Dark, which UIKit applies
-            // before any of this runs and which nothing here can override.
-            // Leaving the control live would let it save a preference that
-            // never takes effect, so it is shown disabled rather than removed —
-            // flipping the Info.plist key back re-enables it.
             Section(footer: Text(.localized("Ksign is dark-only."))) {
-                Picker(.localized("Appearance"), selection: $_userIntefacerStyle) {
+                Picker(.localized("Appearance"), selection: $_userInterfaceStyle) {
                     ForEach(UIUserInterfaceStyle.allCases.sorted(by: { $0.rawValue < $1.rawValue }), id: \.rawValue) { style in
                         Text(style.label).tag(style.rawValue)
                     }
@@ -72,103 +34,221 @@ struct AppearanceView: View {
                 .pickerStyle(.segmented)
                 .disabled(true)
             }
-			
-			NBSection(.localized("Sources")) {
+
+            NBSection(.localized("Theme Profiles")) {
+                Picker(.localized("Active Theme"), selection: _themeSelection) {
+                    ForEach(themeManager.allThemes) { theme in
+                        Text(theme.name).tag(theme.id)
+                    }
+                }
+
+                _themePreview(themeManager.activeTheme)
+
+                if themeManager.isActiveThemeBuiltIn {
+                    Text(.localized("Halloween is the built-in default. Duplicate it or create a theme to customize every color role."))
+                        .font(.footnote)
+                        .foregroundStyle(NBHalloween.textSecondary)
+                } else {
+                    NavigationLink(destination: ThemeProfileEditorView(themeID: themeManager.selectedThemeID)) {
+                        Label(.localized("Customize Colors"), systemImage: "paintpalette")
+                    }
+                }
+
+                Button {
+                    let number = themeManager.customThemes.count + 1
+                    themeManager.createTheme(
+                        name: String.localizedStringWithFormat(String.localized("Custom Theme %d"), number),
+                        copying: themeManager.activeTheme
+                    )
+                } label: {
+                    Label(.localized("Create Theme"), systemImage: "plus")
+                }
+
+                Button {
+                    themeManager.duplicateActiveTheme()
+                } label: {
+                    Label(.localized("Duplicate Theme"), systemImage: "square.on.square")
+                }
+
+                if !themeManager.isActiveThemeBuiltIn {
+                    Button {
+                        showResetConfirmation = true
+                    } label: {
+                        Label(.localized("Reset Colors to Halloween"), systemImage: "arrow.counterclockwise")
+                    }
+
+                    Button(role: .destructive) {
+                        showDeleteConfirmation = true
+                    } label: {
+                        Label(.localized("Delete Theme"), systemImage: "trash")
+                    }
+                }
+            } footer: {
+                Text(.localized("Theme profiles are stored on this device. The Halloween profile always remains available as the factory default."))
+            }
+
+            NBSection(.localized("Sources")) {
                 _storePreview()
-				Picker(.localized("Store Cell Appearance"), selection: $_storeCellAppearance) {
-					ForEach(_storeCellAppearanceMethods.indices, id: \.description) { index in
-						Text(_storeCellAppearanceMethods[index]).tag(index)
-					}
-				}
-				.pickerStyle(.inline)
+                Picker(.localized("Store Cell Appearance"), selection: $_storeCellAppearance) {
+                    ForEach(_storeCellAppearanceMethods.indices, id: \.self) { index in
+                        Text(_storeCellAppearanceMethods[index]).tag(index)
+                    }
+                }
+                .pickerStyle(.inline)
                 .labelsHidden()
-			}
-			
-			NBSection(.localized("Accent Color")) {
-				_accentColorPreview()
-				Picker(.localized("Accent Color"), selection: $_selectedAccentColor) {
-					ForEach(_accentColors.indices, id: \.description) { index in
-						HStack {
-							Circle()
-								.fill(_accentColors[index].color)
-								.frame(width: 20, height: 20)
-							Text(_accentColors[index].name)
-						}
-						.tag(index)
-					}
-				}
-				.pickerStyle(.inline)
-				.labelsHidden()
-			}
-		}
-        .onChange(of: _userIntefacerStyle) { value in
+            }
+        }
+        .onChange(of: _userInterfaceStyle) { value in
             if let style = UIUserInterfaceStyle(rawValue: value) {
                 UIApplication.topViewController()?.view.window?.overrideUserInterfaceStyle = style
             }
         }
-		.onChange(of: _selectedAccentColor) { _ in
-			accentColorManager.updateGlobalTintColor()
-		}
+        .confirmationDialog(
+            .localized("Reset this theme's colors?"),
+            isPresented: $showResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(.localized("Reset Colors"), role: .destructive) {
+                themeManager.resetActiveThemeColors()
+            }
+            Button(.localized("Cancel"), role: .cancel) { }
+        } message: {
+            Text(.localized("The profile name stays the same, but every customizable color returns to the Halloween defaults."))
+        }
+        .confirmationDialog(
+            .localized("Delete this theme?"),
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(.localized("Delete Theme"), role: .destructive) {
+                themeManager.deleteActiveTheme()
+            }
+            Button(.localized("Cancel"), role: .cancel) { }
+        }
     }
-	
-	@ViewBuilder
-	private func _libraryPreview() -> some View {
-		HStack(spacing: 9) {
-			Image(uiImage: (UIImage(named: Bundle.main.iconFileName ?? ""))! )
-				.appIconStyle(size: 57)
-			
-			NBTitleWithSubtitleView(
-				title: Bundle.main.name,
-				subtitle: "\(Bundle.main.version) • \(Bundle.main.bundleIdentifier ?? "")",
-				linelimit: 0
-			)
-			
-			FRExpirationPillView(
-				title: .localized("Install"),
-				showOverlay: _libraryCellAppearance == 0,
-				expiration: Date.now.expirationInfo()
-			).animation(.spring, value: _libraryCellAppearance)
-		}
-	}
-    
+
+    private var _themeSelection: Binding<String> {
+        Binding(
+            get: { themeManager.selectedThemeID },
+            set: { themeManager.selectTheme(id: $0) }
+        )
+    }
+
+    @ViewBuilder
+    private func _themePreview(_ theme: NBThemeProfile) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(theme.name)
+                    .font(.headline)
+                    .foregroundStyle(NBHalloween.text)
+                Text(theme.isBuiltIn ? String.localized("Built-in") : String.localized("Custom"))
+                    .font(.caption)
+                    .foregroundStyle(NBHalloween.textSecondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 5) {
+                ForEach(
+                    [NBThemeRole.accent, .secondaryAccent, .tertiaryAccent, .success, .danger],
+                    id: \.self
+                ) { role in
+                    Circle()
+                        .fill(theme.color(for: role).color)
+                        .frame(width: 19, height: 19)
+                        .overlay {
+                            Circle().stroke(NBHalloween.imageBorder, lineWidth: 0.5)
+                        }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     @ViewBuilder
     private func _storePreview() -> some View {
         VStack {
             HStack(spacing: 9) {
-                Image(uiImage: (UIImage(named: Bundle.main.iconFileName ?? ""))! )
+                Image(uiImage: (UIImage(named: Bundle.main.iconFileName ?? ""))!)
                     .appIconStyle(size: 57)
-                
+
                 NBTitleWithSubtitleView(
                     title: Bundle.main.name,
                     subtitle: "\(Bundle.main.version) • " + .localized("An awesome application"),
                     linelimit: 0
                 )
             }
-            
+
             if _storeCellAppearance != 0 {
                 Text(.localized("An awesome application"))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
                     .lineLimit(18)
                     .padding(.top, 2)
             }
         }
         .animation(.spring, value: _storeCellAppearance)
     }
-	
-	@ViewBuilder
-	private func _accentColorPreview() -> some View {
-		HStack(spacing: 9) {
-			Circle()
-				.fill(currentAccentColor)
-				.frame(width: 57, height: 57)
-			
-			NBTitleWithSubtitleView(
-				title: .localized("Accent Color"),
-				subtitle: .localized("This is the current accent color"),
-				linelimit: 0
-			)
-		}
-	}
+}
+
+private struct ThemeProfileEditorView: View {
+    let themeID: String
+
+    @StateObject private var themeManager = NBThemeManager.shared
+    @State private var name = ""
+
+    private var theme: NBThemeProfile {
+        themeManager.profile(id: themeID) ?? .halloween
+    }
+
+    var body: some View {
+        NBList(.localized("Customize Theme")) {
+            NBSection(.localized("Profile")) {
+                TextField(.localized("Theme Name"), text: $name)
+                    .textInputAutocapitalization(.words)
+                    .onSubmit(_saveName)
+                    .onChange(of: name) { _ in _saveName() }
+            }
+
+            ForEach(NBThemeRole.Category.allCases) { category in
+                NBSection(category.rawValue) {
+                    ForEach(NBThemeRole.allCases.filter { $0.category == category }) { role in
+                        ColorPicker(
+                            role.displayName,
+                            selection: _binding(for: role),
+                            supportsOpacity: true
+                        )
+                    }
+                }
+            }
+        }
+        .onAppear {
+            name = theme.name
+            if themeManager.selectedThemeID != themeID {
+                themeManager.selectTheme(id: themeID)
+            }
+        }
+        .onDisappear(_saveName)
+    }
+
+    private func _saveName() {
+        themeManager.renameTheme(id: themeID, name: name)
+    }
+
+    private func _binding(for role: NBThemeRole) -> Binding<Color> {
+        Binding(
+            get: {
+                themeManager.profile(id: themeID)?.color(for: role).color
+                    ?? NBThemeProfile.halloween.color(for: role).color
+            },
+            set: { newColor in
+                themeManager.setColor(
+                    NBThemeColor(uiColor: UIColor(newColor)),
+                    for: role,
+                    in: themeID
+                )
+            }
+        )
+    }
 }

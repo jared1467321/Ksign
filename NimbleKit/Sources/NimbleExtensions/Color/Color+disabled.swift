@@ -12,6 +12,6 @@ extension Color {
 	/// - Parameter color: Color
 	/// - Returns: "Disabled" version of specified color
 	static public func disabled() -> Color {
-		.secondary.opacity(0.8)
+		NBHalloween.disabledText
 	}
 }

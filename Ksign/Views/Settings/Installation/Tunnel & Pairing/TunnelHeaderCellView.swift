@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct TunnelHeaderView: View {
 	@State var lastHeartbeatTime = Date()
@@ -40,12 +41,13 @@ struct TunnelPulseRing: View {
 				max(0.0, (timeSinceHeartbeat - _colorStartThreshold) / _colorTransitionDuration)
 			)
 			
+			let pulseColor = NBHalloween.themeColor(.success).interpolated(
+				to: NBHalloween.themeColor(.warning),
+				fraction: colorTransitionProgress
+			).color
+
 			Circle()
-				.fill(Color(
-					red: colorTransitionProgress,
-					green: 1.0 - (0.7 * colorTransitionProgress),
-					blue: 0.0
-				))
+				.fill(pulseColor)
 				.frame(width: 10, height: 10)
 				.scaleEffect(1.0 - (0.5 * progress))
 				.opacity(1.0 - (0.7 * progress))

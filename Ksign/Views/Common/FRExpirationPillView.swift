@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 // MARK: - View
 struct FRExpirationPillView: View {
@@ -16,13 +17,13 @@ struct FRExpirationPillView: View {
 	var body: some View {
 		let labelText = showOverlay ? title : (expiration?.formatted ?? title)
 		let backgroundColor = showOverlay
-		? Color(uiColor: .quaternarySystemFill)
-		: (expiration?.color.opacity(0.85) ?? Color(uiColor: .quaternarySystemFill))
+		? NBHalloween.controlFill
+		: (expiration?.color.opacity(0.85) ?? NBHalloween.controlFill)
 		
 		Text(labelText)
 			.lineLimit(0)
 			.font(.headline.bold())
-			.foregroundStyle((showOverlay || expiration == nil) ? .accent : .white)
+			.foregroundStyle((showOverlay || expiration == nil) ? NBHalloween.accent : NBHalloween.onAccent)
 			.padding(.horizontal, 12)
 			.padding(.vertical, 6)
 			.background(backgroundColor)

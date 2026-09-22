@@ -76,7 +76,7 @@ struct DownloaderView: View {
                         HStack(spacing: 12) {
                             ProgressView()
                             Text(.localized("Importing apps, please wait"))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(NBHalloween.textSecondary)
                             Spacer()
                         }
                     }
@@ -93,13 +93,13 @@ struct DownloaderView: View {
                                     .monospacedDigit()
 
                                 Text("•")
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(NBHalloween.textTertiary)
 
                                 Text(ipavaultActiveStreamsText)
                                     .monospacedDigit()
                             }
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NBHalloween.textSecondary)
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel("IPA Vault live download status")
                             .accessibilityValue("\(ipavaultLiveThroughputText), \(ipavaultActiveStreamsText)")
@@ -147,7 +147,7 @@ struct DownloaderView: View {
                     ProgressView("Running Crypt Check…")
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
                 } else if downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {

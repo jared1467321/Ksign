@@ -7,6 +7,7 @@ import ActivityKit
 import Foundation
 import OSLog
 import UIKit
+import NimbleExtensions
 
 // Owns the app's single local Live Activity.
 //
@@ -250,7 +251,35 @@ final class KeepAliveActivityController {
 			total: report?.total,
 			progressFraction: report?.fraction,
 			detail: report?.detail,
-			detailStartedAt: report?.detailStartedAt
+			detailStartedAt: report?.detailStartedAt,
+			theme: _themeSnapshot()
+		)
+	}
+
+	func refreshTheme() {
+		_queue.async {
+			self._scheduleReconcile()
+		}
+	}
+
+	private func _themeSnapshot() -> KeepAliveThemeSnapshot {
+		func color(_ role: NBThemeRole) -> KeepAliveThemeColor {
+			let value = NBHalloween.themeColor(role)
+			return KeepAliveThemeColor(
+				red: value.red,
+				green: value.green,
+				blue: value.blue,
+				alpha: value.alpha
+			)
+		}
+
+		return KeepAliveThemeSnapshot(
+			background: color(.liveActivityBackground),
+			actionText: color(.liveActivityActionText),
+			primaryText: color(.liveActivityPrimaryText),
+			secondaryText: color(.liveActivitySecondaryText),
+			running: color(.liveActivityRunning),
+			idle: color(.liveActivityIdle)
 		)
 	}
 

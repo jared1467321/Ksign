@@ -5,6 +5,7 @@
 
 import Foundation
 import SwiftUI
+import NimbleExtensions
 
 // One thing that happened to the silent-audio keep-alive.
 //
@@ -69,11 +70,11 @@ struct BackgroundAudioEvent: Identifiable, Equatable {
 
 	var tint: Color {
 		switch kind {
-		case .started, .restarted, .resumed:	return .green
-		case .failed:							return .red
-		case .interrupted:						return .orange
-		case .stopped, .released:				return .secondary
-		case .claimed, .reconfigured, .island:	return .accentColor
+		case .started, .restarted, .resumed:	return NBHalloween.ok
+		case .failed:							return NBHalloween.danger
+		case .interrupted:						return NBHalloween.warning
+		case .stopped, .released:				return NBHalloween.textSecondary
+		case .claimed, .reconfigured, .island:	return NBHalloween.accent
 		}
 	}
 }

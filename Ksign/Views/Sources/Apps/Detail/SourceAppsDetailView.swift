@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import Combine
 import AltSourceKit
 import NimbleViews
@@ -50,10 +51,10 @@ struct SourceAppsDetailView: View {
 						Text(app.currentName)
 							.font(.title2)
 							.fontWeight(.semibold)
-							.foregroundColor(.primary)
+							.foregroundColor(NBHalloween.text)
 						Text(app.currentDescription ?? .localized("An awesome application"))
 							.font(.subheadline)
-							.foregroundColor(.secondary)
+							.foregroundColor(NBHalloween.textSecondary)
 						
 						Spacer()
 						
@@ -63,16 +64,16 @@ struct SourceAppsDetailView: View {
 					.frame(maxWidth: .infinity, alignment: .leading)
 				}
 				
-				Divider()
+				Divider().overlay(NBHalloween.hairline)
 				_infoPills(app: app)
-				Divider()
+				Divider().overlay(NBHalloween.hairline)
                 
                 if let screenshotURLs = app.screenshotURLs {
                     NBSection(.localized("Screenshots")) {
                         _screenshots(screenshotURLs: screenshotURLs)
                     }
                     
-                    Divider()
+                    Divider().overlay(NBHalloween.hairline)
                 }
 				
 				if
@@ -96,7 +97,7 @@ struct SourceAppsDetailView: View {
                         }
 					}
 					
-					Divider()
+					Divider().overlay(NBHalloween.hairline)
 				}
 				
 				if let appDesc = app.localizedDescription {
@@ -107,7 +108,7 @@ struct SourceAppsDetailView: View {
 						.frame(maxWidth: .infinity, alignment: .leading)
 					}
 					
-					Divider()
+					Divider().overlay(NBHalloween.hairline)
 				}
                 
                 NBSection(.localized("Information")) {
@@ -153,7 +154,7 @@ struct SourceAppsDetailView: View {
 							} else {
 								Text(.localized("No Entitlements listed."))
 									.font(.subheadline)
-									.foregroundStyle(.secondary)
+									.foregroundStyle(NBHalloween.textSecondary)
 							}
 							if let privacyItems = appPermissions.privacy {
 								ForEach(privacyItems, id: \.self) { item in
@@ -165,13 +166,13 @@ struct SourceAppsDetailView: View {
 							} else {
 								Text(.localized("No Privacy Permissions listed."))
 									.font(.subheadline)
-									.foregroundStyle(.secondary)
+									.foregroundStyle(NBHalloween.textSecondary)
 							}
 						}
 						.padding()
 						.background(
 							RoundedRectangle(cornerRadius: 18, style: .continuous)
-								.fill(Color(.quaternarySystemFill))
+								.fill(NBHalloween.controlFill)
 						)
 					}
 				}
@@ -250,8 +251,8 @@ extension SourceAppsDetailView {
 				.overlay(
 					LinearGradient(
 						gradient: Gradient(colors: [
-							Color.black.opacity(0.8),
-							Color.black.opacity(0)
+							NBHalloween.mask,
+							Color.clear
 						]),
 						startPoint: .top,
 						endPoint: .bottom
@@ -281,11 +282,11 @@ extension SourceAppsDetailView {
 		var pills: [NBPillItem] = []
 		
 		if let version = app.currentVersion {
-			pills.append(NBPillItem(title: version, icon: "tag", color: Color.accentColor))
+			pills.append(NBPillItem(title: version, icon: "tag", color: NBHalloween.accent))
 		}
 		
 		if let size = app.size {
-			pills.append(NBPillItem(title: size.formattedByteCount, icon: "archivebox", color: .secondary))
+			pills.append(NBPillItem(title: size.formattedByteCount, icon: "archivebox", color: NBHalloween.textSecondary))
 		}
 		
 		return pills
@@ -294,7 +295,7 @@ extension SourceAppsDetailView {
 	@ViewBuilder
 	private func _infoRow(title: String, value: String) -> some View {
 		LabeledContent(title, value: value)
-		Divider()
+		Divider().overlay(NBHalloween.hairline)
 	}
 	
 	@ViewBuilder
@@ -315,7 +316,7 @@ extension SourceAppsDetailView {
 								.clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 								.overlay {
 									RoundedRectangle(cornerRadius: 16, style: .continuous)
-										.strokeBorder(.gray.opacity(0.3), lineWidth: 1)
+										.strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
 								}
 								.onTapGesture {
 									_selectedScreenshotIndex = index

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import NukeUI
 
@@ -26,7 +27,7 @@ struct SourcesCellView: View {
 		}
 		.contextMenu {
 			_contextActions(for: source)
-			Divider()
+			Divider().overlay(NBHalloween.hairline)
 			_actions(for: source)
 		}
 	}

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import AltSourceKit
 import NimbleViews
 import Combine
@@ -31,7 +32,7 @@ struct SourceAppsCellView: View {
                         LazyImage(url: iconURL) { state in
                             if let image = state.image {
                                 image
-                                    .appIconStyle(size: 20, isCircle: true, background: Color(uiColor: .secondarySystemBackground))
+                                    .appIconStyle(size: 20, isCircle: true, background: NBHalloween.elevated)
                                     .offset(x: 41, y: 4)
                             }
                         }
@@ -47,7 +48,7 @@ struct SourceAppsCellView: View {
                 Text(desc)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NBHalloween.textSecondary)
                     .padding(.top, 2)
             }
         }

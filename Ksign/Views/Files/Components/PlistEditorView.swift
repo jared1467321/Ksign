@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct PlistEditorView: View {
     let fileURL: URL
@@ -28,7 +29,7 @@ struct PlistEditorView: View {
             viewModel.loadPlist(from: fileURL)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+        .background(NBHalloween.background)
         .alert("Edit Value", isPresented: $_showingEditAlert, presenting: _editingItem) { item in
             TextField("Value", text: $_editValue)
             Button("Cancel", role: .cancel) {
@@ -63,12 +64,12 @@ struct PlistEditorView: View {
             } label: {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color(.systemBackground))
+        .background(NBHalloween.background)
     }
     
     private var contentView: some View {
@@ -77,7 +78,7 @@ struct PlistEditorView: View {
                 VStack(spacing: 16) {
                     Image(systemName: "list.bullet")
                         .font(.system(size: 48))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                     
                     Text("Empty Property List")
                         .font(.title3)
@@ -85,7 +86,7 @@ struct PlistEditorView: View {
                     
                     Text("This property list contains no items")
                         .font(.body)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -104,14 +105,14 @@ struct PlistEditorView: View {
                     
                     Text("\(viewModel.plistItems.count) item\(viewModel.plistItems.count == 1 ? "" : "s")")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(NBHalloween.textSecondary)
                 }
                 
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(Color(.systemGray6))
+            .background(NBHalloween.controlFill)
             
             List {
                 ForEach(_flattenedItems()) { item in
@@ -220,13 +221,13 @@ struct PlistItemRow: View {
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.2))
-                            .foregroundColor(.accentColor)
+                            .background(NBHalloween.accent.opacity(0.2))
+                            .foregroundColor(NBHalloween.accent)
                             .cornerRadius(4)
                         
                         Text(item.displayValue)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(NBHalloween.textSecondary)
                             .lineLimit(2)
                         
                         Spacer()
@@ -237,7 +238,7 @@ struct PlistItemRow: View {
                     Button(action: onExpandToggle) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(NBHalloween.textSecondary)
                             .frame(width: 4, height: 16)
                     }
                     .buttonStyle(PlainButtonStyle())

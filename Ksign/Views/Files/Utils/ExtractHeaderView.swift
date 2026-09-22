@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct ExtractHeaderView: View {
 	@ObservedObject var extractManager: ExtractManager
@@ -23,7 +24,7 @@ struct ExtractHeaderView: View {
 								Spacer()
 								Text(verbatim: "+\(extractManager.extractItems.count - 1)")
 									.font(.caption)
-									.foregroundColor(.secondary)
+									.foregroundColor(NBHalloween.textSecondary)
 									.padding(.vertical, 4)
 							}
 						}
@@ -55,7 +56,7 @@ private struct ExtractProgressItemView: View {
 				Spacer()
 			}
 			.font(.caption)
-			.foregroundColor(.secondary)
+			.foregroundColor(NBHalloween.textSecondary)
 		}
 		.padding(.vertical, 4)
 	}

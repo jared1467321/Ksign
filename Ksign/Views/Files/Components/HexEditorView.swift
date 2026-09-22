@@ -53,7 +53,7 @@ struct HexEditorView: View {
             Text("You have unsaved changes. Do you want to save them before closing?")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+        .background(NBHalloween.background)
     }
     
     private var headerView: some View {
@@ -67,7 +67,7 @@ struct HexEditorView: View {
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
             }
             
             Spacer()
@@ -83,12 +83,12 @@ struct HexEditorView: View {
             } label: {
                 Image(systemName: viewModel.isEditingMode ? "checkmark.circle.fill" : "pencil.circle.fill")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color(.systemBackground))
+        .background(NBHalloween.background)
     }
     
     private var viewModeSegmentedControl: some View {
@@ -108,7 +108,7 @@ struct HexEditorView: View {
         HStack {
             HStack {
                 Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(NBHalloween.textSecondary)
                 
                 TextField("Search hex or ASCII", text: $searchText)
                     .textFieldStyle(PlainTextFieldStyle())
@@ -124,13 +124,13 @@ struct HexEditorView: View {
                         viewModel.clearSearch()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(NBHalloween.textSecondary)
                     }
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(Color(.systemGray6))
+            .background(NBHalloween.controlFill)
             .cornerRadius(8)
             
             if viewModel.hasSearchResults {
@@ -138,7 +138,7 @@ struct HexEditorView: View {
                     viewModel.nextSearchMatch()
                 }
                 .font(.caption)
-                .foregroundColor(.accentColor)
+                .foregroundColor(NBHalloween.accent)
             }
         }
         .padding(.horizontal, 16)
@@ -179,7 +179,7 @@ struct HexEditorView: View {
                         .frame(width: 80, alignment: .leading)
                     
                     Text(line.hexBytes)
-                        .foregroundColor(.primary)
+                        .foregroundColor(NBHalloween.text)
                         .frame(width: 200, alignment: .leading)
                     
                     Text(line.asciiText)
@@ -210,7 +210,7 @@ struct HexEditorView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("String representation:")
                 .font(.subheadline)
-                .foregroundColor(.secondary)
+                .foregroundColor(NBHalloween.textSecondary)
                 .padding(.horizontal, 16)
             
             Text(viewModel.stringRepresentation)

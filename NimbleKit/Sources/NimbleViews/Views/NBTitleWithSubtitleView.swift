@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 public struct NBTitleWithSubtitleView: View {
 	private let _title: String
@@ -24,7 +25,7 @@ public struct NBTitleWithSubtitleView: View {
 				.font(.headline)
 			Text(_subtitle)
 				.font(.subheadline)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(NBHalloween.textSecondary)
 		}
 		.lineLimit(_linelimit)
 		.frame(maxWidth: .infinity, alignment: .leading)

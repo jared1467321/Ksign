@@ -72,7 +72,7 @@ struct DownloadItemRow: View {
                     _toggleSelection()
                 } label: {
                     Image(systemName: _isSelected ? "checkmark.circle.fill" : "circle")
-                        .foregroundColor(_isSelected ? .accentColor : .secondary)
+                        .foregroundColor(_isSelected ? NBHalloween.accent : NBHalloween.textSecondary)
                         .font(.title2)
                 }
                 .buttonStyle(.borderless)
@@ -80,21 +80,21 @@ struct DownloadItemRow: View {
             if item.isFinished {
                 Image(systemName: "doc.zipper")
                     .font(.title2)
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
             } else {
                 if #available(iOS 17.0, *) {
                     Image(systemName: "arrow.down.document")
                         .font(.title2)
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                         .frame(width: 32, height: 32)
                         .contentShape(Rectangle())
                         .symbolEffect(.pulse)
                 } else {
                     Image(systemName: "arrow.down.document")
                         .font(.title2)
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(NBHalloween.accent)
                         .frame(width: 32, height: 32)
                         .contentShape(Rectangle())
                 }
@@ -106,7 +106,7 @@ struct DownloadItemRow: View {
                 
                 Text(item.isFinished ? item.formattedFileSize : item.progressText)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(NBHalloween.textSecondary)
             }
             
             Spacer()
@@ -123,7 +123,7 @@ struct DownloadItemRow: View {
                         Circle()
                             .trim(from: 0, to: item.progress)
                             .stroke(
-                                item.isPaused ? Color.secondary : NBHalloween.warning,
+                                item.isPaused ? NBHalloween.textSecondary : NBHalloween.warning,
                                 style: StrokeStyle(lineWidth: 2.3, lineCap: .round)
                             )
                             .rotationEffect(.degrees(-90))
@@ -131,7 +131,7 @@ struct DownloadItemRow: View {
                             .animation(.smooth, value: item.progress)
 
                         Image(systemName: activeControlSymbol)
-                            .foregroundStyle(item.isPaused ? Color.accentColor : NBHalloween.warning)
+                            .foregroundStyle(item.isPaused ? NBHalloween.accent : NBHalloween.warning)
                             .font(.footnote).bold()
                     }
                 }
@@ -257,14 +257,14 @@ struct AppStoreDownloadItemRow: View {
             if #available(iOS 17.0, *) {
                 Image(systemName: download.unpackageProgress > 0 ? "doc.zipper" : "arrow.down.document")
                     .font(.title2)
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
                     .symbolEffect(.pulse)
             } else {
                 Image(systemName: download.unpackageProgress > 0 ? "doc.zipper" : "arrow.down.document")
                     .font(.title2)
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(NBHalloween.accent)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
             }
@@ -276,7 +276,7 @@ struct AppStoreDownloadItemRow: View {
                 
                 Text(download.progressText)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(NBHalloween.textSecondary)
             }
             
             Spacer()

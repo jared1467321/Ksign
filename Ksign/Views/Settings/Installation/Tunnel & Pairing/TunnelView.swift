@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import IDeviceSwift
 
@@ -91,7 +92,7 @@ struct TunnelView: View {
 					.font(.headline)
 				Text(.localized("The heartbeat is activated in the background, it will restart when the app is re-opened or prompted. If the status below is pulsing, that means its healthy."))
 					.font(.subheadline)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(NBHalloween.textSecondary)
 			}
 			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
 		}

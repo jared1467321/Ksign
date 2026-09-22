@@ -80,7 +80,7 @@ struct InstallProgressView: View {
 			Circle()
 				.fill(dot)
 				.overlay(
-					Circle().strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+					Circle().strokeBorder(NBHalloween.overlayText.opacity(0.9), lineWidth: 1)
 				)
 				.frame(width: 13, height: 13)
 				.shadow(color: dot.opacity(0.9), radius: 4)
@@ -102,13 +102,13 @@ struct InstallProgressView: View {
 			FRAppIconView(app: app)
 				.opacity(_isPulsing ? 0.2 : 0.2)
 				.frame(width: 54, height: 54)
-				.foregroundStyle(Color.black)
+				.foregroundStyle(NBHalloween.mask)
 			
 			FRAppIconView(app: app)
 				.frame(width: 54, height: 54)
 				.mask(
 					ZStack {
-						Circle().strokeBorder(Color.white, lineWidth: 4.5)
+						Circle().strokeBorder(NBHalloween.overlayText, lineWidth: 4.5)
 						PieShape(progress: viewModel.overallProgress)
 							.scaleEffect(viewModel.isCompleted ? 2.2 : 1)
 							.animation(.smooth, value: viewModel.isCompleted)

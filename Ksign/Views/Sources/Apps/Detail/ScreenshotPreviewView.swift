@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NukeUI
 
 struct ScreenshotPreviewView: View {
@@ -46,7 +47,7 @@ struct ScreenshotPreviewView: View {
                                 .padding(.vertical, 6)
                                 .background(
                                     Capsule()
-                                        .fill(.ultraThinMaterial)
+                                        .fill(NBHalloween.overlaySurface)
                                 )
                         }
                     }
@@ -68,7 +69,7 @@ extension ScreenshotPreviewView {
                             .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 32, style: .continuous)
-                                    .strokeBorder(.gray.opacity(0.3), lineWidth: 1)
+                                    .strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
                             }
                     }
                 }

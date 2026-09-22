@@ -89,7 +89,7 @@ where 	Content: View,
 			,
 			footer: _footer
 				.font(.caption)
-				.foregroundColor(.secondary)
+				.foregroundColor(NBHalloween.textSecondary)
 		) {
 			_content
 		}

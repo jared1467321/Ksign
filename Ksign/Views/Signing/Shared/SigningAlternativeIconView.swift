@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -52,7 +53,7 @@ extension SigningAlternativeIconView {
 			
 			Text(icon.name)
 				.font(.headline)
-				.foregroundColor(.primary)
+				.foregroundColor(NBHalloween.text)
 		}
 		.padding(.vertical, 4)
 	}

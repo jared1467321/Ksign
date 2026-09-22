@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 // The speaker badge that sits at the top of the window. 🔊 while the silent
 // keep-alive is actually running, 🔇 while it isn't, and a tap opens the log of
@@ -26,12 +27,12 @@ struct BackgroundAudioIndicatorView: View {
 				.padding(.vertical, 4)
 				.background(
 					Capsule()
-						.fill(Color(uiColor: .secondarySystemBackground))
+						.fill(NBHalloween.elevated)
 				)
 				.overlay(
 					Capsule()
 						.strokeBorder(
-							_status.isRunning ? Color.green.opacity(0.6) : Color.clear,
+							_status.isRunning ? NBHalloween.ok.opacity(0.6) : Color.clear,
 							lineWidth: 1
 						)
 				)
@@ -72,7 +73,7 @@ struct BackgroundAudioLogView: View {
 
 							Text(_stateDescription)
 								.font(.caption)
-								.foregroundColor(.secondary)
+								.foregroundColor(NBHalloween.textSecondary)
 								.fixedSize(horizontal: false, vertical: true)
 						}
 					}
@@ -83,7 +84,7 @@ struct BackgroundAudioLogView: View {
 					if status.events.isEmpty {
 						Text("Nothing yet. Start an install or a download and the keep-alive's comings and goings will show up here.")
 							.font(.footnote)
-							.foregroundColor(.secondary)
+							.foregroundColor(NBHalloween.textSecondary)
 					} else {
 						// Newest first: in a sheet you opened because something
 						// looked wrong, the thing that just happened is the
@@ -153,7 +154,7 @@ struct BackgroundAudioLogView: View {
 				if !event.detail.isEmpty {
 					Text(event.detail)
 						.font(.caption)
-						.foregroundColor(.secondary)
+						.foregroundColor(NBHalloween.textSecondary)
 						.fixedSize(horizontal: false, vertical: true)
 				}
 			}
@@ -162,7 +163,7 @@ struct BackgroundAudioLogView: View {
 
 			Text(Self._timeFormatter.string(from: event.date))
 				.font(.system(size: 11, design: .monospaced))
-				.foregroundColor(.secondary)
+				.foregroundColor(NBHalloween.textSecondary)
 				.padding(.top, 2)
 		}
 		.padding(.vertical, 2)
