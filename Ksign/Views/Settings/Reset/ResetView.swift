@@ -140,14 +140,8 @@ extension ResetView {
 // MARK: - View extension: reset
 extension ResetView {
 	static func clearWorkCache() {
-		let fileManager = FileManager.default
-		let tmpDirectory = fileManager.temporaryDirectory
-		
-		if let files = try? fileManager.contentsOfDirectory(atPath: tmpDirectory.path()) {
-			for file in files {
-				try? fileManager.removeItem(atPath: tmpDirectory.appendingPathComponent(file).path())
-			}
-		}
+		let removed = TempMaintenance.clearWorkCache()
+		print("[TempMaintenance] Manual work-cache sweep removed \(removed) item(s)")
 	}
 	
 	static func clearNetworkCache() {
