@@ -60,7 +60,6 @@ final class BackgroundTaskManager: ObservableObject {
         var identityClaimed = false
         var count = 0
         var success = true
-        var suppressed = false
         var heartbeatToken: UUID?
         var lastMeaningfulProgressAt: Date?
         var report = Report()
@@ -84,13 +83,15 @@ final class BackgroundTaskManager: ObservableObject {
         var sequence = 0
         var currentDownloadId: String?
         var success = true
-        var suppressed = false
         var heartbeatToken: UUID?
         var lastMeaningfulProgressAt: Date?
     }
 
     private let _lock = NSLock()
     private let _taskProgressLock = NSLock()
+    // Weak entries make completion idempotent without retaining retired tasks.
+    private let _completedTasks = NSHashTable<BGContinuedProcessingTask>.weakObjects()
+    private var _needsForegroundRenewal = false // Main queue only.
     private let _heartbeatQueue = DispatchQueue(
         label: "AppAssassin.signer.ipa.background-task-heartbeat",
         qos: .utility
@@ -118,11 +119,23 @@ final class BackgroundTaskManager: ObservableObject {
 
         _lifecycleObservers.append(
             NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?._needsForegroundRenewal = true
+            }
+        )
+        _lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
                 forName: UIApplication.didBecomeActiveNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?._recoverBulkInstallTaskIfNeeded()
+                guard let self else { return }
+                let renew = self._needsForegroundRenewal
+                self._needsForegroundRenewal = false
+                self._recoverActiveTasks(renewLeases: renew)
             }
         )
     }
@@ -138,7 +151,6 @@ final class BackgroundTaskManager: ObservableObject {
         state.identityClaimed = true
         if !wasClaimed && state.count == 0 {
             state.success = true
-            state.suppressed = false
         }
         _workflowStates[owner] = state
         _lock.unlock()
@@ -172,7 +184,6 @@ final class BackgroundTaskManager: ObservableObject {
         var state = _workflowStates[owner] ?? WorkflowState()
         if state.count == 0 && !state.identityClaimed {
             state.success = true
-            state.suppressed = false
         }
         state.count += 1
         _workflowStates[owner] = state
@@ -256,9 +267,8 @@ final class BackgroundTaskManager: ObservableObject {
                 state.lastMeaningfulProgressAt = Date()
             }
             state.report = next
-            if normalizedDetail == "Error" || normalizedDetail == "Cancelled" {
-                state.success = false
-            }
+            // Presentation text may describe a retryable error. Only explicit
+            // worker completion/release results determine batch success.
             task = state.task
             reportToApply = next
         }
@@ -362,12 +372,12 @@ final class BackgroundTaskManager: ObservableObject {
         var shouldClaimAudio = false
 
         _lock.lock()
-        if _downloadBatchState == nil || (_downloadBatchState?.suppressed == true && _downloadBatchState?.items.values.allSatisfy(\.terminal) == true) {
+        if _downloadBatchState == nil {
             _downloadBatchState = DownloadBatchState()
             shouldClaimAudio = true
         }
 
-        guard var state = _downloadBatchState, !state.suppressed else {
+        guard var state = _downloadBatchState else {
             _lock.unlock()
             return
         }
@@ -418,7 +428,6 @@ final class BackgroundTaskManager: ObservableObject {
 
         _lock.lock()
         guard var state = _downloadBatchState,
-              !state.suppressed,
               var item = state.items[downloadId],
               !item.terminal else {
             _lock.unlock()
@@ -534,7 +543,8 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.lock()
         if var state = _workflowStates[owner],
            state.identifier == identifier,
-           !state.suppressed {
+           state.task == nil,
+           state.identityClaimed || state.count > 0 {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
@@ -567,72 +577,106 @@ final class BackgroundTaskManager: ObservableObject {
 
     private func _workflowExpired(_ owner: Owner, task: BGContinuedProcessingTask) {
         var ownsTask = false
-        var shouldRecoverBulkInstall = false
-
         _lock.lock()
         if var state = _workflowStates[owner], state.task === task {
+            // Expiration ends the system lease, not the app's batch. Preserve
+            // ownership, progress and real worker results for foreground recovery.
             state.task = nil
+            state.identifier = nil
+            state.handlerRegistered = false
             state.requestOutstanding = false
             state.submissionToken = nil
             state.heartbeatToken = nil
-
-            if owner == .bulkInstalls {
-                // The continued-processing task is only the system execution /
-                // Live Activity lease. InstallSession owns the actual batch. If
-                // iOS expires this lease while the batch is still running, keep
-                // the batch state intact and retire the identifier so the next
-                // foreground recovery gets a completely fresh task.
-                state.identifier = nil
-                state.handlerRegistered = false
-                shouldRecoverBulkInstall = state.identityClaimed || state.count > 0
-            } else {
-                // Preserve the existing behavior for the other workflows. This
-                // recovery path is intentionally scoped to bulk installation.
-                state.success = false
-                state.suppressed = true
-            }
-
             _workflowStates[owner] = state
             ownsTask = true
         }
         _lock.unlock()
 
         guard ownsTask else { return }
-
         print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
         _completeTask(task, success: false)
+        DispatchQueue.main.async { [weak self] in
+            self?._recoverActiveTasks()
+        }
+    }
 
-        // A new BGContinuedProcessingTask must be submitted while the app is
-        // active. If expiration happened in the background, didBecomeActive
-        // below will recover it when the user opens Ksign. If it happened while
-        // Ksign was already active, recover immediately.
-        if shouldRecoverBulkInstall {
+    private func _recoverActiveTasks(renewLeases: Bool = false) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard UIApplication.shared.applicationState == .active else { return }
+
+        // Run behind earlier submissions so a retired request cannot be
+        // submitted *after* we cancel it. Tokens reject any later stale work.
+        _submissionQueue.async { [weak self] in
+            guard let self else { return }
+            var retiredTasks: [BGContinuedProcessingTask] = []
+            var retiredRequests: [String] = []
+            var owners: [Owner] = []
+            var recoverDownloads = false
+
+            self._lock.lock()
+            for owner in Array(self._workflowStates.keys) {
+                guard var state = self._workflowStates[owner],
+                      state.identityClaimed || state.count > 0 else { continue }
+                owners.append(owner)
+                if renewLeases {
+                    if let task = state.task { retiredTasks.append(task) }
+                    if state.requestOutstanding, let id = state.identifier {
+                        retiredRequests.append(id)
+                    }
+                    state.task = nil
+                    state.identifier = nil
+                    state.handlerRegistered = false
+                    state.requestOutstanding = false
+                    state.submissionToken = nil
+                    state.heartbeatToken = nil
+                    self._workflowStates[owner] = state
+                }
+            }
+            if var state = self._downloadBatchState,
+               state.items.values.contains(where: { !$0.terminal }) {
+                recoverDownloads = true
+                if renewLeases {
+                    if let task = state.task { retiredTasks.append(task) }
+                    if state.requestOutstanding, let id = state.identifier {
+                        retiredRequests.append(id)
+                    }
+                    state.task = nil
+                    state.identifier = nil
+                    state.handlerRegistered = false
+                    state.requestOutstanding = false
+                    state.submissionToken = nil
+                    state.heartbeatToken = nil
+                    self._downloadBatchState = state
+                }
+            }
+            self._lock.unlock()
+
+            if renewLeases, !owners.isEmpty || recoverDownloads {
+                print("Renewing continued-processing tasks on foreground return: \(owners.count) workflow(s), downloads: \(recoverDownloads)")
+            }
+            for identifier in retiredRequests {
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+            }
+            // This is a deliberate lease handoff, not a failed app operation.
+            // Do not advance the batch report to 100% or release its ownership.
+            for task in retiredTasks { self._completeTask(task, success: true) }
+
             DispatchQueue.main.async { [weak self] in
-                guard UIApplication.shared.applicationState == .active else { return }
-                self?._recoverBulkInstallTaskIfNeeded()
+                guard let self, UIApplication.shared.applicationState == .active else { return }
+                for owner in owners { self._submitWorkflowIfNeeded(owner) }
+                if recoverDownloads { self._submitDownloadIfNeeded() }
             }
         }
     }
 
-    private func _recoverBulkInstallTaskIfNeeded() {
-        var shouldSubmit = false
-
-        _lock.lock()
-        if let state = _workflowStates[.bulkInstalls],
-           (state.identityClaimed || state.count > 0),
-           state.task == nil,
-           !state.requestOutstanding,
-           !state.suppressed {
-            shouldSubmit = true
-        }
-        _lock.unlock()
-
-        guard shouldSubmit else { return }
-        print("Recovering bulk install BGContinuedProcessingTask while app is active")
-        _submitWorkflowIfNeeded(.bulkInstalls)
-    }
-
     private func _submitWorkflowIfNeeded(_ owner: Owner) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?._submitWorkflowIfNeeded(owner) }
+            return
+        }
+        // Recovery and workers starting between batch items must not repeatedly
+        // submit foreground-only requests while the app is backgrounded.
+        guard UIApplication.shared.applicationState == .active else { return }
         var request: BGContinuedProcessingTaskRequest?
         var submissionToken: UUID?
         var identifier: String?
@@ -641,7 +685,6 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.lock()
         if var state = _workflowStates[owner],
            (state.identityClaimed || state.count > 0),
-           !state.suppressed,
            state.task == nil,
            !state.requestOutstanding {
             let token = UUID()
@@ -752,7 +795,6 @@ final class BackgroundTaskManager: ObservableObject {
             && state.task == nil
             && state.handlerRegistered
             && (state.identityClaimed || state.count > 0)
-            && !state.suppressed
     }
 
     private func _workflowSubmissionCompleted(
@@ -789,6 +831,11 @@ final class BackgroundTaskManager: ObservableObject {
         var finalReport = Report()
 
         _lock.lock()
+        guard let current = _workflowStates[owner],
+              !current.identityClaimed, current.count == 0 else {
+            _lock.unlock()
+            return
+        }
         if let state = _workflowStates.removeValue(forKey: owner) {
             task = state.task
             identifier = state.identifier
@@ -853,6 +900,8 @@ final class BackgroundTaskManager: ObservableObject {
         )
 
         _taskProgressLock.lock()
+        defer { _taskProgressLock.unlock() }
+        guard !_completedTasks.contains(task) else { return }
         task.updateTitle(presentation.title, subtitle: presentation.subtitle)
         let previousUnits = task.progress.totalUnitCount == Self._fractionProgressUnits
             ? task.progress.completedUnitCount
@@ -861,20 +910,23 @@ final class BackgroundTaskManager: ObservableObject {
         task.progress.completedUnitCount = allowComplete
             ? targetUnits
             : max(previousUnits, targetUnits)
-        _taskProgressLock.unlock()
     }
 
     private func _completeTask(_ task: BGContinuedProcessingTask, success: Bool) {
         _taskProgressLock.lock()
+        defer { _taskProgressLock.unlock() }
+        guard !_completedTasks.contains(task) else { return }
+        _completedTasks.add(task)
+        task.expirationHandler = nil
         task.setTaskCompleted(success: success)
-        _taskProgressLock.unlock()
     }
 
     private func _pulseProgress(_ task: BGContinuedProcessingTask) {
         _taskProgressLock.lock()
         defer { _taskProgressLock.unlock() }
 
-        guard task.progress.totalUnitCount == Self._fractionProgressUnits else { return }
+        guard !_completedTasks.contains(task),
+              task.progress.totalUnitCount == Self._fractionProgressUnits else { return }
         let ceiling = Self._fractionProgressUnits - 1
         guard task.progress.completedUnitCount < ceiling else { return }
         task.progress.completedUnitCount += 1
@@ -896,7 +948,6 @@ final class BackgroundTaskManager: ObservableObject {
             if let state = self._workflowStates[owner],
                state.task === task,
                state.heartbeatToken == token,
-               !state.suppressed,
                state.identityClaimed || state.count > 0 {
                 remainsActive = true
                 if let last = state.lastMeaningfulProgressAt {
@@ -1000,7 +1051,8 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.lock()
         if var state = _downloadBatchState,
            state.identifier == identifier,
-           !state.suppressed {
+           state.task == nil,
+           state.items.values.contains(where: { !$0.terminal }) {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
@@ -1035,48 +1087,34 @@ final class BackgroundTaskManager: ObservableObject {
     }
 
     private func _downloadExpired(task: BGContinuedProcessingTask) {
-        var downloadIDs: [String] = []
         var ownsTask = false
-        var releaseAudioImmediately = false
-
         _lock.lock()
         if var state = _downloadBatchState, state.task === task {
             state.task = nil
+            state.identifier = nil
+            state.handlerRegistered = false
             state.requestOutstanding = false
             state.submissionToken = nil
-            state.success = false
-            state.suppressed = true
             state.heartbeatToken = nil
-            downloadIDs = state.items.compactMap { $0.value.terminal ? nil : $0.key }
-            releaseAudioImmediately = downloadIDs.isEmpty
-            if releaseAudioImmediately {
-                _downloadBatchState = nil
-            } else {
-                _downloadBatchState = state
-            }
+            _downloadBatchState = state
             ownsTask = true
         }
         _lock.unlock()
 
         guard ownsTask else { return }
-
         print("BGContinuedProcessingTask expired for aggregate downloads")
         _completeTask(task, success: false)
-        if releaseAudioImmediately {
-            BackgroundAudioManager.shared.releaseSystemTask(_downloadAudioKey)
-            return
-        }
-
-        DispatchQueue.main.async {
-            for downloadID in downloadIDs {
-                if let download = DownloadManager.shared.getDownload(by: downloadID) {
-                    DownloadManager.shared.cancelDownload(download)
-                }
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?._recoverActiveTasks()
         }
     }
 
     private func _submitDownloadIfNeeded() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?._submitDownloadIfNeeded() }
+            return
+        }
+        guard UIApplication.shared.applicationState == .active else { return }
         var request: BGContinuedProcessingTaskRequest?
         var submissionToken: UUID?
         var identifier: String?
@@ -1084,7 +1122,6 @@ final class BackgroundTaskManager: ObservableObject {
 
         _lock.lock()
         if var state = _downloadBatchState,
-           !state.suppressed,
            !state.items.isEmpty,
            state.task == nil,
            !state.requestOutstanding {
@@ -1184,7 +1221,6 @@ final class BackgroundTaskManager: ObservableObject {
             && state.requestOutstanding
             && state.task == nil
             && state.handlerRegistered
-            && !state.suppressed
             && !state.items.isEmpty
     }
 
@@ -1228,7 +1264,6 @@ final class BackgroundTaskManager: ObservableObject {
             if let state = self._downloadBatchState,
                state.task === task,
                state.heartbeatToken == token,
-               !state.suppressed,
                state.items.values.contains(where: { !$0.terminal }) {
                 remainsActive = true
                 if let last = state.lastMeaningfulProgressAt {
@@ -1257,6 +1292,8 @@ final class BackgroundTaskManager: ObservableObject {
         let targetUnits = _progressUnits(for: progress, allowComplete: allowComplete)
 
         _taskProgressLock.lock()
+        defer { _taskProgressLock.unlock() }
+        guard !_completedTasks.contains(task) else { return }
         let previousUnits = task.progress.totalUnitCount == Self._fractionProgressUnits
             ? task.progress.completedUnitCount
             : 0
@@ -1265,7 +1302,6 @@ final class BackgroundTaskManager: ObservableObject {
             ? targetUnits
             : max(previousUnits, targetUnits)
         task.updateTitle(title, subtitle: subtitle)
-        _taskProgressLock.unlock()
     }
 
 }
