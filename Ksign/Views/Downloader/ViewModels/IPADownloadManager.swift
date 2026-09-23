@@ -46,10 +46,45 @@ class IPADownloadManager: NSObject, ObservableObject {
         let bytes: Int64
     }
 
-    private struct IPAVaultBatchObservation {
-        let itemID: String
-        let streams: Int
-        let sequence: Int
+    private enum IPAVaultBatchProbeDimension: Equatable {
+        case concurrency
+        case streams
+    }
+
+    private enum IPAVaultBatchTuningPhase {
+        case concurrency
+        case streams
+        case steady
+    }
+
+    private final class IPAVaultBatchAdaptiveProbe {
+        let dimension: IPAVaultBatchProbeDimension
+        let previousValue: Int
+        let targetValue: Int
+        let baselineBPS: Double
+        let noiseFraction: Double
+        let requestedAt: TimeInterval
+        let isSteadyProbe: Bool
+        var measurementStartedAt: TimeInterval?
+        var samples: [Double] = []
+
+        init(
+            dimension: IPAVaultBatchProbeDimension,
+            previousValue: Int,
+            targetValue: Int,
+            baselineBPS: Double,
+            noiseFraction: Double,
+            requestedAt: TimeInterval,
+            isSteadyProbe: Bool
+        ) {
+            self.dimension = dimension
+            self.previousValue = previousValue
+            self.targetValue = targetValue
+            self.baselineBPS = baselineBPS
+            self.noiseFraction = noiseFraction
+            self.requestedAt = requestedAt
+            self.isSteadyProbe = isSteadyProbe
+        }
     }
 
     private final class IPAVaultTaskMetadata {
@@ -101,18 +136,9 @@ class IPADownloadManager: NSObject, ObservableObject {
         var assembling = false
         var recentCompletedRates: [Double] = []
 
-        // Stream adaptation is intentionally per job. The configured streams/job
-        // value is the starting point only; each job can independently probe up
-        // or down from there while never exceeding the hard transport ceiling.
+        // The batch controller owns the target. Keeping it on each job lets stream
+        // reductions drain already-issued leases without cancelling useful bytes.
         var desiredStreams: Int
-        var adaptiveProbe: IPAVaultAdaptiveProbe?
-        var adaptiveLastAcceptedBPS: Double = 0
-        var adaptiveLastDecisionAt: TimeInterval = 0
-        var adaptiveNextUpProbeAt: TimeInterval = 0
-        var adaptiveNextDownProbeAt: TimeInterval = 0
-        var controllerThroughputSamples: [(time: TimeInterval, bps: Double)] = []
-        var usefulBytes: Int64 = 0
-        var aggregateRateSamples: [IPAVaultAggregateSample] = []
 
         init(
             itemID: String,
@@ -134,64 +160,41 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
     }
 
-    private enum IPAVaultProbeDirection {
-        case up
-        case down
-    }
-
-    private final class IPAVaultAdaptiveProbe {
-        let direction: IPAVaultProbeDirection
-        let previousBudget: Int
-        let targetBudget: Int
-        let baselineBPS: Double
-        let noiseFraction: Double
-        let requestedAt: TimeInterval
-        var measurementStartedAt: TimeInterval?
-        var samples: [Double] = []
-
-        init(
-            direction: IPAVaultProbeDirection,
-            previousBudget: Int,
-            targetBudget: Int,
-            baselineBPS: Double,
-            noiseFraction: Double,
-            requestedAt: TimeInterval
-        ) {
-            self.direction = direction
-            self.previousBudget = previousBudget
-            self.targetBudget = targetBudget
-            self.baselineBPS = baselineBPS
-            self.noiseFraction = noiseFraction
-            self.requestedAt = requestedAt
-        }
-    }
-
     private var urlSession: URLSession!
     private var activeDownloads: [Int: String] = [:] // taskIdentifier -> downloadItem.id
 
-    // IPA Vault owns its own ranged transport. Concurrent jobs remain fixed at the
-    // user's setting. The streams/job value is each job's adaptive starting point.
+    // IPA Vault owns its own ranged transport. Every new batch starts conservatively
+    // at one IPA with two streams, then tunes both dimensions from real download
+    // traffic. No learned transport state survives the batch.
     private var pendingIPAVaultDownloads: [PendingIPAVaultDownload] = []
     private var activeIPAVaultDownloadIDs: Set<String> = []
     private var ipavaultJobs: [String: IPAVaultJob] = [:]
     private var ipavaultTaskMetadata: [Int: IPAVaultTaskMetadata] = [:]
     private var pausedIPAVaultDownloadIDs: Set<String> = []
     private var resumeRequestedIPAVaultDownloadIDs: Set<String> = []
-    private var maxConcurrentIPAVaultDownloads = 3
-    private var ipavaultStartingStreamsPerFile = 5
+    private var tunerSuspendedIPAVaultDownloadIDs: Set<String> = []
+
+    private let ipavaultHardMaxConcurrentDownloads = 8
     private let ipavaultHardMaxStreamsPerFile = 10
+    private let ipavaultBatchInitialStreamsPerFile = 2
+    private var maxConcurrentIPAVaultDownloads = 1
 
-    // A batch is exactly one IPA Vault keep-alive lifetime. The user's configured
-    // streams/job value seeds a new batch. Stable per-job probe results then form
-    // a recency-weighted consensus used only to seed jobs that start later in the
-    // same batch; active jobs keep their own independently learned stream count.
     private var ipavaultBatchIsActive = false
-    private var ipavaultBatchStartingStreams = 5
-    private var ipavaultBatchObservationSequence = 0
-    private var ipavaultBatchObservations: [String: IPAVaultBatchObservation] = [:]
-    private let ipavaultBatchObservationLimit = 16
-    private let ipavaultBatchRecencyDecay = 0.72
+    private var ipavaultBatchTargetConcurrency = 1
+    private var ipavaultBatchTargetStreams = 2
+    private var ipavaultBatchTuningPhase: IPAVaultBatchTuningPhase = .concurrency
+    private var ipavaultBatchProbe: IPAVaultBatchAdaptiveProbe?
+    private var ipavaultBatchControllerThroughputSamples: [(time: TimeInterval, bps: Double)] = []
+    private var ipavaultBatchConcurrencyUpperBound: Int?
+    private var ipavaultBatchStreamsUpperBound: Int?
+    private var ipavaultBatchLastDecisionAt: TimeInterval = 0
+    private var ipavaultBatchLastStableBPS: Double = 0
+    private var ipavaultBatchNextSteadyProbeAt: TimeInterval = 0
+    private var ipavaultBatchSteadyProbeStep = 0
 
+    @Published private(set) var ipavaultAdaptiveConcurrentCount = 0
+    @Published private(set) var ipavaultAdaptiveStreamsPerFile = 2
+    @Published private(set) var ipavaultAdaptiveStatus = "Idle"
     @Published private(set) var ipavaultAdaptiveStreamCount = 0
     @Published private(set) var ipavaultAdaptiveSpeedBPS: Double = 0
 
@@ -202,11 +205,11 @@ class IPADownloadManager: NSObject, ObservableObject {
     private let ipavaultLeaseTargetSeconds: Double = 2.0
     private let ipavaultTailMinimumBytes: Int64 = 512 * 1024
     private let ipavaultTailMinimumSavingsSeconds: Double = 0.75
-    private let ipavaultSpeedWindowSeconds: Double = 1.50
-    private let ipavaultControllerTickSeconds: Double = 0.75
+    private let ipavaultSpeedWindowSeconds: Double = 1.00
+    private let ipavaultControllerTickSeconds: Double = 0.50
     private let ipavaultProbeSettleSeconds: Double = 0.75
-    private let ipavaultProbeMeasureSeconds: Double = 2.25
-    private let ipavaultPeriodicDownProbeSeconds: Double = 15.0
+    private let ipavaultProbeMeasureSeconds: Double = 1.25
+    private let ipavaultSteadyRetuneSeconds: Double = 15.0
     private let ipavaultWorkerStallSeconds: Double = 3.0
     private let ipavaultStallDetectionFloorSeconds: Double = 4.0
     private let ipavaultMaximumRangeRetries = 5
@@ -342,17 +345,10 @@ class IPADownloadManager: NSObject, ObservableObject {
         task.resume()
     }
 
-    /// Queues IPA Vault server -> Downloads transfers. `maxConcurrent` controls
-    /// how many jobs run at once and is never changed adaptively. `streamsPerFile`
-    /// is the starting stream count for each job; each job then probes independently.
-    func enqueueIPAVaultDownloads(
-        _ files: [(url: URL, filename: String, size: Int64)],
-        maxConcurrent: Int,
-        streamsPerFile: Int
-    ) {
+    /// Queues IPA Vault server -> Downloads transfers. Each batch self-tunes from
+    /// one IPA at two streams, using aggregate useful throughput as the objective.
+    func enqueueIPAVaultDownloads(_ files: [(url: URL, filename: String, size: Int64)]) {
         let work = {
-            self.applyIPAVaultDownloadConfiguration(maxConcurrent: maxConcurrent, streamsPerFile: streamsPerFile)
-
             let fileManager = FileManager.default
             let downloadDirectory = URL.documentsDirectory.appendingPathComponent("Downloads")
             try? fileManager.createDirectoryIfNeeded(at: downloadDirectory)
@@ -389,43 +385,6 @@ class IPADownloadManager: NSObject, ObservableObject {
         } else {
             DispatchQueue.main.async(execute: work)
         }
-    }
-
-    func configureIPAVaultDownloads(maxConcurrent: Int, streamsPerFile: Int) {
-        let work = {
-            let previousStartingStreams = self.ipavaultStartingStreamsPerFile
-            self.applyIPAVaultDownloadConfiguration(maxConcurrent: maxConcurrent, streamsPerFile: streamsPerFile)
-
-            // The two concurrency controls are independent. Changing running-job
-            // concurrency must not reset a job's learned stream count. Only an
-            // explicit streams/job change restarts adaptation from that new value.
-            if previousStartingStreams != self.ipavaultStartingStreamsPerFile {
-                // An explicit user/calibration change becomes the new authority.
-                // Reset the temporary batch prior rather than letting observations
-                // collected under the old starting value override the new setting.
-                self.resetIPAVaultBatchLearningToConfiguredStart()
-
-                let now = ProcessInfo.processInfo.systemUptime
-                for job in self.ipavaultJobs.values where !job.assembling {
-                    job.desiredStreams = self.ipavaultStartingStreamsPerFile
-                    self.resetIPAVaultAdaptiveMeasurements(for: job, now: now)
-                }
-            }
-
-            self.pumpIPAVaultDownloadQueue()
-            self.rebalanceIPAVaultStreams()
-        }
-
-        if Thread.isMainThread {
-            work()
-        } else {
-            DispatchQueue.main.async(execute: work)
-        }
-    }
-
-    private func applyIPAVaultDownloadConfiguration(maxConcurrent: Int, streamsPerFile: Int) {
-        maxConcurrentIPAVaultDownloads = min(8, max(1, maxConcurrent))
-        ipavaultStartingStreamsPerFile = min(ipavaultHardMaxStreamsPerFile, max(1, streamsPerFile))
     }
 
     // IPA Vault uses foreground ranged requests, so claim one continued-processing
@@ -568,8 +527,8 @@ class IPADownloadManager: NSObject, ObservableObject {
 
             if let job = self.ipavaultJobs[itemID] {
                 self.cancelIPAVaultStreams(job, requeueUnfinished: true)
-                job.desiredStreams = self.ipavaultStartingStreamsPerFile
-                self.resetIPAVaultAdaptiveMeasurements(for: job)
+                self.tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+                job.desiredStreams = self.ipavaultBatchTargetStreams
             }
             self.setIPAVaultPausedState(itemID: itemID, isPaused: true)
             self.pumpIPAVaultDownloadQueue()
@@ -616,9 +575,21 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private var runningIPAVaultDownloadCount: Int {
         activeIPAVaultDownloadIDs.reduce(into: 0) { count, itemID in
-            if !pausedIPAVaultDownloadIDs.contains(itemID), ipavaultJobs[itemID]?.assembling != true {
+            if !pausedIPAVaultDownloadIDs.contains(itemID),
+               !tunerSuspendedIPAVaultDownloadIDs.contains(itemID),
+               ipavaultJobs[itemID]?.assembling != true {
                 count += 1
             }
+        }
+    }
+
+    private var transferringIPAVaultDownloadCount: Int {
+        activeIPAVaultDownloadIDs.reduce(into: 0) { count, itemID in
+            guard !pausedIPAVaultDownloadIDs.contains(itemID),
+                  let job = ipavaultJobs[itemID],
+                  !job.assembling,
+                  !job.tasks.isEmpty else { return }
+            count += 1
         }
     }
 
@@ -676,6 +647,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         completedIPAVaultActivityItemIDs.remove(itemID)
         pausedIPAVaultDownloadIDs.remove(itemID)
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+        tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
         rebalanceIPAVaultStreams()
@@ -694,9 +666,19 @@ class IPADownloadManager: NSObject, ObservableObject {
                 }
 
                 pausedIPAVaultDownloadIDs.remove(itemID)
+                tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
                 setIPAVaultPausedState(itemID: itemID, isPaused: false)
-                job.desiredStreams = currentIPAVaultBatchStartingStreams()
-                resetIPAVaultAdaptiveMeasurements(for: job)
+                job.desiredStreams = ipavaultBatchTargetStreams
+                rebalanceIPAVaultStreams()
+                continue
+            }
+
+            if let itemID = tunerSuspendedIPAVaultDownloadIDs.first(where: { itemID in
+                !pausedIPAVaultDownloadIDs.contains(itemID) &&
+                    ipavaultJobs[itemID]?.assembling != true
+            }), let job = ipavaultJobs[itemID] {
+                tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+                job.desiredStreams = ipavaultBatchTargetStreams
                 rebalanceIPAVaultStreams()
                 continue
             }
@@ -749,13 +731,12 @@ class IPADownloadManager: NSObject, ObservableObject {
                 directory: directory,
                 partialURL: partialURL,
                 fileDescriptor: descriptor,
-                startingStreams: currentIPAVaultBatchStartingStreams()
+                startingStreams: ipavaultBatchTargetStreams
             )
             ipavaultJobs[pending.itemID] = job
             activeIPAVaultDownloadIDs.insert(pending.itemID)
             pausedIPAVaultDownloadIDs.remove(pending.itemID)
             setIPAVaultPausedState(itemID: pending.itemID, isPaused: false)
-            resetIPAVaultAdaptiveMeasurements(for: job)
             updateIPAVaultBackgroundTaskState()
         } catch {
             try? fileManager.removeItem(at: directory)
@@ -766,6 +747,7 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func runningIPAVaultJobs() -> [IPAVaultJob] {
         activeIPAVaultDownloadIDs.compactMap { itemID in
             guard !pausedIPAVaultDownloadIDs.contains(itemID),
+                  !tunerSuspendedIPAVaultDownloadIDs.contains(itemID),
                   let job = ipavaultJobs[itemID],
                   !job.assembling else { return nil }
             return job
@@ -773,7 +755,25 @@ class IPADownloadManager: NSObject, ObservableObject {
     }
 
     private func totalRunningIPAVaultStreamCount() -> Int {
-        runningIPAVaultJobs().reduce(0) { $0 + $1.tasks.count }
+        activeIPAVaultDownloadIDs.reduce(0) { partial, itemID in
+            guard !pausedIPAVaultDownloadIDs.contains(itemID),
+                  let job = ipavaultJobs[itemID],
+                  !job.assembling else { return partial }
+            return partial + job.tasks.count
+        }
+    }
+
+    private var tunerIPAVaultDrainInProgress: Bool {
+        tunerSuspendedIPAVaultDownloadIDs.contains { itemID in
+            guard let job = ipavaultJobs[itemID], !job.assembling else { return false }
+            return !job.tasks.isEmpty
+        }
+    }
+
+    private var tunerIPAVaultStreamDrainInProgress: Bool {
+        runningIPAVaultJobs().contains { job in
+            job.tasks.count > ipavaultBatchTargetStreams
+        }
     }
 
     private func rebalanceIPAVaultStreams() {
@@ -1159,6 +1159,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 activeIPAVaultDownloadIDs.remove(itemID)
                 pausedIPAVaultDownloadIDs.remove(itemID)
                 resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+                tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
                 try? FileManager.default.removeItem(at: job.directory)
                 pumpIPAVaultDownloadQueue()
                 updateIPAVaultBackgroundTaskState()
@@ -1184,6 +1185,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         completedIPAVaultActivityItemIDs.remove(itemID)
         pausedIPAVaultDownloadIDs.remove(itemID)
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+        tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultBackgroundTaskState()
     }
@@ -1242,156 +1244,60 @@ class IPADownloadManager: NSObject, ObservableObject {
         return (start, end, total)
     }
 
-    // MARK: Batch stream learning
+    // MARK: Batch adaptive controller
 
     private func beginIPAVaultBatch() {
+        let now = ProcessInfo.processInfo.systemUptime
         BackgroundTaskManager.shared.clearReport(.ipaVaultDownloads)
         ipavaultBackgroundTaskSnapshot = nil
         ipavaultBatchIsActive = true
-        ipavaultBatchObservationSequence = 0
-        ipavaultBatchObservations.removeAll(keepingCapacity: true)
-        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
-        print("IPA Vault adaptive: new batch starts at \(ipavaultBatchStartingStreams) streams/job.")
+        ipavaultBatchTargetConcurrency = 1
+        ipavaultBatchTargetStreams = ipavaultBatchInitialStreamsPerFile
+        maxConcurrentIPAVaultDownloads = 1
+        ipavaultBatchTuningPhase = .concurrency
+        ipavaultBatchProbe = nil
+        ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+        ipavaultBatchConcurrencyUpperBound = nil
+        ipavaultBatchStreamsUpperBound = nil
+        ipavaultBatchLastDecisionAt = now
+        ipavaultBatchLastStableBPS = 0
+        ipavaultBatchNextSteadyProbeAt = 0
+        ipavaultBatchSteadyProbeStep = 0
+        tunerSuspendedIPAVaultDownloadIDs.removeAll(keepingCapacity: true)
+        ipavaultTotalUsefulBytes = 0
+        ipavaultAggregateRateSamples.removeAll(keepingCapacity: true)
+        ipavaultAdaptiveConcurrentCount = 1
+        ipavaultAdaptiveStreamsPerFile = ipavaultBatchInitialStreamsPerFile
+        ipavaultAdaptiveStatus = "Tuning concurrency"
+        print("IPA Vault adaptive: new batch starts at 1 file × 2 streams.")
     }
 
     private func endIPAVaultBatch() {
         guard ipavaultBatchIsActive else { return }
         print(
-            "IPA Vault adaptive: batch ended; discard learned start " +
-            "\(ipavaultBatchStartingStreams) and return to configured " +
-            "\(ipavaultStartingStreamsPerFile) next batch."
+            "IPA Vault adaptive: batch ended at \(ipavaultBatchTargetConcurrency) file(s) × " +
+            "\(ipavaultBatchTargetStreams) streams; discard all learned state."
         )
         ipavaultBatchIsActive = false
-        ipavaultBatchObservationSequence = 0
-        ipavaultBatchObservations.removeAll(keepingCapacity: true)
-        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
+        ipavaultBatchTargetConcurrency = 1
+        ipavaultBatchTargetStreams = ipavaultBatchInitialStreamsPerFile
+        maxConcurrentIPAVaultDownloads = 1
+        ipavaultBatchTuningPhase = .concurrency
+        ipavaultBatchProbe = nil
+        ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+        ipavaultBatchConcurrencyUpperBound = nil
+        ipavaultBatchStreamsUpperBound = nil
+        ipavaultBatchLastDecisionAt = 0
+        ipavaultBatchLastStableBPS = 0
+        ipavaultBatchNextSteadyProbeAt = 0
+        ipavaultBatchSteadyProbeStep = 0
+        tunerSuspendedIPAVaultDownloadIDs.removeAll(keepingCapacity: true)
+        ipavaultAdaptiveConcurrentCount = 0
+        ipavaultAdaptiveStreamsPerFile = ipavaultBatchInitialStreamsPerFile
+        ipavaultAdaptiveStatus = "Idle"
     }
 
-    private func resetIPAVaultBatchLearningToConfiguredStart() {
-        ipavaultBatchObservationSequence = 0
-        ipavaultBatchObservations.removeAll(keepingCapacity: true)
-        ipavaultBatchStartingStreams = ipavaultStartingStreamsPerFile
-        if ipavaultBatchIsActive {
-            print(
-                "IPA Vault adaptive: batch learning reset to configured " +
-                "\(ipavaultBatchStartingStreams) streams/job."
-            )
-        }
-    }
-
-    private func currentIPAVaultBatchStartingStreams() -> Int {
-        if ipavaultBatchIsActive {
-            return min(ipavaultHardMaxStreamsPerFile, max(1, ipavaultBatchStartingStreams))
-        }
-        return min(ipavaultHardMaxStreamsPerFile, max(1, ipavaultStartingStreamsPerFile))
-    }
-
-    private func recordIPAVaultBatchPreference(for job: IPAVaultJob, streams: Int) {
-        guard ipavaultBatchIsActive else { return }
-
-        ipavaultBatchObservationSequence += 1
-        let boundedStreams = min(ipavaultHardMaxStreamsPerFile, max(1, streams))
-        ipavaultBatchObservations[job.itemID] = IPAVaultBatchObservation(
-            itemID: job.itemID,
-            streams: boundedStreams,
-            sequence: ipavaultBatchObservationSequence
-        )
-
-        if ipavaultBatchObservations.count > ipavaultBatchObservationLimit {
-            let oldest = ipavaultBatchObservations.values
-                .sorted { $0.sequence < $1.sequence }
-                .prefix(ipavaultBatchObservations.count - ipavaultBatchObservationLimit)
-            for observation in oldest {
-                ipavaultBatchObservations.removeValue(forKey: observation.itemID)
-            }
-        }
-
-        let previous = ipavaultBatchStartingStreams
-        ipavaultBatchStartingStreams = calculateIPAVaultBatchStartingStreams()
-        if previous != ipavaultBatchStartingStreams {
-            print(
-                "IPA Vault adaptive: batch start moved \(previous)→" +
-                "\(ipavaultBatchStartingStreams) streams/job from " +
-                "\(ipavaultBatchObservations.count) recent job observations."
-            )
-        }
-    }
-
-    private func calculateIPAVaultBatchStartingStreams() -> Int {
-        guard !ipavaultBatchObservations.isEmpty else {
-            return ipavaultStartingStreamsPerFile
-        }
-
-        let newestSequence = ipavaultBatchObservationSequence
-        var weightedVotes: [(streams: Int, weight: Double)] = ipavaultBatchObservations.values.map { observation in
-            let age = max(0, newestSequence - observation.sequence)
-            let weight = pow(ipavaultBatchRecencyDecay, Double(age))
-            return (observation.streams, weight)
-        }
-
-        // Keep the calibrated/user setting as a weak prior at the beginning of a
-        // batch. Its influence decays quickly as real jobs produce evidence, so
-        // two or three recent jobs agreeing can move the baseline while one odd
-        // download normally cannot.
-        let observationCount = ipavaultBatchObservations.count
-        let configuredPriorWeight = 1.5 * pow(ipavaultBatchRecencyDecay, Double(observationCount))
-        weightedVotes.append((ipavaultStartingStreamsPerFile, configuredPriorWeight))
-
-        let totalWeight = weightedVotes.reduce(0.0) { $0 + $1.weight }
-        guard totalWeight > 0 else { return ipavaultStartingStreamsPerFile }
-
-        let ordered = weightedVotes.sorted { lhs, rhs in
-            if lhs.streams == rhs.streams { return lhs.weight > rhs.weight }
-            return lhs.streams < rhs.streams
-        }
-        let halfway = totalWeight / 2.0
-        var cumulative = 0.0
-        for vote in ordered {
-            cumulative += vote.weight
-            if cumulative >= halfway {
-                return min(ipavaultHardMaxStreamsPerFile, max(1, vote.streams))
-            }
-        }
-
-        return min(ipavaultHardMaxStreamsPerFile, max(1, ordered.last?.streams ?? ipavaultStartingStreamsPerFile))
-    }
-
-    // MARK: Adaptive stream controller
-
-    private func startIPAVaultAdaptiveControllerIfNeeded() {
-        guard ipavaultAdaptiveTimer == nil, !runningIPAVaultJobs().isEmpty else { return }
-        let timer = Timer(timeInterval: ipavaultControllerTickSeconds, repeats: true) { [weak self] _ in
-            self?.tickIPAVaultAdaptiveController()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        ipavaultAdaptiveTimer = timer
-        tickIPAVaultAdaptiveController()
-    }
-
-    private func stopIPAVaultAdaptiveController() {
-        ipavaultAdaptiveTimer?.invalidate()
-        ipavaultAdaptiveTimer = nil
-        ipavaultAdaptiveStreamCount = 0
-        ipavaultAdaptiveSpeedBPS = 0
-        ipavaultAggregateRateSamples.removeAll()
-        for job in ipavaultJobs.values {
-            job.adaptiveProbe = nil
-            job.controllerThroughputSamples.removeAll()
-        }
-    }
-
-    private func resetIPAVaultAdaptiveMeasurements(for job: IPAVaultJob, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
-        job.adaptiveProbe = nil
-        job.controllerThroughputSamples.removeAll()
-        job.aggregateRateSamples.removeAll()
-        job.usefulBytes = 0
-        job.adaptiveLastAcceptedBPS = 0
-        job.adaptiveLastDecisionAt = now
-        job.adaptiveNextUpProbeAt = now + 1.5
-        job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
-    }
-
-    private func recordIPAVaultUsefulBytes(_ bytes: Int64, for job: IPAVaultJob, now: TimeInterval) {
+    private func recordIPAVaultUsefulBytes(_ bytes: Int64, now: TimeInterval) {
         guard bytes > 0 else { return }
 
         ipavaultTotalUsefulBytes += bytes
@@ -1406,20 +1312,6 @@ class IPADownloadManager: NSObject, ObservableObject {
         let aggregateCutoff = now - 6.0
         while ipavaultAggregateRateSamples.count > 2, ipavaultAggregateRateSamples[1].time < aggregateCutoff {
             ipavaultAggregateRateSamples.removeFirst()
-        }
-
-        job.usefulBytes += bytes
-        if let last = job.aggregateRateSamples.last, now - last.time < 0.10 {
-            job.aggregateRateSamples[job.aggregateRateSamples.count - 1] = IPAVaultAggregateSample(
-                time: now,
-                bytes: job.usefulBytes
-            )
-        } else {
-            job.aggregateRateSamples.append(IPAVaultAggregateSample(time: now, bytes: job.usefulBytes))
-        }
-        let jobCutoff = now - 6.0
-        while job.aggregateRateSamples.count > 2, job.aggregateRateSamples[1].time < jobCutoff {
-            job.aggregateRateSamples.removeFirst()
         }
     }
 
@@ -1437,159 +1329,373 @@ class IPADownloadManager: NSObject, ObservableObject {
         currentIPAVaultBPS(samples: ipavaultAggregateRateSamples, now: now)
     }
 
-    private func currentIPAVaultJobBPS(_ job: IPAVaultJob, now: TimeInterval) -> Double {
-        currentIPAVaultBPS(samples: job.aggregateRateSamples, now: now)
+    private func availableIPAVaultBatchConcurrency() -> Int {
+        let active = activeIPAVaultDownloadIDs.reduce(into: 0) { count, itemID in
+            if !pausedIPAVaultDownloadIDs.contains(itemID), ipavaultJobs[itemID]?.assembling != true {
+                count += 1
+            }
+        }
+        let pending = pendingIPAVaultDownloads.reduce(into: 0) { count, pending in
+            if !pausedIPAVaultDownloadIDs.contains(pending.itemID) {
+                count += 1
+            }
+        }
+        return min(ipavaultHardMaxConcurrentDownloads, max(1, active + pending))
+    }
+
+    private func setIPAVaultBatchConcurrency(_ requested: Int) {
+        let target = min(availableIPAVaultBatchConcurrency(), max(1, requested))
+        let current = runningIPAVaultDownloadCount
+
+        if target < current {
+            let victims = runningIPAVaultJobs()
+                .sorted { lhs, rhs in
+                    let lhsFraction = lhs.totalBytes > 0 ? Double(lhs.committedBytes) / Double(lhs.totalBytes) : 0
+                    let rhsFraction = rhs.totalBytes > 0 ? Double(rhs.committedBytes) / Double(rhs.totalBytes) : 0
+                    if lhsFraction == rhsFraction {
+                        return lhs.itemID < rhs.itemID
+                    }
+                    // Keep the most-complete jobs active so slots turn over quickly.
+                    return lhsFraction < rhsFraction
+                }
+                .prefix(current - target)
+
+            for job in victims {
+                tunerSuspendedIPAVaultDownloadIDs.insert(job.itemID)
+            }
+        }
+
+        ipavaultBatchTargetConcurrency = target
+        maxConcurrentIPAVaultDownloads = target
+        ipavaultAdaptiveConcurrentCount = target
+
+        if target > current {
+            pumpIPAVaultDownloadQueue()
+        } else {
+            rebalanceIPAVaultStreams()
+        }
+    }
+
+    private func setIPAVaultBatchStreams(_ requested: Int) {
+        let target = min(ipavaultHardMaxStreamsPerFile, max(1, requested))
+        ipavaultBatchTargetStreams = target
+        ipavaultAdaptiveStreamsPerFile = target
+
+        for job in runningIPAVaultJobs() {
+            job.desiredStreams = target
+        }
+        rebalanceIPAVaultStreams()
+    }
+
+    private func nextIPAVaultConcurrencySearchTarget() -> Int? {
+        let current = ipavaultBatchTargetConcurrency
+        let maximum = availableIPAVaultBatchConcurrency()
+        guard current < maximum else { return nil }
+
+        if let upper = ipavaultBatchConcurrencyUpperBound {
+            let boundedUpper = min(upper, maximum + 1)
+            guard boundedUpper - current > 1 else { return nil }
+            return current + (boundedUpper - current) / 2
+        }
+
+        if current == 1 {
+            return min(maximum, 2)
+        }
+        return min(maximum, current * 2)
+    }
+
+    private func nextIPAVaultStreamSearchTarget() -> Int? {
+        let current = ipavaultBatchTargetStreams
+        guard current < ipavaultHardMaxStreamsPerFile else { return nil }
+
+        if let upper = ipavaultBatchStreamsUpperBound {
+            guard upper - current > 1 else { return nil }
+            return current + (upper - current) / 2
+        }
+
+        if current <= 2 {
+            return min(ipavaultHardMaxStreamsPerFile, 4)
+        }
+        if current <= 4 {
+            return min(ipavaultHardMaxStreamsPerFile, 8)
+        }
+        return ipavaultHardMaxStreamsPerFile
+    }
+
+    private func advanceIPAVaultTuningToStreams(now: TimeInterval) {
+        ipavaultBatchTuningPhase = .streams
+        ipavaultBatchStreamsUpperBound = nil
+        ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+        ipavaultBatchLastDecisionAt = now
+        ipavaultAdaptiveStatus = "Tuning streams"
+        print(
+            "IPA Vault adaptive: concurrency settled at \(ipavaultBatchTargetConcurrency); " +
+            "tuning streams from \(ipavaultBatchTargetStreams)."
+        )
+    }
+
+    private func advanceIPAVaultTuningToSteady(now: TimeInterval) {
+        ipavaultBatchTuningPhase = .steady
+        ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+        ipavaultBatchLastDecisionAt = now
+        ipavaultBatchNextSteadyProbeAt = now + ipavaultSteadyRetuneSeconds
+        ipavaultAdaptiveStatus = "Optimized"
+        print(
+            "IPA Vault adaptive: optimized at \(ipavaultBatchTargetConcurrency) file(s) × " +
+            "\(ipavaultBatchTargetStreams) streams."
+        )
+    }
+
+    private func startIPAVaultAdaptiveControllerIfNeeded() {
+        guard ipavaultAdaptiveTimer == nil, ipavaultBatchIsActive else { return }
+        let timer = Timer(timeInterval: ipavaultControllerTickSeconds, repeats: true) { [weak self] _ in
+            self?.tickIPAVaultAdaptiveController()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        ipavaultAdaptiveTimer = timer
+        tickIPAVaultAdaptiveController()
+    }
+
+    private func stopIPAVaultAdaptiveController() {
+        ipavaultAdaptiveTimer?.invalidate()
+        ipavaultAdaptiveTimer = nil
+        ipavaultAdaptiveConcurrentCount = 0
+        ipavaultAdaptiveStreamCount = 0
+        ipavaultAdaptiveSpeedBPS = 0
+        ipavaultAdaptiveStatus = "Idle"
+        ipavaultAggregateRateSamples.removeAll()
+        ipavaultBatchControllerThroughputSamples.removeAll()
+        ipavaultBatchProbe = nil
     }
 
     private func tickIPAVaultAdaptiveController() {
         dispatchPrecondition(condition: .onQueue(.main))
-        let jobs = runningIPAVaultJobs()
-        guard !jobs.isEmpty else {
-            ipavaultAdaptiveStreamCount = 0
-            ipavaultAdaptiveSpeedBPS = 0
+        guard ipavaultBatchIsActive else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        recycleStalledIPAVaultStreams(now: now)
+        rebalanceIPAVaultStreams()
+
+        ipavaultAdaptiveConcurrentCount = min(ipavaultBatchTargetConcurrency, availableIPAVaultBatchConcurrency())
+        ipavaultAdaptiveStreamsPerFile = ipavaultBatchTargetStreams
+        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
+        let aggregateBPS = currentIPAVaultAggregateBPS(now: now)
+        ipavaultAdaptiveSpeedBPS = aggregateBPS
+
+        guard aggregateBPS > 0 else { return }
+
+        ipavaultBatchControllerThroughputSamples.append((time: now, bps: aggregateBPS))
+        let cutoff = now - 8.0
+        ipavaultBatchControllerThroughputSamples.removeAll { $0.time < cutoff }
+
+        if let probe = ipavaultBatchProbe {
+            continueIPAVaultBatchProbe(probe, now: now, currentBPS: aggregateBPS)
             return
         }
 
-        let now = ProcessInfo.processInfo.systemUptime
-        for job in jobs where job.adaptiveLastDecisionAt == 0 {
-            resetIPAVaultAdaptiveMeasurements(for: job, now: now)
+        // A rejected/downward probe may leave already-issued leases draining for a
+        // moment. Do not treat those bytes as the baseline for the restored target.
+        if tunerIPAVaultDrainInProgress || tunerIPAVaultStreamDrainInProgress {
+            ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+            return
         }
 
-        recycleStalledIPAVaultStreams(now: now)
-        rebalanceIPAVaultStreams()
-        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
-        ipavaultAdaptiveSpeedBPS = currentIPAVaultAggregateBPS(now: now)
-
-        // Keep probes isolated. Each job owns its own adaptive state and result,
-        // but only one job perturbs stream count at a time so simultaneous probes
-        // do not contaminate one another's measurements on a shared connection.
-        let orderedJobs = jobs.sorted {
-            if $0.adaptiveProbe != nil && $1.adaptiveProbe == nil { return true }
-            if $0.adaptiveProbe == nil && $1.adaptiveProbe != nil { return false }
-            return $0.adaptiveLastDecisionAt < $1.adaptiveLastDecisionAt
-        }
-
-        let activeProbeJob = orderedJobs.first(where: { $0.adaptiveProbe != nil })
-        for job in orderedJobs {
-            let allowNewProbe = activeProbeJob == nil
-            if tickIPAVaultAdaptiveJob(job, now: now, allowNewProbe: allowNewProbe) {
-                break
-            }
-        }
-    }
-
-    @discardableResult
-    private func tickIPAVaultAdaptiveJob(_ job: IPAVaultJob, now: TimeInterval, allowNewProbe: Bool) -> Bool {
-        let bps = currentIPAVaultJobBPS(job, now: now)
-        guard bps > 0 else { return false }
-
-        job.controllerThroughputSamples.append((time: now, bps: bps))
-        let sampleCutoff = now - 8.0
-        job.controllerThroughputSamples.removeAll { $0.time < sampleCutoff }
-
-        if let probe = job.adaptiveProbe {
-            continueIPAVaultProbe(probe, for: job, now: now, currentBPS: bps)
-            return true
-        }
-
-        guard allowNewProbe else { return false }
-        guard now - job.adaptiveLastDecisionAt >= 1.5 else { return false }
-        let baselineSamples = job.controllerThroughputSamples.suffix(5).map(\.bps)
-        guard baselineSamples.count >= 3 else { return false }
+        guard now - ipavaultBatchLastDecisionAt >= 0.75 else { return }
+        let baselineSamples = ipavaultBatchControllerThroughputSamples.suffix(5).map(\.bps)
+        guard baselineSamples.count >= 3 else { return }
 
         let baseline = median(Array(baselineSamples))
         let noise = relativeNoise(Array(baselineSamples), around: baseline)
-        if job.adaptiveLastAcceptedBPS <= 0 {
-            job.adaptiveLastAcceptedBPS = baseline
+        if ipavaultBatchLastStableBPS <= 0 {
+            ipavaultBatchLastStableBPS = baseline
         }
 
-        let sharpRegression = job.adaptiveLastAcceptedBPS > 0 &&
-            baseline < job.adaptiveLastAcceptedBPS * 0.85
+        switch ipavaultBatchTuningPhase {
+        case .concurrency:
+            if availableIPAVaultBatchConcurrency() <= ipavaultBatchTargetConcurrency {
+                advanceIPAVaultTuningToStreams(now: now)
+                return
+            }
+            guard let target = nextIPAVaultConcurrencySearchTarget() else {
+                advanceIPAVaultTuningToStreams(now: now)
+                return
+            }
+            beginIPAVaultBatchProbe(
+                dimension: .concurrency,
+                targetValue: target,
+                baselineBPS: baseline,
+                noiseFraction: noise,
+                now: now,
+                isSteadyProbe: false
+            )
 
-        if job.desiredStreams > 1,
-           (sharpRegression || now >= job.adaptiveNextDownProbeAt) {
-            return beginIPAVaultProbe(
-                direction: .down,
-                for: job,
+        case .streams:
+            guard let target = nextIPAVaultStreamSearchTarget() else {
+                advanceIPAVaultTuningToSteady(now: now)
+                return
+            }
+            beginIPAVaultBatchProbe(
+                dimension: .streams,
+                targetValue: target,
+                baselineBPS: baseline,
+                noiseFraction: noise,
+                now: now,
+                isSteadyProbe: false
+            )
+
+        case .steady:
+            let sharpRegression = ipavaultBatchLastStableBPS > 0 && baseline < ipavaultBatchLastStableBPS * 0.75
+            guard sharpRegression || now >= ipavaultBatchNextSteadyProbeAt else { return }
+            beginNextIPAVaultSteadyProbe(
                 baselineBPS: baseline,
                 noiseFraction: noise,
                 now: now
             )
         }
-
-        if job.desiredStreams < ipavaultHardMaxStreamsPerFile,
-           now >= job.adaptiveNextUpProbeAt {
-            return beginIPAVaultProbe(
-                direction: .up,
-                for: job,
-                baselineBPS: baseline,
-                noiseFraction: noise,
-                now: now
-            )
-        }
-
-        return false
     }
 
-    @discardableResult
-    private func beginIPAVaultProbe(
-        direction: IPAVaultProbeDirection,
-        for job: IPAVaultJob,
+    private func beginNextIPAVaultSteadyProbe(
         baselineBPS: Double,
         noiseFraction: Double,
         now: TimeInterval
-    ) -> Bool {
-        let previous = job.desiredStreams
-        let target: Int
-        switch direction {
-        case .up:
-            target = min(ipavaultHardMaxStreamsPerFile, previous + 1)
-        case .down:
-            target = max(1, previous - 1)
-        }
-        guard target != previous else { return false }
+    ) {
+        for _ in 0..<4 {
+            let step = ipavaultBatchSteadyProbeStep % 4
+            ipavaultBatchSteadyProbeStep = (ipavaultBatchSteadyProbeStep + 1) % 4
 
-        job.adaptiveProbe = IPAVaultAdaptiveProbe(
-            direction: direction,
-            previousBudget: previous,
-            targetBudget: target,
-            baselineBPS: baselineBPS,
-            noiseFraction: noiseFraction,
-            requestedAt: now
-        )
-        let label = direction == .up ? "up" : "down"
-        print(
-            "IPA Vault adaptive [\(job.itemID.prefix(8))]: probe \(label) \(previous)→\(target) " +
-            "from \(String(format: "%.1f", baselineBPS / 1_000_000)) MB/s."
-        )
-        job.desiredStreams = target
-        job.adaptiveLastDecisionAt = now
-        rebalanceIPAVaultStreams()
-        return true
+            switch step {
+            case 0 where ipavaultBatchTargetConcurrency > 1:
+                beginIPAVaultBatchProbe(
+                    dimension: .concurrency,
+                    targetValue: ipavaultBatchTargetConcurrency - 1,
+                    baselineBPS: baselineBPS,
+                    noiseFraction: noiseFraction,
+                    now: now,
+                    isSteadyProbe: true
+                )
+                return
+
+            case 1 where ipavaultBatchTargetStreams > 1:
+                beginIPAVaultBatchProbe(
+                    dimension: .streams,
+                    targetValue: ipavaultBatchTargetStreams - 1,
+                    baselineBPS: baselineBPS,
+                    noiseFraction: noiseFraction,
+                    now: now,
+                    isSteadyProbe: true
+                )
+                return
+
+            case 2 where ipavaultBatchTargetConcurrency < availableIPAVaultBatchConcurrency():
+                beginIPAVaultBatchProbe(
+                    dimension: .concurrency,
+                    targetValue: ipavaultBatchTargetConcurrency + 1,
+                    baselineBPS: baselineBPS,
+                    noiseFraction: noiseFraction,
+                    now: now,
+                    isSteadyProbe: true
+                )
+                return
+
+            case 3 where ipavaultBatchTargetStreams < ipavaultHardMaxStreamsPerFile:
+                beginIPAVaultBatchProbe(
+                    dimension: .streams,
+                    targetValue: ipavaultBatchTargetStreams + 1,
+                    baselineBPS: baselineBPS,
+                    noiseFraction: noiseFraction,
+                    now: now,
+                    isSteadyProbe: true
+                )
+                return
+
+            default:
+                continue
+            }
+        }
+
+        ipavaultBatchNextSteadyProbeAt = now + ipavaultSteadyRetuneSeconds
     }
 
-    private func continueIPAVaultProbe(
-        _ probe: IPAVaultAdaptiveProbe,
-        for job: IPAVaultJob,
+    private func beginIPAVaultBatchProbe(
+        dimension: IPAVaultBatchProbeDimension,
+        targetValue: Int,
+        baselineBPS: Double,
+        noiseFraction: Double,
+        now: TimeInterval,
+        isSteadyProbe: Bool
+    ) {
+        let previous: Int
+        switch dimension {
+        case .concurrency:
+            previous = ipavaultBatchTargetConcurrency
+        case .streams:
+            previous = ipavaultBatchTargetStreams
+        }
+        guard previous != targetValue else { return }
+
+        ipavaultBatchProbe = IPAVaultBatchAdaptiveProbe(
+            dimension: dimension,
+            previousValue: previous,
+            targetValue: targetValue,
+            baselineBPS: baselineBPS,
+            noiseFraction: noiseFraction,
+            requestedAt: now,
+            isSteadyProbe: isSteadyProbe
+        )
+        if isSteadyProbe {
+            ipavaultAdaptiveStatus = "Retuning"
+        }
+
+        let dimensionLabel = dimension == .concurrency ? "files" : "streams"
+        print(
+            "IPA Vault adaptive: probe \(dimensionLabel) \(previous)→\(targetValue) from " +
+            "\(String(format: "%.1f", baselineBPS / 1_000_000)) MB/s aggregate."
+        )
+
+        switch dimension {
+        case .concurrency:
+            setIPAVaultBatchConcurrency(targetValue)
+        case .streams:
+            setIPAVaultBatchStreams(targetValue)
+        }
+        ipavaultBatchLastDecisionAt = now
+    }
+
+    private func ipavaultBatchProbeTargetReached(_ probe: IPAVaultBatchAdaptiveProbe) -> Bool {
+        switch probe.dimension {
+        case .concurrency:
+            if probe.targetValue > probe.previousValue {
+                return runningIPAVaultDownloadCount >= probe.targetValue &&
+                    transferringIPAVaultDownloadCount >= probe.targetValue
+            }
+            return runningIPAVaultDownloadCount <= probe.targetValue &&
+                transferringIPAVaultDownloadCount <= probe.targetValue
+
+        case .streams:
+            let jobs = runningIPAVaultJobs()
+            guard !jobs.isEmpty else { return false }
+            if probe.targetValue > probe.previousValue {
+                return jobs.allSatisfy { $0.tasks.count >= probe.targetValue }
+            }
+            return jobs.allSatisfy { $0.tasks.count <= probe.targetValue }
+        }
+    }
+
+    private func continueIPAVaultBatchProbe(
+        _ probe: IPAVaultBatchAdaptiveProbe,
         now: TimeInterval,
         currentBPS: Double
     ) {
-        let actualStreams = job.tasks.count
-        let targetReached: Bool
-        switch probe.direction {
-        case .up:
-            targetReached = actualStreams >= probe.targetBudget
-        case .down:
-            targetReached = actualStreams <= probe.targetBudget
+        if probe.dimension == .concurrency,
+           probe.targetValue > probe.previousValue,
+           availableIPAVaultBatchConcurrency() < probe.targetValue {
+            finishIPAVaultBatchProbe(probe, keepTarget: false, measuredBPS: probe.baselineBPS, now: now)
+            return
         }
 
-        guard targetReached else {
-            if now - probe.requestedAt > 12.0 {
-                job.desiredStreams = probe.previousBudget
-                job.adaptiveProbe = nil
-                job.adaptiveNextUpProbeAt = now + 4.0
-                job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
-                rebalanceIPAVaultStreams()
+        guard ipavaultBatchProbeTargetReached(probe) else {
+            if now - probe.requestedAt > 8.0 {
+                finishIPAVaultBatchProbe(probe, keepTarget: false, measuredBPS: probe.baselineBPS, now: now)
             }
             return
         }
@@ -1610,62 +1716,83 @@ class IPADownloadManager: NSObject, ObservableObject {
               probe.samples.count >= 2 else { return }
 
         let measured = median(probe.samples)
-        let baseline = probe.baselineBPS
-        let noise = probe.noiseFraction
+        let movingUp = probe.targetValue > probe.previousValue
         let keepTarget: Bool
-
-        switch probe.direction {
-        case .up:
-            let requiredGain = max(0.04, min(0.12, noise * 1.5 + 0.02))
-            keepTarget = measured >= baseline * (1.0 + requiredGain)
-
-        case .down:
-            // Prefer the lower stream count if it is effectively as fast as the
-            // baseline. This converges on minimum concurrency near peak throughput.
-            let toleratedLoss = min(0.03, max(0.015, noise))
-            keepTarget = measured >= baseline * (1.0 - toleratedLoss)
-        }
-
-        if keepTarget {
-            job.adaptiveLastAcceptedBPS = measured
-            job.desiredStreams = probe.targetBudget
-            if probe.direction == .up {
-                job.adaptiveNextUpProbeAt = now + 1.5
-            } else {
-                job.adaptiveNextUpProbeAt = now + 4.0
-            }
+        if movingUp {
+            let requiredGain = max(0.03, min(0.10, probe.noiseFraction * 1.25 + 0.015))
+            keepTarget = measured >= probe.baselineBPS * (1.0 + requiredGain)
         } else {
-            job.adaptiveLastAcceptedBPS = baseline
-            job.desiredStreams = probe.previousBudget
-            if probe.direction == .up {
-                job.adaptiveNextUpProbeAt = now + 10.0
-            } else {
-                job.adaptiveNextUpProbeAt = now + 3.0
+            let toleratedLoss = min(0.03, max(0.015, probe.noiseFraction))
+            keepTarget = measured >= probe.baselineBPS * (1.0 - toleratedLoss)
+        }
+
+        finishIPAVaultBatchProbe(probe, keepTarget: keepTarget, measuredBPS: measured, now: now)
+    }
+
+    private func finishIPAVaultBatchProbe(
+        _ probe: IPAVaultBatchAdaptiveProbe,
+        keepTarget: Bool,
+        measuredBPS: Double,
+        now: TimeInterval
+    ) {
+        if !keepTarget {
+            switch probe.dimension {
+            case .concurrency:
+                setIPAVaultBatchConcurrency(probe.previousValue)
+            case .streams:
+                setIPAVaultBatchStreams(probe.previousValue)
             }
         }
 
+        if !probe.isSteadyProbe {
+            switch probe.dimension {
+            case .concurrency:
+                if !keepTarget && probe.targetValue > probe.previousValue {
+                    ipavaultBatchConcurrencyUpperBound = probe.targetValue
+                }
+            case .streams:
+                if !keepTarget && probe.targetValue > probe.previousValue {
+                    ipavaultBatchStreamsUpperBound = probe.targetValue
+                }
+            }
+        }
+
+        ipavaultBatchLastStableBPS = keepTarget ? measuredBPS : probe.baselineBPS
         let resultLabel = keepTarget ? "keep" : "revert"
+        let dimensionLabel = probe.dimension == .concurrency ? "files" : "streams"
         print(
-            "IPA Vault adaptive [\(job.itemID.prefix(8))]: \(resultLabel) \(probe.targetBudget) streams; " +
-            "baseline \(String(format: "%.1f", baseline / 1_000_000)) MB/s, " +
-            "measured \(String(format: "%.1f", measured / 1_000_000)) MB/s."
+            "IPA Vault adaptive: \(resultLabel) \(probe.targetValue) \(dimensionLabel); baseline " +
+            "\(String(format: "%.1f", probe.baselineBPS / 1_000_000)) MB/s, measured " +
+            "\(String(format: "%.1f", measuredBPS / 1_000_000)) MB/s aggregate."
         )
 
-        // One job gets one vote. Repeated probes replace that job's previous vote
-        // rather than allowing a long download to dominate the batch. Updating a
-        // vote also makes it the newest evidence, so changing conditions are
-        // reflected quickly in the starting point of later jobs.
-        recordIPAVaultBatchPreference(for: job, streams: job.desiredStreams)
+        ipavaultBatchProbe = nil
+        ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+        if keepTarget && !probe.isSteadyProbe {
+            // The probe samples were already collected entirely at the accepted
+            // target, so reuse them as the next baseline instead of idling for a
+            // second warm-up window between successful coarse-search steps.
+            let retained = Array(probe.samples.suffix(5))
+            for (index, bps) in retained.enumerated() {
+                let age = Double(retained.count - index - 1) * ipavaultControllerTickSeconds
+                ipavaultBatchControllerThroughputSamples.append((time: now - age, bps: bps))
+            }
+        }
+        ipavaultBatchLastDecisionAt = now
 
-        job.adaptiveNextDownProbeAt = now + ipavaultPeriodicDownProbeSeconds
-        job.adaptiveLastDecisionAt = now
-        job.adaptiveProbe = nil
-        job.controllerThroughputSamples.removeAll(keepingCapacity: true)
-        rebalanceIPAVaultStreams()
+        if probe.isSteadyProbe {
+            ipavaultBatchNextSteadyProbeAt = now + ipavaultSteadyRetuneSeconds
+            ipavaultAdaptiveStatus = "Optimized"
+        }
     }
 
     private func recycleStalledIPAVaultStreams(now: TimeInterval) {
-        let jobs = runningIPAVaultJobs()
+        let jobs = activeIPAVaultDownloadIDs.compactMap { itemID -> IPAVaultJob? in
+            guard !pausedIPAVaultDownloadIDs.contains(itemID),
+                  let job = ipavaultJobs[itemID],
+                  !job.assembling else { return nil }
+            return job
+        }
         var candidates: [(taskID: Int, metadata: IPAVaultTaskMetadata, job: IPAVaultJob)] = []
         var healthyRates: [Double] = []
 
@@ -1927,7 +2054,7 @@ extension IPADownloadManager: URLSessionDownloadDelegate, URLSessionDataDelegate
             }
 
             metadata.currentPosition += Int64(acceptedCount)
-            recordIPAVaultUsefulBytes(Int64(acceptedCount), for: job, now: now)
+            recordIPAVaultUsefulBytes(Int64(acceptedCount), now: now)
             metadata.lastProgressAt = now
             let progressed = metadata.currentPosition - metadata.leaseStart
             if let last = metadata.rateSamples.last, now - last.time < 0.10 {
