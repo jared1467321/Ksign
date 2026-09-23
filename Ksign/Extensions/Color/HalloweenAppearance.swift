@@ -170,6 +170,14 @@ enum HalloweenAppearance {
             bar.compactAppearance = navigationAppearance
             bar.compactScrollEdgeAppearance = navigationAppearance
             bar.tintColor = NBHalloween.uiColor(.navigationTint)
+            let buttonTint = NBHalloween.uiColor(.barButtonTint)
+            for item in bar.items ?? [] {
+                for button in (item.leftBarButtonItems ?? []) + (item.rightBarButtonItems ?? []) {
+                    button.tintColor = buttonTint
+                    button.setTitleTextAttributes([.foregroundColor: buttonTint], for: .normal)
+                    button.setTitleTextAttributes([.foregroundColor: buttonTint], for: .highlighted)
+                }
+            }
 
         case let bar as UITabBar:
             bar.standardAppearance = tabAppearance

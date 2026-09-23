@@ -86,6 +86,8 @@ struct AppearanceView: View {
             } footer: {
                 Text(.localized("Theme profiles are stored on this device. The Halloween profile always remains available as the factory default."))
             }
+            // Keep profile mutations out of the temporary editing session.
+            .allowsHitTesting(!themeManager.isColorPreviewActive)
 
             NBSection(.localized("Sources")) {
                 _storePreview()
@@ -141,9 +143,11 @@ struct AppearanceView: View {
                 Text(theme.name)
                     .font(.headline)
                     .foregroundStyle(NBHalloween.text)
+                    .nbThemeInspectorTarget(.text)
                 Text(theme.isBuiltIn ? String.localized("Built-in") : String.localized("Custom"))
                     .font(.caption)
                     .foregroundStyle(NBHalloween.textSecondary)
+                    .nbThemeInspectorTarget(.textSecondary)
             }
 
             Spacer()
@@ -198,6 +202,7 @@ private struct ThemeProfileEditorView: View {
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var name = ""
     @State private var searchText = ""
+    @State private var inspectedRole: NBThemeRole?
 
     private var theme: NBThemeProfile {
         themeManager.profile(id: themeID) ?? .halloween
@@ -226,18 +231,32 @@ private struct ThemeProfileEditorView: View {
                 if !_visibleRoles(in: category).isEmpty {
                     NBSection(category.rawValue) {
                         ForEach(_visibleRoles(in: category)) { role in
-                            ColorPicker(selection: _binding(for: role), supportsOpacity: true) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(role.displayName)
-                                        .font(.body)
-                                    Text(role.usageDescription)
-                                        .font(.caption)
-                                        .foregroundStyle(NBHalloween.textSecondary)
-                                        .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 12) {
+                                ColorPicker(selection: _binding(for: role), supportsOpacity: true) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(role.displayName)
+                                            .font(.body)
+                                        Text(role.usageDescription)
+                                            .font(.caption)
+                                            .foregroundStyle(NBHalloween.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    .padding(.vertical, 3)
                                 }
-                                .padding(.vertical, 3)
+                                .accessibilityHint(Text(role.usageDescription))
+
+                                Button {
+                                    inspectedRole = role
+                                } label: {
+                                    Image(systemName: "location.viewfinder")
+                                        .font(.body.weight(.semibold))
+                                        .frame(width: 36, height: 36)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Show and edit \(role.displayName) in context")
+                                .accessibilityHint("Opens a live screen or labeled example with a temporary color editor")
                             }
-                            .accessibilityHint(Text(role.usageDescription))
                         }
                     }
                 }
@@ -248,6 +267,11 @@ private struct ThemeProfileEditorView: View {
             }
         }
         .searchable(text: $searchText, prompt: .localized("Find a color or screen element"))
+        .fullScreenCover(item: $inspectedRole, onDismiss: {
+            themeManager.cancelColorPreview(in: themeID)
+        }) { role in
+            ThemeColorInspectorView(role: role, themeID: themeID)
+        }
         .onAppear {
             name = theme.name
             if themeManager.selectedThemeID != themeID {
@@ -270,79 +294,84 @@ private struct ThemeProfileEditorView: View {
         }
     }
 
-    // A small, non-interactive sample of the most common roles. It intentionally
-    // uses the edited profile, rather than the global facade, so the swatches and
-    // sample stay in sync with the native ColorPicker as its color changes.
+    // The ordinary editor and the temporary in-context editor share these
+    // swatches. The active theme's unsaved preview is reflected here too.
+    private func _previewColor(_ role: NBThemeRole) -> Color {
+        themeManager.selectedThemeID == themeID
+            ? themeManager.activeColor(for: role).color
+            : theme.color(for: role).color
+    }
+
     private var _livePreview: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(.localized("Example screen"))
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(theme.color(for: .navigationText).color)
+                    .foregroundStyle(_previewColor(.navigationText))
                 Spacer()
                 Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(theme.color(for: .navigationTint).color)
+                    .foregroundStyle(_previewColor(.navigationTint))
             }
 
             Text(.localized("Your Library"))
                 .font(.title3.weight(.bold))
-                .foregroundStyle(theme.color(for: .title).color)
+                .foregroundStyle(_previewColor(.title))
 
             HStack(spacing: 10) {
                 Image(systemName: "app.fill")
                     .font(.title2)
-                    .foregroundStyle(theme.color(for: .accent).color)
+                    .foregroundStyle(_previewColor(.accent))
                     .frame(width: 42, height: 42)
-                    .background(theme.color(for: .controlFill).color, in: RoundedRectangle(cornerRadius: 10))
+                    .background(_previewColor(.controlFill), in: RoundedRectangle(cornerRadius: 10))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(.localized("Example App"))
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(theme.color(for: .text).color)
+                        .foregroundStyle(_previewColor(.text))
                     Text(.localized("Secondary information"))
                         .font(.caption)
-                        .foregroundStyle(theme.color(for: .textSecondary).color)
+                        .foregroundStyle(_previewColor(.textSecondary))
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(theme.color(for: .success).color)
+                    .foregroundStyle(_previewColor(.success))
             }
             .padding(10)
-            .background(theme.color(for: .elevated).color, in: RoundedRectangle(cornerRadius: 12))
+            .background(_previewColor(.elevated), in: RoundedRectangle(cornerRadius: 12))
 
             HStack {
                 Text(.localized("Example action"))
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(theme.color(for: .onAccent).color)
+                    .foregroundStyle(_previewColor(.onAccent))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(theme.color(for: .accent).color, in: Capsule())
+                    .background(_previewColor(.accent), in: Capsule())
                 Spacer()
                 Text(.localized("In progress"))
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(theme.color(for: .warning).color)
+                    .foregroundStyle(_previewColor(.warning))
             }
 
             Rectangle()
-                .fill(theme.color(for: .separator).color)
+                .fill(_previewColor(.separator))
                 .frame(height: 1)
 
             HStack {
                 Label(.localized("Library"), systemImage: "square.grid.2x2.fill")
-                    .foregroundStyle(theme.color(for: .tabSelected).color)
+                    .foregroundStyle(_previewColor(.tabSelected))
                 Spacer()
                 Label(.localized("Settings"), systemImage: "gearshape")
-                    .foregroundStyle(theme.color(for: .tabUnselected).color)
+                    .foregroundStyle(_previewColor(.tabUnselected))
             }
             .font(.caption)
             .padding(9)
-            .background(theme.color(for: .tabBackground).color, in: RoundedRectangle(cornerRadius: 10))
+            .background(_previewColor(.tabBackground), in: RoundedRectangle(cornerRadius: 10))
         }
         .padding(14)
-        .background(theme.color(for: .background).color, in: RoundedRectangle(cornerRadius: 16))
+        .background(_previewColor(.background), in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(theme.color(for: .border).color, lineWidth: 1)
+                .strokeBorder(_previewColor(.border), lineWidth: 1)
         }
     }
 
@@ -369,7 +398,7 @@ private struct ThemeProfileEditorView: View {
 
 // Keep explanations beside the pickers instead of requiring a separate help
 // screen. Search also matches these descriptions (e.g. "tab bar" or "report").
-private extension NBThemeRole {
+extension NBThemeRole {
     var usageDescription: String {
         switch self {
         case .background: return "Background behind the app's lists and screens."

@@ -263,8 +263,11 @@ final class KeepAliveActivityController {
 	}
 
 	private func _themeSnapshot() -> KeepAliveThemeSnapshot {
+		// Background progress updates must also use saved colors while the
+		// foreground inspector has a temporary override.
+		let profile = NBThemeManager.shared.activeTheme
 		func color(_ role: NBThemeRole) -> KeepAliveThemeColor {
-			let value = NBHalloween.themeColor(role)
+			let value = profile.color(for: role)
 			return KeepAliveThemeColor(
 				red: value.red,
 				green: value.green,

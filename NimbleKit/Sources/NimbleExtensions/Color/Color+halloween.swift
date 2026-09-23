@@ -461,6 +461,14 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     @Published public private(set) var customThemes: [NBThemeProfile]
     @Published public private(set) var selectedThemeID: String
 
+    // A live editor may temporarily override one role without touching the
+    // persisted profile. The revision publishes redraws to the app and its
+    // UIKit appearance bridge while the color picker is being dragged.
+    @Published public private(set) var previewRevision: UInt64 = 0
+    private var previewThemeID: String?
+    private var previewRole: NBThemeRole?
+    private var previewValue: NBThemeColor?
+
     private let defaults: UserDefaults
 
     public var allThemes: [NBThemeProfile] {
@@ -473,6 +481,59 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
     public var isActiveThemeBuiltIn: Bool {
         activeTheme.isBuiltIn
+    }
+
+    public var isColorPreviewActive: Bool { previewThemeID != nil }
+
+    public func isPreviewing(_ role: NBThemeRole, in themeID: String) -> Bool {
+        previewThemeID == themeID && previewRole == role
+    }
+
+    /// Resolves the in-progress color only for the active profile and role.
+    /// Everything else continues to read the original saved theme.
+    public func activeColor(for role: NBThemeRole) -> NBThemeColor {
+        if previewThemeID == selectedThemeID,
+           previewRole == role,
+           let previewValue {
+            return previewValue
+        }
+        return activeTheme.color(for: role)
+    }
+
+    public func beginColorPreview(for role: NBThemeRole, in themeID: String) {
+        guard themeID == selectedThemeID,
+              themeID != NBThemeProfile.halloweenID,
+              let original = profile(id: themeID)?.color(for: role) else { return }
+        // A previous editor cannot leave a stale override in a new session.
+        previewThemeID = themeID
+        previewRole = role
+        previewValue = original
+        previewRevision &+= 1
+    }
+
+    public func updateColorPreview(_ value: NBThemeColor, for role: NBThemeRole, in themeID: String) {
+        guard isPreviewing(role, in: themeID), previewValue != value else { return }
+        previewValue = value
+        previewRevision &+= 1
+    }
+
+    public func cancelColorPreview(in themeID: String) {
+        guard previewThemeID == themeID, let previewRole else { return }
+        endColorPreview(for: previewRole, in: themeID, save: false)
+    }
+
+    /// Save is the ONLY path that persists a live preview. Cancel, dismiss,
+    /// and a theme switch simply discard it and redraw the original color.
+    public func endColorPreview(for role: NBThemeRole, in themeID: String, save: Bool) {
+        guard isPreviewing(role, in: themeID) else { return }
+        let editedColor = save ? previewValue : nil
+        previewThemeID = nil
+        previewRole = nil
+        previewValue = nil
+        previewRevision &+= 1
+        if let editedColor {
+            setColor(editedColor, for: role, in: themeID)
+        }
     }
 
     private init(defaults: UserDefaults = .standard) {
@@ -509,6 +570,9 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     @discardableResult
     public func createTheme(name: String, copying source: NBThemeProfile? = nil) -> NBThemeProfile {
         let base = source ?? activeTheme
+        if let previewThemeID, let previewRole {
+            endColorPreview(for: previewRole, in: previewThemeID, save: false)
+        }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Custom Theme" : trimmed
         let theme = NBThemeProfile(name: finalName, colors: base.colors)
@@ -525,6 +589,9 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
     public func selectTheme(id: String) {
         guard profile(id: id) != nil, selectedThemeID != id else { return }
+        if let previewThemeID, let previewRole {
+            endColorPreview(for: previewRole, in: previewThemeID, save: false)
+        }
         selectedThemeID = id
         persist()
     }
@@ -580,6 +647,9 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
     public func deleteTheme(id: String) {
         guard id != NBThemeProfile.halloweenID else { return }
+        if previewThemeID == id, let previewRole {
+            endColorPreview(for: previewRole, in: id, save: false)
+        }
         customThemes.removeAll { $0.id == id }
         if selectedThemeID == id {
             selectedThemeID = NBThemeProfile.halloweenID
@@ -599,7 +669,7 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
 public enum NBHalloween {
     public static func themeColor(_ role: NBThemeRole) -> NBThemeColor {
-        NBThemeManager.shared.activeTheme.color(for: role)
+        NBThemeManager.shared.activeColor(for: role)
     }
 
     public static func color(_ role: NBThemeRole) -> Color {

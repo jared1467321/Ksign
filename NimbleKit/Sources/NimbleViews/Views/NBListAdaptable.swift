@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 
 public struct NBListAdaptable<Content>: View where Content: View {
+	@ObservedObject private var themeManager = NBThemeManager.shared
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 	
 	private var _content: Content
@@ -41,6 +42,6 @@ public struct NBListAdaptable<Content>: View where Content: View {
 				}
 			}
 		}
-		.background(NBHalloween.background.ignoresSafeArea())
+		.background(NBHalloween.background.ignoresSafeArea().nbThemeInspectorTarget(.background))
 	}
 }

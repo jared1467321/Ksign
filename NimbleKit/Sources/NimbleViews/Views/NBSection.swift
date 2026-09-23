@@ -12,6 +12,7 @@ public struct NBSection<Content, Footer>: View
 where 	Content: View,
 		Footer: View
 {
+	@ObservedObject private var themeManager = NBThemeManager.shared
 	private var _headerText: String
 	private var _headerTextSecondary: String?
 	private var _systemName: String?
@@ -58,6 +59,7 @@ where 	Content: View,
 						.fontWeight(.bold)
 						.font(.title2)
 						.foregroundStyle(NBHalloween.heading)
+						.nbThemeInspectorTarget(.heading)
 						
 					
                     Spacer()
@@ -72,6 +74,7 @@ where 	Content: View,
                                 .padding(.vertical, 4.4)
                                 .background(NBHalloween.headingFill)
                                 .clipShape(Capsule())
+								.nbThemeInspectorTarget(.headingFill)
                                 .glassEffect()
                         } else {
                             Text(_headerTextSecondary)
@@ -82,6 +85,7 @@ where 	Content: View,
                                 .padding(.vertical, 4.4)
                                 .background(NBHalloween.headingFill)
                                 .clipShape(Capsule())
+								.nbThemeInspectorTarget(.headingFill)
                         }
 					}
 				}
@@ -90,6 +94,7 @@ where 	Content: View,
 			footer: _footer
 				.font(.caption)
 				.foregroundColor(NBHalloween.textSecondary)
+				.nbThemeInspectorTarget(.textSecondary)
 		) {
 			_content
 		}

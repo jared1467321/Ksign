@@ -8,6 +8,11 @@
 import SwiftUI
 
 struct TabbarView: View {
+	var previewTab: TabEnum? = nil
+	init(previewTab: TabEnum? = nil) {
+		self.previewTab = previewTab
+		self._selectedTab = State(initialValue: previewTab ?? .sources)
+	}
 	@State private var selectedTab: TabEnum = .sources
 
 	var body: some View {

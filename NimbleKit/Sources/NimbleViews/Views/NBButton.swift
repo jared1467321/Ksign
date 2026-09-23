@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 
 public struct NBButton: View {
+	@ObservedObject private var themeManager = NBThemeManager.shared
 	private var _title: String
 	private var _icon: String
 	private var _style: NBToolbarMenuStyle
@@ -40,10 +41,12 @@ public struct NBButton: View {
 		case .icon:
 			Image(systemName: _icon)
 				.foregroundStyle(NBHalloween.accent)
+				.nbThemeInspectorTarget(.accent)
 
 		case .text:
 			Text(_title)
 				.foregroundStyle(NBHalloween.accent)
+				.nbThemeInspectorTarget(.accent)
 		}
     }
 }

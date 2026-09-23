@@ -11,11 +11,17 @@ import NukeUI
 
 @available(iOS 18, *)
 struct ExtendedTabbarView: View {
+	var previewTab: TabEnum? = nil
+	init(previewTab: TabEnum? = nil) {
+		self.previewTab = previewTab
+		self.__selectedTab = State(initialValue: previewTab?.rawValue ?? TabEnum.files.rawValue)
+	}
 	@Environment(\.horizontalSizeClass) var horizontalSizeClass
 	@AppStorage("Feather.tabCustomization") var customization = TabViewCustomization()
 	@StateObject var viewModel = SourcesViewModel.shared
 	
 	@State private var _isAddingPresenting = false
+	@State private var _selectedTab: String = TabEnum.files.rawValue
 	
 	@FetchRequest(
 		entity: AltSource.entity(),
@@ -24,15 +30,15 @@ struct ExtendedTabbarView: View {
 	) private var _sources: FetchedResults<AltSource>
 		
 	var body: some View {
-		TabView {
+		TabView(selection: $_selectedTab) {
 			ForEach(TabEnum.defaultTabs, id: \.hashValue) { tab in
-				Tab(tab.title, systemImage: tab.icon) {
+				Tab(tab.title, systemImage: tab.icon, value: tab.rawValue) {
 					TabEnum.view(for: tab)
 				}
 			}
 			
 			ForEach(TabEnum.customizableTabs, id: \.hashValue) { tab in
-				Tab(tab.title, systemImage: tab.icon) {
+				Tab(tab.title, systemImage: tab.icon, value: tab.rawValue) {
 					TabEnum.view(for: tab)
 				}
 				.customizationID("tab.\(tab.rawValue)")
@@ -42,14 +48,14 @@ struct ExtendedTabbarView: View {
 			}
 			
 			TabSection("Sources") {
-				Tab(.localized("All Repositories"), systemImage: "globe.desk") {
+				Tab(.localized("All Repositories"), systemImage: "globe.desk", value: "all.repositories") {
 					NavigationStack {
 						SourceAppsView(object: Array(_sources), viewModel: viewModel)
 					}
 				}
 				
 				ForEach(_sources, id: \.identifier) { source in
-					Tab {
+					Tab(value: "source.\(source.identifier ?? "")") {
 						NavigationStack {
 							SourceAppsView(object: [source], viewModel: viewModel)
 						}

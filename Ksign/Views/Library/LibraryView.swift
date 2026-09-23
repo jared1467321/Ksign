@@ -114,6 +114,7 @@ private enum CryptCheckExtractedBatchError: LocalizedError {
 
 // MARK: - View
 struct LibraryView: View {
+	@Environment(\.nbInspectedThemeRole) private var inspectedThemeRole
 	@StateObject var downloadManager = DownloadManager.shared
 	@StateObject private var _exportManager = BulkExportManager()
 	@AppStorage("Feather.useLastExportLocation") private var _useLastExportLocation: Bool = false
@@ -227,7 +228,8 @@ struct LibraryView: View {
 					}
 				}
 			}
-			.searchable(text: $_searchText, placement: .platform())
+			.searchable(text: $_searchText, placement: inspectedThemeRole == nil
+                ? .platform() : .navigationBarDrawer(displayMode: .always))
             .overlay {
                 if
                     _filteredSignedApps.isEmpty,
@@ -460,8 +462,7 @@ extension LibraryView {
             // both provide it — and `Text` is overloaded on exactly that pair, so
             // the ternary has nothing to infer from. The lookup has already
             // happened by then, hence `verbatim:` rather than a second one.
-            Text(verbatim: _isEditMode.isEditing ? String.localized("Done") : String.localized("Edit"))
-                .foregroundStyle(NBHalloween.accent)
+            ThemeObservedEditLabel(title: _isEditMode.isEditing ? String.localized("Done") : String.localized("Edit"))
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -713,4 +714,17 @@ extension LibraryView {
 			Storage.shared.deleteApp(for: app)
 		}
 	}
+}
+
+// The edit label consumes the accent role directly; it must redraw during a
+// temporary preview without re-fetching/redrawing the whole library list.
+private struct ThemeObservedEditLabel: View {
+    let title: String
+    @ObservedObject private var themes = NBThemeManager.shared
+
+    var body: some View {
+        Text(verbatim: title)
+            .foregroundStyle(NBHalloween.accent)
+            .nbThemeInspectorTarget(.accent)
+    }
 }

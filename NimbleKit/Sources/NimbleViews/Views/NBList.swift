@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 
 public struct NBList<Content>: View where Content: View {
+	@ObservedObject private var themeManager = NBThemeManager.shared
 	public enum NBListType {
 		case list
 		case form
@@ -37,12 +38,12 @@ public struct NBList<Content>: View where Content: View {
 			case .form:
 				Form {
 					_content
-						.listRowBackground(NBHalloween.elevated)
+						.listRowBackground(NBHalloween.elevated.nbThemeInspectorTarget(.elevated))
 				}
 			case .list:
 				List {
 					_content
-						.listRowBackground(NBHalloween.elevated)
+						.listRowBackground(NBHalloween.elevated.nbThemeInspectorTarget(.elevated))
 				}
 			}
 		}
@@ -67,7 +68,7 @@ public struct NBList<Content>: View where Content: View {
 		.foregroundStyle(NBHalloween.text, NBHalloween.textSecondary)
 		.listRowSeparatorTint(NBHalloween.hairline)
 		.scrollContentBackground(.hidden)
-		.background(NBHalloween.background.ignoresSafeArea())
+		.background(NBHalloween.background.ignoresSafeArea().nbThemeInspectorTarget(.background))
 		.navigationTitle(_title)
 		.navigationBarTitleDisplayMode(_mode)
 	}

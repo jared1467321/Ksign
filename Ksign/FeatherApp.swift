@@ -45,7 +45,10 @@ struct FeatherApp: App {
 				// main-loop turn so the appearance bridge reads the new profile.
 				DispatchQueue.main.async {
 					HalloweenAppearance.apply(refreshExistingViews: true)
-					if #available(iOS 16.2, *) {
+					// The widget runs in another process. Never push an
+					// unsaved editor preview to ActivityKit; commit triggers
+					// this normal refresh once the profile is persisted.
+					if !themeManager.isColorPreviewActive, #available(iOS 16.2, *) {
 						KeepAliveActivityController.shared.refreshTheme()
 					}
 				}
