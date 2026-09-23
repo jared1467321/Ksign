@@ -2,13 +2,14 @@
 //  ThemeColorInspectorView.swift
 //  Ksign
 //
-//  A temporary, in-context color editing session. App screens below are their
-//  real SwiftUI views and UIKit bars, not screenshots. State-dependent colors,
-//  Crypt Check reports, and the widget use an explicitly labeled example.
+//  Temporary color editing over a copy of the app screen where the color is
+//  used, or a clearly labeled full-screen sample state when live content is
+//  unavailable. Crypt Check and Live Activity have contextual previews.
 //
 
 import SwiftUI
 import UIKit
+import WebKit
 import NimbleViews
 import NimbleExtensions
 
@@ -20,6 +21,7 @@ struct ThemeColorInspectorView: View {
     @StateObject private var themes = NBThemeManager.shared
     @State private var didBeginPreview = false
     @State private var appearancePath = ["appearance"]
+    @State private var sampleSegmentSelection = 0
     @State private var compact = false
     @State private var dockAtTop = false
     @State private var spotlightRect: CGRect?
@@ -36,8 +38,14 @@ struct ThemeColorInspectorView: View {
                 realScreen
                     .environment(\.managedObjectContext, Storage.shared.context)
                     .environment(\.nbInspectedThemeRole, role)
+            } else if role.category == .reports {
+                ThemeCryptReportPreview(role: role, revision: themes.previewRevision)
+            } else if role.category == .liveActivity {
+                ThemeActivityContextPreview(role: role)
+                    .environment(\.nbInspectedThemeRole, role)
             } else {
-                exampleScreen
+                ThemeAppContextPreview(role: role)
+                    .environment(\.nbInspectedThemeRole, role)
             }
 
             if role.usesUIKitSpotlight {
@@ -106,45 +114,43 @@ struct ThemeColorInspectorView: View {
                 NBNavigationView(.localized("Appearance")) { AppearanceView() }
             }
         case .library:
-            // Use the real tab container: UIKit search/segment/nav/tab chrome
-            // exists here and the current library contents remain live.
+            // A copy of the real tab container; visible content is live.
             VariedTabbarView(previewTab: .library)
-        }
-    }
-
-    private var exampleScreen: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Label(role.category == .liveActivity ? "Live Activity example" :
-                      role.category == .reports ? "Crypt Check report example" :
-                      "Component example", systemImage: "eye")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-
-                Text(role.category == .liveActivity
-                     ? "The Live Activity runs in a separate system widget. This is an interactive, on-screen example; an active widget is refreshed after you save."
-                     : role.category == .reports
-                     ? "Reports are separate HTML documents and may not exist yet. This interactive example uses your current report colors; saved colors apply to newly generated reports."
-                     : "This color is state-dependent or has no guaranteed visible instance on an app page. This is a labeled interactive example, not a claim that the actual screen is open.")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.73))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                ThemeRoleExampleView(role: role)
-                    .environment(\.nbInspectedThemeRole, role)
-                    .padding(20)
-                    .frame(maxWidth: .infinity, minHeight: 205)
-                    .background(NBHalloween.elevated, in: RoundedRectangle(cornerRadius: 18))
-
-                Text(role.usageDescription)
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.76))
+        case .segmented:
+            // The real Appearance picker is intentionally disabled. Use the
+            // same native segmented control in an otherwise familiar Appearance
+            // page, with a local, non-persisted selection so both text states
+            // can be inspected without changing Ksign settings.
+            NBNavigationView("Appearance") {
+                NBList("Appearance") {
+                    Section {
+                        Label("Contextual sample of the Appearance segmented picker. This selection does not change app settings.",
+                              systemImage: "eye")
+                            .font(.caption)
+                            .foregroundStyle(NBHalloween.textSecondary)
+                    }
+                    NBSection("Store Cell Appearance") {
+                        Picker("Store Cell Appearance", selection: $sampleSegmentSelection) {
+                            Text("Standard").tag(0)
+                            Text("Big Description").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text("Choose how application rows are displayed.")
+                            .font(.caption)
+                            .foregroundStyle(NBHalloween.textSecondary)
+                    }
+                    NBSection("Theme") {
+                        Label("Customize Colors", systemImage: "paintpalette")
+                    }
+                }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 34)
-            .padding(.bottom, 425)
+        case .downloads:
+            // Use the real Downloads screen, including its production IPA
+            // Vault status row. If no download is active, the same row is
+            // rendered with clearly labeled sample values (no network work).
+            DownloaderView(inspectorSampleDownloadStatus: true)
         }
-        .background(NBHalloween.background.ignoresSafeArea())
     }
 
     private var editorPanel: some View {
@@ -179,14 +185,9 @@ struct ThemeColorInspectorView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if role.usesUIKitSpotlight && spotlightRect == nil {
-                    Text("The control isn't visible on this screen right now. You can reveal it on the real page, or use the highlighted example below.")
+                    Text("This control isn't currently exposed on the copied screen. Scroll or reveal its search / toolbar controls above to find the highlighted element.")
                         .font(.caption)
                         .foregroundStyle(.yellow)
-                    ThemeRoleExampleView(role: role)
-                        .environment(\.nbInspectedThemeRole, role)
-                        .frame(maxWidth: .infinity, minHeight: 55)
-                        .padding(6)
-                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 }
 
                 HStack(spacing: 12) {
@@ -303,12 +304,13 @@ struct ThemeColorInspectorView: View {
 
 // MARK: - Where an unambiguous, currently renderable real element exists
 
-private enum InspectorRealScreen { case appearance, library }
+private enum InspectorRealScreen { case appearance, library, segmented, downloads }
 
 private extension NBThemeRole {
     var usesRealScreen: Bool {
         switch self {
-        case .background, .elevated, .text, .textSecondary, .accent, .heading, .headingFill:
+        case .background, .elevated, .text, .textSecondary, .textTertiary,
+             .accent, .heading, .headingFill:
             return true
         default:
             return category == .navigation
@@ -317,7 +319,11 @@ private extension NBThemeRole {
 
     var realScreen: InspectorRealScreen {
         switch self {
-        case .background, .elevated, .text, .textSecondary, .navigationTint, .navigationText: return .appearance
+        case .background, .elevated, .text, .textSecondary, .navigationTint, .navigationText:
+            return .appearance
+        case .textTertiary: return .downloads
+        case .segmentBackground, .segmentSelectedBackground, .segmentText, .segmentSelectedText:
+            return .segmented
         default: return .library
         }
     }
@@ -468,208 +474,656 @@ private final class ThemeUIKitProbeView: UIView {
     }
 }
 
-// MARK: - Clearly labeled interactive fallback for non-renderable states
+// MARK: - Full-screen contextual states for colors that need sample content
 
-private struct ThemeRoleExampleView: View {
+// These are intentionally full Ksign-style pages, not isolated swatches. Each
+// sample is identified as such. It never changes the user's downloads,
+// certificates, files or install queue.
+private struct ThemeAppContextPreview: View {
     let role: NBThemeRole
     @StateObject private var themes = NBThemeManager.shared
 
-    private var selected: Color { themes.activeColor(for: role).color }
-    private var exampleSurface: Color {
-        switch role.category {
-        case .reports: return NBHalloween.color(.reportCard)
-        case .liveActivity: return NBHalloween.color(.liveActivityBackground)
-        default: return NBHalloween.elevated
+    private var screenTitle: String {
+        switch role {
+        case .warning, .mask: return "Downloads"
+        case .disabledText, .danger, .expired, .success: return "Certificates"
+        case .imageScrim, .overlayText, .imageBorder: return "Sources"
+        case .overlaySurface, .overlayScrim, .shadow: return "Library"
+        default: return "Library"
         }
     }
-    private var exampleText: Color {
-        switch role.category {
-        case .reports: return NBHalloween.color(.reportText)
-        case .liveActivity: return NBHalloween.color(.liveActivityPrimaryText)
-        default: return NBHalloween.text
+
+    private var sampleDescription: String {
+        switch role {
+        case .elevatedHigh, .controlFillStrong, .selection:
+            return "This role has no app-screen usage in this revision. The page below demonstrates how it could look; editing it won't recolor an existing app control."
+        case .title, .border:
+            return "This role is currently used by the theme editor's preview. This example shows it beside the other library colors."
+        case .secondaryAccent:
+            return "The secondary accent is currently visible in the theme swatches. This is a contextual sample of an accent badge."
+        default:
+            return "Contextual sample state. The surrounding interface uses your active theme; no real content or operation has been changed."
         }
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            switch role {
-            case .background, .reportBackground:
-                VStack(alignment: .leading) {
-                    Text("Page content").font(.headline)
-                    Text("This entire panel is the page background.").font(.caption)
+        NBNavigationView(screenTitle) {
+            NBList(screenTitle) {
+                Section {
+                    Label(sampleDescription, systemImage: "eye")
+                        .font(.caption)
+                        .foregroundStyle(NBHalloween.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .foregroundStyle(exampleText)
-                .frame(maxWidth: .infinity, minHeight: 105, alignment: .leading)
-                .padding(12)
-                .background(selected, in: RoundedRectangle(cornerRadius: 10))
-                .nbThemeInspectorTarget(role)
 
-            case .elevated, .elevatedHigh, .reportCard, .overlaySurface, .reportDropdown,
-                 .controlFill, .controlFillStrong, .reportInteractiveFill, .reportSelectedFill,
-                 .reportSuccessFill, .reportWarningFill, .reportDangerFill, .headingFill:
-                Label("Filled \(role.displayName)", systemImage: "square.on.square")
-                    .foregroundStyle(exampleText)
-                    .padding(16)
-                    .frame(maxWidth: .infinity)
-                    .background(selected, in: RoundedRectangle(cornerRadius: 12))
-                    .nbThemeInspectorTarget(role)
+                NBSection(sectionTitle, secondary: "2") {
+                    primaryExample
+                    secondaryRow
+                }
 
-            case .overlayScrim, .imageScrim, .mask:
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12).fill(.gray.gradient)
-                    Image(systemName: "photo.fill").font(.largeTitle).foregroundStyle(.white.opacity(0.5))
-                    if role == .imageScrim {
-                        LinearGradient(colors: [.clear, selected], startPoint: .top, endPoint: .bottom)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .nbThemeInspectorTarget(role)
-                    } else {
-                        selected
-                            .opacity(role == .mask ? 0.65 : 1)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .nbThemeInspectorTarget(role)
+                NBSection("Details") {
+                    Label("Theme settings", systemImage: "paintpalette")
+                    HStack {
+                        Text("App appearance")
+                        Spacer()
+                        Text("Custom")
+                            .foregroundStyle(NBHalloween.textSecondary)
                     }
-                    Text("Content behind \(role.displayName)")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
                 }
-                .frame(maxWidth: .infinity, minHeight: 112)
-
-            case .shadow, .reportShadow:
-                Text("Floating content")
-                    .foregroundStyle(exampleText)
-                    .padding(20)
-                    .background(exampleSurface, in: RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: selected, radius: 17, x: 0, y: 9)
-                    .nbThemeInspectorTarget(role)
-                    .padding(18)
-
-            case .text, .textSecondary, .textTertiary, .disabledText, .onAccent, .overlayText,
-                 .reportText, .reportDim, .reportSelectedText, .navigationText, .navigationTitle,
-                 .segmentText, .segmentSelectedText, .searchText, .searchPlaceholder,
-                 .liveActivityPrimaryText, .liveActivitySecondaryText, .liveActivityActionText:
-                Text(role.displayName == "Search Placeholder" ? "Search for an app" : role.displayName)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(selected)
-                    .padding(14)
-                    .frame(maxWidth: .infinity)
-                    .background(role == .onAccent ? NBHalloween.accent : exampleSurface,
-                                in: RoundedRectangle(cornerRadius: 10))
-                    .nbThemeInspectorTarget(role)
-
-            case .separator, .border, .imageBorder, .navigationShadow, .tabShadow,
-                 .reportBorder, .reportInteractiveBorder:
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(selected, lineWidth: 3)
-                    .frame(height: 80)
-                    .overlay { Text("Outlined content").font(.caption).foregroundStyle(exampleText) }
-                    .nbThemeInspectorTarget(role)
-
-            case .tabBackground, .tabSelected, .tabUnselected:
-                HStack(spacing: 24) {
-                    Label("Library", systemImage: "square.grid.2x2.fill")
-                        .foregroundStyle(role == .tabSelected ? selected : NBHalloween.color(.tabSelected))
-                        .nbThemeInspectorTarget(.tabSelected)
-                    Spacer(minLength: 0)
-                    Label("Settings", systemImage: "gearshape")
-                        .foregroundStyle(role == .tabUnselected ? selected : NBHalloween.color(.tabUnselected))
-                        .nbThemeInspectorTarget(.tabUnselected)
-                }
-                .font(.caption)
-                .padding(14)
-                .background(role == .tabBackground ? selected : NBHalloween.color(.tabBackground),
-                            in: RoundedRectangle(cornerRadius: 12))
-                .nbThemeInspectorTarget(.tabBackground)
-
-            case .searchBackground, .searchTint:
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                    Text("Search apps")
-                    Spacer(minLength: 0)
-                    Text("|")
-                        .foregroundStyle(role == .searchTint ? selected : NBHalloween.color(.searchTint))
-                        .nbThemeInspectorTarget(.searchTint)
-                }
-                .foregroundStyle(NBHalloween.color(.searchPlaceholder))
-                .padding(14)
-                .background(role == .searchBackground ? selected : NBHalloween.color(.searchBackground),
-                            in: RoundedRectangle(cornerRadius: 12))
-                .nbThemeInspectorTarget(.searchBackground)
-
-            case .segmentBackground, .segmentSelectedBackground:
-                HStack(spacing: 4) {
-                    Text("Downloaded")
-                        .foregroundStyle(NBHalloween.color(.segmentSelectedText))
-                        .padding(10)
-                        .frame(maxWidth: .infinity)
-                        .background(role == .segmentSelectedBackground ? selected : NBHalloween.color(.segmentSelectedBackground),
-                                    in: RoundedRectangle(cornerRadius: 9))
-                        .nbThemeInspectorTarget(.segmentSelectedBackground)
-                    Text("Signed")
-                        .foregroundStyle(NBHalloween.color(.segmentText))
-                        .padding(10)
-                        .frame(maxWidth: .infinity)
-                }
-                .background(role == .segmentBackground ? selected : NBHalloween.color(.segmentBackground),
-                            in: RoundedRectangle(cornerRadius: 12))
-                .nbThemeInspectorTarget(.segmentBackground)
-
-            case .navigationTint, .barButtonTint:
-                Label(role == .navigationTint ? "Back" : "Edit",
-                      systemImage: role == .navigationTint ? "chevron.left" : "ellipsis.circle")
-                    .foregroundStyle(selected)
-                    .padding(16)
-                    .background(exampleSurface, in: RoundedRectangle(cornerRadius: 12))
-                    .nbThemeInspectorTarget(role)
-
-            case .navigationBackground:
-                HStack {
-                    Image(systemName: "square.grid.2x2.fill")
-                    Text("Real control background")
-                    Spacer()
-                }
-                .foregroundStyle(exampleText)
-                .padding(14)
-                .background(selected, in: RoundedRectangle(cornerRadius: 12))
-                .nbThemeInspectorTarget(role)
-
-            case .reportTapHighlight:
-                Label("Pressed report row", systemImage: "hand.tap.fill")
-                    .foregroundStyle(NBHalloween.color(.reportText))
-                    .padding(16)
-                    .frame(maxWidth: .infinity)
-                    .background(NBHalloween.color(.reportCard), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(selected)
-                            .nbThemeInspectorTarget(role)
-                    }
-
-            case .liveActivityBackground, .liveActivityRunning, .liveActivityIdle:
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(role == .liveActivityBackground ? NBHalloween.liveActivityRunning : selected)
-                        .frame(width: 13, height: 13)
-                        .nbThemeInspectorTarget(role)
-                    Text("Silent audio running")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(NBHalloween.liveActivityPrimaryText)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity)
-                .background(role == .liveActivityBackground ? selected : NBHalloween.liveActivityBackground,
-                            in: Capsule())
-                .nbThemeInspectorTarget(role == .liveActivityBackground ? role : .liveActivityBackground)
-
-            default:
-                Label(role.displayName, systemImage: "checkmark.circle.fill")
-                    .font(.headline)
-                    .foregroundStyle(selected)
-                    .padding(16)
-                    .frame(maxWidth: .infinity)
-                    .background(exampleSurface, in: RoundedRectangle(cornerRadius: 12))
-                    .nbThemeInspectorTarget(role)
             }
         }
-        .padding(3)
+    }
+
+    private var sectionTitle: String {
+        switch role {
+        case .warning, .mask: return "Downloading"
+        case .disabledText, .danger, .expired, .success: return "Certificates"
+        case .imageScrim, .overlayText, .imageBorder: return "News"
+        case .overlaySurface, .overlayScrim, .shadow: return "Install Queue"
+        default: return "Applications"
+        }
+    }
+
+    private var secondaryRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "square.stack.3d.up")
+                .foregroundStyle(NBHalloween.accent)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Other application").foregroundStyle(NBHalloween.text)
+                Text("Ready in your library")
+                    .font(.caption)
+                    .foregroundStyle(NBHalloween.textSecondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .foregroundStyle(NBHalloween.textSecondary)
+                .font(.caption)
+        }
+        .padding(.vertical, 5)
+    }
+
+    @ViewBuilder
+    private var primaryExample: some View {
+        switch role {
+        case .imageScrim, .overlayText, .imageBorder:
+            newsContext
+        case .overlaySurface, .overlayScrim, .shadow:
+            installDrawerContext
+        case .mask:
+            maskedArtworkContext
+        case .warning:
+            downloadContext
+        case .disabledText:
+            HStack {
+                Image(systemName: "checkmark.shield")
+                    .foregroundStyle(NBHalloween.textSecondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Sign with certificate").foregroundStyle(NBHalloween.text)
+                    Text("No certificate selected")
+                        .font(.caption)
+                        .foregroundStyle(NBHalloween.disabledText)
+                        .nbThemeInspectorTarget(.disabledText)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(NBHalloween.disabledText)
+                    .nbThemeInspectorTarget(.disabledText)
+            }
+            .padding(.vertical, 6)
+        case .danger:
+            Label("Revoke selected certificate", systemImage: "xmark.octagon.fill")
+                .foregroundStyle(NBHalloween.danger)
+                .nbThemeInspectorTarget(.danger)
+                .padding(.vertical, 8)
+        case .expired:
+            HStack {
+                Label("Certificate expired", systemImage: "calendar.badge.exclamationmark")
+                    .foregroundStyle(NBHalloween.expired)
+                    .nbThemeInspectorTarget(.expired)
+                Spacer()
+                Text("Expired")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(NBHalloween.expired)
+            }
+            .padding(.vertical, 8)
+        case .success:
+            HStack {
+                Label("Certificate verified", systemImage: "checkmark.shield.fill")
+                    .foregroundStyle(NBHalloween.text)
+                Spacer()
+                Text("Valid")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(NBHalloween.ok)
+                    .nbThemeInspectorTarget(.success)
+            }
+            .padding(.vertical, 8)
+        case .onAccent:
+            HStack {
+                appIcon
+                appInfo
+                Spacer()
+                Text("Install")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(NBHalloween.onAccent)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
+                    .background(NBHalloween.accent, in: Capsule())
+                    .nbThemeInspectorTarget(.onAccent)
+            }
+        case .secondaryAccent:
+            HStack {
+                appIcon
+                appInfo
+                Spacer()
+                Text("Pending")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(NBHalloween.pumpkin)
+                    .nbThemeInspectorTarget(.secondaryAccent)
+            }
+        case .tertiaryAccent:
+            HStack {
+                appIcon
+                appInfo
+                Spacer()
+                Image(systemName: "circle.dotted.circle.fill")
+                    .foregroundStyle(NBHalloween.neonPurple)
+                    .nbThemeInspectorTarget(.tertiaryAccent)
+                Text("Queued")
+                    .font(.caption)
+                    .foregroundStyle(NBHalloween.textSecondary)
+            }
+        case .separator:
+            VStack(alignment: .leading, spacing: 10) {
+                appRow
+                Rectangle()
+                    .fill(NBHalloween.hairline)
+                    .frame(height: 2)
+                    .nbThemeInspectorTarget(.separator)
+                Label("App details", systemImage: "info.circle")
+                    .foregroundStyle(NBHalloween.textSecondary)
+            }
+            .padding(.vertical, 8)
+        case .elevatedHigh:
+            HStack { appIcon; appInfo; Spacer() }
+                .padding(14)
+                .background(NBHalloween.elevatedHigh, in: RoundedRectangle(cornerRadius: 14))
+                .nbThemeInspectorTarget(.elevatedHigh)
+                .padding(.vertical, 3)
+        case .controlFillStrong:
+            HStack {
+                appInfo
+                Spacer()
+                Image(systemName: "checkmark")
+                    .foregroundStyle(NBHalloween.text)
+                    .frame(width: 40, height: 38)
+                    .background(NBHalloween.controlFillStrong, in: RoundedRectangle(cornerRadius: 9))
+                    .nbThemeInspectorTarget(.controlFillStrong)
+            }
+        case .title:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Your Library")
+                    .font(.largeTitle.weight(.bold))
+                    .foregroundStyle(NBHalloween.title)
+                    .nbThemeInspectorTarget(.title)
+                appRow
+            }
+        case .selection:
+            HStack {
+                appIcon
+                appInfo
+                Spacer()
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(NBHalloween.selection)
+                    .nbThemeInspectorTarget(.selection)
+            }
+        case .border:
+            HStack { appIcon; appInfo; Spacer() }
+                .padding(12)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(NBHalloween.border, lineWidth: 2)
+                        .nbThemeInspectorTarget(.border)
+                }
+        case .controlFill:
+            HStack { appIcon; appInfo; Spacer() }
+        default:
+            appRow
+        }
+    }
+
+    private var appIcon: some View {
+        Image(systemName: "shippingbox.fill")
+            .font(.title2)
+            .foregroundStyle(NBHalloween.accent)
+            .frame(width: 44, height: 44)
+            .background(NBHalloween.controlFill, in: RoundedRectangle(cornerRadius: 11))
+            .nbThemeInspectorTarget(.controlFill)
+    }
+
+    private var appInfo: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Example App")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(NBHalloween.text)
+            Text("Ready to install")
+                .font(.caption)
+                .foregroundStyle(NBHalloween.textSecondary)
+        }
+    }
+
+    private var appRow: some View {
+        HStack(spacing: 12) { appIcon; appInfo; Spacer() }
+            .padding(.vertical, 5)
+    }
+
+    private var downloadContext: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.document")
+                .font(.title2)
+                .foregroundStyle(NBHalloween.accent)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Example.ipa").foregroundStyle(NBHalloween.text)
+                Text("62 MB / 100 MB (62%)")
+                    .font(.caption)
+                    .foregroundStyle(NBHalloween.textSecondary)
+                ProgressView(value: 0.62)
+                    .tint(NBHalloween.warning)
+                    .nbThemeInspectorTarget(.warning)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "pause.circle.fill")
+                .foregroundStyle(NBHalloween.warning)
+                .nbThemeInspectorTarget(.warning)
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var newsContext: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(NBHalloween.controlFill)
+                    .overlay {
+                        Image(systemName: "square.stack.3d.up.fill")
+                            .font(.system(size: 56))
+                            .foregroundStyle(NBHalloween.accent.opacity(0.35))
+                    }
+                LinearGradient(colors: [.clear, NBHalloween.imageScrim],
+                               startPoint: .top, endPoint: .bottom)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .nbThemeInspectorTarget(.imageScrim)
+                Text("New applications in Sources")
+                    .font(.headline)
+                    .foregroundStyle(NBHalloween.overlayText)
+                    .nbThemeInspectorTarget(.overlayText)
+                    .padding(16)
+            }
+            .frame(height: 150)
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(NBHalloween.imageBorder, lineWidth: 1.5)
+                    .nbThemeInspectorTarget(.imageBorder)
+            }
+            Text("News card · sample artwork")
+                .font(.caption)
+                .foregroundStyle(NBHalloween.textSecondary)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private var maskedArtworkContext: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 13)
+                .fill(NBHalloween.controlFill)
+            Image(systemName: "shippingbox.fill")
+                .font(.system(size: 60))
+                .foregroundStyle(NBHalloween.accent)
+            LinearGradient(colors: [.clear, NBHalloween.mask],
+                           startPoint: .top, endPoint: .bottom)
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+                .nbThemeInspectorTarget(.mask)
+            VStack {
+                Spacer()
+                Text("Download preview")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(NBHalloween.overlayText)
+                    .padding(12)
+            }
+        }
+        .frame(height: 140)
+        .padding(.vertical, 5)
+    }
+
+    private var installDrawerContext: some View {
+        ZStack {
+            VStack(alignment: .leading, spacing: 9) {
+                appRow
+                Divider()
+                Label("Install options", systemImage: "square.and.arrow.down")
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity)
+            .background(NBHalloween.elevated, in: RoundedRectangle(cornerRadius: 14))
+
+            NBHalloween.overlayScrim
+                .nbThemeInspectorTarget(.overlayScrim)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Install Queue").font(.headline)
+                Text("1 application is ready")
+                    .font(.caption)
+                    .foregroundStyle(NBHalloween.textSecondary)
+                HStack {
+                    Image(systemName: "shippingbox.fill")
+                        .foregroundStyle(NBHalloween.accent)
+                    Text("Example App")
+                    Spacer()
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(NBHalloween.ok)
+                }
+                .padding(.top, 7)
+            }
+            .padding(18)
+            .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
+            .nbThemeInspectorTarget(.overlaySurface)
+            .shadow(color: NBHalloween.shadow, radius: 16, y: 7)
+            .nbThemeInspectorTarget(.shadow)
+            .padding(15)
+        }
+        .frame(height: 225)
+    }
+}
+// MARK: - Lock Screen / Dynamic Island context (widget extension sample)
+
+private struct ThemeActivityContextPreview: View {
+    let role: NBThemeRole
+    @State private var running: Bool
+    @StateObject private var themes = NBThemeManager.shared
+
+    init(role: NBThemeRole) {
+        self.role = role
+        _running = State(initialValue: role != .liveActivityIdle)
+    }
+
+    private var statusColor: Color {
+        running ? NBHalloween.liveActivityRunning : NBHalloween.liveActivityIdle
+    }
+
+    var body: some View {
+        NBNavigationView("Live Activity") {
+            NBList("Live Activity") {
+                Section {
+                    Label("Widget extension preview · sample state. iOS owns the actual Lock Screen and Dynamic Island presentation.",
+                          systemImage: "eye")
+                        .font(.caption)
+                        .foregroundStyle(NBHalloween.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                NBSection("Lock Screen") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(running ? "Silent audio running" : "Silent audio paused")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(NBHalloween.liveActivityPrimaryText)
+                                .nbThemeInspectorTarget(.liveActivityPrimaryText)
+                            Spacer(minLength: 6)
+                            Text("00:24")
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(NBHalloween.liveActivitySecondaryText)
+                                .nbThemeInspectorTarget(.liveActivitySecondaryText)
+                        }
+                        ProgressView(value: 0.62)
+                            .tint(statusColor)
+                        HStack(spacing: 8) {
+                            Image(systemName: running ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                                .foregroundStyle(statusColor)
+                                .nbThemeInspectorTarget(running ? .liveActivityRunning : .liveActivityIdle)
+                            Text(running ? "Awake" : "Not awake")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(NBHalloween.liveActivityPrimaryText)
+                            Spacer()
+                            Text("Keep Alive")
+                                .font(.caption)
+                                .foregroundStyle(NBHalloween.liveActivitySecondaryText)
+                        }
+                        HStack {
+                            Text("Ksign keeps this session available")
+                                .font(.caption2)
+                                .foregroundStyle(NBHalloween.liveActivitySecondaryText)
+                            Spacer()
+                            Text(running ? "Pause" : "Resume")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(NBHalloween.liveActivityActionText)
+                                .nbThemeInspectorTarget(.liveActivityActionText)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(statusColor.opacity(0.26), in: Capsule())
+                        }
+                    }
+                    .padding(17)
+                    .background(NBHalloween.liveActivityBackground,
+                                in: RoundedRectangle(cornerRadius: 17))
+                    .nbThemeInspectorTarget(.liveActivityBackground)
+                    .padding(.vertical, 6)
+                }
+
+                NBSection("Dynamic Island") {
+                    HStack(spacing: 12) {
+                        Image(systemName: running ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .foregroundStyle(statusColor)
+                            .nbThemeInspectorTarget(running ? .liveActivityRunning : .liveActivityIdle)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(running ? "Awake" : "Not awake")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(NBHalloween.liveActivityPrimaryText)
+                            Text("00:24 · Keep Alive")
+                                .font(.caption2)
+                                .foregroundStyle(NBHalloween.liveActivitySecondaryText)
+                        }
+                        Spacer()
+                    }
+                    .padding(16)
+                    .background(Color.black, in: Capsule())
+                    .padding(.vertical, 6)
+                }
+
+                NBSection("Sample state") {
+                    Toggle("Audio running", isOn: $running)
+                        .tint(NBHalloween.accent)
+                }
+            }
+        }
+    }
+}
+// MARK: - Crypt Check's HTML layout, with harmless sample report data
+
+// The HTML uses the same CSS role names, colors and major layout elements as
+// CryptCheckAnalyzer.makeHTML. It is an interactive sample report, not an IPA
+// scan; WKWebView CSS custom properties update without reloading while a
+// slider is dragged, so scroll position and context stay intact.
+private struct ThemeCryptReportPreview: UIViewRepresentable {
+    let role: NBThemeRole
+    let revision: UInt64
+
+    private static let cssRoles: [(String, NBThemeRole)] = [
+        ("bg", .reportBackground), ("card", .reportCard),
+        ("border", .reportBorder), ("text", .reportText),
+        ("dim", .reportDim), ("cyan", .reportAccent),
+        ("green", .reportSuccess), ("orange", .reportWarning),
+        ("red", .reportDanger), ("green-fill", .reportSuccessFill),
+        ("orange-fill", .reportWarningFill), ("red-fill", .reportDangerFill),
+        ("tap-highlight", .reportTapHighlight), ("pink", .reportPink),
+        ("purple", .reportPurple), ("blue", .reportBlue),
+        ("lime", .reportLime), ("interactive-fill", .reportInteractiveFill),
+        ("interactive-border", .reportInteractiveBorder),
+        ("selected-fill", .reportSelectedFill),
+        ("selected-text", .reportSelectedText),
+        ("dropdown", .reportDropdown), ("shadow", .reportShadow)
+    ]
+
+    private static func cssVariables() -> String {
+        cssRoles.map { name, role in
+            "--\(name):\(NBThemeManager.shared.activeColor(for: role).cssRGBA);"
+        }.joined()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView(frame: .zero)
+        view.isOpaque = false
+        view.backgroundColor = NBHalloween.uiColor(.reportBackground)
+        view.scrollView.backgroundColor = NBHalloween.uiColor(.reportBackground)
+        view.navigationDelegate = context.coordinator
+        context.coordinator.role = role
+        view.loadHTMLString(Self.sampleHTML, baseURL: nil)
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {
+        context.coordinator.role = role
+        view.backgroundColor = NBHalloween.uiColor(.reportBackground)
+        view.scrollView.backgroundColor = NBHalloween.uiColor(.reportBackground)
+        context.coordinator.update(view, variables: Self.cssVariables())
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var role: NBThemeRole = .reportBackground
+        private var loaded = false
+        private var hasScrolledToTarget = false
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            loaded = true
+            update(webView, variables: ThemeCryptReportPreview.cssVariables())
+        }
+
+        func update(_ webView: WKWebView, variables: String) {
+            guard loaded else { return }
+            let selector = "[data-role~='\(role.rawValue)']"
+            let script = """
+            document.documentElement.style.cssText = \(String(reflecting: variables));
+            document.querySelectorAll('.inspected').forEach(function(el) {
+              el.classList.remove('inspected');
+            });
+            var target = document.querySelector(\(String(reflecting: selector)));
+            if (target) {
+              target.classList.add('inspected');
+              \(hasScrolledToTarget ? "" : "target.scrollIntoView({block: 'center', behavior: 'auto'});")
+            }
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+            hasScrolledToTarget = true
+        }
+    }
+
+    private static var sampleHTML: String {
+        """
+        <!doctype html><html lang="en"><head>
+        <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+        <style>
+        :root { color-scheme: dark; \(cssVariables()) }
+        * { box-sizing:border-box; }
+        body { margin:0;padding:22px 16px 400px;background:var(--bg);color:var(--text);
+          font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif; }
+        .inspected { outline:3px solid #ffdc34 !important;outline-offset:3px;
+          box-shadow:0 0 0 5px rgba(0,0,0,.55);border-radius:6px; }
+        .notice {border:1px solid var(--interactive-border);background:var(--interactive-fill);
+          color:var(--dim);border-radius:10px;padding:10px 12px;font-size:.72rem;margin-bottom:18px;}
+        .header {position:relative;border-bottom:1px solid var(--border);padding-bottom:18px;margin-bottom:18px;}
+        h1 {margin:0;font:700 1.3rem ui-monospace,Menlo,monospace;color:var(--cyan);}
+        .sub {color:var(--dim);font-size:.78rem;margin-top:5px;}
+        .source {color:var(--text);font-size:.86rem;margin-top:8px;}
+        .summary {display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:22px;}
+        .stat {position:relative;text-align:center;padding:14px 9px;border-radius:14px;
+          background:linear-gradient(180deg,var(--interactive-fill),var(--card));
+          border:1px solid var(--border);-webkit-tap-highlight-color:var(--tap-highlight);}
+        .num {font:700 1.55rem ui-monospace,Menlo,monospace;line-height:1;}
+        .lbl {color:var(--dim);font-size:.68rem;text-transform:uppercase;margin-top:6px;}
+        .green {color:var(--green)} .orange {color:var(--orange)} .red {color:var(--red)}
+        .card {background:var(--card);border:1px solid var(--border);border-radius:13px;
+          padding:18px 15px;margin-bottom:17px;box-shadow:0 10px 24px var(--shadow);}
+        .card-head {font:700 .84rem ui-monospace,Menlo,monospace;}
+        .meta {font:.72rem ui-monospace,Menlo,monospace;color:var(--dim);margin:8px 0 11px;}
+        .tag {display:inline-block;font:700 .81rem ui-monospace,Menlo,monospace;
+          padding:5px 10px;border-radius:7px;margin:4px 6px 8px 0;}
+        .ok {color:var(--green);background:var(--green-fill)}
+        .warn {color:var(--orange);background:var(--orange-fill)}
+        .bad {color:var(--red);background:var(--red-fill)}
+        .filter {border:1px solid var(--interactive-border);background:var(--interactive-fill);
+          color:var(--dim);border-radius:100px;padding:6px 11px;font-size:.7rem;}
+        .filter.selected {color:var(--selected-text);background:var(--selected-fill);}
+        .dropdown {border:1px solid var(--interactive-border);background:var(--dropdown);
+          border-radius:13px;padding:13px;margin:12px 0;box-shadow:0 10px 22px var(--shadow);}
+        .op {font:700 .8rem ui-monospace,Menlo,monospace;margin-right:11px;}
+        .pink {color:var(--pink)} .purple {color:var(--purple)}
+        .blue {color:var(--blue)} .lime {color:var(--lime)}
+        .tap {background:var(--tap-highlight);border-radius:7px;padding:10px;font-size:.75rem;margin-top:10px;}
+        </style></head>
+        <body data-role="reportBackground">
+          <div class="notice">Crypt Check · contextual sample report. No IPA was scanned; saved colors apply to newly generated reports.</div>
+          <header class="header">
+            <h1 data-role="reportAccent">🔐 cryptcheck</h1>
+            <div class="sub" data-role="reportDim">Example report · sample status</div>
+            <div class="source" data-role="reportText">Example.app / ExampleBinary</div>
+          </header>
+          <div class="summary">
+            <div class="stat" data-role="reportInteractiveFill">
+              <div class="num" data-role="reportText">3</div><div class="lbl" data-role="reportDim">Binaries</div>
+            </div>
+            <div class="stat"><div class="num green" data-role="reportSuccess">2</div><div class="lbl">Decrypted</div></div>
+            <div class="stat"><div class="num red" data-role="reportDanger">0</div><div class="lbl">Encrypted</div></div>
+            <div class="stat"><div class="num orange" data-role="reportWarning">1</div><div class="lbl">Likely enc</div></div>
+          </div>
+          <section class="card" data-role="reportCard reportBorder reportShadow">
+            <div class="card-head" data-role="reportText">ExampleBinary · arm64</div>
+            <div class="meta" data-role="reportDim">2.4 MB &nbsp; | &nbsp; LC_ENCRYPTION_INFO_64</div>
+            <span class="tag ok" data-role="reportSuccessFill">Decrypted</span>
+            <span class="tag warn" data-role="reportWarningFill">Review</span>
+            <span class="tag bad" data-role="reportDangerFill">Encrypted</span>
+            <div class="meta">Inspection filters</div>
+            <button type="button" class="filter selected" data-role="reportSelectedFill reportSelectedText">All</button>
+            <button type="button" class="filter" data-role="reportInteractiveFill reportInteractiveBorder">Decrypted</button>
+            <button type="button" class="filter">Encrypted</button>
+            <div class="dropdown" data-role="reportDropdown">
+              <div class="meta">Filter menu · sample entries</div>
+              <div class="source">▸ ExampleBinary</div>
+              <div class="source">▸ ExampleFramework.dylib</div>
+            </div>
+            <div class="card-head">Instruction sample</div>
+            <p><span class="op pink" data-role="reportPink">CBZ</span>
+              <span class="op purple" data-role="reportPurple">MOV</span>
+              <span class="op blue" data-role="reportBlue">ADD</span>
+              <span class="op lime" data-role="reportLime">RET</span></p>
+            <div class="tap" data-role="reportTapHighlight">Tap-highlight example · report row pressed</div>
+          </section>
+          <section class="card"><div class="card-head">ExampleFramework.dylib</div>
+            <div class="meta">Additional sample report section</div>
+            <span class="tag ok">Decrypted</span>
+          </section>
+        </body></html>
+        """
     }
 }

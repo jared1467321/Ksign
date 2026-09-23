@@ -230,6 +230,13 @@ struct LibraryView: View {
 			}
 			.searchable(text: $_searchText, placement: inspectedThemeRole == nil
                 ? .platform() : .navigationBarDrawer(displayMode: .always))
+            .onAppear {
+                // This is local to the copied Library view, not the user's
+                // real search. An entered term makes Search Text visible.
+                if inspectedThemeRole == .searchText && _searchText.isEmpty {
+                    _searchText = "Example"
+                }
+            }
             .overlay {
                 if
                     _filteredSignedApps.isEmpty,

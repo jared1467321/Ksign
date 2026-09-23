@@ -12,6 +12,15 @@ import NimbleViews
 import UIKit
 
 struct DownloaderView: View {
+    // Inspector-only sample state. Normal Downloads instances never create a
+    // synthetic download or change the shared download manager.
+    let inspectorSampleDownloadStatus: Bool
+
+    init(inspectorSampleDownloadStatus: Bool = false) {
+        self.inspectorSampleDownloadStatus = inspectorSampleDownloadStatus
+    }
+
+    @ObservedObject private var themes = NBThemeManager.shared
     @ObservedObject private var downloadManager = IPAVaultPresentationSession.shared.downloadManager
     @StateObject private var libraryManager = DownloadManager.shared
     
@@ -55,9 +64,54 @@ struct DownloaderView: View {
         return "\(count) stream\(count == 1 ? "" : "s")"
     }
 
+    // Shared by a real IPA Vault download and the inspector's non-networked
+    // sample, so the inspected separator has precisely the production layout.
+    private func ipaVaultStatusRow(speed: String, streams: String, isSample: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
+                .fontWeight(.semibold)
+            Spacer()
+            Text(speed).monospacedDigit()
+            Text("•")
+                .foregroundStyle(NBHalloween.textTertiary)
+                .nbThemeInspectorTarget(.textTertiary)
+            Text(streams).monospacedDigit()
+        }
+        .font(.caption)
+        .foregroundStyle(NBHalloween.textSecondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
+        .accessibilityValue("\(speed), \(streams)")
+    }
+
     var body: some View {
+        let _ = themes.previewRevision
         NBNavigationView(.localized("Downloads")) {
             List {
+                if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
+                    NBSection("Downloading", secondary: "Sample") {
+                        ipaVaultStatusRow(speed: "12.4 MB/s", streams: "4 streams", isSample: true)
+                        HStack(spacing: 12) {
+                            Image(systemName: "arrow.down.document")
+                                .foregroundStyle(NBHalloween.accent)
+                                .font(.title2)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Example.ipa")
+                                Text("62 MB / 100 MB (62%)")
+                                    .font(.caption)
+                                    .foregroundStyle(NBHalloween.textSecondary)
+                            }
+                            Spacer()
+                            ProgressView(value: 0.62)
+                                .frame(width: 52)
+                                .tint(NBHalloween.warning)
+                        }
+                        Text("Inspector sample only · no download started")
+                            .font(.caption2)
+                            .foregroundStyle(NBHalloween.textSecondary)
+                    }
+                }
+
                 if libraryManager.isImporting {
                     // One static row for the whole batch.
                     //
@@ -73,6 +127,12 @@ struct DownloaderView: View {
                     // The finished list underneath is only a selection surface
                     // during an import, so it now stays completely still.
                     NBSection(.localized("Importing")) {
+                        // Imports normally replace the active-download section.
+                        // Keep the inspected live status visible in the copy.
+                        if inspectorSampleDownloadStatus && hasActiveIPAVaultDownloads {
+                            ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
+                                              streams: ipavaultActiveStreamsText)
+                        }
                         HStack(spacing: 12) {
                             ProgressView()
                             Text(.localized("Importing apps, please wait"))
@@ -83,26 +143,8 @@ struct DownloaderView: View {
                 } else if !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
                     NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
                         if hasActiveIPAVaultDownloads {
-                            HStack(spacing: 8) {
-                                Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
-                                    .fontWeight(.semibold)
-
-                                Spacer()
-
-                                Text(ipavaultLiveThroughputText)
-                                    .monospacedDigit()
-
-                                Text("•")
-                                    .foregroundStyle(NBHalloween.textTertiary)
-
-                                Text(ipavaultActiveStreamsText)
-                                    .monospacedDigit()
-                            }
-                            .font(.caption)
-                            .foregroundStyle(NBHalloween.textSecondary)
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel("IPA Vault live download status")
-                            .accessibilityValue("\(ipavaultLiveThroughputText), \(ipavaultActiveStreamsText)")
+                            ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
+                                              streams: ipavaultActiveStreamsText)
                         }
 
                         ForEach(libraryManager.downloads) { download in
@@ -148,7 +190,7 @@ struct DownloaderView: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
                         .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
-                } else if downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
+                } else if !inspectorSampleDownloadStatus && downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No downloaded IPAs"), systemImage: "square.and.arrow.down.fill")
@@ -224,7 +266,7 @@ struct DownloaderView: View {
                 // Importing adds/removes entries in `downloads` too. Don't let
                 // that rebuild and reorder this list — it only needs to refresh
                 // when a real download finishes, not while importing.
-                guard !libraryManager.isImporting else { return }
+                guard !inspectorSampleDownloadStatus, !libraryManager.isImporting else { return }
                 downloadManager.loadDownloadedIPAs()
             }
             // IPADownloadManager publishes its own completed rows. Rescanning
@@ -245,6 +287,9 @@ struct DownloaderView: View {
             // rows would never see it change.
             .environment(\.editMode, $_isEditMode)
         }
+        // The inspector displays shared live data, but its controls must not
+        // mutate downloads or open workflows while a color is being edited.
+        .disabled(inspectorSampleDownloadStatus)
     }
 }
 
