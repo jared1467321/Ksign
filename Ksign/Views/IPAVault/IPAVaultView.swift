@@ -307,8 +307,7 @@ struct IPAVaultView: View {
 
     @AppStorage("Ksign.IPAVault.serverURL") private var serverURL = "http://100.89.243.68:8765/"
     @AppStorage("Ksign.IPAVault.mode") private var modeRaw = IPAVaultMode.download.rawValue
-    @AppStorage("Ksign.IPAVault.concurrentFiles") private var concurrentFiles = 3
-    @AppStorage("Ksign.IPAVault.streamsPerFile") private var streamsPerFile = 5
+    @AppStorage("Ksign.IPAVault.concurrentFiles") private var calibrationConcurrentFiles = 3
 
     @State private var remoteFiles: [IPAVaultRemoteFile] = []
     @State private var localFiles: [IPAVaultLocalFile] = []
@@ -392,50 +391,25 @@ struct IPAVaultView: View {
                 actionBar
             }
             .task {
-                let clampedConcurrent = min(8, max(1, concurrentFiles))
-                let clampedStreams = min(10, max(1, streamsPerFile))
-                if concurrentFiles != clampedConcurrent {
-                    concurrentFiles = clampedConcurrent
+                let clampedConcurrent = min(8, max(1, calibrationConcurrentFiles))
+                if calibrationConcurrentFiles != clampedConcurrent {
+                    calibrationConcurrentFiles = clampedConcurrent
                 }
-                if streamsPerFile != clampedStreams {
-                    streamsPerFile = clampedStreams
-                }
-                downloadManager.configureIPAVaultDownloads(
-                    maxConcurrent: clampedConcurrent,
-                    streamsPerFile: clampedStreams
-                )
                 await refreshCurrentMode()
             }
             .onChange(of: modeRaw) { _ in
                 Task { await refreshCurrentMode() }
             }
-            .onChange(of: concurrentFiles) { value in
+            .onChange(of: calibrationConcurrentFiles) { value in
                 let clamped = min(8, max(1, value))
                 if value != clamped {
-                    concurrentFiles = clamped
-                    return
+                    calibrationConcurrentFiles = clamped
                 }
-                downloadManager.configureIPAVaultDownloads(
-                    maxConcurrent: clamped,
-                    streamsPerFile: streamsPerFile
-                )
-            }
-            .onChange(of: streamsPerFile) { value in
-                let clamped = min(10, max(1, value))
-                if value != clamped {
-                    streamsPerFile = clamped
-                    return
-                }
-                downloadManager.configureIPAVaultDownloads(
-                    maxConcurrent: concurrentFiles,
-                    streamsPerFile: clamped
-                )
             }
             .sheet(isPresented: $showingSettings) {
                 IPAVaultSettingsView(
                     serverURL: $serverURL,
-                    concurrentFiles: $concurrentFiles,
-                    streamsPerFile: $streamsPerFile,
+                    concurrentFiles: $calibrationConcurrentFiles,
                     downloadManager: downloadManager
                 )
             }
@@ -717,11 +691,7 @@ struct IPAVaultView: View {
     private func downloadSelected() {
         let selected = remoteFiles.filter { presentationSession.selectedRemoteIDs.contains($0.id) }
         let downloads = selected.map { (url: $0.url, filename: $0.name, size: $0.size) }
-        downloadManager.enqueueIPAVaultDownloads(
-            downloads,
-            maxConcurrent: concurrentFiles,
-            streamsPerFile: streamsPerFile
-        )
+        downloadManager.enqueueIPAVaultDownloads(downloads)
         statusMessage = selected.count == 1
             ? "Added 1 IPA to Ksign Downloads."
             : "Added \(selected.count) IPAs to Ksign Downloads."
@@ -1244,7 +1214,6 @@ private struct IPAVaultSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var serverURL: String
     @Binding var concurrentFiles: Int
-    @Binding var streamsPerFile: Int
     @ObservedObject var downloadManager: IPADownloadManager
 
     @State private var calibrationMode = IPAVaultCalibrationMode.streamsOnly
@@ -1274,15 +1243,17 @@ private struct IPAVaultSettingsView: View {
                 }
 
                 Section {
-                    Stepper(value: $concurrentFiles, in: 1...8) {
-                        LabeledContent("Concurrent files", value: "\(concurrentFiles)")
-                    }
-
-                    Stepper(value: $streamsPerFile, in: 1...10) {
-                        LabeledContent("Concurrent streams / job", value: "\(streamsPerFile)")
-                    }
+                    LabeledContent("Batch tuning", value: hasActiveVaultDownloads ? downloadManager.ipavaultAdaptiveStatus : "Automatic")
 
                     if hasActiveVaultDownloads {
+                        LabeledContent(
+                            "Target concurrent files",
+                            value: "\(downloadManager.ipavaultAdaptiveConcurrentCount)"
+                        )
+                        LabeledContent(
+                            "Target streams / file",
+                            value: "\(downloadManager.ipavaultAdaptiveStreamsPerFile)"
+                        )
                         LabeledContent(
                             "Active streams (all jobs)",
                             value: "\(downloadManager.ipavaultAdaptiveStreamCount)"
@@ -1298,10 +1269,17 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Downloads")
                 } footer: {
-                    Text("Concurrent jobs always follow your configured value. Each job starts at your configured streams/job value, then independently probes one stream up or down to follow current conditions, with a hard maximum of 10 streams per job. Calibration remains the starting point rather than being discarded. These settings do not affect uploads, imports, or signing.")
+                    Text("Every batch starts fresh at 1 IPA × 2 streams. Ksign uses the real downloads to tune file concurrency first, then streams per file, judging changes by total useful throughput. It keeps lightly retuning during longer batches and discards everything it learned when that batch ends. Hard limits are 8 files and 10 streams per file.")
                 }
 
                 Section {
+                    if calibrationMode == .streamsOnly {
+                        Stepper(value: $concurrentFiles, in: 1...8) {
+                            LabeledContent("Benchmark concurrent files", value: "\(concurrentFiles)")
+                        }
+                        .disabled(calibrationRunning)
+                    }
+
                     Picker("Mode", selection: $calibrationMode) {
                         ForEach(IPAVaultCalibrationMode.allCases) { mode in
                             Text(mode.title).tag(mode)
@@ -1327,13 +1305,13 @@ private struct IPAVaultSettingsView: View {
                             if calibrationRunning {
                                 ProgressView()
                             }
-                            Text(calibrationRunning ? "Calibrating…" : "Calibrate")
+                            Text(calibrationRunning ? "Benchmarking…" : "Run Benchmark")
                         }
                     }
                     .disabled(calibrationRunning || hasActiveVaultDownloads)
 
                     if hasActiveVaultDownloads && !calibrationRunning {
-                        Text("Finish or cancel active IPA Vault downloads before calibrating so they do not distort the result.")
+                        Text("Finish or cancel active IPA Vault downloads before benchmarking so they do not distort the result.")
                             .font(.footnote)
                             .foregroundStyle(NBHalloween.textSecondary)
                     }
@@ -1365,9 +1343,9 @@ private struct IPAVaultSettingsView: View {
                             .foregroundStyle(NBHalloween.danger)
                     }
                 } header: {
-                    Text("Calibration")
+                    Text("Diagnostic Benchmark")
                 } footer: {
-                    Text("Uses real IPA files from this Vault and the same ranged-download behavior as normal downloads. Streams mode tests 1–10 at your selected concurrency. Combined mode runs 4 broad scouting tests followed by 12 adaptive refinement tests. Test data is discarded and your settings are not changed automatically.")
+                    Text("Optional manual benchmark only; normal IPA Vault downloads no longer wait for calibration or use its result. Streams mode tests 1–10 at the selected benchmark concurrency. Combined mode runs 4 broad scouting tests followed by 12 adaptive refinement tests. Benchmark data is discarded.")
                 }
             }
             .navigationTitle("IPA Vault Settings")
@@ -1405,7 +1383,7 @@ private struct IPAVaultSettingsView: View {
 
         do {
             guard !hasActiveVaultDownloads else {
-                throw NSError(domain: "IPAVaultCalibration", code: 10, userInfo: [NSLocalizedDescriptionKey: "Finish or cancel active IPA Vault downloads before calibrating."])
+                throw NSError(domain: "IPAVaultCalibration", code: 10, userInfo: [NSLocalizedDescriptionKey: "Finish or cancel active IPA Vault downloads before benchmarking."])
             }
 
             let files = try await loadCalibrationFiles()
@@ -1424,7 +1402,7 @@ private struct IPAVaultSettingsView: View {
             }
 
             calibrationResult = best
-            calibrationStatus = "Calibration complete."
+            calibrationStatus = "Benchmark complete."
         } catch is CancellationError {
             calibrationStatus = nil
         } catch {
