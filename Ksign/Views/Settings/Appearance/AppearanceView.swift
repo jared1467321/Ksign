@@ -197,6 +197,7 @@ private struct ThemeProfileEditorView: View {
 
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var name = ""
+    @State private var searchText = ""
 
     private var theme: NBThemeProfile {
         themeManager.profile(id: themeID) ?? .halloween
@@ -211,18 +212,42 @@ private struct ThemeProfileEditorView: View {
                     .onChange(of: name) { _ in _saveName() }
             }
 
+            if searchText.isEmpty {
+                NBSection(.localized("Live Preview")) {
+                    _livePreview
+
+                    Text(.localized("This preview shows the main app colors. Each setting below also explains where it appears, including colors used on other screens."))
+                        .font(.footnote)
+                        .foregroundStyle(NBHalloween.textSecondary)
+                }
+            }
+
             ForEach(NBThemeRole.Category.allCases) { category in
-                NBSection(category.rawValue) {
-                    ForEach(NBThemeRole.allCases.filter { $0.category == category }) { role in
-                        ColorPicker(
-                            role.displayName,
-                            selection: _binding(for: role),
-                            supportsOpacity: true
-                        )
+                if !_visibleRoles(in: category).isEmpty {
+                    NBSection(category.rawValue) {
+                        ForEach(_visibleRoles(in: category)) { role in
+                            ColorPicker(selection: _binding(for: role), supportsOpacity: true) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(role.displayName)
+                                        .font(.body)
+                                    Text(role.usageDescription)
+                                        .font(.caption)
+                                        .foregroundStyle(NBHalloween.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(.vertical, 3)
+                            }
+                            .accessibilityHint(Text(role.usageDescription))
+                        }
                     }
                 }
             }
+
+            if !searchText.isEmpty && NBThemeRole.Category.allCases.allSatisfy({ _visibleRoles(in: $0).isEmpty }) {
+                ContentUnavailableView.search(text: searchText)
+            }
         }
+        .searchable(text: $searchText, prompt: .localized("Find a color or screen element"))
         .onAppear {
             name = theme.name
             if themeManager.selectedThemeID != themeID {
@@ -231,6 +256,93 @@ private struct ThemeProfileEditorView: View {
         }
         .onDisappear {
             _saveName()
+        }
+    }
+
+    private func _visibleRoles(in category: NBThemeRole.Category) -> [NBThemeRole] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NBThemeRole.allCases.filter { role in
+            guard role.category == category else { return false }
+            return query.isEmpty
+                || category.rawValue.localizedCaseInsensitiveContains(query)
+                || role.displayName.localizedCaseInsensitiveContains(query)
+                || role.usageDescription.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    // A small, non-interactive sample of the most common roles. It intentionally
+    // uses the edited profile, rather than the global facade, so the swatches and
+    // sample stay in sync with the native ColorPicker as its color changes.
+    private var _livePreview: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(.localized("Example screen"))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(theme.color(for: .navigationText).color)
+                Spacer()
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(theme.color(for: .navigationTint).color)
+            }
+
+            Text(.localized("Your Library"))
+                .font(.title3.weight(.bold))
+                .foregroundStyle(theme.color(for: .title).color)
+
+            HStack(spacing: 10) {
+                Image(systemName: "app.fill")
+                    .font(.title2)
+                    .foregroundStyle(theme.color(for: .accent).color)
+                    .frame(width: 42, height: 42)
+                    .background(theme.color(for: .controlFill).color, in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(.localized("Example App"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.color(for: .text).color)
+                    Text(.localized("Secondary information"))
+                        .font(.caption)
+                        .foregroundStyle(theme.color(for: .textSecondary).color)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(theme.color(for: .success).color)
+            }
+            .padding(10)
+            .background(theme.color(for: .elevated).color, in: RoundedRectangle(cornerRadius: 12))
+
+            HStack {
+                Text(.localized("Example action"))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(theme.color(for: .onAccent).color)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(theme.color(for: .accent).color, in: Capsule())
+                Spacer()
+                Text(.localized("In progress"))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(theme.color(for: .warning).color)
+            }
+
+            Rectangle()
+                .fill(theme.color(for: .separator).color)
+                .frame(height: 1)
+
+            HStack {
+                Label(.localized("Library"), systemImage: "square.grid.2x2.fill")
+                    .foregroundStyle(theme.color(for: .tabSelected).color)
+                Spacer()
+                Label(.localized("Settings"), systemImage: "gearshape")
+                    .foregroundStyle(theme.color(for: .tabUnselected).color)
+            }
+            .font(.caption)
+            .padding(9)
+            .background(theme.color(for: .tabBackground).color, in: RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(14)
+        .background(theme.color(for: .background).color, in: RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(theme.color(for: .border).color, lineWidth: 1)
         }
     }
 
@@ -252,5 +364,96 @@ private struct ThemeProfileEditorView: View {
                 )
             }
         )
+    }
+}
+
+// Keep explanations beside the pickers instead of requiring a separate help
+// screen. Search also matches these descriptions (e.g. "tab bar" or "report").
+private extension NBThemeRole {
+    var usageDescription: String {
+        switch self {
+        case .background: return "Background behind the app's lists and screens."
+        case .elevated: return "List rows, cards, and other surfaces above the page."
+        case .elevatedHigh: return "Extra-raised panels and surfaces inside cards."
+        case .controlFill: return "Background of small controls, buttons, and icon tiles."
+        case .controlFillStrong: return "More prominent filled controls and selected-looking tiles."
+        case .overlaySurface: return "Floating panels, popovers, and badges shown over content."
+        case .overlayScrim: return "Dim layer behind an open overlay or drawer."
+        case .imageScrim: return "Dark gradient over images so captions remain readable."
+        case .mask: return "Mask and fade effects around artwork and progress views."
+        case .shadow: return "Soft shadows under floating content and cards."
+
+        case .text: return "Main text in lists, cards, and screen content."
+        case .textSecondary: return "Subtitles, descriptions, and less prominent labels."
+        case .textTertiary: return "Hints and low-priority supporting text."
+        case .disabledText: return "Labels for unavailable or disabled actions."
+        case .onAccent: return "Text and icons placed on solid accent-colored buttons."
+        case .overlayText: return "Text and outlines placed on top of images or overlays."
+
+        case .accent: return "Main button, icon, link, and interactive highlight color."
+        case .secondaryAccent: return "Secondary highlights and orange-style accent details."
+        case .tertiaryAccent: return "Third highlight color used for purple-style details."
+        case .title: return "Large titles within app screens (not the navigation bar)."
+        case .selection: return "Highlights for selected items and selected content."
+        case .heading: return "Section titles above groups of settings or list rows."
+        case .headingFill: return "Background behind the small badges beside section titles."
+        case .separator: return "Thin divider lines between rows and content."
+        case .border: return "Outlines around cards and other interface elements."
+        case .imageBorder: return "Fine outlines around app icons and image thumbnails."
+        case .success: return "Successful and completed states, such as checkmarks."
+        case .warning: return "Warnings and operations that are still in progress."
+        case .danger: return "Errors, destructive actions, and failed states."
+        case .expired: return "Expired certificates and other inactive states."
+
+        case .navigationBackground: return "Background of the top navigation bar."
+        case .navigationTitle: return "Large navigation-bar title when a screen uses large titles."
+        case .navigationText: return "Small, centered title in the top navigation bar."
+        case .navigationTint: return "Back arrows and tinted navigation-bar controls."
+        case .navigationShadow: return "Hairline or shadow below the top navigation bar."
+        case .tabBackground: return "Background of the bottom tab bar."
+        case .tabSelected: return "Icon and label of the currently selected bottom tab."
+        case .tabUnselected: return "Icons and labels of inactive bottom tabs."
+        case .tabShadow: return "Hairline or shadow above the bottom tab bar."
+        case .searchBackground: return "Fill inside the search field."
+        case .searchText: return "Text entered into the search field."
+        case .searchPlaceholder: return "Hint text shown in an empty search field."
+        case .searchTint: return "Search cursor and the search field's tinted controls."
+        case .segmentBackground: return "Background behind all options in a segmented picker."
+        case .segmentSelectedBackground: return "Fill of the active option in a segmented picker."
+        case .segmentText: return "Labels of unselected segmented-picker options."
+        case .segmentSelectedText: return "Label of the selected segmented-picker option."
+        case .barButtonTint: return "Text and icons of top-bar action buttons."
+
+        case .liveActivityBackground: return "Background of the Live Activity and Dynamic Island."
+        case .liveActivityActionText: return "Text of system-style actions in the Live Activity."
+        case .liveActivityPrimaryText: return "Main status text in the Live Activity."
+        case .liveActivitySecondaryText: return "Secondary details in the Live Activity."
+        case .liveActivityRunning: return "Indicator shown while a Live Activity is running."
+        case .liveActivityIdle: return "Indicator shown while a Live Activity is idle."
+
+        case .reportBackground: return "Page background of a Crypt Check HTML report."
+        case .reportCard: return "Cards and raised sections inside Crypt Check reports."
+        case .reportBorder: return "Outlines around report cards and report sections."
+        case .reportText: return "Main text inside Crypt Check reports."
+        case .reportDim: return "Muted captions and secondary text in reports."
+        case .reportAccent: return "Primary highlights and links inside reports."
+        case .reportSuccess: return "Successful results and positive report indicators."
+        case .reportWarning: return "Warnings and caution indicators in reports."
+        case .reportDanger: return "Errors and negative result indicators in reports."
+        case .reportSuccessFill: return "Light background behind successful result badges."
+        case .reportWarningFill: return "Light background behind warning badges."
+        case .reportDangerFill: return "Light background behind error badges."
+        case .reportTapHighlight: return "Brief highlight when tapping interactive report content."
+        case .reportPink: return "Pink-colored charts and decorative report highlights."
+        case .reportPurple: return "Purple-colored charts and decorative report highlights."
+        case .reportBlue: return "Blue-colored charts and decorative report highlights."
+        case .reportLime: return "Lime-colored charts and decorative report highlights."
+        case .reportInteractiveFill: return "Fill of filter pills and other interactive report controls."
+        case .reportInteractiveBorder: return "Outline of report filter pills and interactive controls."
+        case .reportSelectedFill: return "Background of a selected report filter or option."
+        case .reportSelectedText: return "Text of a selected report filter or option."
+        case .reportDropdown: return "Background of dropdown menus inside reports."
+        case .reportShadow: return "Shadows cast by report cards and floating menus."
+        }
     }
 }
