@@ -33,8 +33,7 @@ extension Storage {
 		// out of order, and when the timing lines up the app simply stops —
 		// no crash, no log, nothing written badly, which is why a relaunch
 		// and a retry of the exact same files works fine. Bulk import runs
-		// two at a time, so it had two background threads racing the main
-		// one, which is where it actually showed up.
+		// concurrent workers, which is where the race actually showed up.
 		//
 		// `perform` hops onto the context's own queue before touching
 		// anything. It also puts the haptic — a UIKit object that was being

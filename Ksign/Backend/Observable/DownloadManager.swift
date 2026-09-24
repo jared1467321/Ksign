@@ -69,10 +69,10 @@ class DownloadManager: NSObject, ObservableObject {
 
 	// MARK: - Bulk import backlog
 	//
-	// A `Download` only exists once an import has actually started, and the
-	// bulk importer deliberately runs two at a time so a big batch doesn't
-	// kick off thirty-five extractions at once. That's why the header's "+N"
-	// was pinned at "+1": it was counting work in flight, not work left.
+	// A `Download` only exists once an import task has actually started. Bulk
+	// import keeps a small feeder queue while the archive-memory coordinator
+	// decides how many extractions may run, so the header still needs to count
+	// both started tasks and the rest of the selected batch.
 	//
 	// This is the rest of the batch — selected, but not yet handed a
 	// `Download`. Batches are tracked by token rather than as one running

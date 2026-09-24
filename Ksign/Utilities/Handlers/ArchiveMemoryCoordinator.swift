@@ -3,15 +3,22 @@ import Darwin
 import OSLog
 
 // These are workload signals, not estimates of the device's physical RAM.
+enum ArchiveOperation: Int, Sendable {
+	case creation
+	case miniZipExtraction
+	case zipFoundationExtraction
+}
+
 struct ArchiveWorkload: Sendable {
 	var entries: Double = 0
 	var pathBytes: Double = 0
 	var uncompressedBytes: Double = 0
 	var compression: Int = 0
 	var complete = true
+	var operation: ArchiveOperation = .creation
 
 	func covers(_ other: Self) -> Bool {
-		complete && other.complete && compression == other.compression
+		complete && other.complete && operation == other.operation && compression == other.compression
 			&& other.entries <= max(1, entries) * 1.5
 			&& other.pathBytes <= max(1, pathBytes) * 1.5
 			&& other.uncompressedBytes <= max(1, uncompressedBytes) * 2
@@ -22,11 +29,12 @@ struct ArchiveWorkload: Sendable {
 	var metadataAllowance: Double { 2 * (pathBytes + entries * 512) }
 }
 
-// Native archives are synchronous. Cancellation withdraws a request, but never
-// releases a running writer's reservation. Only its owner may finish the lease.
+// Archive work can be synchronous. Cancellation withdraws a request, but never
+// releases a running operation's reservation. Only its owner may finish the lease.
 // All state and kernel callbacks live on this queue, independent of MainActor.
 final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	static let shared = ArchiveMemoryCoordinator()
+	static let admissionCeiling = 5
 
 	struct Lease: Sendable { fileprivate let id: UUID }
 	private struct Snapshot {
@@ -73,7 +81,7 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	private var lastHold: [UUID: String] = [:]
 	private var lastPeriodic: TimeInterval = 0
 	private var buildCount = 0
-	private let ceiling = 5
+	private let ceiling = ArchiveMemoryCoordinator.admissionCeiling
 	private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
 	private init(monitorPressure: Bool = true) {

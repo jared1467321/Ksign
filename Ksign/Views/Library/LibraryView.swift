@@ -627,12 +627,12 @@ extension LibraryView {
         }
     }
 
-    // Imports IPAs with a bounded queue: at most `maxConcurrent` files are
-    // extracted at once, the rest wait their turn. Importing 5+ at once used
-    // to kick off every extraction simultaneously and freeze the app.
+    // Keep only enough import tasks in flight to feed the archive-memory gate.
+    // Actual extraction concurrency is decided globally by
+    // `ArchiveMemoryCoordinator` from live process headroom and learned cost.
     private func _importIPAs(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
-        let maxConcurrent = 2
+        let queueDepth = ArchiveMemoryCoordinator.admissionCeiling
 
         Task {
             let token = await MainActor.run {
@@ -642,16 +642,16 @@ extension LibraryView {
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
 
-                // Prime the queue with up to `maxConcurrent` imports.
-                let initial = min(maxConcurrent, urls.count)
+                // Prime enough work to saturate the coordinator's maximum
+                // possible admission level without launching the whole batch.
+                let initial = min(queueDepth, urls.count)
                 while next < initial {
                     let url = urls[next]
                     next += 1
                     group.addTask { await Self._importOne(url, token: token) }
                 }
 
-                // Each time one finishes, start the next one — so the number
-                // in flight never exceeds `maxConcurrent`.
+                // Each time one finishes, feed the coordinator another item.
                 while await group.next() != nil {
                     if next < urls.count {
                         let url = urls[next]

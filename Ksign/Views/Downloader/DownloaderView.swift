@@ -595,8 +595,8 @@ private extension DownloaderView {
         runCryptChecks(items)
     }
 
-    // Imports every selected download, at most 2 at a time so a big batch
-    // doesn't kick off all the extractions at once and freeze the app.
+    // Keep enough tasks in flight to feed the global archive-memory gate.
+    // The coordinator, not this view, decides how many may extract at once.
     func _bulkImportSelected() {
         let items = downloadManager.finishedItems.filter { _selectedDownloads.contains($0.id) }
         guard !items.isEmpty else { return }
@@ -616,8 +616,8 @@ private extension DownloaderView {
 
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
-                let maxConcurrent = 2
-                let initial = min(maxConcurrent, items.count)
+                let queueDepth = ArchiveMemoryCoordinator.admissionCeiling
+                let initial = min(queueDepth, items.count)
                 while next < initial {
                     let item = items[next]; next += 1
                     group.addTask { await Self._importOneDownload(item, token: token) }

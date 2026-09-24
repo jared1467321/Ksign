@@ -15,6 +15,7 @@ import Foundation.NSByteCountFormatter
 final class AppFileHandler: NSObject, @unchecked Sendable {
 	private let _fileManager = FileManager.default
 	private let _uuid = UUID().uuidString
+	private let _memoryJobID = UUID()
 	private let _uniqueWorkDir: URL
 	var uniqueWorkDirPayload: URL?
 
@@ -61,23 +62,81 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		let library = ArchiveExtractionLibrary.normalized(
 			UserDefaults.standard.string(forKey: "Feather.extractionLibrary")
 		)
-		
-		try await withCheckedThrowingContinuation { continuation in
-			DispatchQueue.global(qos: .utility).async {
-				do {
-					if library == ArchiveExtractionLibrary.zipFoundation {
-						try self._ZIPFoundation(download: download)
-					} else {
-						try self._MiniZip(download: download)
+
+		let gate = ArchiveMemoryCoordinator.shared
+		let lease = try await gate.acquire(
+			job: _memoryJobID,
+			attempt: UUID(),
+			workload: _memoryWorkload(for: library)
+		)
+
+		var result: Result<Void, Error>
+		do {
+			try Task.checkCancellation()
+			result = await withCheckedContinuation { continuation in
+				DispatchQueue.global(qos: .utility).async {
+					let extractionResult: Result<Void, Error> = Result {
+						try autoreleasepool {
+							gate.checkpoint(lease, "before native")
+							defer { gate.checkpoint(lease, "native returned") }
+
+							if library == ArchiveExtractionLibrary.zipFoundation {
+								try self._ZIPFoundation(download: download)
+							} else {
+								try self._MiniZip(download: download)
+							}
+							self.uniqueWorkDirPayload = self._uniqueWorkDir.appendingPathComponent("Payload")
+						}
 					}
-					self.uniqueWorkDirPayload = self._uniqueWorkDir.appendingPathComponent("Payload")
-					continuation.resume()
-				} catch {
-					print("[\(self._uuid)] Extraction error: \(error.localizedDescription)")
-					continuation.resume(throwing: error)
+					continuation.resume(returning: extractionResult)
 				}
 			}
+		} catch {
+			result = .failure(error)
 		}
+
+		gate.checkpoint(lease, "temporary objects released")
+		await gate.settle()
+		if Task.isCancelled { result = .failure(CancellationError()) }
+		let succeeded: Bool
+		switch result {
+		case .success: succeeded = true
+		case .failure: succeeded = false
+		}
+		gate.finish(lease, succeeded: succeeded)
+
+		if case .failure(let error) = result {
+			print("[\(_uuid)] Extraction error: \(error.localizedDescription)")
+		}
+		try result.get()
+	}
+
+	private func _memoryWorkload(for library: String) -> ArchiveWorkload {
+		let operation: ArchiveOperation = library == ArchiveExtractionLibrary.zipFoundation
+			? .zipFoundationExtraction
+			: .miniZipExtraction
+		var archiveBytes: Double = 0
+		var complete = true
+
+		do {
+			let values = try _ipa.resourceValues(forKeys: [.fileSizeKey])
+			if let fileSize = values.fileSize {
+				archiveBytes = Double(fileSize)
+			} else {
+				complete = false
+			}
+		} catch {
+			complete = false
+		}
+
+		return ArchiveWorkload(
+			entries: 1,
+			pathBytes: Double(_ipa.lastPathComponent.utf8.count),
+			uncompressedBytes: archiveBytes,
+			compression: 0,
+			complete: complete,
+			operation: operation
+		)
 	}
 	
 	private func _MiniZip(download: Download?) throws {

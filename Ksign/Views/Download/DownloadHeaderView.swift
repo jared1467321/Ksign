@@ -16,8 +16,8 @@ struct DownloadHeaderView: View {
 	// currently running, plus the rest of the batch that hasn't started yet.
 	//
 	// Previously this was just `manualDownloads.count - 1`, which only ever
-	// saw what was in flight — and since bulk import runs two at a time, that
-	// was permanently "+1" no matter how many apps you'd selected. Now a
+	// saw what was in flight, so a bounded bulk import could hide most of the
+	// selected backlog. Now a
 	// 35-app import reads "+34" and counts down as they land.
 	private var _remainingCount: Int {
 		let inFlight = downloadManager.manualDownloads.count
