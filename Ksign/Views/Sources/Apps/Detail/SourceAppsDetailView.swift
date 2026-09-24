@@ -187,8 +187,8 @@ struct SourceAppsDetailView: View {
 				}
 			}())
 		}
-		.nbThemeCanvas()
 		.flexibleHeaderScrollView()
+		.nbThemeCanvas()
 		.shouldSetInset()
 		.toolbar {
 			NBToolbarButton(
