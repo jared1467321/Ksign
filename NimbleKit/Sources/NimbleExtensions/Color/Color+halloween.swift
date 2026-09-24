@@ -317,11 +317,43 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var colors: [String: NBThemeColor]
+    /// Per-call-site exceptions used by the in-place editor. Existing saved
+    /// profiles decode with an empty dictionary, so the v1 theme store remains
+    /// backwards compatible.
+    public var elementOverrides: [String: NBThemeColor]
 
-    public init(id: String = UUID().uuidString, name: String, colors: [String: NBThemeColor]) {
+    public init(
+        id: String = UUID().uuidString,
+        name: String,
+        colors: [String: NBThemeColor],
+        elementOverrides: [String: NBThemeColor] = [:]
+    ) {
         self.id = id
         self.name = name
         self.colors = colors
+        self.elementOverrides = elementOverrides
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, colors, elementOverrides
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        colors = try container.decode([String: NBThemeColor].self, forKey: .colors)
+        elementOverrides = try container.decodeIfPresent([String: NBThemeColor].self, forKey: .elementOverrides) ?? [:]
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(colors, forKey: .colors)
+        if !elementOverrides.isEmpty {
+            try container.encode(elementOverrides, forKey: .elementOverrides)
+        }
     }
 
     public var isBuiltIn: Bool { id == Self.halloweenID }
@@ -336,6 +368,18 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
 
     public mutating func setColor(_ color: NBThemeColor, for role: NBThemeRole) {
         colors[role.rawValue] = color
+    }
+
+    public func elementOverride(for elementID: String) -> NBThemeColor? {
+        elementOverrides[elementID]
+    }
+
+    public mutating func setElementOverride(_ color: NBThemeColor?, for elementID: String) {
+        if let color {
+            elementOverrides[elementID] = color
+        } else {
+            elementOverrides.removeValue(forKey: elementID)
+        }
     }
 
     public static let halloween: NBThemeProfile = {
@@ -467,6 +511,7 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     @Published public private(set) var previewRevision: UInt64 = 0
     private var previewThemeID: String?
     private var previewRole: NBThemeRole?
+    private var previewElementID: String?
     private var previewValue: NBThemeColor?
 
     private let defaults: UserDefaults
@@ -489,24 +534,57 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         previewThemeID == themeID && previewRole == role
     }
 
-    /// Resolves the in-progress color only for the active profile and role.
-    /// Everything else continues to read the original saved theme.
+    public func isPreviewing(_ role: NBThemeRole, elementID: String?, in themeID: String) -> Bool {
+        previewThemeID == themeID && previewRole == role && previewElementID == elementID
+    }
+
+    /// Resolves the in-progress semantic-role color. Exact-element previews do
+    /// not leak into other consumers of the same role.
     public func activeColor(for role: NBThemeRole) -> NBThemeColor {
         if previewThemeID == selectedThemeID,
            previewRole == role,
+           previewElementID == nil,
            let previewValue {
             return previewValue
         }
         return activeTheme.color(for: role)
     }
 
+    /// Resolves a foreground call site, including a persistent local exception
+    /// and an in-progress exact-element preview when one exists.
+    public func activeColor(for role: NBThemeRole, elementID: String) -> NBThemeColor {
+        if previewThemeID == selectedThemeID,
+           previewRole == role,
+           previewElementID == elementID,
+           let previewValue {
+            return previewValue
+        }
+        if let local = activeTheme.elementOverride(for: elementID) {
+            return local
+        }
+        return activeColor(for: role)
+    }
+
     public func beginColorPreview(for role: NBThemeRole, in themeID: String) {
+        beginColorPreview(for: role, elementID: nil, initialColor: nil, in: themeID)
+    }
+
+    public func beginColorPreview(
+        for role: NBThemeRole,
+        elementID: String?,
+        initialColor: NBThemeColor? = nil,
+        in themeID: String
+    ) {
         guard themeID == selectedThemeID,
               themeID != NBThemeProfile.halloweenID,
-              let original = profile(id: themeID)?.color(for: role) else { return }
+              let profile = profile(id: themeID) else { return }
+
+        let semanticDefault = initialColor ?? profile.color(for: role)
+        let original = elementID.flatMap { profile.elementOverride(for: $0) } ?? semanticDefault
         // A previous editor cannot leave a stale override in a new session.
         previewThemeID = themeID
         previewRole = role
+        previewElementID = elementID
         previewValue = original
         previewRevision &+= 1
     }
@@ -527,11 +605,20 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     public func endColorPreview(for role: NBThemeRole, in themeID: String, save: Bool) {
         guard isPreviewing(role, in: themeID) else { return }
         let editedColor = save ? previewValue : nil
+        let editedElementID = previewElementID
         previewThemeID = nil
         previewRole = nil
+        previewElementID = nil
         previewValue = nil
         previewRevision &+= 1
-        if let editedColor {
+        guard let editedColor else { return }
+        if let editedElementID {
+            setElementOverride(
+                editedColor,
+                for: editedElementID,
+                in: themeID
+            )
+        } else {
             setColor(editedColor, for: role, in: themeID)
         }
     }
@@ -575,7 +662,11 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Custom Theme" : trimmed
-        let theme = NBThemeProfile(name: finalName, colors: base.colors)
+        let theme = NBThemeProfile(
+            name: finalName,
+            colors: base.colors,
+            elementOverrides: base.elementOverrides
+        )
         customThemes.append(theme)
         selectedThemeID = theme.id
         persist()
@@ -627,16 +718,54 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         persist()
     }
 
+    public func hasElementOverride(_ elementID: String, in themeID: String? = nil) -> Bool {
+        let id = themeID ?? selectedThemeID
+        return profile(id: id)?.elementOverride(for: elementID) != nil
+    }
+
+    public func clearElementOverride(_ elementID: String, in themeID: String? = nil) {
+        let id = themeID ?? selectedThemeID
+        guard id != NBThemeProfile.halloweenID,
+              let index = customThemes.firstIndex(where: { $0.id == id }),
+              customThemes[index].elementOverride(for: elementID) != nil else { return }
+        var theme = customThemes[index]
+        theme.setElementOverride(nil, for: elementID)
+        customThemes[index] = theme
+        persist()
+    }
+
+    private func setElementOverride(
+        _ color: NBThemeColor,
+        for elementID: String,
+        in themeID: String
+    ) {
+        guard themeID != NBThemeProfile.halloweenID,
+              let index = customThemes.firstIndex(where: { $0.id == themeID }) else { return }
+
+        var theme = customThemes[index]
+        // Save Element always pins a local exception, even when its RGB equals
+        // the current role. Only Use Theme Color Instead reconnects the role.
+        let stored: NBThemeColor? = color
+        guard theme.elementOverride(for: elementID) != stored else { return }
+        theme.setElementOverride(stored, for: elementID)
+        customThemes[index] = theme
+        persist()
+    }
+
     public func resetActiveThemeColors() {
         resetThemeColors(id: selectedThemeID)
     }
 
     public func resetThemeColors(id: String) {
+        if previewThemeID == id, let previewRole {
+            endColorPreview(for: previewRole, in: id, save: false)
+        }
         guard id != NBThemeProfile.halloweenID,
               let index = customThemes.firstIndex(where: { $0.id == id }) else { return }
 
         var theme = customThemes[index]
         theme.colors = NBThemeProfile.halloween.colors
+        theme.elementOverrides.removeAll()
         customThemes[index] = theme
         persist()
     }

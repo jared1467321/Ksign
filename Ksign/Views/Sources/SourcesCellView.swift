@@ -27,7 +27,7 @@ struct SourcesCellView: View {
 		}
 		.contextMenu {
 			_contextActions(for: source)
-			Divider().overlay(NBHalloween.hairline)
+			Divider().nbThemeOverlay(.separator)
 			_actions(for: source)
 		}
 	}

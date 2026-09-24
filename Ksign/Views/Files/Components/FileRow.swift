@@ -62,28 +62,28 @@ struct FileRow: View {
                 if file.isDirectory {
                     if file.isAppDirectory {
                         Image(systemName: "app.badge")
-                            .foregroundColor(NBHalloween.accent)
+                            .nbThemeForeground(.accent)
                     } else {
                         Image(systemName: "folder")
-                            .foregroundColor(NBHalloween.accent)
+                            .nbThemeForeground(.accent)
                     }
                 } else if file.isImageFile {
                     ImageRow(file: file)
                 } else if file.isArchive {
                     Image(systemName: "doc.zipper")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                 } else if file.isPlistFile {
                     Image(systemName: "list.bullet")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                 } else if file.isP12Certificate {
                     Image(systemName: "key")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                 } else if file.isKsignFile {
                     Image(systemName: "questionmark")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                 } else {
                     Image(systemName: "doc")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                 }
             }
             .font(.title2)
@@ -100,17 +100,17 @@ struct FileRow: View {
                     if !file.isDirectory {
                         Text(file.formattedSize)
                             .font(.caption)
-                            .foregroundColor(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                     }
                     if let date = file.creationDate {
                         if !file.isDirectory {
                             Text("•")
                                 .font(.caption)
-                                .foregroundColor(NBHalloween.textSecondary)
+                                .nbThemeForeground(.textSecondary)
                         }
                         Text(date, style: .date)
                             .font(.caption)
-                            .foregroundColor(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                     }
                 }
             }
@@ -119,19 +119,19 @@ struct FileRow: View {
             if viewModel.isEditMode == .inactive {
                 if file.isDirectory {
                     Image(systemName: "chevron.right")
-                        .foregroundColor(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                         .font(.system(size: 12))
                 }
             }
             else {
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                         .font(.system(size: 22))
                 }
                 else {
                     Image(systemName: "circle")
-                        .foregroundColor(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                         .font(.system(size: 22))
                 }
             }

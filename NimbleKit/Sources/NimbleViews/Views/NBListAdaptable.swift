@@ -32,16 +32,15 @@ public struct NBListAdaptable<Content>: View where Content: View {
 				}
 				.listStyle(.plain)
 				// See NBList: sets both hierarchy levels so descendant
-				// `.foregroundStyle(.secondary)` picks up the green-grey.
-				.foregroundStyle(NBHalloween.text, NBHalloween.textSecondary)
-				.listRowSeparatorTint(NBHalloween.hairline)
-				.scrollContentBackground(.hidden)
+				// `.foregroundStyle(.secondary)` picks up the green-grey,
+				// while also making the actual scroll canvas exact-editable.
+				.nbThemeCanvas()
 			} else {
 				NBGrid {
 					_content
 				}
+				.nbThemeBackground(.background, ignoresSafeAreaEdges: .all)
 			}
 		}
-		.background(NBHalloween.background.ignoresSafeArea().nbThemeInspectorTarget(.background))
 	}
 }

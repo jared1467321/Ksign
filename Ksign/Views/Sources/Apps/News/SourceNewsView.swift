@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import AltSourceKit
 
 struct SourceNewsView: View {
@@ -29,7 +30,7 @@ struct SourceNewsView: View {
 					.padding(.horizontal, 21)
 				}
 				.frame(height: 150)
-				.opacity(isLoading ? 0 : 1)
+				.nbThemeOpacity(isLoading ? 0 : 1)
 				.transition(.opacity)
 			}
 		}

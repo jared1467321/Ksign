@@ -43,15 +43,15 @@ struct CertificatesView: View {
 		}
 		.navigationTitle(.localized("Certificates"))
 		.navigationBarTitleDisplayMode(.inline)
-        .overlay {
+        .nbThemeOverlay {
             if certificates.isEmpty {
                 if #available(iOS 17, *) {
                     ContentUnavailableView {
                         Label(.localized("No Certificates"), systemImage: "questionmark.folder.fill")
-                        .foregroundStyle(NBHalloween.heading)
+                        .nbThemeForeground(.heading)
                     } description: {
                         Text(.localized("Get started signing by importing your first certificate."))
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                     } actions: {
                         Button {
                             _isAddingPresenting = true
@@ -104,20 +104,19 @@ extension CertificatesView {
 				cert: cert
 			)
 			.padding()
-			.background(
+			.nbThemeBackground(
 				RoundedRectangle(cornerRadius: _cornerRadius)
-					.fill(NBHalloween.controlFill)
+					.nbThemeFill(.controlFill)
 			)
-			.overlay(
-				RoundedRectangle(cornerRadius: _cornerRadius)
-					.strokeBorder(
-						_selectedCertBinding.wrappedValue == index ? NBHalloween.accent : Color.clear,
-						lineWidth: 2
-					)
-			)
+			.nbThemeOverlay {
+                if _selectedCertBinding.wrappedValue == index {
+                    RoundedRectangle(cornerRadius: _cornerRadius)
+                        .nbThemeStrokeBorder(.accent, lineWidth: 2)
+                }
+            }
 			.contextMenu {
 				_contextActions(for: cert)
-				Divider().overlay(NBHalloween.hairline)
+				Divider().nbThemeOverlay(.separator)
 				_actions(for: cert)
 			}
 			.animation(.smooth, value: _selectedCertBinding.wrappedValue)

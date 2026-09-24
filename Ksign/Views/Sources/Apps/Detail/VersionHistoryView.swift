@@ -26,7 +26,7 @@ struct VersionHistoryView: View {
                         description: version.localizedDescription ?? .localized("No release notes available")
                     )
                     .padding(.horizontal)
-                    .background(NBHalloween.background)
+                    .nbThemeBackground(.background)
                     .contextMenu {
                         if let downloadURL = version.downloadURL {
                             Button {
@@ -47,11 +47,12 @@ struct VersionHistoryView: View {
                         }
                     }
                     
-                    Divider().overlay(NBHalloween.hairline).padding(.horizontal)
+                    Divider().nbThemeOverlay(.separator).padding(.horizontal)
                 }
             }
             .padding(.top, 8)
         }
+        .nbThemeCanvas()
     }
 }
 

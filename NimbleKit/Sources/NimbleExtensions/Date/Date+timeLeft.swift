@@ -11,7 +11,8 @@ import SwiftUI
 extension Date {
 	public struct ExpirationInfo {
 		public let formatted: String
-		public let color: Color
+		public var color: Color { NBHalloween.themeColor(role).color }
+		public let role: NBThemeRole
 		public let icon: String
 	}
 	
@@ -24,20 +25,20 @@ extension Date {
 		guard timeLeft > 0 else {
 			return ExpirationInfo(
 				formatted: .localized("Expired"),
-				color: NBHalloween.expired,
+				role: .expired,
 				icon: "xmark.octagon"
 			)
 		}
 		
 		let daysLeft = Int(timeLeft / 86400)
-		let color = Color.expiration(days: daysLeft)
+		let role: NBThemeRole = daysLeft < 14 ? .danger : daysLeft < 60 ? .warning : .success
 		
 		let formatter = Date._expirationFormatter(for: timeLeft)
 		let timeString = formatter.string(from: timeLeft) ?? .localized("%lld days", arguments: daysLeft)
 		
 		return ExpirationInfo(
 			formatted: timeString,
-			color: color,
+			role: role,
 			icon: "clock"
 		)
 	}

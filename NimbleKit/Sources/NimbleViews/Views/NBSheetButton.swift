@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 
 public struct NBSheetButton: View {
+	@ObservedObject private var themes = NBThemeManager.shared
 	private var _title: String
 	
 	public init(title: String) {
@@ -20,24 +21,24 @@ public struct NBSheetButton: View {
             Text(_title)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.clear)
-                .foregroundColor(NBHalloween.onAccent)
+                .nbThemeForeground(.onAccent)
                 .nbThemeInspectorTarget(.onAccent)
                 .nbThemeInspectorTarget(.accent)
-                .clipShape(
+                .nbThemeClipShape(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
                 )
                 .bold()
                 .frame(height: 50)
-                .glassEffect(.regular.tint(Color.accentColor.opacity(0.9)).interactive(), in: .rect(cornerRadius: 28))
+                .glassEffect(.regular.tint(themes.activeColor(for: .accent).color.opacity(0.9)).interactive(), in: .rect(cornerRadius: 28))
                 .padding()
         } else {
             Text(_title)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.accentColor)
-                .foregroundColor(NBHalloween.onAccent)
+                .nbThemeBackground(.accent)
+                .nbThemeForeground(.onAccent)
                 .nbThemeInspectorTarget(.onAccent)
                 .nbThemeInspectorTarget(.accent)
-                .clipShape(
+                .nbThemeClipShape(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
                 .bold()

@@ -66,17 +66,17 @@ extension AppIconView {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(iconOption.title)
                         .font(.headline)
-                        .foregroundColor(NBHalloween.text)
+                        .nbThemeForeground(.text)
                     Text(iconOption.subtitle)
                         .font(.subheadline)
-                        .foregroundColor(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                 }
                 
                 Spacer()
                 
                 if selectedIcon == iconOption.alternateIconName {
                     Image(systemName: "checkmark")
-                        .foregroundColor(NBHalloween.accent)
+                        .nbThemeForeground(.accent)
                         .font(.headline)
                 }
             }

@@ -14,6 +14,7 @@ import NukeUI
 
 // MARK: - SourceAppsDetailView
 struct SourceAppsDetailView: View {
+    @ObservedObject private var themes = NBThemeManager.shared
 	@ObservedObject var downloadManager = DownloadManager.shared
 	@State private var _downloadProgress: Double = 0
 	@State var cancellable: AnyCancellable? // Combine
@@ -51,10 +52,10 @@ struct SourceAppsDetailView: View {
 						Text(app.currentName)
 							.font(.title2)
 							.fontWeight(.semibold)
-							.foregroundColor(NBHalloween.text)
+							.nbThemeForeground(.text)
 						Text(app.currentDescription ?? .localized("An awesome application"))
 							.font(.subheadline)
-							.foregroundColor(NBHalloween.textSecondary)
+							.nbThemeForeground(.textSecondary)
 						
 						Spacer()
 						
@@ -64,16 +65,16 @@ struct SourceAppsDetailView: View {
 					.frame(maxWidth: .infinity, alignment: .leading)
 				}
 				
-				Divider().overlay(NBHalloween.hairline)
+				Divider().nbThemeOverlay(.separator)
 				_infoPills(app: app)
-				Divider().overlay(NBHalloween.hairline)
+				Divider().nbThemeOverlay(.separator)
                 
                 if let screenshotURLs = app.screenshotURLs {
                     NBSection(.localized("Screenshots")) {
                         _screenshots(screenshotURLs: screenshotURLs)
                     }
                     
-                    Divider().overlay(NBHalloween.hairline)
+                    Divider().nbThemeOverlay(.separator)
                 }
 				
 				if
@@ -97,7 +98,7 @@ struct SourceAppsDetailView: View {
                         }
 					}
 					
-					Divider().overlay(NBHalloween.hairline)
+					Divider().nbThemeOverlay(.separator)
 				}
 				
 				if let appDesc = app.localizedDescription {
@@ -108,7 +109,7 @@ struct SourceAppsDetailView: View {
 						.frame(maxWidth: .infinity, alignment: .leading)
 					}
 					
-					Divider().overlay(NBHalloween.hairline)
+					Divider().nbThemeOverlay(.separator)
 				}
                 
                 NBSection(.localized("Information")) {
@@ -154,7 +155,7 @@ struct SourceAppsDetailView: View {
 							} else {
 								Text(.localized("No Entitlements listed."))
 									.font(.subheadline)
-									.foregroundStyle(NBHalloween.textSecondary)
+									.nbThemeForeground(.textSecondary)
 							}
 							if let privacyItems = appPermissions.privacy {
 								ForEach(privacyItems, id: \.self) { item in
@@ -166,13 +167,13 @@ struct SourceAppsDetailView: View {
 							} else {
 								Text(.localized("No Privacy Permissions listed."))
 									.font(.subheadline)
-									.foregroundStyle(NBHalloween.textSecondary)
+									.nbThemeForeground(.textSecondary)
 							}
 						}
 						.padding()
-						.background(
+						.nbThemeBackground(
 							RoundedRectangle(cornerRadius: 18, style: .continuous)
-								.fill(NBHalloween.controlFill)
+								.nbThemeFill(.controlFill)
 						)
 					}
 				}
@@ -186,6 +187,7 @@ struct SourceAppsDetailView: View {
 				}
 			}())
 		}
+		.nbThemeCanvas()
 		.flexibleHeaderScrollView()
 		.shouldSetInset()
 		.toolbar {
@@ -222,6 +224,7 @@ struct SourceAppsDetailView: View {
 			.aspectRatio(contentMode: .fill)
 			.frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
 			.clipped()
+                            .nbThemeContentSurface()
 	}
 }
 
@@ -231,6 +234,7 @@ extension SourceAppsDetailView {
 	@ViewBuilder
 	private func _header() -> some View {
 		ZStack {
+			Group {
 			if let iconURL = source.currentIconURL {
 				LazyImage(url: iconURL) { state in
 					if let image = state.image {
@@ -238,6 +242,7 @@ extension SourceAppsDetailView {
 							.aspectRatio(contentMode: .fill)
 							.frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
 							.clipped()
+                            .nbThemeContentSurface()
 					} else {
 						standardHeader
 					}
@@ -246,19 +251,25 @@ extension SourceAppsDetailView {
 				standardHeader
 			}
 			
+            }
+            .nbThemePaintLayer(0)
+
 			NBVariableBlurView()
 				.rotationEffect(.degrees(-180))
-				.overlay(
+				.nbThemeOverlay(
 					LinearGradient(
 						gradient: Gradient(colors: [
-							NBHalloween.mask,
+							themes.activeColor(for: .mask).color,
 							Color.clear
 						]),
 						startPoint: .top,
 						endPoint: .bottom
 					)
+                    .nbThemeInspectorTarget(.mask)
 				)
+                .nbThemePaintLayer(1)
 		}
+        .nbThemePaintGroup()
 	}
 	
 	@ViewBuilder
@@ -272,7 +283,8 @@ extension SourceAppsDetailView {
 					icon: pill.icon,
 					color: pill.color,
 					index: index,
-					count: pillItems.count
+					count: pillItems.count,
+                    themeRole: pill.themeRole
 				)
 			}
 		}
@@ -282,11 +294,11 @@ extension SourceAppsDetailView {
 		var pills: [NBPillItem] = []
 		
 		if let version = app.currentVersion {
-			pills.append(NBPillItem(title: version, icon: "tag", color: NBHalloween.accent))
+			pills.append(NBPillItem(title: version, icon: "tag", themeRole: .accent))
 		}
 		
 		if let size = app.size {
-			pills.append(NBPillItem(title: size.formattedByteCount, icon: "archivebox", color: NBHalloween.textSecondary))
+			pills.append(NBPillItem(title: size.formattedByteCount, icon: "archivebox", themeRole: .textSecondary))
 		}
 		
 		return pills
@@ -295,7 +307,7 @@ extension SourceAppsDetailView {
 	@ViewBuilder
 	private func _infoRow(title: String, value: String) -> some View {
 		LabeledContent(title, value: value)
-		Divider().overlay(NBHalloween.hairline)
+		Divider().nbThemeOverlay(.separator)
 	}
 	
 	@ViewBuilder
@@ -313,10 +325,11 @@ extension SourceAppsDetailView {
 									maxWidth: UIScreen.main.bounds.width - 32,
 									maxHeight: 400
 								)
-								.clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-								.overlay {
+								.nbThemeContentSurface()
+                                .nbThemeClipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+								.nbThemeOverlay {
 									RoundedRectangle(cornerRadius: 16, style: .continuous)
-										.strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
+										.nbThemeStrokeBorder(.imageBorder, lineWidth: 1)
 								}
 								.onTapGesture {
 									_selectedScreenshotIndex = index

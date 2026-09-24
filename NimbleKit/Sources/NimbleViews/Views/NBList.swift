@@ -38,12 +38,12 @@ public struct NBList<Content>: View where Content: View {
 			case .form:
 				Form {
 					_content
-						.listRowBackground(NBHalloween.elevated.nbThemeInspectorTarget(.elevated))
+						.nbThemeRow()
 				}
 			case .list:
 				List {
 					_content
-						.listRowBackground(NBHalloween.elevated.nbThemeInspectorTarget(.elevated))
+						.nbThemeRow()
 				}
 			}
 		}
@@ -65,10 +65,7 @@ public struct NBList<Content>: View where Content: View {
 		// It does not catch `.foregroundColor(.secondary)` — that's a fixed
 		// system colour rather than a hierarchical level, so those call sites
 		// still opt out and have to be converted individually.
-		.foregroundStyle(NBHalloween.text, NBHalloween.textSecondary)
-		.listRowSeparatorTint(NBHalloween.hairline)
-		.scrollContentBackground(.hidden)
-		.background(NBHalloween.background.ignoresSafeArea().nbThemeInspectorTarget(.background))
+		.nbThemeCanvas()
 		.navigationTitle(_title)
 		.navigationBarTitleDisplayMode(_mode)
 	}

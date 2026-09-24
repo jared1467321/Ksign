@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct VariedTabbarView: View {
 	var previewTab: TabEnum? = nil
@@ -16,14 +17,20 @@ struct VariedTabbarView: View {
 		// survives switching tabs. It was a sheet on `LibraryView`, which meant
 		// it only existed on that screen and died the moment it was dismissed.
 		ZStack(alignment: .bottom) {
+			Group {
 			if #available(iOS 18, *) {
 				ExtendedTabbarView(previewTab: previewTab)
 			} else {
 				TabbarView(previewTab: previewTab)
 			}
+            }
+            .nbThemePaintLayer(0)
 
 			InstallDrawerView()
+                .nbThemePaintLayer(1)
 			IPAVaultDrawerView()
+                .nbThemePaintLayer(2)
 		}
+        .nbThemePaintGroup()
 	}
 }

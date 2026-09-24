@@ -40,7 +40,8 @@ struct FeatherApp: App {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-			.tint(NBHalloween.accent)
+			.nbThemeTint(.accent)
+            .nbThemeCanvas()
 			.animation(.smooth, value: downloadManager.manualDownloads.description)
             .animation(.smooth, value: extractManager.extractItems.description)
 			.onReceive(themeManager.objectWillChange) { _ in

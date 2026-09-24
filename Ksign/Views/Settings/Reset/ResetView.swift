@@ -133,7 +133,7 @@ extension ResetView {
 				}
 			}
 		}
-		.foregroundStyle(NBHalloween.danger)
+		.nbThemeForeground(.danger)
 	}
 }
 

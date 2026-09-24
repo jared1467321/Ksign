@@ -28,7 +28,7 @@ struct BulkExportProgressView: View {
 						.controlSize(.small)
 					Text(manager.currentName)
 						.font(.subheadline)
-						.foregroundColor(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 						.lineLimit(1)
 						.truncationMode(.middle)
 				}
@@ -44,7 +44,7 @@ struct BulkExportProgressView: View {
 		}
 		.padding(20)
 		.frame(maxWidth: 320)
-		.background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+		.nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
 		.shadow(radius: 30)
 		.padding()
 	}

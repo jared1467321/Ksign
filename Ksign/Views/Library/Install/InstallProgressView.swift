@@ -44,7 +44,7 @@ struct InstallProgressView: View {
 				// Outside the scale effect on purpose: the dot holds still
 				// while the icon breathes, and it's outside the pie mask so
 				// it can't be clipped by the progress fill.
-				.overlay(alignment: .topTrailing) { _activityDot }
+				.nbThemeOverlay(alignment: .topTrailing) { _activityDot }
 		}
 	}
 	
@@ -63,29 +63,32 @@ struct InstallProgressView: View {
 	// is the one thing here that shouldn't blend in. Orange and purple are the
 	// two colours on this screen that aren't the accent.
 	private var _activityDot: some View {
-		let dot = activity == .upcoming ? NBHalloween.neonPurple : NBHalloween.warning
+		let dot: NBThemeRole = activity == .upcoming ? .tertiaryAccent : .warning
 		return ZStack {
 			// Soft halo that breathes in and out behind the dot.
 			Circle()
-				.fill(dot)
+				.nbThemeFill(dot)
 				.frame(width: 13, height: 13)
 				.blur(radius: 3.5)
 				.scaleEffect(_isPulsing ? 2.0 : 1.2)
-				.opacity(_isPulsing ? 0.85 : 0.3)
+				.nbThemeOpacity(_isPulsing ? 0.85 : 0.3)
+                .nbThemePaintLayer(0)
 				.animation(
 					.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
 					value: _isPulsing
 				)
 
 			Circle()
-				.fill(dot)
-				.overlay(
-					Circle().strokeBorder(NBHalloween.overlayText.opacity(0.9), lineWidth: 1)
+				.nbThemeFill(dot)
+				.nbThemeOverlay(
+					Circle().nbThemeStrokeBorder(.overlayText, opacity: 0.9, lineWidth: 1)
 				)
 				.frame(width: 13, height: 13)
-				.shadow(color: dot.opacity(0.9), radius: 4)
+				.nbThemeShadow(dot, opacity: 0.9, radius: 4)
+                .nbThemePaintLayer(1)
 		}
-		.opacity(activity == .none ? 0 : 1)
+        .nbThemePaintGroup()
+			.nbThemeOpacity(activity == .none ? 0 : 1)
 		.scaleEffect(activity == .none ? 0.5 : 1)
 		// Covers the purple -> orange handover as well as the fade in, so a
 		// job joining the live manifest crossfades rather than snapping.
@@ -100,15 +103,15 @@ struct InstallProgressView: View {
 	private func _appIcon() -> some View {
 		ZStack {
 			FRAppIconView(app: app)
-				.opacity(_isPulsing ? 0.2 : 0.2)
+				.nbThemeOpacity(_isPulsing ? 0.2 : 0.2)
 				.frame(width: 54, height: 54)
-				.foregroundStyle(NBHalloween.mask)
+
 			
 			FRAppIconView(app: app)
 				.frame(width: 54, height: 54)
 				.mask(
 					ZStack {
-						Circle().strokeBorder(NBHalloween.overlayText, lineWidth: 4.5)
+						Circle().strokeBorder(.white, lineWidth: 4.5)
 						PieShape(progress: viewModel.overallProgress)
 							.scaleEffect(viewModel.isCompleted ? 2.2 : 1)
 							.animation(.smooth, value: viewModel.isCompleted)

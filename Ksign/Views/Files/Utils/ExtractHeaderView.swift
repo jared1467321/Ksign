@@ -24,7 +24,7 @@ struct ExtractHeaderView: View {
 								Spacer()
 								Text(verbatim: "+\(extractManager.extractItems.count - 1)")
 									.font(.caption)
-									.foregroundColor(NBHalloween.textSecondary)
+									.nbThemeForeground(.textSecondary)
 									.padding(.vertical, 4)
 							}
 						}
@@ -56,7 +56,7 @@ private struct ExtractProgressItemView: View {
 				Spacer()
 			}
 			.font(.caption)
-			.foregroundColor(NBHalloween.textSecondary)
+			.nbThemeForeground(.textSecondary)
 		}
 		.padding(.vertical, 4)
 	}

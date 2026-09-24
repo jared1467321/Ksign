@@ -97,15 +97,15 @@ struct SigningTweaksView: View {
 				}
 			}
 		}
-		.overlay(alignment: .center) {
+		.nbThemeOverlay(alignment: .center) {
 			if _allTweaks.isEmpty {
 				if #available(iOS 17, *) {
 					ContentUnavailableView {
 						Label(.localized("No Tweaks"), systemImage: "gear.badge.questionmark")
-						.foregroundStyle(NBHalloween.heading)
+						.nbThemeForeground(.heading)
 					} description: {
 						Text(.localized("Importing your .dylib, .deb or .framework files \n These will also be automatically added to Tweaks folder"))
-						.foregroundStyle(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 					} actions: {
 						Button {
 							_isAddingPresenting = true
@@ -115,7 +115,7 @@ struct SigningTweaksView: View {
 					}
 				} else {
 					Text(.localized("Importing your .dylib, .deb or .framework files \n These will also be automatically added to Tweaks folder"))
-						.foregroundColor(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 						.frame(maxWidth: .infinity, alignment: .center)
 						.padding()
 				}
@@ -246,11 +246,11 @@ extension SigningTweaksView {
 				if isMissing {
 					Label(.localized("File missing"), systemImage: "exclamationmark.triangle")
 						.font(.caption)
-						.foregroundStyle(NBHalloween.warning)
+						.nbThemeForeground(.warning)
 				} else if isDefault {
 					Text(.localized("Default"))
 						.font(.caption)
-						.foregroundStyle(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 				}
 			}
 			.frame(maxWidth: .infinity, alignment: .leading)

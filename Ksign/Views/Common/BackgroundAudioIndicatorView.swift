@@ -25,17 +25,15 @@ struct BackgroundAudioIndicatorView: View {
 				.font(.system(size: 15))
 				.padding(.horizontal, 12)
 				.padding(.vertical, 4)
-				.background(
+				.nbThemeBackground(
 					Capsule()
-						.fill(NBHalloween.elevated)
+						.nbThemeFill(.elevated)
 				)
-				.overlay(
-					Capsule()
-						.strokeBorder(
-							_status.isRunning ? NBHalloween.ok.opacity(0.6) : Color.clear,
-							lineWidth: 1
-						)
-				)
+				.nbThemeOverlay {
+                    if _status.isRunning {
+                        Capsule().nbThemeStrokeBorder(.success, opacity: 0.6, lineWidth: 1)
+                    }
+                }
 				.contentShape(Capsule())
 		}
 		.buttonStyle(.plain)
@@ -62,6 +60,7 @@ struct BackgroundAudioLogView: View {
 	var body: some View {
 		NavigationStack {
 			List {
+				Group {
 				Section {
 					HStack(spacing: 12) {
 						Text(verbatim: status.isRunning ? "🔊" : "🔇")
@@ -73,7 +72,7 @@ struct BackgroundAudioLogView: View {
 
 							Text(_stateDescription)
 								.font(.caption)
-								.foregroundColor(NBHalloween.textSecondary)
+								.nbThemeForeground(.textSecondary)
 								.fixedSize(horizontal: false, vertical: true)
 						}
 					}
@@ -84,7 +83,7 @@ struct BackgroundAudioLogView: View {
 					if status.events.isEmpty {
 						Text("Nothing yet. Start an install or a download and the keep-alive's comings and goings will show up here.")
 							.font(.footnote)
-							.foregroundColor(NBHalloween.textSecondary)
+							.nbThemeForeground(.textSecondary)
 					} else {
 						// Newest first: in a sheet you opened because something
 						// looked wrong, the thing that just happened is the
@@ -96,7 +95,10 @@ struct BackgroundAudioLogView: View {
 				} header: {
 					Text("History")
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.navigationTitle("Keep-Alive")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
@@ -143,7 +145,7 @@ struct BackgroundAudioLogView: View {
 		HStack(alignment: .top, spacing: 10) {
 			Image(systemName: event.symbolName)
 				.font(.system(size: 13))
-				.foregroundColor(event.tint)
+				.nbThemeForeground(event.themeRole)
 				.frame(width: 18)
 				.padding(.top, 2)
 
@@ -154,7 +156,7 @@ struct BackgroundAudioLogView: View {
 				if !event.detail.isEmpty {
 					Text(event.detail)
 						.font(.caption)
-						.foregroundColor(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 						.fixedSize(horizontal: false, vertical: true)
 				}
 			}
@@ -163,7 +165,7 @@ struct BackgroundAudioLogView: View {
 
 			Text(Self._timeFormatter.string(from: event.date))
 				.font(.system(size: 11, design: .monospaced))
-				.foregroundColor(NBHalloween.textSecondary)
+				.nbThemeForeground(.textSecondary)
 				.padding(.top, 2)
 		}
 		.padding(.vertical, 2)

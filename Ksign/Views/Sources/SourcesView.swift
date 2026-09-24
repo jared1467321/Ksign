@@ -62,15 +62,15 @@ struct SourcesView: View {
 				}
 			}
 			.searchable(text: $_searchText, placement: .platform())
-            .overlay {
+            .nbThemeOverlay {
                 if _filteredSources.isEmpty {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No Repositories"), systemImage: "globe.desk.fill")
-                            .foregroundStyle(NBHalloween.heading)
+                            .nbThemeForeground(.heading)
                         } description: {
                             Text(.localized("Get started by adding your first repository."))
-                            .foregroundStyle(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                         } actions: {
                             Button {
                                 _isAddingPresenting = true

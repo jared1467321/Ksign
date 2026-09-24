@@ -6,11 +6,13 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 public struct NBPillView: View {
 	public var title: String
 	public var icon: String
 	public var color: Color
+    public var themeRole: NBThemeRole?
 	public var index: Int
 	public var count: Int
 	
@@ -19,13 +21,15 @@ public struct NBPillView: View {
 		icon: String,
 		color: Color,
 		index: Int,
-		count: Int
+		count: Int,
+        themeRole: NBThemeRole? = nil
 	) {
 		self.title = title
 		self.icon = icon
 		self.color = color
 		self.index = index
 		self.count = count
+        self.themeRole = themeRole
 	}
 	
 	public var body: some View {
@@ -33,16 +37,22 @@ public struct NBPillView: View {
 		let radii = position.cornerRadii
 		
 		HStack(spacing: 4) {
-			Image(systemName: icon)
-				.font(.caption)
-				.foregroundStyle(color.opacity(0.9))
+            if let themeRole {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .nbThemeForeground(themeRole, opacity: 0.9)
+            } else {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(color.opacity(0.9))
+            }
 			Text(title)
 				.font(.caption.bold())
 		}
 		.frame(maxWidth: .infinity)
 		.padding(.vertical, 10)
-		.background(
-			UnevenRoundedRectangle(
+        .nbThemeBackground {
+            let shape = UnevenRoundedRectangle(
 				cornerRadii: .init(
 					topLeading: radii.topLeading,
 					bottomLeading: radii.bottomLeading,
@@ -51,8 +61,12 @@ public struct NBPillView: View {
 				),
 				style: .continuous
 			)
-            .fill(color.opacity(0.1))
-		)
+            if let themeRole {
+                shape.nbThemeFill(themeRole, opacity: 0.1)
+            } else {
+                shape.fill(color.opacity(0.1))
+            }
+        }
 	}
 	
 	public enum PillPosition {

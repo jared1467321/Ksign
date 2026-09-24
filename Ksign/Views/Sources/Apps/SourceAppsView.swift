@@ -81,15 +81,16 @@ struct SourceAppsView: View {
                     ContentUnavailableView {
                         ProgressView()
                         Label(.localized("Fetching..."), systemImage: "")
-                        .foregroundStyle(NBHalloween.heading)
+                        .nbThemeForeground(.heading)
                     } description: {
                         Text(.localized("Stuck? Check if you have any sources added."))
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                     }
                 }
                 else { ProgressView() }
             }
         }
+        .nbThemeCanvas()
         .navigationTitle(_navigationTitle)
         .searchable(text: $_searchText, placement: .platform())
         .toolbarTitleMenu {
@@ -110,7 +111,7 @@ struct SourceAppsView: View {
                 }
             }
             
-            Divider().overlay(NBHalloween.hairline)
+            Divider().nbThemeOverlay(.separator)
             
             Button(.localized("Copy"), systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = object.map {
@@ -126,7 +127,7 @@ struct SourceAppsView: View {
                         SourcesView()
                     } label: {
                         Text(.localized("Sources"))
-                            .foregroundStyle(NBHalloween.accent)
+                            .nbThemeForeground(.accent)
                     }
                 }
             }

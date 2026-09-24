@@ -20,6 +20,7 @@ struct CertificatesInfoView: View {
     var body: some View {
 		NBNavigationView(cert.nickname ?? "", displayMode: .inline) {
 			Form {
+				Group {
 				Section {} header: {
 					Image("Cert")
 						.resizable()
@@ -33,7 +34,10 @@ struct CertificatesInfoView: View {
 					_entitlementsSection(data: data)
 					_miscSection(data: data)
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.toolbar {
 				NBToolbarButton(role: .close)
 			}
@@ -56,7 +60,7 @@ extension CertificatesInfoView {
 		
 		Section {
 			_info(.localized("Expires"), description: data.ExpirationDate.expirationInfo().formatted)
-				.foregroundStyle(data.ExpirationDate.expirationInfo().color)
+				.nbThemeForeground(data.ExpirationDate.expirationInfo().role)
             
             _info(.localized("Revoked"), description: cert.revoked ? "Yes" : "No")
             
@@ -110,7 +114,7 @@ extension CertificatesInfoView {
 		DisclosureGroup(title) {
 			ForEach(keys, id: \.self) { key in
 				Text(key)
-					.foregroundStyle(NBHalloween.textSecondary)
+					.nbThemeForeground(.textSecondary)
 			}
 		}
 	}

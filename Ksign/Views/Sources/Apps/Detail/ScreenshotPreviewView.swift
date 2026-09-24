@@ -26,6 +26,7 @@ struct ScreenshotPreviewView: View {
     var body: some View {
         NavigationStack {
             _imageScrollView()
+                .nbThemeCanvas()
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         if #available(iOS 26.0, *) {
@@ -45,9 +46,9 @@ struct ScreenshotPreviewView: View {
                                 .font(.subheadline)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(
+                                .nbThemeBackground(
                                     Capsule()
-                                        .fill(NBHalloween.overlaySurface)
+                                        .nbThemeFill(.overlaySurface)
                                 )
                         }
                     }
@@ -66,10 +67,11 @@ extension ScreenshotPreviewView {
                         image
                             .resizable()
                             .aspectRatio(contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-                            .overlay {
+                            .nbThemeContentSurface()
+                            .nbThemeClipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
+                            .nbThemeOverlay {
                                 RoundedRectangle(cornerRadius: 32, style: .continuous)
-                                    .strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
+                                    .nbThemeStrokeBorder(.imageBorder, lineWidth: 1)
                             }
                     }
                 }

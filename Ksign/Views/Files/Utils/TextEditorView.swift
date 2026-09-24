@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct TextEditorView: View {
     let fileURL: URL
@@ -16,6 +17,8 @@ struct TextEditorView: View {
     var body: some View {
         NavigationStack {
             TextEditor(text: $_text)
+                .nbThemeCanvas()
+                .nbThemeForeground(.text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled(true)
                 .font(.system(size: 12, design: .monospaced))

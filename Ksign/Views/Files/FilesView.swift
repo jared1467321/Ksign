@@ -62,7 +62,7 @@ struct FilesView: View {
                 NavigationStack {
                     filesBrowserContent
                 }
-                .accentColor(NBHalloween.accent)
+                .nbThemeAccentColor(.accent)
             } else {
                 filesBrowserContent
             }
@@ -98,8 +98,8 @@ struct FilesView: View {
                     ToolbarItemGroup(placement: .navigationBarTrailing) {
                         // Applied at the use site rather than inside each
                         // property so the destructive one below can opt out.
-                        addButton.foregroundStyle(NBHalloween.accent)
-                        editButton.foregroundStyle(NBHalloween.accent)
+                        addButton.nbThemeForeground(.accent)
+                        editButton.nbThemeForeground(.accent)
                     }
                     NBToolbarMenu(
                         systemImage: "line.3.horizontal.decrease",
@@ -115,9 +115,9 @@ struct FilesView: View {
                                 moveButton
                                 shareButton
                                 deleteButton
-                                    .foregroundStyle(NBHalloween.danger)
+                                    .nbThemeForeground(.danger)
                             }
-                            .foregroundStyle(NBHalloween.accent)
+                            .nbThemeForeground(.accent)
                         }
                     }
                 }
@@ -180,6 +180,7 @@ struct FilesView: View {
     @ViewBuilder
     private var contentView: some View {
         List {
+            Group {
             ForEach(filteredFiles) { file in
                 FileRow(
                     file: file,
@@ -201,8 +202,11 @@ struct FilesView: View {
                 }
                 .compatMatchedTransitionSource(id: file.url.absoluteString, ns: _namespace)
             }
+            }
+            .nbThemeRow()
         }
         .listStyle(.plain)
+        .nbThemeCanvas()
         .environment(\.editMode, $viewModel.isEditMode)
         .navigationDestination(isPresented: Binding(
             get: { navigateToDirectoryURL != nil },
@@ -212,15 +216,15 @@ struct FilesView: View {
                 FilesView(directoryURL: url)
             }
         }
-        .overlay {
+        .nbThemeOverlay {
             if filteredFiles.isEmpty {
                 if #available(iOS 17, *) {
                     ContentUnavailableView {
                         Label(.localized("No Files"), systemImage: "folder.fill.badge.questionmark")
-                        .foregroundStyle(NBHalloween.heading)
+                        .nbThemeForeground(.heading)
                     } description: {
                         Text(.localized("Get started by importing your first file."))
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                     } actions: {
                         Button {
                             viewModel.showingImporter = true
@@ -353,7 +357,7 @@ struct FilesView: View {
         } label: {
             Image(systemName: "trash")
         }
-        .tint(NBHalloween.danger)
+        .nbThemeTint(.danger)
         .disabled(viewModel.selectedItems.isEmpty)
     }
     

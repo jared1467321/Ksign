@@ -42,6 +42,7 @@ struct CertificatesAddView: View {
 	var body: some View {
 		NBNavigationView(.localized("New Certificate"), displayMode: .inline) {
 			Form {
+				Group {
 				NBSection(.localized("Files")) {
 					_importButton(.localized("Import Certificate File"), file: _p12URL, hasData: _p12Data) {
 						_isImportingP12Presenting = true
@@ -59,7 +60,10 @@ struct CertificatesAddView: View {
 				Section {
 					TextField(.localized("Nickname (Optional)"), text: $_certificateName)
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.toolbar {
 				NBToolbarButton(role: .cancel)
 				
@@ -122,7 +126,7 @@ extension CertificatesAddView {
 		Button(title) {
 			action()
 		}
-		.foregroundColor((file == nil && hasData == nil) ? NBHalloween.accent : .disabled())
+		.nbThemeForeground((file == nil && hasData == nil) ? .accent : .disabledText)
 		.disabled(file != nil || hasData != nil)
 		.animation(.easeInOut(duration: 0.3), value: file != nil || hasData != nil)
 	}

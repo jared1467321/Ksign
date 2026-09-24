@@ -47,7 +47,7 @@ extension AboutView {
 			iconUrl: URL(string: "https://github.com/\(github).png")!,
 			trailing: AnyView(
 				Image(systemName: "arrow.up.right")
-					.foregroundStyle(NBHalloween.textSecondary)
+					.nbThemeForeground(.textSecondary)
 			)
 		)
 		.onTapGesture {

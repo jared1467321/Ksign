@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import Zsign
 
@@ -17,6 +18,7 @@ struct LibraryInfoView: View {
     var body: some View {
 		NBNavigationView(app.name ?? "", displayMode: .inline) {
 			List {
+				Group {
 				Section {} header: {
 					FRAppIconView(app: app)
 						.frame(maxWidth: .infinity, alignment: .center)
@@ -32,7 +34,10 @@ struct LibraryInfoView: View {
 						UIApplication.open(Storage.shared.getUuidDirectory(for: app)!.toSharedDocumentsURL()!)
 					}
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.toolbar {
 				NBToolbarButton(role: .close)
 			}

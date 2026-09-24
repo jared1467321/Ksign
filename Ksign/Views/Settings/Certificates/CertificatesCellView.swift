@@ -51,7 +51,8 @@ extension CertificatesCellView {
 					icon: pill.icon,
 					color: pill.color,
 					index: index,
-					count: pillItems.count
+					count: pillItems.count,
+                    themeRole: pill.themeRole
 				)
 			}
 		}
@@ -61,21 +62,21 @@ extension CertificatesCellView {
 		var pills: [NBPillItem] = []
 		
 		if cert.ppQCheck == true {
-			pills.append(NBPillItem(title: "PPQCheck", icon: "checkmark.shield", color: NBHalloween.danger))
+			pills.append(NBPillItem(title: "PPQCheck", icon: "checkmark.shield", themeRole: .danger))
 		}
         
         if cert.revoked {
-            pills.append(NBPillItem(title: "Revoked", icon: "xmark.octagon", color: NBHalloween.danger))
+            pills.append(NBPillItem(title: "Revoked", icon: "xmark.octagon", themeRole: .danger))
         }
         else {
-            pills.append(NBPillItem(title: "Valid", icon: "checkmark.circle", color: NBHalloween.ok))
+            pills.append(NBPillItem(title: "Valid", icon: "checkmark.circle", themeRole: .success))
         }
 		
 		if let info = cert.expiration?.expirationInfo() {
 			pills.append(NBPillItem(
 				title: info.formatted,
 				icon: info.icon,
-				color: info.color
+				themeRole: info.role
 			))
 		}
 		

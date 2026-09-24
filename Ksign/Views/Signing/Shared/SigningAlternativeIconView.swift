@@ -23,6 +23,7 @@ struct SigningAlternativeIconView: View {
 	var body: some View {
 		NBNavigationView(.localized("Alternative Icons"), displayMode: .inline) {
 			List(_alternateIcons, id: \.name) { icon in
+				Group {
 				Button {
 					appIcon = _iconUrl(icon.path)
 					dismiss()
@@ -30,7 +31,10 @@ struct SigningAlternativeIconView: View {
 					_icon(icon)
 				}
 				.disabled(!isModifing)
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.onAppear(perform: _loadAlternateIcons)
 			.toolbar {
 				if isModifing {
@@ -53,7 +57,7 @@ extension SigningAlternativeIconView {
 			
 			Text(icon.name)
 				.font(.headline)
-				.foregroundColor(NBHalloween.text)
+				.nbThemeForeground(.text)
 		}
 		.padding(.vertical, 4)
 	}

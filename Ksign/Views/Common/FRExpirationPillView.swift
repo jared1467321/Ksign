@@ -16,23 +16,21 @@ struct FRExpirationPillView: View {
 	
 	var body: some View {
 		let labelText = showOverlay ? title : (expiration?.formatted ?? title)
-		let backgroundColor = showOverlay
-		? NBHalloween.controlFill
-		: (expiration?.color.opacity(0.85) ?? NBHalloween.controlFill)
+		let backgroundRole: NBThemeRole = showOverlay ? .controlFill : (expiration?.role ?? .controlFill)
 		
 		Text(labelText)
 			.lineLimit(0)
 			.font(.headline.bold())
-			.foregroundStyle((showOverlay || expiration == nil) ? NBHalloween.accent : NBHalloween.onAccent)
+			.nbThemeForeground((showOverlay || expiration == nil) ? .accent : .onAccent)
 			.padding(.horizontal, 12)
 			.padding(.vertical, 6)
-			.background(backgroundColor)
-			.clipShape(Capsule())
-			.overlay {
+			.nbThemeBackground(backgroundRole, opacity: !showOverlay && expiration != nil ? 0.85 : 1)
+			.nbThemeClipShape(Capsule())
+			.nbThemeOverlay {
 				if showOverlay, let expiration {
 					Text(expiration.formatted)
 						.font(.system(size: 9))
-						.foregroundStyle(expiration.color.opacity(0.85))
+						.nbThemeForeground(expiration.role, opacity: 0.85)
 						.offset(y: -23)
 				}
 			}

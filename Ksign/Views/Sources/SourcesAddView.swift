@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import AltSourceKit
 import NimbleJSON
@@ -25,6 +26,7 @@ struct SourcesAddView: View {
 	var body: some View {
 		NBNavigationView(.localized("Add Source"), displayMode: .inline) {
 			Form {
+				Group {
 				Section {
 					TextField(.localized("Source Repo URL"), text: $_sourceURL)
 						.keyboardType(.URL)
@@ -52,7 +54,10 @@ struct SourcesAddView: View {
 				} footer: {
 					Text(.localized("Supports importing from KravaSign/MapleSign and ESign"))
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.toolbar {
 				NBToolbarButton(role: .cancel)
 				

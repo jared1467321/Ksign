@@ -38,7 +38,7 @@ struct DownloadHeaderView: View {
 									Spacer()
 									Text(verbatim: "+\(_remainingCount)")
 										.font(.caption)
-										.foregroundColor(NBHalloween.textSecondary)
+										.nbThemeForeground(.textSecondary)
 										.contentTransition(.numericText())
 										.padding(.vertical, 4)
 								}
@@ -81,7 +81,7 @@ struct DownloadItemView: View {
 				}
 			}
 			.font(.caption)
-			.foregroundColor(NBHalloween.textSecondary)
+			.nbThemeForeground(.textSecondary)
 		}
 		.padding(.vertical, 4)
 		.onReceive(download.$progress) { self.progress = $0 }

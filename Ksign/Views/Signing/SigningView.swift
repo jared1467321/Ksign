@@ -69,10 +69,14 @@ struct SigningView: View {
     var body: some View {
 		NBNavigationView(app.name ?? .localized("Unknown"), displayMode: .inline) {
 			Form {
+				Group {
 				_customizationOptions(for: app)
 				_cert()
 				_customizationProperties(for: app)
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.disabled(_isSigning)
 			.safeAreaInset(edge: .bottom) {
 				if _isSigning {
@@ -81,7 +85,7 @@ struct SigningView: View {
 					} label: {
 						NBSheetButton(title: .localized("Show Logs"))
 					}
-					.tint(NBHalloween.textSecondary)
+					.nbThemeTint(.textSecondary)
 					.compatMatchedTransitionSource(id: "showLogs", ns: _namespace)
 				} else {
 					Button() {
@@ -268,10 +272,15 @@ extension SigningView {
 			}
 			
 			NavigationLink(String.localized("Properties")) {
-				Form { SigningOptionsView(
+				Form {
+					Group { SigningOptionsView(
 					options: $_temporaryOptions,
 					temporaryOptions: _optionsManager.options
-				)}
+				)
+					}
+					.nbThemeRow()
+				}
+				.nbThemeCanvas()
 				.navigationTitle(.localized("Properties"))
 			}
 		}

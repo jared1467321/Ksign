@@ -40,12 +40,12 @@ public struct NBButton: View {
 		switch _style {
 		case .icon:
 			Image(systemName: _icon)
-				.foregroundStyle(NBHalloween.accent)
+				.nbThemeForeground(.accent)
 				.nbThemeInspectorTarget(.accent)
 
 		case .text:
 			Text(_title)
-				.foregroundStyle(NBHalloween.accent)
+				.nbThemeForeground(.accent)
 				.nbThemeInspectorTarget(.accent)
 		}
     }

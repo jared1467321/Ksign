@@ -47,7 +47,7 @@ struct AppearanceView: View {
                 if themeManager.isActiveThemeBuiltIn {
                     Text(.localized("Halloween is the built-in default. Duplicate it or create a theme to customize every color role."))
                         .font(.footnote)
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                 } else {
                     NavigationLink(destination: ThemeProfileEditorView(themeID: themeManager.selectedThemeID)) {
                         Label(.localized("Customize Colors"), systemImage: "paintpalette")
@@ -115,7 +115,7 @@ struct AppearanceView: View {
             }
             Button(.localized("Cancel"), role: .cancel) { }
         } message: {
-            Text(.localized("The profile name stays the same, but every customizable color returns to the Halloween defaults."))
+            Text(.localized("The profile name stays the same, but every customizable color and per-element override returns to the Halloween defaults."))
         }
         .confirmationDialog(
             .localized("Delete this theme?"),
@@ -142,11 +142,11 @@ struct AppearanceView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(theme.name)
                     .font(.headline)
-                    .foregroundStyle(NBHalloween.text)
+                    .nbThemeForeground(.text)
                     .nbThemeInspectorTarget(.text)
                 Text(theme.isBuiltIn ? String.localized("Built-in") : String.localized("Custom"))
                     .font(.caption)
-                    .foregroundStyle(NBHalloween.textSecondary)
+                    .nbThemeForeground(.textSecondary)
                     .nbThemeInspectorTarget(.textSecondary)
             }
 
@@ -160,8 +160,8 @@ struct AppearanceView: View {
                     Circle()
                         .fill(theme.color(for: role).color)
                         .frame(width: 19, height: 19)
-                        .overlay {
-                            Circle().stroke(NBHalloween.imageBorder, lineWidth: 0.5)
+                        .nbThemeOverlay {
+                            Circle().nbThemeStroke(.imageBorder, lineWidth: 0.5)
                         }
                         .nbThemeInspectorTarget(role)
                 }
@@ -188,7 +188,7 @@ struct AppearanceView: View {
                 Text(.localized("An awesome application"))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.subheadline)
-                    .foregroundStyle(NBHalloween.textSecondary)
+                    .nbThemeForeground(.textSecondary)
                     .lineLimit(18)
                     .padding(.top, 2)
             }
@@ -221,11 +221,11 @@ private struct ThemeProfileEditorView: View {
                 NBSection(.localized("In-Place Editing")) {
                     Label(.localized("Use the paintbrush button on any app screen to tap and edit the real colors in place."), systemImage: "paintbrush.pointed.fill")
                         .font(.footnote)
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
 
                     Text(.localized("The roles below remain available as the advanced editor for colors that are not currently visible or cannot be selected directly."))
                         .font(.footnote)
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                 }
             }
 
@@ -239,7 +239,7 @@ private struct ThemeProfileEditorView: View {
                                         .font(.body)
                                     Text(role.usageDescription)
                                         .font(.caption)
-                                        .foregroundStyle(NBHalloween.textSecondary)
+                                        .nbThemeForeground(.textSecondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                                 .padding(.vertical, 3)

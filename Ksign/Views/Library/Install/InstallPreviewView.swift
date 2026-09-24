@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import Combine
 import NimbleViews
 import IDeviceSwift
@@ -63,6 +64,7 @@ struct InstallPreviewView: View {
 			_status()
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .nbThemeCanvas()
 		.sheet(isPresented: $_isWebviewPresenting) {
 			SafariRepresentableView(url: installer.pageEndpoint).ignoresSafeArea()
 		}
@@ -142,6 +144,7 @@ struct InstallPreviewView: View {
 	@ViewBuilder
 	private func _status() -> some View {
 		Label(viewModel.statusLabel, systemImage: viewModel.statusImage)
+            .nbThemeForeground(.text)
 			.padding()
 			.labelStyle(.titleAndIcon)
 			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)

@@ -73,12 +73,12 @@ struct DownloaderView: View {
             Spacer()
             Text(speed).monospacedDigit()
             Text("•")
-                .foregroundStyle(NBHalloween.textTertiary)
+                .nbThemeForeground(.textTertiary)
                 .nbThemeInspectorTarget(.textTertiary)
             Text(streams).monospacedDigit()
         }
         .font(.caption)
-        .foregroundStyle(NBHalloween.textSecondary)
+        .nbThemeForeground(.textSecondary)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
         .accessibilityValue("\(speed), \(streams)")
@@ -88,27 +88,28 @@ struct DownloaderView: View {
         let _ = themes.previewRevision
         NBNavigationView(.localized("Downloads")) {
             List {
+                Group {
                 if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
                     NBSection("Downloading", secondary: "Sample") {
                         ipaVaultStatusRow(speed: "12.4 MB/s", streams: "4 streams", isSample: true)
                         HStack(spacing: 12) {
                             Image(systemName: "arrow.down.document")
-                                .foregroundStyle(NBHalloween.accent)
+                                .nbThemeForeground(.accent)
                                 .font(.title2)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Example.ipa")
                                 Text("62 MB / 100 MB (62%)")
                                     .font(.caption)
-                                    .foregroundStyle(NBHalloween.textSecondary)
+                                    .nbThemeForeground(.textSecondary)
                             }
                             Spacer()
                             ProgressView(value: 0.62)
                                 .frame(width: 52)
-                                .tint(NBHalloween.warning)
+                                .nbThemeTint(.warning)
                         }
                         Text("Inspector sample only · no download started")
                             .font(.caption2)
-                            .foregroundStyle(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                     }
                 }
 
@@ -136,7 +137,7 @@ struct DownloaderView: View {
                         HStack(spacing: 12) {
                             ProgressView()
                             Text(.localized("Importing apps, please wait"))
-                                .foregroundStyle(NBHalloween.textSecondary)
+                                .nbThemeForeground(.textSecondary)
                             Spacer()
                         }
                     }
@@ -182,22 +183,25 @@ struct DownloaderView: View {
                         )
                     }
                 }
+                }
+                .nbThemeRow()
             }
             .listStyle(.plain)
-            .overlay {
+            .nbThemeCanvas()
+            .nbThemeOverlay {
                 if cryptCheckRunning {
                     ProgressView("Running Crypt Check…")
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
-                        .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
+                        .nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
                 } else if !inspectorSampleDownloadStatus && downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No downloaded IPAs"), systemImage: "square.and.arrow.down.fill")
-                            .foregroundStyle(NBHalloween.heading)
+                            .nbThemeForeground(.heading)
                         } description: {
                             Text(.localized("Get started by downloading your first IPA file."))
-                            .foregroundStyle(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                         } actions: {
                             Button {
                                 _addDownload()
@@ -244,7 +248,7 @@ struct DownloaderView: View {
                             IPAVaultPresentationSession.shared.open()
                         } label: {
                             Image(systemName: "externaldrive.badge.wifi")
-                                .foregroundStyle(NBHalloween.accent)
+                                .nbThemeForeground(.accent)
                         }
                         .accessibilityLabel("IPA Vault")
 
@@ -252,7 +256,7 @@ struct DownloaderView: View {
                             _addDownload()
                         } label: {
                             Image(systemName: "plus")
-                                .foregroundStyle(NBHalloween.accent)
+                                .nbThemeForeground(.accent)
                         }
                     }
                 }
@@ -515,7 +519,7 @@ private extension DownloaderView {
             // the ternary has nothing to infer from. The lookup has already
             // happened by then, hence `verbatim:` rather than a second one.
             Text(verbatim: _isEditMode.isEditing ? String.localized("Done") : String.localized("Edit"))
-                .foregroundStyle(NBHalloween.accent)
+                .nbThemeForeground(.accent)
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -539,8 +543,8 @@ private extension DownloaderView {
             action()
         } label: {
             Image(systemName: systemImage)
-                .foregroundStyle(NBHalloween.accent)
-                .opacity(enabled ? 1 : 0.3)
+                .nbThemeForeground(.accent)
+                .nbThemeOpacity(enabled ? 1 : 0.3)
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -559,7 +563,7 @@ private extension DownloaderView {
             _toggleSelectAllDownloads()
         } label: {
             SelectionCheckIcon(isSelected: _allDownloadsSelected)
-                .opacity(filteredDownloadItems.isEmpty ? 0.3 : 1)
+                .nbThemeOpacity(filteredDownloadItems.isEmpty ? 0.3 : 1)
         }
         .transaction { transaction in
             transaction.animation = nil

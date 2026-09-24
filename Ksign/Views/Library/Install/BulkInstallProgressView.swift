@@ -53,7 +53,7 @@ struct BulkInstallProgressView: View {
 			if job.phase == .failed {
 				Text(.localized("Failed"))
 					.font(.caption2.weight(.medium))
-					.foregroundStyle(NBHalloween.danger)
+					.nbThemeForeground(.danger)
 			}
 		}
 		// Long press for the same two actions the Home Screen gives you. Using

@@ -24,6 +24,7 @@ struct DylibsView: View {
         NBNavigationView(app.name ?? .localized("Frameworks & Dylibs"), displayMode: .inline) {
             VStack {
                 List(dylibFiles.filter { searchText.isEmpty ? true : $0.lastPathComponent.localizedCaseInsensitiveContains(searchText) }, id: \.absoluteString) { fileURL in
+                    Group {
                     DylibRowView(
                         fileURL: fileURL,
                         isSelected: selectedDylibs.contains(fileURL),
@@ -31,36 +32,39 @@ struct DylibsView: View {
                             toggleDylibSelection(fileURL)
                         }
                     )
+                    }
+                    .nbThemeRow()
                 }
                 .listStyle(.plain)
+                .nbThemeCanvas()
                 if hiddenDylibCount > 0 {
                     Text(verbatim: .localized("%lld required system dylibs not shown", arguments: hiddenDylibCount))
                         .font(.footnote)
-                        .foregroundColor(.disabled())
+                        .nbThemeForeground(.disabledText)
                 }
             }
-            .overlay(alignment: .center) {
+            .nbThemeOverlay(alignment: .center) {
                 if dylibFiles.isEmpty {
                     if #available(iOS 17.0, *) {
-                        ContentUnavailableView(
-                            .localized("No Frameworks"),
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text(.localized("No frameworks or dylibs found in this app"))
-                                .foregroundStyle(NBHalloween.textSecondary)
-                        )
-                        .foregroundStyle(NBHalloween.heading)
+                        ContentUnavailableView {
+                            Label(.localized("No Frameworks"), systemImage: "doc.text.magnifyingglass")
+                                .nbThemeForeground(.heading)
+                        } description: {
+                            Text(.localized("No frameworks or dylibs found in this app"))
+                                .nbThemeForeground(.textSecondary)
+                        }
                     } else {
                         VStack(spacing: 15) {
                             Image(systemName: "doc.text.magnifyingglass")
                                 .font(.largeTitle)
-                                .foregroundColor(NBHalloween.textSecondary)
+                                .nbThemeForeground(.textSecondary)
                             
                             Text(.localized("No Frameworks"))
                                 .font(.headline)
                             
                             Text(.localized("No frameworks or dylibs found in this app"))
                                 .font(.subheadline)
-                                .foregroundColor(NBHalloween.textSecondary)
+                                .nbThemeForeground(.textSecondary)
                                 .multilineTextAlignment(.center)
                         }
                         .padding()

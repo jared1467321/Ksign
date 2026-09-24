@@ -16,7 +16,7 @@ struct DylibRowView: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: fileURL.pathExtension.lowercased() == "framework" ? "shippingbox" : "doc.circle")
-                .foregroundColor(NBHalloween.accent)
+                .nbThemeForeground(.accent)
                 .frame(width: 32, height: 32)
             
             VStack(alignment: .leading) {
@@ -25,14 +25,14 @@ struct DylibRowView: View {
                 
                 Text(fileURL.pathExtension.uppercased())
                     .font(.caption)
-                    .foregroundColor(NBHalloween.textSecondary)
+                    .nbThemeForeground(.textSecondary)
             }
             
             Spacer()
             
             if isSelected {
                 Image(systemName: "checkmark")
-                    .foregroundColor(NBHalloween.accent)
+                    .nbThemeForeground(.accent)
             }
         }
         .contentShape(Rectangle())

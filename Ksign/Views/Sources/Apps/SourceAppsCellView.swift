@@ -32,7 +32,7 @@ struct SourceAppsCellView: View {
                         LazyImage(url: iconURL) { state in
                             if let image = state.image {
                                 image
-                                    .appIconStyle(size: 20, isCircle: true, background: NBHalloween.elevated)
+                                    .appIconStyle(size: 20, isCircle: true, backgroundRole: .elevated)
                                     .offset(x: 41, y: 4)
                             }
                         }
@@ -48,7 +48,7 @@ struct SourceAppsCellView: View {
                 Text(desc)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.subheadline)
-                    .foregroundStyle(NBHalloween.textSecondary)
+                    .nbThemeForeground(.textSecondary)
                     .padding(.top, 2)
             }
         }

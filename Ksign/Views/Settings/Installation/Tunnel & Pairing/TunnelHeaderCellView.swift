@@ -24,6 +24,7 @@ struct TunnelHeaderView: View {
 }
 
 struct TunnelPulseRing: View {
+    @ObservedObject private var themes = NBThemeManager.shared
 	@State private var _animationProgress = 0.0
 	
 	private let _animationDuration = 10.0
@@ -41,16 +42,18 @@ struct TunnelPulseRing: View {
 				max(0.0, (timeSinceHeartbeat - _colorStartThreshold) / _colorTransitionDuration)
 			)
 			
-			let pulseColor = NBHalloween.themeColor(.success).interpolated(
-				to: NBHalloween.themeColor(.warning),
+			let pulseColor = themes.activeColor(for: .success).interpolated(
+				to: themes.activeColor(for: .warning),
 				fraction: colorTransitionProgress
 			).color
 
 			Circle()
 				.fill(pulseColor)
+                .nbThemeInspectorTarget(.success)
+                .nbThemeInspectorTarget(.warning)
 				.frame(width: 10, height: 10)
 				.scaleEffect(1.0 - (0.5 * progress))
-				.opacity(1.0 - (0.7 * progress))
+				.nbThemeOpacity(1.0 - (0.7 * progress))
 				.animation(.easeInOut(duration: 0.3), value: lastHeartbeat)
 		}
 	}

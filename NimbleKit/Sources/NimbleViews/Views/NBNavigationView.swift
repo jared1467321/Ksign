@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 public struct NBNavigationView<Content>: View where Content: View {
 	private var _title: String
@@ -25,7 +26,8 @@ public struct NBNavigationView<Content>: View where Content: View {
 	public var body: some View {
 		NavigationStack {
 			_content
-				.navigationTitle(_title)
+				.nbThemeCanvas()
+                .navigationTitle(_title)
 				.navigationBarTitleDisplayMode(_mode)
 		}
 	}

@@ -41,7 +41,7 @@ struct ServerView: View {
 						Text(.localized("Apps per prompt"))
 						Spacer()
 						Text("\(_batchGroupSize)")
-							.foregroundStyle(NBHalloween.textSecondary)
+							.nbThemeForeground(.textSecondary)
 					}
 				}
 				.disabled(_serverMethod != 0)

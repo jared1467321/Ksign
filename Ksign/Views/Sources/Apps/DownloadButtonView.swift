@@ -24,13 +24,13 @@ struct DownloadButtonView: View {
 				ZStack {
 					Circle()
 						.trim(from: 0, to: downloadProgress)
-						.stroke(NBHalloween.warning, style: StrokeStyle(lineWidth: 2.3, lineCap: .round))
+						.nbThemeStroke(.warning, style: StrokeStyle(lineWidth: 2.3, lineCap: .round))
 						.rotationEffect(.degrees(-90))
 						.frame(width: 31, height: 31)
 						.animation(.smooth, value: downloadProgress)
 
 					Image(systemName: downloadProgress >= 0.75 ? "archivebox" : "square.fill")
-						.foregroundStyle(NBHalloween.warning)
+						.nbThemeForeground(.warning)
 						.font(.footnote).bold()
 				}
 				.onTapGesture {
@@ -48,12 +48,12 @@ struct DownloadButtonView: View {
 					Text(.localized("Get"))
 						.lineLimit(0)
 						.font(.headline.bold())
-						.foregroundStyle(NBHalloween.accent)
+						.nbThemeForeground(.accent)
 						.padding(.horizontal, 24)
 						.padding(.vertical, 6)
-						.background(NBHalloween.accent.opacity(0.16))
-						.overlay(Capsule().stroke(NBHalloween.accent.opacity(0.35), lineWidth: 1))
-						.clipShape(Capsule())
+						.nbThemeBackground(.accent, opacity: 0.16)
+						.nbThemeOverlay(Capsule().nbThemeStroke(.accent, opacity: 0.35, lineWidth: 1))
+						.nbThemeClipShape(Capsule())
 				}
 				.buttonStyle(.borderless)
 				.compatTransition()

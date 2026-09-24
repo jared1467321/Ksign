@@ -11,14 +11,16 @@ import AltSourceKit
 import NukeUI
 
 struct SourceNewsCardView: View {
+	@ObservedObject private var themes = NBThemeManager.shared
 	var new: ASRepository.News
 	
 	var body: some View {
 		ZStack(alignment: .bottomLeading) {
 			let placeholderView = {
-				NBHalloween.controlFill
+				NBThemePaint(.controlFill)
 			}()
 			
+			Group {
 			if let iconURL = new.imageURL {
 				LazyImage(url: iconURL) { state in
 					if let image = state.image {
@@ -27,6 +29,7 @@ struct SourceNewsCardView: View {
 							.aspectRatio(contentMode: .fill)
 							.frame(width: 250, height: 150)
 							.clipped()
+                            .nbThemeContentSurface()
 					} else {
 						placeholderView
 					}
@@ -35,28 +38,45 @@ struct SourceNewsCardView: View {
 				placeholderView
 			}
 			
+            }
+            .nbThemePaintLayer(0)
+
 			LinearGradient(
-				gradient: Gradient(colors: [NBHalloween.imageScrim, .clear]),
+				gradient: Gradient(colors: [themes.activeColor(for: .imageScrim).color, .clear]),
 				startPoint: .bottom,
 				endPoint: .top
 			)
+			.nbThemeInspectorTarget(.imageScrim)
+            .nbThemePaintLayer(1)
 			.frame(height: 70)
 			.frame(maxWidth: .infinity, alignment: .bottom)
-			.clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+			.nbThemeClipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 			
 			Text(new.title)
 				.font(.headline)
-				.foregroundColor(NBHalloween.overlayText)
+				.nbThemeForeground(.overlayText)
 				.lineLimit(2)
 				.padding()
+                .nbThemePaintLayer(2)
 		}
 		.frame(width: 250, height: 150)
-		.background(new.tintColor ?? NBHalloween.textSecondary)
-		.clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-		.overlay(
+		.nbThemeBackground {
+            Group {
+            if let tint = new.tintColor {
+                tint.nbThemeContentSurface() // Content color, never a theme role.
+            } else {
+                NBThemePaint(.textSecondary)
+            }
+            }
+            .nbThemePaintLayer(-1)
+        }
+		.nbThemeClipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+		.nbThemeOverlay(
 			RoundedRectangle(cornerRadius: 12, style: .continuous)
-				.strokeBorder(NBHalloween.imageBorder, lineWidth: 1)
+				.nbThemeStrokeBorder(.imageBorder, lineWidth: 1)
+                .nbThemePaintLayer(3)
 		)
+        .nbThemePaintGroup()
 	}
 }
 

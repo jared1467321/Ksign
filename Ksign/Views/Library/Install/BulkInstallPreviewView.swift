@@ -44,7 +44,7 @@ struct BulkInstallPreviewView: View {
 		}
 		.frame(maxWidth: .infinity, alignment: .center)
 		.padding(.vertical, 24)
-		.background(NBHalloween.elevated)
+		.nbThemeBackground(.elevated)
 		.cornerRadius(22.5)
 		.padding(.horizontal)
 	}

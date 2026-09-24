@@ -152,12 +152,35 @@ private final class ThemeEditingOverlayWindow: UIWindow {
 
 // MARK: - Scene editor state
 
+private struct ThemeEditingCandidate: Identifiable, Equatable {
+    let role: NBThemeRole
+    let elementID: String?
+    /// Exact targets may render a transformed role color (for example Accent at
+    /// 16% opacity). This is the no-local-override color the editor should open
+    /// on before a local override is created.
+    let initialColor: NBThemeColor?
+
+    init(role: NBThemeRole, elementID: String?, initialColor: NBThemeColor? = nil) {
+        self.role = role
+        self.elementID = elementID
+        self.initialColor = initialColor
+    }
+
+    var id: String { "\(role.rawValue)|\(elementID ?? "role")" }
+    var isExactElement: Bool { elementID != nil }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.role == rhs.role && lhs.elementID == rhs.elementID
+    }
+}
+
 private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendable {
     @Published var isEditingTheme = false
     @Published var editingRole: NBThemeRole?
+    @Published var editingElementID: String?
     private var editingThemeID: String?
     @Published var originalColor: NBThemeColor?
-    @Published var candidateRoles: [NBThemeRole] = []
+    @Published var candidateTargets: [ThemeEditingCandidate] = []
     @Published var showDuplicatePrompt = false
     @Published var dockEditorAtTop = false
     @Published var compactEditor = false
@@ -187,17 +210,26 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
         withAnimation(.snappy) { isEditingTheme = true }
     }
 
-    func select(_ role: NBThemeRole) {
+    func select(_ candidate: ThemeEditingCandidate) {
         guard isPicking, !themes.isActiveThemeBuiltIn else { return }
+        let role = candidate.role
         editingThemeID = themes.selectedThemeID
-        candidateRoles = []
-        originalColor = themes.profile(id: themes.selectedThemeID)?.color(for: role)
-            ?? NBThemeProfile.halloween.color(for: role)
+        candidateTargets = []
+        let profile = themes.profile(id: themes.selectedThemeID) ?? .halloween
+        originalColor = candidate.elementID.flatMap { profile.elementOverride(for: $0) }
+            ?? candidate.initialColor
+            ?? profile.color(for: role)
 
-        // Set the semantic selection first. isPicking becomes false immediately,
+        // Set selection identity first. isPicking becomes false immediately,
         // which removes every yellow discovery marker before preview begins.
+        editingElementID = candidate.elementID
         editingRole = role
-        themes.beginColorPreview(for: role, in: themes.selectedThemeID)
+        themes.beginColorPreview(
+            for: role,
+            elementID: candidate.elementID,
+            initialColor: candidate.initialColor,
+            in: themes.selectedThemeID
+        )
     }
 
     func finishRole(save: Bool) {
@@ -205,8 +237,9 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
         themes.endColorPreview(for: role, in: themeID, save: save)
         editingThemeID = nil
         editingRole = nil
+        editingElementID = nil
         originalColor = nil
-        candidateRoles = []
+        candidateTargets = []
     }
 
     func endEditingSession() {
@@ -215,8 +248,9 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
         }
         editingThemeID = nil
         editingRole = nil
+        editingElementID = nil
         originalColor = nil
-        candidateRoles = []
+        candidateTargets = []
         withAnimation(.snappy) { isEditingTheme = false }
     }
 
@@ -229,13 +263,13 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
         }
     }
 
-    func presentRoles(_ roles: [NBThemeRole]) {
-        let unique = roles.reduce(into: [NBThemeRole]()) { result, role in
-            if !result.contains(role) { result.append(role) }
+    func presentTargets(_ candidates: [ThemeEditingCandidate]) {
+        let unique = candidates.reduce(into: [ThemeEditingCandidate]()) { result, candidate in
+            if !result.contains(candidate) { result.append(candidate) }
         }
 
         guard !unique.isEmpty else {
-            candidateRoles = []
+            candidateTargets = []
             withAnimation(.easeOut(duration: 0.12)) { showMissHint = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
                 withAnimation(.easeIn(duration: 0.15)) { self?.showMissHint = false }
@@ -244,11 +278,28 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
         }
 
         showMissHint = false
-        if unique.count == 1, let role = unique.first {
-            select(role)
+        if unique.count == 1, let candidate = unique.first {
+            select(candidate)
         } else {
-            candidateRoles = unique
+            candidateTargets = unique
         }
+    }
+
+    func presentRoles(_ roles: [NBThemeRole]) {
+        presentTargets(roles.map { ThemeEditingCandidate(role: $0, elementID: nil) })
+    }
+
+    func removeCurrentElementOverride() {
+        guard let role = editingRole,
+              let themeID = editingThemeID,
+              let elementID = editingElementID else { return }
+        themes.endColorPreview(for: role, in: themeID, save: false)
+        themes.clearElementOverride(elementID, in: themeID)
+        editingThemeID = nil
+        editingRole = nil
+        editingElementID = nil
+        originalColor = nil
+        candidateTargets = []
     }
 }
 
@@ -321,7 +372,7 @@ private struct ThemeEditingOverlayWindowView: View {
                     editButton(bottomInset: baseWindow.safeAreaInsets.bottom)
                 }
 
-                if coordinator.isPicking, !coordinator.candidateRoles.isEmpty {
+                if coordinator.isPicking, !coordinator.candidateTargets.isEmpty {
                     roleChooser(bottomInset: baseWindow.safeAreaInsets.bottom)
                 }
 
@@ -330,7 +381,7 @@ private struct ThemeEditingOverlayWindowView: View {
                 }
 
                 if coordinator.isPicking, coordinator.showMissHint {
-                    Text("No editable theme target there")
+                    Text("No registered theme paint at this point")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
@@ -349,7 +400,7 @@ private struct ThemeEditingOverlayWindowView: View {
                 if presentationID != currentID {
                     presentationID = currentID
                     inspectionRequest = UUID()
-                    coordinator.candidateRoles = []
+                    coordinator.candidateTargets = []
                 }
                 geometryRevision &+= 1
             }
@@ -377,27 +428,19 @@ private struct ThemeEditingOverlayWindowView: View {
         _ targets: [NBThemeInspectorTargetFrame],
         visibleIn root: CGRect
     ) -> [NBThemeInspectorTargetFrame] {
-        var result: [NBThemeInspectorTargetFrame] = []
-        for target in targets {
-            guard target.frame.width > 0.5,
-                  target.frame.height > 0.5,
-                  target.frame.intersects(root) else { continue }
-
-            let duplicate = result.contains { existing in
-                existing.role == target.role &&
-                abs(existing.frame.minX - target.frame.minX) < 0.75 &&
-                abs(existing.frame.minY - target.frame.minY) < 0.75 &&
-                abs(existing.frame.width - target.frame.width) < 0.75 &&
-                abs(existing.frame.height - target.frame.height) < 0.75
-            }
-            if !duplicate { result.append(target) }
+        // Registration identity and paint ownership must survive until the
+        // point-specific selector. Equal frames/roles do NOT imply equal paint.
+        targets.filter {
+            $0.frame.width > 0 && $0.frame.height > 0 &&
+            $0.frame.minX.isFinite && $0.frame.minY.isFinite &&
+            $0.frame.width.isFinite && $0.frame.height.isFinite &&
+            $0.frame.intersects(root)
         }
-        return result
     }
 
     @ViewBuilder
     private func discoveryMarkers(for targets: [NBThemeInspectorTargetFrame]) -> some View {
-        ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+        ForEach(Array(targets.filter(\.isEditable).enumerated()), id: \.offset) { _, target in
             RoundedRectangle(cornerRadius: min(8, max(3, min(target.frame.width, target.frame.height) * 0.18)))
                 .strokeBorder(.yellow.opacity(0.82), lineWidth: 2)
                 .shadow(color: .black.opacity(0.55), radius: 1.5)
@@ -454,7 +497,9 @@ private struct ThemeEditingOverlayWindowView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Theme Edit")
                         .font(.subheadline.weight(.bold))
-                    Text(targetCount == 0 ? "No selectable colors are visible" : "Tap a highlighted element or report content")
+                    Text(targetCount == 0
+                         ? "Tap any visible themed color"
+                         : "Tap a themed element · choose this paint or its role")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -485,7 +530,7 @@ private struct ThemeEditingOverlayWindowView: View {
                         .font(.headline)
                     Spacer()
                     Button {
-                        coordinator.candidateRoles = []
+                        coordinator.candidateTargets = []
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.white.opacity(0.72))
@@ -495,19 +540,25 @@ private struct ThemeEditingOverlayWindowView: View {
 
                 ScrollView {
                     VStack(spacing: 8) {
-                        ForEach(coordinator.candidateRoles, id: \.self) { role in
+                        ForEach(coordinator.candidateTargets) { candidate in
+                            let role = candidate.role
+                            let swatch = candidate.elementID.flatMap {
+                                themes.activeTheme.elementOverride(for: $0)
+                            } ?? candidate.initialColor ?? themes.activeColor(for: role)
                             Button {
-                                coordinator.select(role)
+                                coordinator.select(candidate)
                             } label: {
                                 HStack(spacing: 10) {
                                     Circle()
-                                        .fill(themes.activeColor(for: role).color)
+                                        .fill(swatch.color)
                                         .frame(width: 24, height: 24)
                                         .overlay { Circle().stroke(.white.opacity(0.3), lineWidth: 1) }
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(role.displayName)
+                                        Text(candidate.isExactElement ? "This Element" : "All \(role.displayName)")
                                             .font(.subheadline.weight(.semibold))
-                                        Text(role.usageDescription)
+                                        Text(candidate.isExactElement
+                                             ? "Only this paint · currently uses \(role.displayName)"
+                                             : role.usageDescription)
                                             .font(.caption2)
                                             .foregroundStyle(.white.opacity(0.64))
                                             .lineLimit(2)
@@ -554,7 +605,8 @@ private struct ThemeEditingOverlayWindowView: View {
     }
 
     private func editorPanel(for role: NBThemeRole) -> some View {
-        let current = themes.activeColor(for: role)
+        let current = currentEditingColor(for: role)
+        let isExactElement = coordinator.editingElementID != nil
 
         return VStack(alignment: .leading, spacing: coordinator.compactEditor ? 8 : 10) {
             HStack(spacing: 8) {
@@ -563,7 +615,7 @@ private struct ThemeEditingOverlayWindowView: View {
                 // UI completely unobstructed during color evaluation.
                 Image(systemName: "paintbrush.pointed.fill")
                     .foregroundStyle(.yellow)
-                Text(role.displayName)
+                Text(isExactElement ? "This Element · \(role.displayName)" : role.displayName)
                     .font(.headline)
                     .lineLimit(1)
                 Spacer(minLength: 5)
@@ -584,7 +636,9 @@ private struct ThemeEditingOverlayWindowView: View {
             .foregroundStyle(.white)
 
             if !coordinator.compactEditor {
-                Text(role.usageDescription)
+                Text(isExactElement
+                     ? "This is a local exception. Other elements using \(role.displayName) keep following the theme role."
+                     : role.usageDescription)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.74))
                     .fixedSize(horizontal: false, vertical: true)
@@ -615,11 +669,19 @@ private struct ThemeEditingOverlayWindowView: View {
                 slider("Opacity", component: .alpha, role: role)
             }
 
+            if let elementID = coordinator.editingElementID,
+               themes.hasElementOverride(elementID, in: themes.selectedThemeID) {
+                Button("Use Theme Color Instead") {
+                    coordinator.removeCurrentElementOverride()
+                }
+                .font(.caption.weight(.semibold))
+            }
+
             HStack(spacing: 9) {
                 Button("Cancel") { coordinator.finishRole(save: false) }
                     .frame(maxWidth: .infinity)
                     .buttonStyle(.bordered)
-                Button("Save Color") { coordinator.finishRole(save: true) }
+                Button(isExactElement ? "Save Element" : "Save Color") { coordinator.finishRole(save: true) }
                     .frame(maxWidth: .infinity)
                     .buttonStyle(.borderedProminent)
             }
@@ -661,26 +723,30 @@ private struct ThemeEditingOverlayWindowView: View {
             return
         }
 
-        let hits = targets.filter { expandedHitRect(for: $0.frame).contains(point) }
-            .sorted { lhs, rhs in
-                let lhsExact = lhs.frame.contains(point)
-                let rhsExact = rhs.frame.contains(point)
-                if lhsExact != rhsExact { return lhsExact && !rhsExact }
-                return lhs.frame.width * lhs.frame.height < rhs.frame.width * rhs.frame.height
+        let hits = NBThemeInspectorRegistry.pickTargets(targets, at: point)
+
+        var candidates: [ThemeEditingCandidate] = []
+        var seenElements = Set<String>()
+        var seenRoles = Set<NBThemeRole>()
+        for hit in hits {
+            if let elementID = hit.elementID,
+               seenElements.insert("\(hit.role.rawValue)|\(elementID)").inserted {
+                candidates.append(.init(role: hit.role, elementID: elementID, initialColor: hit.initialColor))
             }
+            if seenRoles.insert(hit.role).inserted {
+                candidates.append(.init(role: hit.role, elementID: nil))
+            }
+        }
 
-        coordinator.presentRoles(hits.map(\.role))
-    }
-
-    private func expandedHitRect(for frame: CGRect) -> CGRect {
-        let dx = max(0, (36 - frame.width) / 2)
-        let dy = max(0, (36 - frame.height) / 2)
-        return frame.insetBy(dx: -dx, dy: -dy)
+        // Pixels cannot establish semantic ownership: artwork and fixed colors
+        // can equal any theme role, including black/white and translucent mixes.
+        // With no registered target, show a miss rather than edit an unrelated role.
+        coordinator.presentTargets(candidates)
     }
 
     private func colorBinding(for role: NBThemeRole) -> Binding<Color> {
         Binding(
-            get: { themes.activeColor(for: role).color },
+            get: { currentEditingColor(for: role).color },
             set: {
                 themes.updateColorPreview(
                     NBThemeColor(uiColor: UIColor($0)),
@@ -709,7 +775,7 @@ private struct ThemeEditingOverlayWindowView: View {
     private func componentBinding(_ component: ColorComponent, role: NBThemeRole) -> Binding<Double> {
         Binding(
             get: {
-                let rgba = themes.activeColor(for: role)
+                let rgba = currentEditingColor(for: role)
                 var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
                 UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green),
                         blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
@@ -722,7 +788,7 @@ private struct ThemeEditingOverlayWindowView: View {
                 }
             },
             set: { value in
-                let rgba = themes.activeColor(for: role)
+                let rgba = currentEditingColor(for: role)
                 var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
                 UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green),
                         blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
@@ -745,6 +811,13 @@ private struct ThemeEditingOverlayWindowView: View {
                 )
             }
         )
+    }
+
+    private func currentEditingColor(for role: NBThemeRole) -> NBThemeColor {
+        if let elementID = coordinator.editingElementID {
+            return themes.activeColor(for: role, elementID: elementID)
+        }
+        return themes.activeColor(for: role)
     }
 
     private func hexValue(_ color: NBThemeColor) -> String {
@@ -800,19 +873,16 @@ private func firstPresentedController(in controller: UIViewController) -> UIView
         return presented
     }
 
-    if let navigation = controller as? UINavigationController,
-       let visible = navigation.visibleViewController,
-       let presented = firstPresentedController(in: visible) {
-        return presented
+    if let navigation = controller as? UINavigationController {
+        return navigation.visibleViewController.flatMap { firstPresentedController(in: $0) }
     }
 
-    if let tab = controller as? UITabBarController,
-       let selected = tab.selectedViewController,
-       let presented = firstPresentedController(in: selected) {
-        return presented
+    if let tab = controller as? UITabBarController {
+        return tab.selectedViewController.flatMap { firstPresentedController(in: $0) }
     }
 
-    for child in controller.children.reversed() {
+    for child in controller.children.reversed()
+    where child.isViewLoaded && child.view.window != nil && !child.view.isHidden {
         if let presented = firstPresentedController(in: child) {
             return presented
         }
@@ -822,6 +892,7 @@ private func firstPresentedController(in controller: UIViewController) -> UIView
 
 // MARK: - Native UIKit target discovery
 
+@MainActor
 private enum ThemeUIKitTargetDiscovery {
     static func targets(in root: UIView, window: UIWindow) -> [NBThemeInspectorTargetFrame] {
         var stack = [root]
@@ -833,6 +904,16 @@ private enum ThemeUIKitTargetDiscovery {
 
             let rect = NBThemeInspectorRegistry.visibleFrame(of: view, in: window)
             guard !rect.isNull, rect.width > 1, rect.height > 1, rect.intersects(window.bounds) else { continue }
+
+            if let table = view as? UITableView, table.delegate is SourceAppsTableRepresentableView.Coordinator {
+                for cell in table.visibleCells {
+                    let cellRect = NBThemeInspectorRegistry.visibleFrame(of: cell, in: window)
+                    add(.separator, CGRect(x: cellRect.minX, y: cellRect.maxY - 1, width: cellRect.width, height: 1), to: &targets)
+                }
+                if table.dataSource?.sectionIndexTitles?(for: table)?.isEmpty == false {
+                    add(.accent, CGRect(x: rect.maxX - 20, y: rect.minY, width: 20, height: rect.height), to: &targets)
+                }
+            }
 
             if view is UINavigationBar {
                 add(.navigationBackground, rect, to: &targets)
@@ -903,7 +984,13 @@ private enum ThemeUIKitTargetDiscovery {
         _ frame: CGRect,
         to targets: inout [NBThemeInspectorTargetFrame]
     ) {
-        targets.append(.init(role: role, frame: frame))
+        guard !frame.isNull, !frame.isEmpty,
+              frame.minX.isFinite, frame.minY.isFinite,
+              frame.width.isFinite, frame.height.isFinite else { return }
+        let isChrome = role == .navigationBackground || role == .tabBackground
+        targets.append(.init(role: role, frame: frame,
+                             kind: isChrome ? .chrome : .control,
+                             alpha: NBThemeManager.shared.activeColor(for: role).alpha))
     }
 
     private static func ancestor<T: UIView>(_ type: T.Type, from view: UIView) -> T? {

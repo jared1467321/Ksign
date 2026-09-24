@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import PhotosUI
 
@@ -57,6 +58,7 @@ struct BulkSigningView: View {
 	var body: some View {
 		NBNavigationView(.localized("Bulk Signing"), displayMode: .inline) {
 			Form {
+				Group {
                 _cert()
 				
 				ForEach($_configs) { $config in
@@ -65,7 +67,10 @@ struct BulkSigningView: View {
 						_customizationProperties(for: $config)
 					}
 				}
+				}
+				.nbThemeRow()
 			}
+			.nbThemeCanvas()
 			.safeAreaInset(edge: .bottom) {
 				Button {
 					_start()
@@ -223,10 +228,15 @@ extension BulkSigningView {
 			}
 			
 			NavigationLink(String.localized("Properties")) {
-				Form { SigningOptionsView(
+				Form {
+					Group { SigningOptionsView(
 					options: config.options,
 					temporaryOptions: _optionsManager.options
-				)}
+				)
+					}
+					.nbThemeRow()
+				}
+				.nbThemeCanvas()
 			.navigationTitle(.localized("Properties"))
 		}
 	}

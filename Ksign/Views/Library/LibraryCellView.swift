@@ -44,7 +44,7 @@ struct LibraryCellView: View {
 					_toggleSelection()
 				} label: {
 					Image(systemName: _isSelected ? "checkmark.circle.fill" : "circle")
-						.foregroundColor(_isSelected ? NBHalloween.accent : NBHalloween.textSecondary)
+						.nbThemeForeground(_isSelected ? .accent : .textSecondary)
 						.font(.title2)
 				}
 				.buttonStyle(.borderless)
@@ -69,16 +69,16 @@ struct LibraryCellView: View {
 							.font(.system(size: 12))
 							.fontWeight(.semibold)
 					}
-					.foregroundColor(NBHalloween.onAccent)
+					.nbThemeForeground(.onAccent)
 					.padding(.horizontal, 10)
 					.padding(.vertical, 5)
-					.background(certInfo.color)
-					.clipShape(Capsule())
+					.nbThemeBackground(certInfo.role)
+					.nbThemeClipShape(Capsule())
 					.padding(.trailing, 4)
 				}
 				
 				Image(systemName: "chevron.right")
-					.foregroundColor(NBHalloween.textSecondary)
+					.nbThemeForeground(.textSecondary)
 					.font(.footnote)
 			}
 		}
@@ -108,9 +108,9 @@ struct LibraryCellView: View {
 		.contextMenu {
 			if !isEditing {
 				_contextActions(for: app)
-				Divider().overlay(NBHalloween.hairline)
+				Divider().nbThemeOverlay(.separator)
 				_contextActionsExtra(for: app)
-				Divider().overlay(NBHalloween.hairline)
+				Divider().nbThemeOverlay(.separator)
 				_actions(for: app)
 			}
 		}

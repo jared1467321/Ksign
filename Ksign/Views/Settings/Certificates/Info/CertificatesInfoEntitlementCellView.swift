@@ -25,7 +25,7 @@ struct CertificatesInfoEntitlementCellView: View {
 				Text(key)
 				Spacer()
 				Text(_formatted(value))
-					.foregroundStyle(NBHalloween.textSecondary)
+					.nbThemeForeground(.textSecondary)
 			}
 		}
 	}

@@ -62,6 +62,7 @@ final class ThemeReportBridge {
         webViews.remove(webView)
     }
 
+    @MainActor
     func visibleWebViews(in window: UIWindow, within presentationRoot: UIView) -> [WKWebView] {
         precondition(Thread.isMainThread)
         return webViews.allObjects.filter { webView in
@@ -74,6 +75,7 @@ final class ThemeReportBridge {
         }
     }
 
+    @MainActor
     func frame(of webView: WKWebView, in window: UIWindow) -> CGRect {
         NBThemeInspectorRegistry.visibleFrame(of: webView, in: window)
     }

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 
 struct LogsView: View {
 	@ObservedObject var manager: LogsManager
@@ -19,6 +20,7 @@ struct LogsView: View {
 					LazyVStack(alignment: .leading, spacing: 0) {
 						ForEach(manager.entries) { entry in
 							Text(entry.message)
+                                .nbThemeForeground(.text)
 								.font(.system(size: 12, weight: .regular, design: .monospaced))
 								.textSelection(.enabled)
 								.frame(maxWidth: .infinity, alignment: .leading)
@@ -28,7 +30,8 @@ struct LogsView: View {
 						}
 					}
 				}
-				.onAppear { if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) } }
+				.nbThemeCanvas()
+                .onAppear { if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) } }
 				.onChange(of: manager.entries.count) { _ in
 					if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) }
 				}

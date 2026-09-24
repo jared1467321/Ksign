@@ -46,3 +46,12 @@ Device verification still required:
   A write failure must show an error instead of presenting stale export data.
 - Verify advanced Settings still lists every semantic role, including unused
   colors and external Live Activity surfaces.
+
+Theme-picker ownership checks:
+
+- `python3 Tests/ThemeEditing/verify_picker.py` runs source integration guards.
+- `python3 Tests/ThemeEditing/verify_ownership.py` compiles and executes the
+  production dependency-free C selection core with clang in a temporary directory.
+- [OWNERSHIP.md](OWNERSHIP.md) documents the registration pipeline, ordering
+  contract, Downloads regression, limits, and device checks. The portable
+  metadata tests do not substitute for SwiftUI/UIKit execution.

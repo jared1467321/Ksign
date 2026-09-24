@@ -26,7 +26,7 @@ public struct NBTitleWithSubtitleView: View {
                 .nbThemeInspectorTarget(.text)
 			Text(_subtitle)
 				.font(.subheadline)
-				.foregroundStyle(NBHalloween.textSecondary)
+				.nbThemeForeground(.textSecondary)
                 .nbThemeInspectorTarget(.textSecondary)
 		}
 		.lineLimit(_linelimit)

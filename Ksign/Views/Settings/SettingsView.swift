@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -32,6 +33,7 @@ struct SettingsView: View {
     var body: some View {
 		NBNavigationView(.localized("Settings")) {
 			Form {
+				Group {
 				Section {
                     NavigationLink(destination: AppIconView()) {
                         Label(.localized("App Icon"), systemImage: "app.badge")
@@ -48,7 +50,7 @@ struct SettingsView: View {
                     } else {
                         Text(.localized("No Certificate"))
                             .font(.footnote)
-                            .foregroundColor(.disabled())
+                            .nbThemeForeground(.disabledText)
                     }
                     NavigationLink(destination: CertificatesView()) {
                         Label(.localized("Certificates"), systemImage: "signature")
@@ -86,7 +88,10 @@ struct SettingsView: View {
                     Text("Reset the applications sources, certificates, apps, and general contents.")
                 }
 
-            }
+				}
+				.nbThemeRow()
+			}
+            .nbThemeCanvas()
         }
     }
 }

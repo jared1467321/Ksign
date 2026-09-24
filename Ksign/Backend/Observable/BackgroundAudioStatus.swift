@@ -68,13 +68,13 @@ struct BackgroundAudioEvent: Identifiable, Equatable {
 		}
 	}
 
-	var tint: Color {
+	var themeRole: NBThemeRole {
 		switch kind {
-		case .started, .restarted, .resumed:	return NBHalloween.ok
-		case .failed:							return NBHalloween.danger
-		case .interrupted:						return NBHalloween.warning
-		case .stopped, .released:				return NBHalloween.textSecondary
-		case .claimed, .reconfigured, .island:	return NBHalloween.accent
+		case .started, .restarted, .resumed:	return .success
+		case .failed:							return .danger
+		case .interrupted:						return .warning
+		case .stopped, .released:				return .textSecondary
+		case .claimed, .reconfigured, .island:	return .accent
 		}
 	}
 }

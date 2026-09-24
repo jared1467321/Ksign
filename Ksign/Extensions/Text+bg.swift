@@ -13,7 +13,7 @@ extension Text {
         self.padding(.horizontal, 12)
             .frame(height: 29)
             .modifier(style())
-            .clipShape(Capsule())
+            .nbThemeClipShape(Capsule())
     }
 }
 
@@ -29,9 +29,9 @@ struct style: ViewModifier {
         // want the material back; it's left out here so the build doesn't hinge
         // on an API this project hasn't compiled against yet.
         content
-            .background(NBHalloween.accent.opacity(0.16))
-            .overlay(
-                Capsule().stroke(NBHalloween.accent.opacity(0.35), lineWidth: 1)
+            .nbThemeBackground(.accent, opacity: 0.16)
+            .nbThemeOverlay(
+                Capsule().nbThemeStroke(.accent, opacity: 0.35, lineWidth: 1)
             )
     }
 }

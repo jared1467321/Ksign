@@ -21,18 +21,19 @@ struct ImageRow: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .clipped()
+                    .nbThemeContentSurface()
             } else if isLoading {
                 ProgressView()
                     .scaleEffect(0.6)
             } else {
                 Image(systemName: "photo")
-                    .foregroundColor(NBHalloween.accent)
+                    .nbThemeForeground(.accent)
                     .font(.title2)
             }
         }
         .frame(width: 32, height: 32)
-        .background(NBHalloween.controlFill)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .nbThemeBackground(.controlFill)
+        .nbThemeClipShape(RoundedRectangle(cornerRadius: 4))
         .onAppear {
             loadImage()
         }

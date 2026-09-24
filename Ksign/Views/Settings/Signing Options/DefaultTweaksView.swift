@@ -39,15 +39,15 @@ struct DefaultTweaksView: View {
 				}
 			}
 		}
-		.overlay(alignment: .center) {
+		.nbThemeOverlay(alignment: .center) {
 			if _tweaksInDirectory.isEmpty {
 				if #available(iOS 17, *) {
 					ContentUnavailableView {
 						Label(.localized("No Tweaks"), systemImage: "gear.badge.questionmark")
-						.foregroundStyle(NBHalloween.heading)
+						.nbThemeForeground(.heading)
 					} description: {
 						Text(.localized("Import your .dylib, .deb or .framework files, then toggle the ones you want injected into every app."))
-						.foregroundStyle(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 					} actions: {
 						Button {
 							_isAddingPresenting = true
@@ -57,7 +57,7 @@ struct DefaultTweaksView: View {
 					}
 				} else {
 					Text(.localized("Import your .dylib, .deb or .framework files, then toggle the ones you want injected into every app."))
-						.foregroundColor(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 						.frame(maxWidth: .infinity, alignment: .center)
 						.padding()
 				}

@@ -28,14 +28,14 @@ struct AppVersionInfo: View {
             HStack {
                 Text(verbatim: "Version \(version)")
                     .font(.subheadline)
-                    .foregroundStyle(NBHalloween.textSecondary)
+                    .nbThemeForeground(.textSecondary)
                 
                 Spacer()
                 
                 if let date {
                     Text(date.formatted(.relative(presentation: .named)))
                         .font(.subheadline)
-                        .foregroundStyle(NBHalloween.textSecondary)
+                        .nbThemeForeground(.textSecondary)
                 }
             }
             .padding(.vertical, 4)

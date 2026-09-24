@@ -53,13 +53,16 @@ struct InstallDrawerView: View {
 			HStack(spacing: 10) {
 				ZStack {
 					Circle()
-						.stroke(NBHalloween.textSecondary.opacity(0.25), lineWidth: 3)
+						.nbThemeStroke(.textSecondary, opacity: 0.25, lineWidth: 3)
+                        .nbThemePaintLayer(0)
 
 					Circle()
 						.trim(from: 0, to: max(0.02, session.aggregateProgress))
-						.stroke(NBHalloween.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+						.nbThemeStroke(.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
 						.rotationEffect(.degrees(-90))
+                        .nbThemePaintLayer(1)
 				}
+                .nbThemePaintGroup()
 				.frame(width: 18, height: 18)
 
 				// Spelled out as `String.localized` rather than `.localized`:
@@ -70,20 +73,20 @@ struct InstallDrawerView: View {
 					 ? String.localized("Paused")
 					 : "\(session.completedCount) of \(session.totalCount) installed")
 					.font(.footnote.weight(.medium))
-					.foregroundStyle(NBHalloween.text)
+					.nbThemeForeground(.text)
 
 				Image(systemName: "chevron.up")
 					.font(.caption2.weight(.bold))
-					.foregroundStyle(NBHalloween.textSecondary)
+					.nbThemeForeground(.textSecondary)
 			}
 			.padding(.horizontal, 16)
 			.padding(.vertical, 11)
-			.background(NBHalloween.overlaySurface, in: Capsule())
-			.overlay(
+			.nbThemeBackground(.overlaySurface, in: Capsule())
+			.nbThemeOverlay(
 				Capsule()
-					.stroke(NBHalloween.text.opacity(0.08), lineWidth: 0.5)
+					.nbThemeStroke(.text, opacity: 0.08, lineWidth: 0.5)
 			)
-			.shadow(color: NBHalloween.shadow, radius: 10, y: 3)
+			.nbThemeShadow(.shadow, radius: 10, y: 3)
 		}
 		.buttonStyle(.plain)
 	}
@@ -111,7 +114,7 @@ struct InstallDrawerSheet: View {
 						} label: {
 							Image(systemName: session.isPaused ? "play.circle.fill" : "pause.circle.fill")
 								.font(.title3)
-								.foregroundStyle(session.isPaused ? NBHalloween.accent : NBHalloween.textSecondary)
+								.nbThemeForeground(session.isPaused ? .accent : .textSecondary)
 						}
 						.buttonStyle(.plain)
 					}
@@ -122,7 +125,7 @@ struct InstallDrawerSheet: View {
 						} label: {
 							Image(systemName: "xmark.circle.fill")
 								.font(.title3)
-								.foregroundStyle(NBHalloween.textSecondary)
+								.nbThemeForeground(.textSecondary)
 						}
 						.buttonStyle(.plain)
 					}
@@ -139,14 +142,14 @@ struct InstallDrawerSheet: View {
 					// answers "how far in".
 					Text("\(session.runningCount)/\(session.remainingCount)")
 						.font(.caption.monospacedDigit())
-						.foregroundStyle(NBHalloween.textSecondary)
+						.nbThemeForeground(.textSecondary)
 				}
 
 				if session.isPaused, session.waitingCount > 0 {
 					HStack {
 						Text("\(session.waitingCount) waiting")
 							.font(.caption)
-							.foregroundStyle(NBHalloween.textSecondary)
+							.nbThemeForeground(.textSecondary)
 
 						Spacer(minLength: 0)
 					}
@@ -166,7 +169,7 @@ struct InstallDrawerSheet: View {
 					}
 					.buttonStyle(.bordered)
 					.controlSize(.small)
-					.tint(NBHalloween.accent)
+					.nbThemeTint(.accent)
 					.padding(.top, 2)
 				}
 			}
@@ -182,6 +185,7 @@ struct InstallDrawerSheet: View {
 				.padding(.bottom, 20)
 			}
 		}
+		.nbThemeCanvas()
 		// Nested inside the drawer, the way it used to be nested inside the row.
 		.sheet(item: $session.webviewJob) { job in
 			// The server is built lazily now, so this is only reachable once

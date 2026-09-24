@@ -47,7 +47,7 @@ struct ExpandableText: View {
 				}) {
 					Text(expanded ? .localized("Less") : .localized("More"))
 						.font(.caption)
-						.foregroundColor(NBHalloween.accent)
+						.nbThemeForeground(.accent)
 				}
 			}
 		}

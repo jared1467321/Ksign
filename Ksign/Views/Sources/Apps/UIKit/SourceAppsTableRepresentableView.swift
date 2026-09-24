@@ -6,10 +6,13 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import AltSourceKit
 
 // MARK: - Representable
 struct SourceAppsTableRepresentableView: UIViewRepresentable {
+    @Environment(\.nbThemeInspectorContext) private var inspectorContext
+    @ObservedObject private var themes = NBThemeManager.shared
     var sources: [ASRepository]
     @Binding var searchText: String
     @Binding var sortOption: SourceAppsView.SortOption
@@ -18,6 +21,7 @@ struct SourceAppsTableRepresentableView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> UITableView {
         let tableView = UITableView(frame: .zero, style: .plain)
+        tableView.backgroundColor = .clear
         tableView.delegate = context.coordinator
         tableView.dataSource = context.coordinator
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "AppCell")
@@ -35,7 +39,9 @@ struct SourceAppsTableRepresentableView: UIViewRepresentable {
             let news = firstSource.news,
             !news.isEmpty
         {
-            let header = UIHostingController(rootView: SourceNewsView(news: news))
+            let header = UIHostingController(rootView: SourceAppsThemeHost(coordinator: context.coordinator) {
+                SourceNewsView(news: news)
+            })
             header.view.translatesAutoresizingMaskIntoConstraints = true
             header.view.backgroundColor = .clear
             let fixedHeight: CGFloat = 161
@@ -57,7 +63,20 @@ struct SourceAppsTableRepresentableView: UIViewRepresentable {
     }
     
     func updateUIView(_ tableView: UITableView, context: Context) {
+        if context.coordinator.inspectorContext != inspectorContext {
+            let coordinator = context.coordinator
+            let snapshot = inspectorContext
+            // Update existing hosts, not just newly dequeued rows. Publishing
+            // after this representable update avoids a SwiftUI render mutation.
+            DispatchQueue.main.async { [weak coordinator] in
+                coordinator?.inspectorContext = snapshot
+            }
+        }
         context.coordinator.uiTableView = tableView
+        tableView.backgroundColor = .clear
+        tableView.separatorColor = themes.activeColor(for: .separator).uiColor
+        tableView.sectionIndexColor = themes.activeColor(for: .accent).uiColor
+        tableView.sectionIndexBackgroundColor = .clear
         
         let sourcesChanged = context.coordinator.sources != sources
         let searchChanged = context.coordinator.searchText != searchText
@@ -75,18 +94,21 @@ struct SourceAppsTableRepresentableView: UIViewRepresentable {
     }
     
     func makeCoordinator() -> Coordinator {
-        Coordinator(
+        let coordinator = Coordinator(
             sources: sources,
             searchText: searchText,
             sortOption: sortOption,
             sortAscending: sortAscending,
             onSelect: onSelect
         )
+        coordinator.inspectorContext = inspectorContext
+        return coordinator
     }
 }
 
 // MARK: - Representable Extension: Coordinator
-extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
+extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate, ObservableObject {
+    @Published var inspectorContext = NBThemeInspectorContext()
     var sources: [ASRepository]
     var searchText: String
     var sortOption: SourceAppsView.SortOption
@@ -224,9 +246,14 @@ extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITabl
         case .date: entry = _groupedAppsByDate[_sortedSectionTitles[indexPath.section]]?[indexPath.row] ?? _sortedApps[indexPath.row]
         }
 
+        cell.backgroundColor = .clear
         cell.contentConfiguration = UIHostingConfiguration {
-            SourceAppsCellView(source: entry.source, app: entry.app)
+            SourceAppsThemeHost(coordinator: self) {
+                SourceAppsCellView(source: entry.source, app: entry.app)
+                    .nbThemeForeground(.text)
+            }
         }
+        cell.backgroundConfiguration = UIBackgroundConfiguration.clear()
         return cell
     }
     
@@ -255,14 +282,18 @@ extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITabl
         }
         
         headerView?.contentConfiguration = UIHostingConfiguration {
+            SourceAppsThemeHost(coordinator: self) {
             HStack {
                 Text(verbatim: title)
+                    .nbThemeForeground(.heading)
                 Spacer()
             }
             .font(.headline)
             .padding(.vertical, 2)
+            }
         }
         
+        headerView?.backgroundConfiguration = UIBackgroundConfiguration.clear()
         return headerView
     }
     
@@ -339,3 +370,18 @@ extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITabl
         }
     }
 }}
+
+
+/// UIHostingConfiguration does not inherit the representable's environment.
+/// Keep the same live ownership context for existing and recycled cell hosts.
+private struct SourceAppsThemeHost<Content: View>: View {
+    @ObservedObject var coordinator: SourceAppsTableRepresentableView.Coordinator
+    let content: Content
+    init(coordinator: SourceAppsTableRepresentableView.Coordinator, @ViewBuilder content: () -> Content) {
+        self.coordinator = coordinator
+        self.content = content()
+    }
+    var body: some View {
+        content.environment(\.nbThemeInspectorContext, coordinator.inspectorContext)
+    }
+}

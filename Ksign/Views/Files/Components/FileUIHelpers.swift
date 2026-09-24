@@ -37,7 +37,7 @@ struct FileUIHelpers {
         } label: {
             Label(String(localized: "Rename"), systemImage: "pencil")
         }
-        .tint(NBHalloween.warning)
+        .nbThemeTint(.warning)
     }
     
     

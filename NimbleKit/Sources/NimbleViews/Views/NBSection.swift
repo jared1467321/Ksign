@@ -52,13 +52,13 @@ where 	Content: View,
 						Image(systemName: _systemName)
 							.font(.system(size: 12))
 							.offset(y: -2)
-							.foregroundStyle(NBHalloween.heading)
+							.nbThemeForeground(.heading)
 					}
 					
 					Text(_headerText)
 						.fontWeight(.bold)
 						.font(.title2)
-						.foregroundStyle(NBHalloween.heading)
+						.nbThemeForeground(.heading)
 						.nbThemeInspectorTarget(.heading)
 						
 					
@@ -68,23 +68,23 @@ where 	Content: View,
                         if #available(iOS 26.0, *) {
                             Text(_headerTextSecondary)
                                 .font(.caption)
-                                .foregroundStyle(NBHalloween.heading)
+                                .nbThemeForeground(.heading)
                                 .contentTransition(.numericText())
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4.4)
-                                .background(NBHalloween.headingFill)
-                                .clipShape(Capsule())
+                                .nbThemeBackground(.headingFill)
+                                .nbThemeClipShape(Capsule())
 								.nbThemeInspectorTarget(.headingFill)
                                 .glassEffect()
                         } else {
                             Text(_headerTextSecondary)
                                 .font(.caption)
-                                .foregroundStyle(NBHalloween.heading)
+                                .nbThemeForeground(.heading)
                                 .contentTransition(.numericText())
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4.4)
-                                .background(NBHalloween.headingFill)
-                                .clipShape(Capsule())
+                                .nbThemeBackground(.headingFill)
+                                .nbThemeClipShape(Capsule())
 								.nbThemeInspectorTarget(.headingFill)
                         }
 					}
@@ -93,7 +93,7 @@ where 	Content: View,
 			,
 			footer: _footer
 				.font(.caption)
-				.foregroundColor(NBHalloween.textSecondary)
+				.nbThemeForeground(.textSecondary)
 				.nbThemeInspectorTarget(.textSecondary)
 		) {
 			_content

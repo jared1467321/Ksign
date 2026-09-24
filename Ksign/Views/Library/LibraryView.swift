@@ -74,26 +74,29 @@ final class ToolbarTapGate {
 struct SelectionCheckIcon: View {
 	let isSelected: Bool
 	var diameter: CGFloat = 21
-	var ringColor: Color = NBHalloween.accent
-	var fillColor: Color = NBHalloween.accent
+
 
 	var body: some View {
 		// All three layers are always present; only opacity changes, so the view's
 		// identity never changes and there is no add/remove for SwiftUI to animate.
 		ZStack {
 			Circle()
-				.strokeBorder(ringColor, lineWidth: max(1.4, diameter * 0.085))
-				.opacity(isSelected ? 0 : 1)
+				.nbThemeStrokeBorder(.accent, lineWidth: max(1.4, diameter * 0.085))
+				.nbThemeOpacity(isSelected ? 0 : 1)
+                .nbThemePaintLayer(0)
 
 			Circle()
-				.fill(fillColor)
-				.opacity(isSelected ? 1 : 0)
+				.nbThemeFill(.accent)
+				.nbThemeOpacity(isSelected ? 1 : 0)
+                .nbThemePaintLayer(1)
 
 			Image(systemName: "checkmark")
 				.font(.system(size: diameter * 0.5, weight: .heavy))
-				.foregroundStyle(NBHalloween.onAccent)
-				.opacity(isSelected ? 1 : 0)
+				.nbThemeForeground(.onAccent)
+				.nbThemeOpacity(isSelected ? 1 : 0)
+                .nbThemePaintLayer(2)
 		}
+        .nbThemePaintGroup()
 		.frame(width: diameter, height: diameter)
 		// Refuses animations inherited from the edit-mode transition or from the
 		// list's own batch update, which `.animation(nil, value:)` does not.
@@ -237,7 +240,7 @@ struct LibraryView: View {
                     _searchText = "Example"
                 }
             }
-            .overlay {
+            .nbThemeOverlay {
                 if
                     _filteredSignedApps.isEmpty,
                     _filteredImportedApps.isEmpty
@@ -245,10 +248,10 @@ struct LibraryView: View {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No Apps"), systemImage: "questionmark.app.fill")
-                            .foregroundStyle(NBHalloween.heading)
+                            .nbThemeForeground(.heading)
                         } description: {
                             Text(.localized("Get started by importing your first IPA file."))
-                            .foregroundStyle(NBHalloween.textSecondary)
+                            .nbThemeForeground(.textSecondary)
                         } actions: {
                             Menu {
                                 _importActions()
@@ -311,24 +314,27 @@ struct LibraryView: View {
                             _importActions()
                         } label: {
                             Image(systemName: "plus")
-                                .foregroundStyle(NBHalloween.accent)
+                                .nbThemeForeground(.accent)
                         }
                     }
                 }
 			}
             .environment(\.editMode, $_isEditMode)
-            .overlay {
+            .nbThemeOverlay {
                 if _exportManager.isExporting {
                     ZStack {
-                        NBHalloween.overlayScrim.ignoresSafeArea()
+                        NBThemePaint(.overlayScrim).ignoresSafeArea()
+                            .nbThemePaintLayer(0)
                         BulkExportProgressView(manager: _exportManager)
+                            .nbThemePaintLayer(1)
                     }
+                    .nbThemePaintGroup()
                     .transition(.opacity)
                 } else if _cryptCheckExtractedRunning {
                     ProgressView("Running Crypt Check Extracted…")
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
-                        .background(NBHalloween.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
+                        .nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: _exportManager.isExporting)
@@ -495,8 +501,8 @@ extension LibraryView {
             action()
         } label: {
             Image(systemName: systemImage)
-                .foregroundStyle(NBHalloween.accent)
-                .opacity(enabled ? 1 : 0.3)
+                .nbThemeForeground(.accent)
+                .nbThemeOpacity(enabled ? 1 : 0.3)
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -515,7 +521,7 @@ extension LibraryView {
             _toggleSelectAll()
         } label: {
             SelectionCheckIcon(isSelected: _allCurrentTabSelected)
-                .opacity(_currentTabUUIDs.isEmpty ? 0.3 : 1)
+                .nbThemeOpacity(_currentTabUUIDs.isEmpty ? 0.3 : 1)
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -731,7 +737,7 @@ private struct ThemeObservedEditLabel: View {
 
     var body: some View {
         Text(verbatim: title)
-            .foregroundStyle(NBHalloween.accent)
+            .nbThemeForeground(.accent)
             .nbThemeInspectorTarget(.accent)
     }
 }

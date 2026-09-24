@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import Zsign
 
@@ -33,7 +34,7 @@ struct SigningDylibView: View {
 			NBSection(.localized("Hidden")) {
 				Text(verbatim: .localized("%lld required system dylibs not shown", arguments: _hiddenDylibCount))
 					.font(.footnote)
-					.foregroundColor(.disabled())
+					.nbThemeForeground(.disabledText)
 			}
 		}
 		.onAppear(perform: _loadDylibs)
