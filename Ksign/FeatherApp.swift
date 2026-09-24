@@ -10,6 +10,7 @@ import Nuke
 import OSLog
 import IDeviceSwift
 import NimbleExtensions
+import NimbleViews
 
 @main
 struct FeatherApp: App {
@@ -23,28 +24,32 @@ struct FeatherApp: App {
 
 	var body: some Scene {
 		WindowGroup {
-			VStack {
-				// Inline at the top of the stack rather than an overlay: an
-				// overlay would float over each tab's navigation bar title,
-				// which is the one place at the top of the screen that's
-				// already spoken for.
-                ExtractHeaderView(extractManager: extractManager)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-				DownloadHeaderView(downloadManager: downloadManager)
-					.transition(.move(edge: .top).combined(with: .opacity))
-				VariedTabbarView()
-					.environment(\.managedObjectContext, storage.context)
-					.onOpenURL(perform: _handleURL)
-					.transition(.move(edge: .top).combined(with: .opacity))
-			}
+            ThemeEditingRoot {
+                VStack {
+                    // Inline at the top of the stack rather than an overlay: an
+                    // overlay would float over each tab's navigation bar title,
+                    // which is the one place at the top of the screen that's
+                    // already spoken for.
+                    ExtractHeaderView(extractManager: extractManager)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    DownloadHeaderView(downloadManager: downloadManager)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    VariedTabbarView()
+                        .environment(\.managedObjectContext, storage.context)
+                        .onOpenURL(perform: _handleURL)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
 			.tint(NBHalloween.accent)
 			.animation(.smooth, value: downloadManager.manualDownloads.description)
             .animation(.smooth, value: extractManager.extractItems.description)
 			.onReceive(themeManager.objectWillChange) { _ in
-				// @Published emits before its value changes. Refresh UIKit on the next
-				// main-loop turn so the appearance bridge reads the new profile.
+				// @Published emits before its value changes. Refresh UIKit and any
+				// open Crypt Check DOM on the next main-loop turn so both read the
+				// newly selected/live-preview value.
 				DispatchQueue.main.async {
 					HalloweenAppearance.apply(refreshExistingViews: true)
+                    ThemeReportBridge.shared.refreshAllOpenReports()
 					// The widget runs in another process. Never push an
 					// unsaved editor preview to ActivityKit; commit triggers
 					// this normal refresh once the profile is persisted.

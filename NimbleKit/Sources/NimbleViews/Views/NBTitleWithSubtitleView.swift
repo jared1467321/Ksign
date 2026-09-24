@@ -23,9 +23,11 @@ public struct NBTitleWithSubtitleView: View {
 		VStack(alignment: .leading, spacing: 2) {
 			Text(_title)
 				.font(.headline)
+                .nbThemeInspectorTarget(.text)
 			Text(_subtitle)
 				.font(.subheadline)
 				.foregroundStyle(NBHalloween.textSecondary)
+                .nbThemeInspectorTarget(.textSecondary)
 		}
 		.lineLimit(_linelimit)
 		.frame(maxWidth: .infinity, alignment: .leading)

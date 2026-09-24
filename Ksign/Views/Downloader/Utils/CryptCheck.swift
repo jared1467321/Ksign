@@ -1395,6 +1395,7 @@ struct CryptCheckReportView: View {
     let reportURLs: [URL]
 
     @Environment(\.dismiss) private var dismiss
+    @State private var exportError: String?
     @State private var showExporter = false
     @State private var selectedIndex = 0
 
@@ -1425,10 +1426,26 @@ struct CryptCheckReportView: View {
                     Button("Close") { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save") { showExporter = true }
-                        .disabled(currentReportURL == nil)
+                    Button("Save") {
+                        guard let currentReportURL else { return }
+                        do {
+                            try ThemeReportBridge.shared.persistCurrentTheme(to: [currentReportURL])
+                            showExporter = true
+                        } catch {
+                            exportError = error.localizedDescription
+                        }
+                    }
+                    .disabled(currentReportURL == nil)
                 }
             }
+        }
+        .alert("Could Not Save Report", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
         }
         .sheet(isPresented: $showExporter) {
             if let currentReportURL {
@@ -1451,15 +1468,26 @@ struct CryptCheckReportView: View {
 private struct CryptCheckHTMLView: UIViewRepresentable {
     let url: URL
 
+    func makeCoordinator() -> ThemeReportNavigationCoordinator {
+        ThemeReportNavigationCoordinator()
+    }
+
     func makeUIView(context: Context) -> WKWebView {
         let webView = WKWebView(frame: .zero)
         webView.isOpaque = false
-        let background = NBHalloween.uiColor(.reportBackground)
-        webView.backgroundColor = background
-        webView.scrollView.backgroundColor = background
+        webView.navigationDelegate = context.coordinator
+        ThemeReportBridge.shared.register(webView)
+        ThemeReportBridge.shared.applyCurrentTheme(to: webView)
         webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        ThemeReportBridge.shared.applyCurrentTheme(to: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: ThemeReportNavigationCoordinator) {
+        ThemeReportBridge.shared.unregister(uiView)
+        uiView.navigationDelegate = nil
+    }
 }

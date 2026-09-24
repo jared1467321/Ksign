@@ -163,6 +163,7 @@ struct AppearanceView: View {
                         .overlay {
                             Circle().stroke(NBHalloween.imageBorder, lineWidth: 0.5)
                         }
+                        .nbThemeInspectorTarget(role)
                 }
             }
         }
@@ -202,7 +203,6 @@ private struct ThemeProfileEditorView: View {
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var name = ""
     @State private var searchText = ""
-    @State private var inspectedRole: NBThemeRole?
 
     private var theme: NBThemeProfile {
         themeManager.profile(id: themeID) ?? .halloween
@@ -218,10 +218,12 @@ private struct ThemeProfileEditorView: View {
             }
 
             if searchText.isEmpty {
-                NBSection(.localized("Live Preview")) {
-                    _livePreview
+                NBSection(.localized("In-Place Editing")) {
+                    Label(.localized("Use the paintbrush button on any app screen to tap and edit the real colors in place."), systemImage: "paintbrush.pointed.fill")
+                        .font(.footnote)
+                        .foregroundStyle(NBHalloween.textSecondary)
 
-                    Text(.localized("This preview shows the main app colors. Each setting below also explains where it appears, including colors used on other screens."))
+                    Text(.localized("The roles below remain available as the advanced editor for colors that are not currently visible or cannot be selected directly."))
                         .font(.footnote)
                         .foregroundStyle(NBHalloween.textSecondary)
                 }
@@ -231,32 +233,18 @@ private struct ThemeProfileEditorView: View {
                 if !_visibleRoles(in: category).isEmpty {
                     NBSection(category.rawValue) {
                         ForEach(_visibleRoles(in: category)) { role in
-                            HStack(spacing: 12) {
-                                ColorPicker(selection: _binding(for: role), supportsOpacity: true) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(role.displayName)
-                                            .font(.body)
-                                        Text(role.usageDescription)
-                                            .font(.caption)
-                                            .foregroundStyle(NBHalloween.textSecondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                    .padding(.vertical, 3)
+                            ColorPicker(selection: _binding(for: role), supportsOpacity: true) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(role.displayName)
+                                        .font(.body)
+                                    Text(role.usageDescription)
+                                        .font(.caption)
+                                        .foregroundStyle(NBHalloween.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                .accessibilityHint(Text(role.usageDescription))
-
-                                Button {
-                                    inspectedRole = role
-                                } label: {
-                                    Image(systemName: "location.viewfinder")
-                                        .font(.body.weight(.semibold))
-                                        .frame(width: 36, height: 36)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.borderless)
-                                .accessibilityLabel("Show and edit \(role.displayName) in context")
-                                .accessibilityHint("Opens a live screen or labeled example with a temporary color editor")
+                                .padding(.vertical, 3)
                             }
+                            .accessibilityHint(Text(role.usageDescription))
                         }
                     }
                 }
@@ -267,11 +255,6 @@ private struct ThemeProfileEditorView: View {
             }
         }
         .searchable(text: $searchText, prompt: .localized("Find a color or screen element"))
-        .fullScreenCover(item: $inspectedRole, onDismiss: {
-            themeManager.cancelColorPreview(in: themeID)
-        }) { role in
-            ThemeColorInspectorView(role: role, themeID: themeID)
-        }
         .onAppear {
             name = theme.name
             if themeManager.selectedThemeID != themeID {
@@ -291,87 +274,6 @@ private struct ThemeProfileEditorView: View {
                 || category.rawValue.localizedCaseInsensitiveContains(query)
                 || role.displayName.localizedCaseInsensitiveContains(query)
                 || role.usageDescription.localizedCaseInsensitiveContains(query)
-        }
-    }
-
-    // The ordinary editor and the temporary in-context editor share these
-    // swatches. The active theme's unsaved preview is reflected here too.
-    private func _previewColor(_ role: NBThemeRole) -> Color {
-        themeManager.selectedThemeID == themeID
-            ? themeManager.activeColor(for: role).color
-            : theme.color(for: role).color
-    }
-
-    private var _livePreview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(.localized("Example screen"))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(_previewColor(.navigationText))
-                Spacer()
-                Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(_previewColor(.navigationTint))
-            }
-
-            Text(.localized("Your Library"))
-                .font(.title3.weight(.bold))
-                .foregroundStyle(_previewColor(.title))
-
-            HStack(spacing: 10) {
-                Image(systemName: "app.fill")
-                    .font(.title2)
-                    .foregroundStyle(_previewColor(.accent))
-                    .frame(width: 42, height: 42)
-                    .background(_previewColor(.controlFill), in: RoundedRectangle(cornerRadius: 10))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(.localized("Example App"))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(_previewColor(.text))
-                    Text(.localized("Secondary information"))
-                        .font(.caption)
-                        .foregroundStyle(_previewColor(.textSecondary))
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(_previewColor(.success))
-            }
-            .padding(10)
-            .background(_previewColor(.elevated), in: RoundedRectangle(cornerRadius: 12))
-
-            HStack {
-                Text(.localized("Example action"))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(_previewColor(.onAccent))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(_previewColor(.accent), in: Capsule())
-                Spacer()
-                Text(.localized("In progress"))
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(_previewColor(.warning))
-            }
-
-            Rectangle()
-                .fill(_previewColor(.separator))
-                .frame(height: 1)
-
-            HStack {
-                Label(.localized("Library"), systemImage: "square.grid.2x2.fill")
-                    .foregroundStyle(_previewColor(.tabSelected))
-                Spacer()
-                Label(.localized("Settings"), systemImage: "gearshape")
-                    .foregroundStyle(_previewColor(.tabUnselected))
-            }
-            .font(.caption)
-            .padding(9)
-            .background(_previewColor(.tabBackground), in: RoundedRectangle(cornerRadius: 10))
-        }
-        .padding(14)
-        .background(_previewColor(.background), in: RoundedRectangle(cornerRadius: 16))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(_previewColor(.border), lineWidth: 1)
         }
     }
 
@@ -422,12 +324,12 @@ extension NBThemeRole {
         case .accent: return "Main button, icon, link, and interactive highlight color."
         case .secondaryAccent: return "Secondary accent shown in theme swatches; not currently used by another app screen."
         case .tertiaryAccent: return "Third highlight color used for purple-style details."
-        case .title: return "Large title in the theme editor preview; navigation titles have their own color."
+        case .title: return "Large title text used by themed content; navigation titles have their own color."
         case .selection: return "Reserved selection color; no existing app screen currently uses it."
         case .heading: return "Section titles above groups of settings or list rows."
         case .headingFill: return "Background behind the small badges beside section titles."
         case .separator: return "Thin divider lines between rows and content."
-        case .border: return "Outline of the theme editor preview; app icons and reports use separate borders."
+        case .border: return "General themed outline color; app icons and reports use separate borders."
         case .imageBorder: return "Fine outlines around app icons and image thumbnails."
         case .success: return "Successful and completed states, such as checkmarks."
         case .warning: return "Warnings and operations that are still in progress."

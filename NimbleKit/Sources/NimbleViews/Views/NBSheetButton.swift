@@ -21,6 +21,8 @@ public struct NBSheetButton: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.clear)
                 .foregroundColor(NBHalloween.onAccent)
+                .nbThemeInspectorTarget(.onAccent)
+                .nbThemeInspectorTarget(.accent)
                 .clipShape(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
                 )
@@ -33,6 +35,8 @@ public struct NBSheetButton: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.accentColor)
                 .foregroundColor(NBHalloween.onAccent)
+                .nbThemeInspectorTarget(.onAccent)
+                .nbThemeInspectorTarget(.accent)
                 .clipShape(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
