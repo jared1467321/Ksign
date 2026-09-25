@@ -48,6 +48,7 @@ final class InstallSession: ObservableObject {
 	// and there's no reason to race iOS to the finish line.
 	private var _retired: [InstallJob] = []
 	private var _tickTask: Task<Void, Never>?
+	private var _lifecycleObservers: [NSObjectProtocol] = []
 
 	// Batched-prompt coordination. Server + local installs park at `.ready` and
 	// fire in groups of this size behind one confirmation each; other methods
@@ -66,7 +67,47 @@ final class InstallSession: ObservableObject {
 	// than this, they just build a few at a time.
 	private let _batchBuildConcurrency = 5
 
-	private init() {}
+	private init() {
+		let center = NotificationCenter.default
+
+		_lifecycleObservers.append(center.addObserver(
+			forName: UIApplication.willResignActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			Task { @MainActor in
+				self?._stopTicking()
+			}
+		})
+
+		_lifecycleObservers.append(center.addObserver(
+			forName: UIApplication.didEnterBackgroundNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			Task { @MainActor in
+				self?._stopTicking()
+			}
+		})
+
+		_lifecycleObservers.append(center.addObserver(
+			forName: UIApplication.didBecomeActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			Task { @MainActor in
+				guard let self, self.isActive else { return }
+				self._recomputeProgress()
+				self._startTicking()
+			}
+		})
+	}
+
+	deinit {
+		for observer in _lifecycleObservers {
+			NotificationCenter.default.removeObserver(observer)
+		}
+	}
 
 	var isActive: Bool { !jobs.isEmpty }
 
@@ -449,6 +490,7 @@ final class InstallSession: ObservableObject {
 	// server method polls more frequently than the drawer or ActivityKit needs,
 	// so the session publishes one aggregate snapshot every 0.4 seconds.
 	private func _startTicking() {
+		guard UIApplication.shared.applicationState == .active else { return }
 		guard _tickTask == nil else { return }
 
 		_tickTask = Task { @MainActor [weak self] in

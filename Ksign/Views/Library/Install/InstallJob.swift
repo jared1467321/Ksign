@@ -71,6 +71,160 @@ private final class InstallStatusEpoch: @unchecked Sendable {
 	func matches(_ epoch: UUID?) -> Bool { epoch != nil && current == epoch }
 }
 
+// Server-method install progress is polled at 10 Hz so the Live Activity can
+// stay responsive, but SwiftUI does not need ten ObservableObject publications
+// per second per app. Retain only the newest numeric value, publish at most 5 Hz
+// while active, and publish nothing while the app is inactive/locked. Status
+// transitions are intentionally NOT routed through this bridge because they
+// drive install control flow and must continue immediately in the background.
+final class InstallProgressUIBridge {
+	static let shared = InstallProgressUIBridge()
+
+	private struct Pending {
+		var latest: (() -> Void)?
+		var deliveryQueued = false
+	}
+
+	private let _lock = NSLock()
+	private var _isAppActive = false
+	private var _pending: [ObjectIdentifier: Pending] = [:]
+	private var _observers: [NSObjectProtocol] = []
+	private let _presentationInterval: TimeInterval = 0.2
+
+	private init() {
+		let center = NotificationCenter.default
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.willResignActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(false)
+		})
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.didEnterBackgroundNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(false)
+		})
+
+		_observers.append(center.addObserver(
+			forName: UIApplication.didBecomeActiveNotification,
+			object: nil,
+			queue: .main
+		) { [weak self] _ in
+			self?._setAppActive(true)
+		})
+
+		DispatchQueue.main.async { [weak self] in
+			guard let self else { return }
+			self._setAppActive(UIApplication.shared.applicationState == .active)
+		}
+	}
+
+	deinit {
+		for observer in _observers {
+			NotificationCenter.default.removeObserver(observer)
+		}
+	}
+
+	func submit(_ value: Double, to viewModel: InstallerStatusViewModel) {
+		let key = ObjectIdentifier(viewModel)
+		var shouldQueueDelivery = false
+
+		_lock.lock()
+		var entry = _pending[key] ?? Pending()
+		entry.latest = { [weak viewModel] in
+			viewModel?.installProgress = value
+		}
+
+		if _isAppActive && !entry.deliveryQueued {
+			entry.deliveryQueued = true
+			shouldQueueDelivery = true
+		}
+
+		_pending[key] = entry
+		_lock.unlock()
+
+		if shouldQueueDelivery {
+			_queueDelivery(for: key, after: _presentationInterval)
+		}
+	}
+
+	private func _queueDelivery(for key: ObjectIdentifier, after delay: TimeInterval) {
+		DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+			self?._deliverLatest(for: key)
+		}
+	}
+
+	private func _deliverLatest(for key: ObjectIdentifier) {
+		var update: (() -> Void)?
+
+		_lock.lock()
+		guard _isAppActive, var entry = _pending[key] else {
+			if var entry = _pending[key] {
+				entry.deliveryQueued = false
+				_pending[key] = entry
+			}
+			_lock.unlock()
+			return
+		}
+
+		update = entry.latest
+		entry.latest = nil
+		_pending[key] = entry
+		_lock.unlock()
+
+		update?()
+
+		var shouldQueueAgain = false
+		_lock.lock()
+		if var entry = _pending[key] {
+			if _isAppActive, entry.latest != nil {
+				shouldQueueAgain = true
+				_pending[key] = entry
+			} else if entry.latest == nil {
+				_pending.removeValue(forKey: key)
+			} else {
+				entry.deliveryQueued = false
+				_pending[key] = entry
+			}
+		}
+		_lock.unlock()
+
+		if shouldQueueAgain {
+			_queueDelivery(for: key, after: _presentationInterval)
+		}
+	}
+
+	private func _setAppActive(_ active: Bool) {
+		var keysToFlush: [ObjectIdentifier] = []
+
+		_lock.lock()
+		_isAppActive = active
+
+		if active {
+			for key in Array(_pending.keys) {
+				guard var entry = _pending[key],
+					entry.latest != nil,
+					!entry.deliveryQueued
+				else { continue }
+
+				entry.deliveryQueued = true
+				_pending[key] = entry
+				keysToFlush.append(key)
+			}
+		}
+		_lock.unlock()
+
+		for key in keysToFlush {
+			_queueDelivery(for: key, after: 0)
+		}
+	}
+}
+
 // One app's install.
 //
 // All of this used to live inside `BulkInstallProgressView` as `@State` and
@@ -203,9 +357,7 @@ final class InstallJob: ObservableObject, Identifiable {
 								jobID: jobID,
 								progress: progress
 							)
-							DispatchQueue.main.async {
-								statusModel.installProgress = progress
-							}
+							InstallProgressUIBridge.shared.submit(progress, to: statusModel)
 						},
 						onCompleted: {
 							let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
@@ -213,8 +365,8 @@ final class InstallJob: ObservableObject, Identifiable {
 								jobID: jobID,
 								status: completed
 							)
+							InstallProgressUIBridge.shared.submit(1, to: statusModel)
 							DispatchQueue.main.async {
-								statusModel.installProgress = 1
 								statusModel.status = completed
 							}
 						}

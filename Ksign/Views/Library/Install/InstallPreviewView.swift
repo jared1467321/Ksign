@@ -353,15 +353,13 @@ final class SingleInstallLiveActivityReporter {
 				bundleID: bundleID,
 				onProgress: { progress in
 					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
-					DispatchQueue.main.async {
-						viewModel.installProgress = progress
-					}
+					InstallProgressUIBridge.shared.submit(progress, to: viewModel)
 				},
 				onCompleted: {
 					let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
 					SingleInstallLiveActivityReporter.shared.updateStatus(completed)
+					InstallProgressUIBridge.shared.submit(1, to: viewModel)
 					DispatchQueue.main.async {
-						viewModel.installProgress = 1
 						viewModel.status = completed
 					}
 				}
