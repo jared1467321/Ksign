@@ -7,6 +7,7 @@
 
 import SwiftUI
 import WebKit
+import UIKit
 import Darwin
 
 class IPADownloadManager: NSObject, ObservableObject {
@@ -242,6 +243,15 @@ class IPADownloadManager: NSObject, ObservableObject {
     @Published private(set) var ipavaultAdaptiveStreamCount = 0
     @Published private(set) var ipavaultAdaptiveSpeedBPS: Double = 0
 
+    private struct IPAVaultAdaptivePresentation {
+        var concurrentCount = 0
+        var streamsPerFile = 2
+        var status = "Idle"
+        var streamCount = 0
+        var speedBPS: Double = 0
+    }
+    private var ipavaultLatestAdaptivePresentation = IPAVaultAdaptivePresentation()
+
     private let ipavaultBlockSize: Int64 = 256 * 1024
     private let ipavaultMinimumLeaseBytes: Int64 = 2 * 1024 * 1024
     private let ipavaultDefaultLeaseBytes: Int64 = 8 * 1024 * 1024
@@ -277,6 +287,24 @@ class IPADownloadManager: NSObject, ObservableObject {
         let currentItem: String?
     }
 
+    // Transport progress can arrive many times per second. Keep that high-frequency
+    // state separate from @Published downloadItems so SwiftUI/AttributeGraph is not
+    // invalidated once per URLSession data callback. While active we coalesce to 5 Hz;
+    // while inactive we retain only the newest snapshot and publish it on foreground.
+    private struct IPAVaultPresentationProgress: Equatable {
+        let totalBytes: Int64
+        let bytesDownloaded: Int64
+        let progress: Double
+    }
+
+    private let ipavaultPresentationInterval: TimeInterval = 0.20
+    private var ipavaultLatestProgressByItemID: [String: IPAVaultPresentationProgress] = [:]
+    private var ipavaultDirtyPresentationItemIDs: Set<String> = []
+    private var ipavaultPresentationWorkItem: DispatchWorkItem?
+    private var ipavaultLastPresentationFlushAt: TimeInterval = 0
+    private var ipavaultPresentationIsAppActive = false
+    private var ipavaultPresentationObservers: [NSObjectProtocol] = []
+
     private var ipavaultActivityItemIDs: Set<String> = []
     private var completedIPAVaultActivityItemIDs: Set<String> = []
     private var ipavaultCurrentActivityItemID: String?
@@ -302,11 +330,212 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        setupIPAVaultPresentationLifecycle()
         setupURLSession()
         _ = ipavaultSession
         loadDownloadedIPAs()
     }
+
+    deinit {
+        ipavaultPresentationWorkItem?.cancel()
+        for observer in ipavaultPresentationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
     
+    private func setupIPAVaultPresentationLifecycle() {
+        let setup = { [weak self] in
+            guard let self else { return }
+            let center = NotificationCenter.default
+            self.ipavaultPresentationObservers.append(
+                center.addObserver(
+                    forName: UIApplication.willResignActiveNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.setIPAVaultPresentationActive(false)
+                }
+            )
+            self.ipavaultPresentationObservers.append(
+                center.addObserver(
+                    forName: UIApplication.didEnterBackgroundNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.setIPAVaultPresentationActive(false)
+                }
+            )
+            self.ipavaultPresentationObservers.append(
+                center.addObserver(
+                    forName: UIApplication.didBecomeActiveNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.setIPAVaultPresentationActive(true)
+                }
+            )
+
+            self.ipavaultPresentationIsAppActive = UIApplication.shared.applicationState == .active
+        }
+
+        if Thread.isMainThread {
+            setup()
+        } else {
+            DispatchQueue.main.sync(execute: setup)
+        }
+    }
+
+    private func setIPAVaultPresentationActive(_ active: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        ipavaultPresentationIsAppActive = active
+
+        if active {
+            flushIPAVaultPresentationProgress(force: true)
+            publishIPAVaultAdaptivePresentation()
+        } else {
+            ipavaultPresentationWorkItem?.cancel()
+            ipavaultPresentationWorkItem = nil
+        }
+    }
+
+    private func stageIPAVaultPresentationProgress(
+        itemID: String,
+        totalBytes: Int64,
+        bytesDownloaded: Int64,
+        progress: Double
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        ipavaultLatestProgressByItemID[itemID] = IPAVaultPresentationProgress(
+            totalBytes: totalBytes,
+            bytesDownloaded: bytesDownloaded,
+            progress: progress
+        )
+        ipavaultDirtyPresentationItemIDs.insert(itemID)
+        scheduleIPAVaultPresentationFlushIfNeeded()
+    }
+
+    private func scheduleIPAVaultPresentationFlushIfNeeded() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard ipavaultPresentationIsAppActive,
+              !ipavaultDirtyPresentationItemIDs.isEmpty,
+              ipavaultPresentationWorkItem == nil else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let delay = max(0, ipavaultPresentationInterval - (now - ipavaultLastPresentationFlushAt))
+
+        if delay <= 0 {
+            flushIPAVaultPresentationProgress(force: false)
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.ipavaultPresentationWorkItem = nil
+            self.flushIPAVaultPresentationProgress(force: false)
+        }
+        ipavaultPresentationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func flushIPAVaultPresentationProgress(force: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        if force {
+            ipavaultPresentationWorkItem?.cancel()
+            ipavaultPresentationWorkItem = nil
+        }
+
+        guard ipavaultPresentationIsAppActive,
+              !ipavaultDirtyPresentationItemIDs.isEmpty else { return }
+
+        let dirtyIDs = ipavaultDirtyPresentationItemIDs
+        ipavaultDirtyPresentationItemIDs.removeAll(keepingCapacity: true)
+
+        var updatedItems = downloadItems
+        var didChange = false
+
+        for itemID in dirtyIDs {
+            guard let snapshot = ipavaultLatestProgressByItemID[itemID],
+                  let index = updatedItems.firstIndex(where: { $0.id.uuidString == itemID }),
+                  !updatedItems[index].isFinished else { continue }
+
+            if updatedItems[index].totalBytes != snapshot.totalBytes ||
+                updatedItems[index].bytesDownloaded != snapshot.bytesDownloaded ||
+                updatedItems[index].progress != snapshot.progress {
+                updatedItems[index].totalBytes = snapshot.totalBytes
+                updatedItems[index].bytesDownloaded = snapshot.bytesDownloaded
+                updatedItems[index].progress = snapshot.progress
+                didChange = true
+            }
+        }
+
+        ipavaultLastPresentationFlushAt = ProcessInfo.processInfo.systemUptime
+        if didChange {
+            // One array assignment means one ObservableObject invalidation for the
+            // whole IPA Vault batch instead of one invalidation per network chunk.
+            downloadItems = updatedItems
+        }
+    }
+
+    private func clearIPAVaultPresentationProgress(for itemID: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        ipavaultLatestProgressByItemID.removeValue(forKey: itemID)
+        ipavaultDirtyPresentationItemIDs.remove(itemID)
+    }
+
+    private func updateIPAVaultAdaptivePresentation(
+        concurrentCount: Int? = nil,
+        streamsPerFile: Int? = nil,
+        status: String? = nil,
+        streamCount: Int? = nil,
+        speedBPS: Double? = nil
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        if let concurrentCount {
+            ipavaultLatestAdaptivePresentation.concurrentCount = concurrentCount
+        }
+        if let streamsPerFile {
+            ipavaultLatestAdaptivePresentation.streamsPerFile = streamsPerFile
+        }
+        if let status {
+            ipavaultLatestAdaptivePresentation.status = status
+        }
+        if let streamCount {
+            ipavaultLatestAdaptivePresentation.streamCount = streamCount
+        }
+        if let speedBPS {
+            ipavaultLatestAdaptivePresentation.speedBPS = speedBPS
+        }
+
+        if ipavaultPresentationIsAppActive {
+            publishIPAVaultAdaptivePresentation()
+        }
+    }
+
+    private func publishIPAVaultAdaptivePresentation() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard ipavaultPresentationIsAppActive else { return }
+
+        let snapshot = ipavaultLatestAdaptivePresentation
+        if ipavaultAdaptiveConcurrentCount != snapshot.concurrentCount {
+            ipavaultAdaptiveConcurrentCount = snapshot.concurrentCount
+        }
+        if ipavaultAdaptiveStreamsPerFile != snapshot.streamsPerFile {
+            ipavaultAdaptiveStreamsPerFile = snapshot.streamsPerFile
+        }
+        if ipavaultAdaptiveStatus != snapshot.status {
+            ipavaultAdaptiveStatus = snapshot.status
+        }
+        if ipavaultAdaptiveStreamCount != snapshot.streamCount {
+            ipavaultAdaptiveStreamCount = snapshot.streamCount
+        }
+        if ipavaultAdaptiveSpeedBPS != snapshot.speedBPS {
+            ipavaultAdaptiveSpeedBPS = snapshot.speedBPS
+        }
+    }
+
     private func setupURLSession() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -511,9 +740,6 @@ class IPADownloadManager: NSObject, ObservableObject {
         } else {
             detail = "Downloading from IPA Vault"
         }
-        let progressByID = Dictionary(
-            uniqueKeysWithValues: downloadItems.map { ($0.id.uuidString, min(1, max(0, $0.progress))) }
-        )
         let aggregateFraction = min(
             1,
             max(
@@ -522,7 +748,11 @@ class IPADownloadManager: NSObject, ObservableObject {
                     if completedIPAVaultActivityItemIDs.contains(itemID) {
                         return partial + 1
                     }
-                    return partial + (progressByID[itemID] ?? 0)
+                    if let transportProgress = ipavaultLatestProgressByItemID[itemID]?.progress {
+                        return partial + min(1, max(0, transportProgress))
+                    }
+                    let publishedProgress = downloadItems.first(where: { $0.id.uuidString == itemID })?.progress ?? 0
+                    return partial + min(1, max(0, publishedProgress))
                 } / Double(total)
             )
         )
@@ -678,6 +908,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             completedIPAVaultActivityItemIDs.remove(itemID)
             pausedIPAVaultDownloadIDs.remove(itemID)
             resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+            clearIPAVaultPresentationProgress(for: itemID)
             pumpIPAVaultDownloadQueue()
             rebalanceIPAVaultStreams()
             updateIPAVaultBackgroundTaskState()
@@ -698,6 +929,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         pausedIPAVaultDownloadIDs.remove(itemID)
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+        clearIPAVaultPresentationProgress(for: itemID)
         try? FileManager.default.removeItem(at: job.directory)
         pumpIPAVaultDownloadQueue()
         rebalanceIPAVaultStreams()
@@ -831,7 +1063,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         let jobs = runningIPAVaultJobs()
         guard !jobs.isEmpty else {
-            ipavaultAdaptiveStreamCount = 0
+            updateIPAVaultAdaptivePresentation(streamCount: 0)
             return
         }
 
@@ -855,7 +1087,8 @@ class IPADownloadManager: NSObject, ObservableObject {
             }
         }
 
-        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
+        let runningStreamCount = totalRunningIPAVaultStreamCount()
+        updateIPAVaultAdaptivePresentation(streamCount: runningStreamCount)
     }
 
     private func remainingIPAVaultBytes(_ job: IPAVaultJob) -> Int64 {
@@ -990,19 +1223,24 @@ class IPADownloadManager: NSObject, ObservableObject {
     }
 
     private func updateIPAVaultProgress(for job: IPAVaultJob) {
-        guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == job.itemID }) else { return }
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard downloadItems.contains(where: { $0.id.uuidString == job.itemID }) else { return }
 
         let uncommittedInFlight = job.tasks.keys.reduce(Int64(0)) { partial, taskID in
             guard let metadata = ipavaultTaskMetadata[taskID] else { return partial }
             return partial + max(0, metadata.currentPosition - metadata.committedEnd)
         }
         let downloaded = min(job.totalBytes, max(0, job.committedBytes + uncommittedInFlight))
+        let progress = job.totalBytes > 0 ? Double(downloaded) / Double(job.totalBytes) : 0
 
-        var item = downloadItems[index]
-        item.totalBytes = job.totalBytes
-        item.bytesDownloaded = downloaded
-        item.progress = job.totalBytes > 0 ? Double(downloaded) / Double(job.totalBytes) : 0
-        downloadItems[index] = item
+        // Keep transport/system-task accounting current at full callback cadence,
+        // but coalesce the SwiftUI-facing DownloadItem mutation separately.
+        stageIPAVaultPresentationProgress(
+            itemID: job.itemID,
+            totalBytes: job.totalBytes,
+            bytesDownloaded: downloaded,
+            progress: progress
+        )
         publishIPAVaultBackgroundTaskState()
     }
 
@@ -1210,6 +1448,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 pausedIPAVaultDownloadIDs.remove(itemID)
                 resumeRequestedIPAVaultDownloadIDs.remove(itemID)
                 tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+                clearIPAVaultPresentationProgress(for: itemID)
                 try? FileManager.default.removeItem(at: job.directory)
                 pumpIPAVaultDownloadQueue()
                 updateIPAVaultBackgroundTaskState()
@@ -1236,6 +1475,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         pausedIPAVaultDownloadIDs.remove(itemID)
         resumeRequestedIPAVaultDownloadIDs.remove(itemID)
         tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+        clearIPAVaultPresentationProgress(for: itemID)
         pumpIPAVaultDownloadQueue()
         updateIPAVaultBackgroundTaskState()
     }
@@ -1320,9 +1560,13 @@ class IPADownloadManager: NSObject, ObservableObject {
         tunerSuspendedIPAVaultDownloadIDs.removeAll(keepingCapacity: true)
         ipavaultTotalUsefulBytes = 0
         ipavaultAggregateRateSamples.removeAll(keepingCapacity: true)
-        ipavaultAdaptiveConcurrentCount = 1
-        ipavaultAdaptiveStreamsPerFile = ipavaultBatchInitialStreamsPerFile
-        ipavaultAdaptiveStatus = "Tuning concurrency"
+        updateIPAVaultAdaptivePresentation(
+            concurrentCount: 1,
+            streamsPerFile: ipavaultBatchInitialStreamsPerFile,
+            status: "Tuning concurrency",
+            streamCount: 0,
+            speedBPS: 0
+        )
         print("IPA Vault adaptive: new batch starts at 1 file × 2 streams.")
     }
 
@@ -1350,9 +1594,13 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchSpeedDropStartedAt = nil
         ipavaultBatchRetuneAllowedAt = 0
         tunerSuspendedIPAVaultDownloadIDs.removeAll(keepingCapacity: true)
-        ipavaultAdaptiveConcurrentCount = 0
-        ipavaultAdaptiveStreamsPerFile = ipavaultBatchInitialStreamsPerFile
-        ipavaultAdaptiveStatus = "Idle"
+        updateIPAVaultAdaptivePresentation(
+            concurrentCount: 0,
+            streamsPerFile: ipavaultBatchInitialStreamsPerFile,
+            status: "Idle",
+            streamCount: 0,
+            speedBPS: 0
+        )
     }
 
     private func recordIPAVaultUsefulBytes(_ bytes: Int64, now: TimeInterval) {
@@ -1425,7 +1673,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         ipavaultBatchTargetConcurrency = target
         maxConcurrentIPAVaultDownloads = target
-        ipavaultAdaptiveConcurrentCount = target
+        updateIPAVaultAdaptivePresentation(concurrentCount: target)
 
         if target > current {
             pumpIPAVaultDownloadQueue()
@@ -1437,7 +1685,7 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func setIPAVaultBatchStreams(_ requested: Int) {
         let target = min(ipavaultHardMaxStreamsPerFile, max(1, requested))
         ipavaultBatchTargetStreams = target
-        ipavaultAdaptiveStreamsPerFile = target
+        updateIPAVaultAdaptivePresentation(streamsPerFile: target)
 
         for job in runningIPAVaultJobs() {
             job.desiredStreams = target
@@ -1740,7 +1988,9 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchStreamsUpperBound = nil
         ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
         ipavaultBatchLastDecisionAt = now
-        ipavaultAdaptiveStatus = ipavaultBatchRetuneAllowedAt > 0 ? "Retuning streams" : "Tuning streams"
+        updateIPAVaultAdaptivePresentation(
+            status: ipavaultBatchRetuneAllowedAt > 0 ? "Retuning streams" : "Tuning streams"
+        )
         print(
             "IPA Vault adaptive: concurrency settled at \(ipavaultBatchTargetConcurrency); " +
             "tuning streams from \(ipavaultBatchTargetStreams)."
@@ -1754,7 +2004,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchLastStableBPS = max(1, max(stableBPS, ipavaultBatchObservedCeilingBPS))
         ipavaultBatchSpeedDropStartedAt = nil
         ipavaultBatchRetuneAllowedAt = now + ipavaultRetuneCooldownSeconds
-        ipavaultAdaptiveStatus = "Optimized"
+        updateIPAVaultAdaptivePresentation(status: "Optimized")
         print(
             "IPA Vault adaptive: optimized and locked at \(ipavaultBatchTargetConcurrency) file(s) × " +
             "\(ipavaultBatchTargetStreams) streams; watching for a sustained throughput drop."
@@ -1784,7 +2034,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchObservedConfigurations.removeAll(keepingCapacity: true)
         ipavaultBatchAcceptedConfigurationWasStreamTuned = false
         ipavaultBatchLastDecisionAt = now
-        ipavaultAdaptiveStatus = "Retuning concurrency"
+        updateIPAVaultAdaptivePresentation(status: "Retuning concurrency")
 
         setIPAVaultBatchConcurrency(concurrencySeed)
         setIPAVaultBatchStreams(streamSeed)
@@ -1808,10 +2058,12 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func stopIPAVaultAdaptiveController() {
         ipavaultAdaptiveTimer?.invalidate()
         ipavaultAdaptiveTimer = nil
-        ipavaultAdaptiveConcurrentCount = 0
-        ipavaultAdaptiveStreamCount = 0
-        ipavaultAdaptiveSpeedBPS = 0
-        ipavaultAdaptiveStatus = "Idle"
+        updateIPAVaultAdaptivePresentation(
+            concurrentCount: 0,
+            status: "Idle",
+            streamCount: 0,
+            speedBPS: 0
+        )
         ipavaultAggregateRateSamples.removeAll()
         ipavaultBatchControllerThroughputSamples.removeAll()
         ipavaultBatchProbe = nil
@@ -1826,11 +2078,16 @@ class IPADownloadManager: NSObject, ObservableObject {
         recycleStalledIPAVaultStreams(now: now)
         rebalanceIPAVaultStreams()
 
-        ipavaultAdaptiveConcurrentCount = min(ipavaultBatchTargetConcurrency, availableIPAVaultBatchConcurrency())
-        ipavaultAdaptiveStreamsPerFile = ipavaultBatchTargetStreams
-        ipavaultAdaptiveStreamCount = totalRunningIPAVaultStreamCount()
+        let displayedConcurrency = min(ipavaultBatchTargetConcurrency, availableIPAVaultBatchConcurrency())
+        let displayedStreamCount = totalRunningIPAVaultStreamCount()
         let aggregateBPS = currentIPAVaultAggregateBPS(now: now)
-        ipavaultAdaptiveSpeedBPS = aggregateBPS
+
+        updateIPAVaultAdaptivePresentation(
+            concurrentCount: displayedConcurrency,
+            streamsPerFile: ipavaultBatchTargetStreams,
+            streamCount: displayedStreamCount,
+            speedBPS: aggregateBPS
+        )
 
         guard aggregateBPS > 0 else { return }
 
