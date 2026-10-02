@@ -299,6 +299,9 @@ final class InstallJob: ObservableObject, Identifiable {
 	// itself: the handler is built inside a detached task and isn't Sendable,
 	// and a URL is all that's needed to clean up.
 	private var _archiveWorkDir: URL?
+	// True when packageUrl points at Signed/<UUID>/Archive.ipa. That file is
+	// canonical library state and must never be removed as install scratch data.
+	private var _usesCanonicalArchive = false
 
 	// Throws rather than `try!`-ing the way the view did: `ServerInstaller`
 	// starts a Vapor server in its initialiser, and a port collision took the
@@ -658,6 +661,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	// exists would re-prompt against a file that's gone and serve a 404
 	// instead of rebuilding.
 	private func _cleanupArchive() {
+		if _usesCanonicalArchive {
+			_usesCanonicalArchive = false
+			installer?.packageUrl = nil
+			return
+		}
 		guard let dir = _archiveWorkDir else { return }
 		_archiveWorkDir = nil
 		installer?.packageUrl = nil
@@ -769,8 +777,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _install() {
-		// Rejoin/retry can arrive while a synchronous native writer is alive.
-		// Invalidate it now, but restart only after its worker has cleaned up.
+		// Rejoin/retry can arrive while a synchronous native writer or direct
+		// idevice consumer is alive. Invalidate it now, then restart after cleanup.
 		if _packagingTask != nil {
 			_retryAfterPackaging = true
 			_packagingAttempt?.cancel()
@@ -788,56 +796,94 @@ final class InstallJob: ObservableObject, Identifiable {
 		_packagingAttempt = attempt
 
 		_packagingTask = Task.detached { [weak self] in
-			let handler = ArchiveHandler(
-				app: app,
-				viewModel: viewModel,
-				progressReporter: { progress in
-					BulkInstallLiveActivityReporter.shared.updatePackage(
-						jobID: jobID, progress: progress, isCurrent: { attempt.isCurrent }
-					)
-				},
-				attempt: attempt,
-				jobID: jobID
-			)
 			var handedOff = false
 			var failure: Error?
-			do {
-				try await handler.move()
-				try Task.checkCancellation()
-				let packageURL = try await handler.archive()
-				try Task.checkCancellation()
-				guard attempt.isCurrent else { throw CancellationError() }
 
-				if method == 0 {
-					BulkInstallLiveActivityReporter.shared.updateStatus(
-						jobID: jobID, status: .ready, isCurrent: { attempt.isCurrent }
-					)
-					let workDir = handler.workDir
-					handedOff = await MainActor.run { [weak self] in
-						guard let self, self._packagingAttempt?.id == attempt.id,
-						      attempt.isCurrent else { return false }
-						// Ownership transfers atomically with .ready. Until this point
-						// only the worker may delete its work directory.
-						self._archiveWorkDir = workDir
-						installer?.packageUrl = packageURL
-						viewModel.packageProgress = 1
-						viewModel.status = .ready
-						return true
-					}
-				} else if method == 1 {
-					let proxy = await InstallationProxy(viewModel: viewModel)
+			// Archive-backed signed records are already installable IPAs. Bypass
+			// ArchiveHandler entirely: no Payload staging, no full archive rebuild.
+			if let packageURL = Storage.shared.getArchiveURL(for: app) {
+				do {
 					try Task.checkCancellation()
-					try await proxy.install(at: packageURL, suspend: app.identifier == Bundle.main.bundleIdentifier!)
-					// Keep worker ownership until idevice finishes consuming the IPA.
+					guard attempt.isCurrent else { throw CancellationError() }
+
+					if method == 0 {
+						BulkInstallLiveActivityReporter.shared.updatePackage(
+							jobID: jobID, progress: 1, isCurrent: { attempt.isCurrent }
+						)
+						BulkInstallLiveActivityReporter.shared.updateStatus(
+							jobID: jobID, status: .ready, isCurrent: { attempt.isCurrent }
+						)
+						handedOff = await MainActor.run { [weak self] in
+							guard let self, self._packagingAttempt?.id == attempt.id,
+							      attempt.isCurrent else { return false }
+							self._usesCanonicalArchive = true
+							installer?.packageUrl = packageURL
+							viewModel.packageProgress = 1
+							viewModel.status = .ready
+							return true
+						}
+					} else if method == 1 {
+						let proxy = await InstallationProxy(viewModel: viewModel)
+						try Task.checkCancellation()
+						try await proxy.install(
+							at: packageURL,
+							suspend: app.identifier == Bundle.main.bundleIdentifier!
+						)
+					}
+				} catch let error as CancellationError {
+					if !Task.isCancelled && attempt.isCurrent { failure = error }
+				} catch {
+					failure = error
 				}
-			} catch let error as CancellationError {
-				// Cancellation is not an install failure, including a queued lease.
-				// An unrelated dependency cancellation still needs a terminal state.
-				if !Task.isCancelled && attempt.isCurrent { failure = error }
-			} catch {
-				failure = error
+			} else {
+				// Backward compatibility: legacy records that still store a complete
+				// .app keep the established ArchiveHandler packaging path.
+				let handler = ArchiveHandler(
+					app: app,
+					viewModel: viewModel,
+					progressReporter: { progress in
+						BulkInstallLiveActivityReporter.shared.updatePackage(
+							jobID: jobID, progress: progress, isCurrent: { attempt.isCurrent }
+						)
+					},
+					attempt: attempt,
+					jobID: jobID
+				)
+				do {
+					try await handler.move()
+					try Task.checkCancellation()
+					let packageURL = try await handler.archive()
+					try Task.checkCancellation()
+					guard attempt.isCurrent else { throw CancellationError() }
+
+					if method == 0 {
+						BulkInstallLiveActivityReporter.shared.updateStatus(
+							jobID: jobID, status: .ready, isCurrent: { attempt.isCurrent }
+						)
+						let workDir = handler.workDir
+						handedOff = await MainActor.run { [weak self] in
+							guard let self, self._packagingAttempt?.id == attempt.id,
+							      attempt.isCurrent else { return false }
+							self._archiveWorkDir = workDir
+							self._usesCanonicalArchive = false
+							installer?.packageUrl = packageURL
+							viewModel.packageProgress = 1
+							viewModel.status = .ready
+							return true
+						}
+					} else if method == 1 {
+						let proxy = await InstallationProxy(viewModel: viewModel)
+						try Task.checkCancellation()
+						try await proxy.install(at: packageURL, suspend: app.identifier == Bundle.main.bundleIdentifier!)
+					}
+				} catch let error as CancellationError {
+					if !Task.isCancelled && attempt.isCurrent { failure = error }
+				} catch {
+					failure = error
+				}
+				if !handedOff { handler.cleanup() }
 			}
-			if !handedOff { handler.cleanup() }
+
 			let packagingError = failure
 			if let packagingError {
 				BulkInstallLiveActivityReporter.shared.updateStatus(

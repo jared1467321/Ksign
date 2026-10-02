@@ -565,13 +565,21 @@ extension LibraryView {
     private func _runCryptCheckExtracted(_ apps: [AppInfoPresentable]) {
         guard !apps.isEmpty, !_cryptCheckExtractedRunning else { return }
 
-        let appURLs: [URL]
+        enum Input {
+            case filesystem(URL)
+            case archive(URL)
+        }
+
+        let inputs: [Input]
         do {
-            appURLs = try apps.map { app in
-                guard let appURL = Storage.shared.getAppDirectory(for: app) else {
-                    throw CryptCheckExtractedBatchError.missingAppBundle
+            inputs = try apps.map { app in
+                if let appURL = Storage.shared.getAppDirectory(for: app) {
+                    return .filesystem(appURL)
                 }
-                return appURL
+                if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+                    return .archive(archiveURL)
+                }
+                throw CryptCheckExtractedBatchError.missingAppBundle
             }
         } catch {
             UIAlertController.showAlertWithOk(
@@ -584,9 +592,29 @@ extension LibraryView {
         _cryptCheckExtractedRunning = true
         DispatchQueue.global(qos: .userInitiated).async {
             var reportURLs: [URL] = []
+            var temporaryRoots: [URL] = []
+            defer { temporaryRoots.forEach { try? FileManager.default.removeItem(at: $0) } }
 
             do {
-                for appURL in appURLs {
+                for input in inputs {
+                    let appURL: URL
+                    switch input {
+                    case .filesystem(let url):
+                        appURL = url
+                    case .archive(let archiveURL):
+                        // "Crypt Check Extracted" explicitly analyzes an extracted
+                        // tree, so archive-backed apps use a feature-scoped temporary
+                        // extraction. This is never part of normal import/sign/install.
+                        let archivedApp = try ArchiveBackedApp(archiveURL: archiveURL)
+                        let tempRoot = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("FeatherCryptCheckExtracted_\(UUID().uuidString)", isDirectory: true)
+                        let appName = URL(fileURLWithPath: archivedApp.rootAppPath).lastPathComponent
+                        let extractedApp = tempRoot.appendingPathComponent(appName, isDirectory: true)
+                        try archivedApp.extractRootApp(to: extractedApp)
+                        temporaryRoots.append(tempRoot)
+                        appURL = extractedApp
+                    }
+
                     let reportURL = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
                     reportURLs.append(reportURL)
                 }

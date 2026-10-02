@@ -56,10 +56,16 @@ struct SigningFrameworksView: View {
 // MARK: - Extension: View
 extension SigningFrameworksView {
 	private func _listFrameworksAndPlugins() {
+		if let archiveURL = Storage.shared.getArchiveURL(for: app),
+			let archivedApp = try? ArchiveBackedApp(archiveURL: archiveURL) {
+			_frameworks = archivedApp.list(relativePrefix: "Frameworks")
+			_plugins = archivedApp.list(relativePrefix: "PlugIns")
+			return
+		}
+
 		guard let path = Storage.shared.getAppDirectory(for: app) else { return }
-		
-		_frameworks = _listFiles(at: path.appendingPathComponent(_frameworksPath))
-		_plugins = _listFiles(at: path.appendingPathComponent(_pluginsPath))
+		_frameworks = _listFiles(at: path.appendingPathComponent("Frameworks"))
+		_plugins = _listFiles(at: path.appendingPathComponent("PlugIns"))
 	}
 	
 	private func _listFiles(at path: URL) -> [String] {

@@ -103,8 +103,7 @@ extension ServerInstaller {
 	// Same lookup  uses to draw icons everywhere else.
 	private func _appIcon(_ r: CGFloat) -> Data? {
 		guard
-			let iconPath = Storage.shared.getAppDirectory(for: app)?
-				.appendingPathComponent(app.icon ?? ""),
+			let iconPath = Storage.shared.getIconURL(for: app),
 			let image = UIImage(contentsOfFile: iconPath.path)
 		else {
 			return nil

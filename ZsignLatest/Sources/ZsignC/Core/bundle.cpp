@@ -3,6 +3,10 @@
 #include "macho.h"
 #include "sys/stat.h"
 #include "sys/types.h"
+#include "mz.h"
+#include "mz_zip.h"
+#include "mz_zip_rw.h"
+#include <openssl/evp.h>
 #ifndef _WIN32
 #include <unistd.h>
 #include <limits.h>
@@ -32,6 +36,91 @@ static bool GetSymbolicLinkTarget(const string& strPath, string& strTarget)
 	strTarget.assign(buffer.data(), (size_t)length);
 	return true;
 #endif
+}
+
+
+static bool PathExistsNoFollow(const string& path)
+{
+#ifndef _WIN32
+    struct stat st {};
+    return 0 == lstat(path.c_str(), &st);
+#else
+    return ZFile::IsFileExists(path.c_str());
+#endif
+}
+
+static string NormalizeArchiveLogicalPath(string path)
+{
+    replace(path.begin(), path.end(), '\\', '/');
+    while (!path.empty() && '/' == path.front()) {
+        path.erase(path.begin());
+    }
+    while (!path.empty() && '/' == path.back()) {
+        path.pop_back();
+    }
+    return path;
+}
+
+static bool IsSafeArchiveRelativePath(const string& path)
+{
+    if (path.empty() || '/' == path.front() || '\\' == path.front() || string::npos != path.find('\\')) {
+        return false;
+    }
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t end = path.find('/', start);
+        if (string::npos == end) {
+            end = path.size();
+        }
+        if (end - start == 2 && path[start] == '.' && path[start + 1] == '.') {
+            return false;
+        }
+        if (end == path.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+    return true;
+}
+
+static bool IsCodeSignatureRelativePath(const string& relativePath)
+{
+    return relativePath == "_CodeSignature" ||
+           0 == relativePath.rfind("_CodeSignature/", 0) ||
+           string::npos != relativePath.find("/_CodeSignature/") ||
+           (relativePath.size() > 15 && 0 == relativePath.compare(relativePath.size() - 15, 15, "/_CodeSignature"));
+}
+
+void ZBundle::SetArchiveBacking(const string& archivePath,
+                                const string& archiveRootPath,
+                                const vector<string>& deletedPaths)
+{
+    m_strArchivePath = archivePath;
+    m_strArchiveRootPath = NormalizeArchiveLogicalPath(archiveRootPath);
+    m_setArchiveDeletedPaths.clear();
+    for (const string& value : deletedPaths) {
+        string normalized = NormalizeArchiveLogicalPath(value);
+        if (!normalized.empty()) {
+            m_setArchiveDeletedPaths.insert(normalized);
+        }
+    }
+}
+
+bool ZBundle::IsArchiveDeleted(const string& relativePath) const
+{
+    string normalized = NormalizeArchiveLogicalPath(relativePath);
+    if (IsCodeSignatureRelativePath(normalized)) {
+        return true;
+    }
+    for (const string& deleted : m_setArchiveDeletedPaths) {
+        if (normalized == deleted ||
+            (normalized.size() > deleted.size() &&
+             0 == normalized.compare(0, deleted.size(), deleted) &&
+             '/' == normalized[deleted.size()])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ZBundle::ZBundle()
@@ -115,17 +204,230 @@ bool ZBundle::GetSignFolderInfo(const string& strFolder, jvalue& jvNode, bool bG
 
 bool ZBundle::BuildFileIndex()
 {
-	m_indexedFiles.clear();
-	m_indexedFolders.clear();
+    m_indexedFiles.clear();
+    m_indexedFolders.clear();
+    m_archiveEntries.clear();
 
-	return ZFile::EnumFolder(m_strAppFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
-		if (bFolder) {
-			m_indexedFolders.push_back(strPath);
-		} else {
-			m_indexedFiles.push_back(strPath);
-		}
-		return false;
-	});
+    if (!ZFile::EnumFolder(m_strAppFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
+        if (bFolder) {
+            m_indexedFolders.push_back(strPath);
+        } else {
+            m_indexedFiles.push_back(strPath);
+        }
+        return false;
+    })) {
+        return false;
+    }
+
+    if (!m_strArchivePath.empty() && !m_strArchiveRootPath.empty()) {
+        return AddArchiveFileIndex();
+    }
+    return true;
+}
+
+bool ZBundle::AddArchiveFileIndex()
+{
+    void* reader = mz_zip_reader_create();
+    if (NULL == reader) {
+        return false;
+    }
+    int32_t err = mz_zip_reader_open_file(reader, m_strArchivePath.c_str());
+    if (MZ_OK != err) {
+        mz_zip_reader_delete(&reader);
+        return false;
+    }
+
+    void* zipHandle = NULL;
+    err = mz_zip_reader_get_zip_handle(reader, &zipHandle);
+    if (MZ_OK != err || NULL == zipHandle) {
+        mz_zip_reader_close(reader);
+        mz_zip_reader_delete(&reader);
+        return false;
+    }
+
+    const string prefix = m_strArchiveRootPath + "/";
+    err = mz_zip_reader_goto_first_entry(reader);
+    while (MZ_OK == err) {
+        mz_zip_file* info = NULL;
+        if (MZ_OK != mz_zip_reader_entry_get_info(reader, &info) || NULL == info || NULL == info->filename) {
+            err = MZ_FORMAT_ERROR;
+            break;
+        }
+
+        string archiveName = info->filename;
+        // IPA member names are required to use forward slashes. Do not quietly
+        // normalize backslashes here: treating them as separators could turn a
+        // malformed member into a different logical path than the archive stores.
+        if (string::npos != archiveName.find('\\')) {
+            err = MZ_FORMAT_ERROR;
+            break;
+        }
+        if (archiveName.size() > prefix.size() && 0 == archiveName.compare(0, prefix.size(), prefix)) {
+            string relative = archiveName.substr(prefix.size());
+            while (!relative.empty() && '/' == relative.back()) {
+                relative.pop_back();
+            }
+
+            if (!relative.empty()) {
+                if (!IsSafeArchiveRelativePath(relative)) {
+                    err = MZ_FORMAT_ERROR;
+                    break;
+                }
+                if (IsArchiveDeleted(relative)) {
+                    err = mz_zip_reader_goto_next_entry(reader);
+                    continue;
+                }
+                const string logicalPath = m_strAppFolder + "/" + relative;
+                const bool isDirectory = (MZ_OK == mz_zip_reader_entry_is_dir(reader));
+                if (isDirectory) {
+                    if (!PathExistsNoFollow(logicalPath) &&
+                        std::find(m_indexedFolders.begin(), m_indexedFolders.end(), logicalPath) == m_indexedFolders.end()) {
+                        m_indexedFolders.push_back(logicalPath);
+                    }
+                } else if (!PathExistsNoFollow(logicalPath)) {
+                    ArchiveEntry archiveEntry;
+                    archiveEntry.cdPosition = mz_zip_get_entry(zipHandle);
+                    archiveEntry.isSymlink = (MZ_OK == mz_zip_attrib_is_symlink(info->external_fa, info->version_madeby));
+                    if (archiveEntry.isSymlink) {
+                        if (NULL != info->linkname && '\0' != info->linkname[0]) {
+                            archiveEntry.symlinkTarget = info->linkname;
+                        } else if (info->uncompressed_size >= 0 && info->uncompressed_size <= 65536) {
+                            if (MZ_OK == mz_zip_reader_entry_open(reader)) {
+                                vector<char> target((size_t)info->uncompressed_size + 1, 0);
+                                int32_t amount = 0;
+                                if (info->uncompressed_size > 0) {
+                                    amount = mz_zip_reader_entry_read(reader, target.data(), (int32_t)info->uncompressed_size);
+                                }
+                                int32_t closeStatus = mz_zip_reader_entry_close(reader);
+                                if (amount >= 0 && closeStatus == MZ_OK) {
+                                    archiveEntry.symlinkTarget.assign(target.data(), (size_t)amount);
+                                }
+                            }
+                        }
+                    }
+                    // Last duplicate wins for the merged logical resource view.
+                    m_archiveEntries[logicalPath] = archiveEntry;
+                    if (std::find(m_indexedFiles.begin(), m_indexedFiles.end(), logicalPath) == m_indexedFiles.end()) {
+                        m_indexedFiles.push_back(logicalPath);
+                    }
+
+                    // ZIPs are allowed to omit explicit directory entries. Add all
+                    // logical parents so nested bundle discovery still works.
+                    size_t slash = relative.find('/');
+                    while (slash != string::npos) {
+                        string folder = m_strAppFolder + "/" + relative.substr(0, slash);
+                        if (!PathExistsNoFollow(folder) &&
+                            std::find(m_indexedFolders.begin(), m_indexedFolders.end(), folder) == m_indexedFolders.end()) {
+                            m_indexedFolders.push_back(folder);
+                        }
+                        slash = relative.find('/', slash + 1);
+                    }
+                }
+            }
+        }
+        err = mz_zip_reader_goto_next_entry(reader);
+    }
+
+    if (MZ_END_OF_LIST == err) {
+        err = MZ_OK;
+    }
+    int32_t closeStatus = mz_zip_reader_close(reader);
+    mz_zip_reader_delete(&reader);
+    if (MZ_OK == err && MZ_OK != closeStatus) {
+        err = closeStatus;
+    }
+    return MZ_OK == err;
+}
+
+bool ZBundle::GetLogicalSymbolicLinkTarget(const string& strPath, string& strTarget) const
+{
+    if (GetSymbolicLinkTarget(strPath, strTarget)) {
+        return true;
+    }
+    if (PathExistsNoFollow(strPath)) {
+        strTarget.clear();
+        return false;
+    }
+    auto it = m_archiveEntries.find(strPath);
+    if (it != m_archiveEntries.end() && it->second.isSymlink) {
+        strTarget = it->second.symlinkTarget;
+        return true;
+    }
+    strTarget.clear();
+    return false;
+}
+
+bool ZBundle::HashLogicalFile(const string& strPath,
+                              string& strSHA1Base64,
+                              string& strSHA256Base64,
+                              void* archiveReader) const
+{
+    if (PathExistsNoFollow(strPath)) {
+        return ZSHA::SHABase64File(strPath.c_str(), strSHA1Base64, strSHA256Base64);
+    }
+
+    auto it = m_archiveEntries.find(strPath);
+    if (it == m_archiveEntries.end() || it->second.isSymlink || it->second.cdPosition < 0) {
+        return false;
+    }
+
+    void* ownedReader = NULL;
+    void* reader = archiveReader;
+    if (NULL == reader) {
+        ownedReader = mz_zip_reader_create();
+        if (NULL == ownedReader || MZ_OK != mz_zip_reader_open_file(ownedReader, m_strArchivePath.c_str())) {
+            if (NULL != ownedReader) {
+                mz_zip_reader_delete(&ownedReader);
+            }
+            return false;
+        }
+        reader = ownedReader;
+    }
+
+    void* zipHandle = NULL;
+    bool success = false;
+    if (MZ_OK == mz_zip_reader_get_zip_handle(reader, &zipHandle) && NULL != zipHandle &&
+        MZ_OK == mz_zip_goto_entry(zipHandle, it->second.cdPosition) &&
+        MZ_OK == mz_zip_entry_read_open(zipHandle, 0, NULL)) {
+        EVP_MD_CTX* sha1Context = EVP_MD_CTX_new();
+        EVP_MD_CTX* sha256Context = EVP_MD_CTX_new();
+        bool digestOK = NULL != sha1Context && NULL != sha256Context &&
+                        1 == EVP_DigestInit_ex(sha1Context, EVP_sha1(), NULL) &&
+                        1 == EVP_DigestInit_ex(sha256Context, EVP_sha256(), NULL);
+
+        uint8_t buffer[64 * 1024];
+        int32_t read = 0;
+        while (digestOK && (read = mz_zip_entry_read(zipHandle, buffer, (int32_t)sizeof(buffer))) > 0) {
+            digestOK = 1 == EVP_DigestUpdate(sha1Context, buffer, (size_t)read) &&
+                       1 == EVP_DigestUpdate(sha256Context, buffer, (size_t)read);
+        }
+        if (read < 0) {
+            digestOK = false;
+        }
+        int32_t closeEntry = mz_zip_entry_read_close(zipHandle, NULL, NULL, NULL);
+        if (digestOK && MZ_OK == closeEntry) {
+            uint8_t sha1[EVP_MAX_MD_SIZE];
+            uint8_t sha256[EVP_MAX_MD_SIZE];
+            unsigned int sha1Length = 0;
+            unsigned int sha256Length = 0;
+            digestOK = 1 == EVP_DigestFinal_ex(sha1Context, sha1, &sha1Length) &&
+                       1 == EVP_DigestFinal_ex(sha256Context, sha256, &sha256Length);
+            if (digestOK) {
+                jbase64 b64;
+                strSHA1Base64 = b64.encode(string((const char*)sha1, sha1Length));
+                strSHA256Base64 = b64.encode(string((const char*)sha256, sha256Length));
+                success = !strSHA1Base64.empty() && !strSHA256Base64.empty();
+            }
+        }
+        EVP_MD_CTX_free(sha1Context);
+        EVP_MD_CTX_free(sha256Context);
+    }
+
+    if (NULL != ownedReader) {
+        mz_zip_reader_close(ownedReader);
+        mz_zip_reader_delete(&ownedReader);
+    }
+    return success;
 }
 
 void ZBundle::EnsureIndexedFile(const string& strFile)
@@ -291,7 +593,9 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 			continue;
 		}
 		string strLinkTarget;
-		if (!ZFile::IsFileExists(strPath.c_str()) && !GetSymbolicLinkTarget(strPath, strLinkTarget)) {
+		const bool hasDiskPath = PathExistsNoFollow(strPath);
+		const bool hasArchivePath = (m_archiveEntries.find(strPath) != m_archiveEntries.end());
+		if (!hasDiskPath && !hasArchivePath) {
 			continue;
 		}
 
@@ -318,6 +622,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		string sha1;
 		string sha256;
 		bool isSymlink = false;
+		bool hashOK = true;
 		string symlinkTarget;
 	};
 
@@ -334,7 +639,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		ResourceHash item;
 		item.key = strKey;
 		string strFile = strFolder + "/" + strKey;
-		item.isSymlink = GetSymbolicLinkTarget(strFile, item.symlinkTarget);
+		item.isSymlink = GetLogicalSymbolicLinkTarget(strFile, item.symlinkTarget);
 		hashes.push_back(std::move(item));
 	}
 
@@ -342,20 +647,43 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	// then commit to the plist serially in the same sorted-key order as before.
 	// This keeps CodeResources byte-for-byte stable while using multiple cores.
 	const size_t workerCount = (hashes.size() >= 8) ? ZUtil::GetWorkerCount(hashes.size()) : 1;
+	auto openArchiveReader = [&]() -> void* {
+		if (m_strArchivePath.empty()) {
+			return NULL;
+		}
+		void* reader = mz_zip_reader_create();
+		if (NULL == reader || MZ_OK != mz_zip_reader_open_file(reader, m_strArchivePath.c_str())) {
+			if (NULL != reader) {
+				mz_zip_reader_delete(&reader);
+			}
+			return NULL;
+		}
+		return reader;
+	};
+	auto closeArchiveReader = [&](void*& reader) {
+		if (NULL != reader) {
+			mz_zip_reader_close(reader);
+			mz_zip_reader_delete(&reader);
+		}
+	};
+
 	if (workerCount <= 1) {
+		void* reader = openArchiveReader();
 		for (ResourceHash& item : hashes) {
 			if (item.isSymlink) {
 				continue;
 			}
 			string strFile = strFolder + "/" + item.key;
-			ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
+			item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
 		}
+		closeArchiveReader(reader);
 	} else {
 		atomic<size_t> next(0);
 		vector<thread> workers;
 		workers.reserve(workerCount);
 		for (size_t worker = 0; worker < workerCount; worker++) {
 			workers.emplace_back([&]() {
+				void* reader = openArchiveReader();
 				for (;;) {
 					size_t index = next.fetch_add(1, std::memory_order_relaxed);
 					if (index >= hashes.size()) {
@@ -366,12 +694,20 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 						continue;
 					}
 					string strFile = strFolder + "/" + item.key;
-					ZSHA::SHABase64File(strFile.c_str(), item.sha1, item.sha256);
+					item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
 				}
+				closeArchiveReader(reader);
 			});
 		}
 		for (thread& worker : workers) {
 			worker.join();
+		}
+	}
+
+	for (const ResourceHash& item : hashes) {
+		if (!item.isSymlink && !item.hashOK) {
+			ZLog::ErrorV(">>> Can't hash logical resource: %s/%s\n", strFolder.c_str(), item.key.c_str());
+			return false;
 		}
 	}
 

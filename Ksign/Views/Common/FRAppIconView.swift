@@ -104,12 +104,7 @@ struct FRAppIconView: View {
 			_loadedKey = nil
 		}
 
-		guard
-			let dir = Storage.shared.getAppDirectory(for: _app),
-			let iconName = _app.icon, !iconName.isEmpty
-		else { return }
-
-		let url = dir.appendingPathComponent(iconName)
+		guard let url = Storage.shared.getIconURL(for: _app) else { return }
 		let decoded = await AppIconLoader.shared.icon(forKey: key, path: url.path)
 
 		// The view may have been reused while we were waiting; don't apply a

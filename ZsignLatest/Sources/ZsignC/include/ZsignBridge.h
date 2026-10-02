@@ -26,6 +26,9 @@ int zsign(
     NSString *bundleversion,
     bool adhoc,
     bool dontGenerateEmbeddedMobileProvision,
+    NSString *archivePath,
+    NSString *archiveRootPath,
+    NSArray<NSString *> *archiveDeletedPaths,
     void (^ _Nullable completionHandler)(BOOL success)
 );
 

@@ -20,6 +20,8 @@ struct DylibsView: View {
     @State private var showDirectoryPicker = false
     @State private var hiddenDylibCount: Int = 0
     @State private var searchText: String = ""
+    @State private var _archiveRelativePathByVirtualURL: [String: String] = [:]
+    @State private var _archiveExportTemp: URL?
     var body: some View {
         NBNavigationView(app.name ?? .localized("Frameworks & Dylibs"), displayMode: .inline) {
             VStack {
@@ -87,7 +89,7 @@ struct DylibsView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(.localized("Copy")) {
-                        showDirectoryPicker = true
+                        _prepareSelectedDylibsForExport()
                     }
                     .disabled(selectedDylibs.isEmpty)
                 }
@@ -102,6 +104,10 @@ struct DylibsView: View {
                     useLastLocation: _useLastExportLocation,
                     onCompletion: { _ in
                         selectedDylibs.removeAll()
+                        if let temp = _archiveExportTemp {
+                            try? FileManager.default.removeItem(at: temp)
+                            _archiveExportTemp = nil
+                        }
                     }
                 )
             }
@@ -112,6 +118,61 @@ struct DylibsView: View {
     private func loadDylibFiles() {
         dylibFiles = []
         hiddenDylibCount = 0
+        _archiveRelativePathByVirtualURL.removeAll()
+
+        if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let inspectRoot = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FeatherArchiveLibraryDylibInspect_\(UUID().uuidString)", isDirectory: true)
+                defer { try? FileManager.default.removeItem(at: inspectRoot) }
+
+                do {
+                    let archivedApp = try ArchiveBackedApp(archiveURL: archiveURL)
+                    let metadata = try archivedApp.metadata()
+                    var hiddenCount = 0
+
+                    if let executable = metadata.executable, !executable.isEmpty {
+                        let executableURL = inspectRoot.appendingPathComponent(executable)
+                        if try archivedApp.extract(relativePath: executable, to: executableURL) {
+                            let allDylibs = Zsign.listDylibs(appExecutable: executableURL.path).map { $0 as String }
+                            let visibleDylibs = allDylibs.filter { $0.hasPrefix("@rpath") || $0.hasPrefix("@executable_path") }
+                            hiddenCount = allDylibs.count - visibleDylibs.count
+                        }
+                    }
+
+                    var relativePaths = archivedApp.list(relativePrefix: "")
+                        .filter { $0.lowercased().hasSuffix(".dylib") }
+                    relativePaths += archivedApp.list(relativePrefix: "Frameworks")
+                        .filter {
+                            let lower = $0.lowercased()
+                            return lower.hasSuffix(".framework") || lower.hasSuffix(".dylib")
+                        }
+                        .map { "Frameworks/\($0)" }
+                    relativePaths = Array(Set(relativePaths)).sorted {
+                        URL(fileURLWithPath: $0).lastPathComponent.localizedCaseInsensitiveCompare(
+                            URL(fileURLWithPath: $1).lastPathComponent
+                        ) == .orderedAscending
+                    }
+
+                    var map: [String: String] = [:]
+                    let virtualURLs = relativePaths.map { relative -> URL in
+                        let virtual = URL(fileURLWithPath: "/__FeatherArchive__/\(relative)")
+                        map[virtual.path] = relative
+                        return virtual
+                    }
+
+                    DispatchQueue.main.async {
+                        dylibFiles = virtualURLs
+                        hiddenDylibCount = hiddenCount
+                        _archiveRelativePathByVirtualURL = map
+                    }
+                } catch {
+                    print("[ArchiveBacked] Failed to list frameworks/dylibs: \(error)")
+                }
+            }
+            return
+        }
+
         guard let appPath = Storage.shared.getAppDirectory(for: app) else { return }
         let bundle = Bundle(url: appPath)
         let execPath = appPath.appendingPathComponent(bundle?.exec ?? "").relativePath
@@ -121,33 +182,67 @@ struct DylibsView: View {
         
         let fileManager = FileManager.default
         let searchPaths = [
-            appPath, // .app root
-            appPath.appendingPathComponent("Frameworks") // .app/Frameworks
+            appPath,
+            appPath.appendingPathComponent("Frameworks")
         ]
         
         DispatchQueue.global(qos: .userInitiated).async {
             var collectedFiles: [URL] = []
-            
             for path in searchPaths {
                 guard fileManager.fileExists(atPath: path.path) else { continue }
-                
-                do {
-                    let fileURLs = try fileManager.contentsOfDirectory(at: path, includingPropertiesForKeys: nil)
-                    let filtered = fileURLs.filter { url in
+                if let fileURLs = try? fileManager.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) {
+                    collectedFiles.append(contentsOf: fileURLs.filter { url in
                         let ext = url.pathExtension.lowercased()
                         return ext == "framework" || ext == "dylib"
-                    }
-                    collectedFiles.append(contentsOf: filtered)
-                } catch {
-                    // Optional: handle individual folder error
+                    })
                 }
             }
-            
             let sortedFiles = collectedFiles.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            
             DispatchQueue.main.async {
                 self.dylibFiles = sortedFiles
                 self.hiddenDylibCount = hiddenDylibCount
+            }
+        }
+    }
+
+    private func _prepareSelectedDylibsForExport() {
+        guard let archiveURL = Storage.shared.getArchiveURL(for: app) else {
+            showDirectoryPicker = true
+            return
+        }
+
+        let selections = selectedDylibs.compactMap { url -> (URL, String)? in
+            guard let relative = _archiveRelativePathByVirtualURL[url.path] else { return nil }
+            return (url, relative)
+        }
+        guard !selections.isEmpty else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let tempRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FeatherArchiveDylibExport_\(UUID().uuidString)", isDirectory: true)
+            do {
+                let archivedApp = try ArchiveBackedApp(archiveURL: archiveURL)
+                try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+                var materialized: [URL] = []
+                for (_, relative) in selections {
+                    let destination = tempRoot.appendingPathComponent(URL(fileURLWithPath: relative).lastPathComponent)
+                    if try archivedApp.extractTree(relativePath: relative, to: destination) {
+                        materialized.append(destination)
+                    }
+                }
+                DispatchQueue.main.async {
+                    _archiveExportTemp = tempRoot
+                    selectedDylibs = materialized
+                    showDirectoryPicker = !materialized.isEmpty
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: tempRoot)
+                DispatchQueue.main.async {
+                    UIAlertController.showAlertWithOk(
+                        title: .localized("Copy"),
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }

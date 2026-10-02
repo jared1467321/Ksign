@@ -9,11 +9,19 @@ import Foundation
 import Zsign
 import UIKit
 import OSLog
+import ASignArchiveKit
 
 final class SigningHandler: NSObject {
 	private let _fileManager = FileManager.default
 	private let _uuid = UUID().uuidString
 	private var _movedAppPath: URL?
+	private var _archiveSourceURL: URL?
+	private var _archiveRootAppPath: String?
+	private var _archiveUsesFullExtractionFallback = false
+	private var _archiveOriginalRelativePaths = Set<String>()
+	private var _archiveExplicitDeletedPaths = Set<String>()
+	private var _archiveSigningHiddenPaths = Set<String>()
+	private var _signedArchiveURL: URL?
 	// using uuid string is the best way to find the
 	// app we want to sign, it does not matter what
 	// type of app it is
@@ -38,32 +46,55 @@ final class SigningHandler: NSObject {
 	}
 	
 	func copy() async throws {
+		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
+
+		if let archiveURL = Storage.shared.getArchiveURL(for: _app) {
+			let archiveApp = try ArchiveBackedApp(archiveURL: archiveURL)
+			_archiveSourceURL = archiveURL
+			_archiveRootAppPath = archiveApp.rootAppPath
+
+			let appName = URL(fileURLWithPath: archiveApp.rootAppPath).lastPathComponent
+			let movedAppURL = _uniqueWorkDir.appendingPathComponent(appName, isDirectory: true)
+
+			// Tweak/deb injection can copy arbitrary support bundles and replace
+			// existing framework trees. Keep that broad mutation path on an explicit
+			// compatibility fallback for now; normal archive-backed signing stays sparse.
+			let needsFullTreeForTweaks = !_options.injectionFiles.isEmpty || _options.experiment_replaceSubstrateWithEllekit
+			if needsFullTreeForTweaks {
+				_archiveUsesFullExtractionFallback = true
+				_archiveOriginalRelativePaths = Set(archiveApp.paths())
+				Logger.signing.notice("[\(self._uuid)] Archive-backed tweak compatibility fallback: materializing full root app tree")
+				try archiveApp.extractRootApp(to: movedAppURL)
+				guard _fileManager.fileExists(atPath: movedAppURL.path) else {
+					throw SigningFileHandlerError.appNotFound
+				}
+				_movedAppPath = movedAppURL
+			} else {
+				try ASignArchive.materializeSigningInputs(
+					from: archiveURL,
+					rootAppPath: archiveApp.rootAppPath,
+					to: movedAppURL,
+					includeInfoPlistStrings: _options.appName != nil
+				)
+				_movedAppPath = movedAppURL
+			}
+
+			print("[\(_uuid)] Archive-backed signing workspace: \(_movedAppPath?.path ?? "unknown")")
+			return
+		}
+
 		guard let appUrl = Storage.shared.getAppDirectory(for: _app) else {
 			throw SigningFileHandlerError.appNotFound
 		}
 
-		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
-		
 		let movedAppURL = _uniqueWorkDir.appendingPathComponent(appUrl.lastPathComponent)
-		
-		print(appUrl)
-		print(movedAppURL)
-		
-		// Cloned, not copied. Signing rewrites Info.plist, the icon,
-		// embedded.mobileprovision, CodeResources and the Mach-O binaries;
-		// everything else in the bundle — which is nearly all of it — comes
-		// out the other side byte-identical. A copy-on-write clone means only
-		// the parts that actually change get written.
-		//
-		// Note this is *not* the hard-link trick `ArchiveHandler` uses. That
-		// works there because archiving only reads. Here zsign modifies the
-		// bundle in place, and hard links would write those modifications
-		// straight through into the stored original.
+
+		// Legacy filesystem-backed records keep their copy-on-write clone path.
 		try _fileManager.cloneItem(at: appUrl, to: movedAppURL)
 		_movedAppPath = movedAppURL
-		print("[\(_uuid)] Moved Payload to: \(movedAppURL.path)")
+		print("[\(_uuid)] Cloned legacy app to: \(movedAppURL.path)")
 	}
-	
+
 	func modify() async throws {
 		guard let movedAppPath = _movedAppPath else {
 			throw SigningFileHandlerError.appNotFound
@@ -119,11 +150,22 @@ final class SigningHandler: NSObject {
             try await _locateMachosAndFixupArm64eSlice(for: movedAppPath)
         }
 		
-        let handler = ZsignHandler(appUrl: movedAppPath, options: _options, cert: appCertificate)
+        let archiveContext = _zsignArchiveContext()
+        let handler = ZsignHandler(
+            appUrl: movedAppPath,
+            options: _options,
+            cert: appCertificate,
+            archiveContext: archiveContext
+        )
         try await handler.disinject()
 		
 		if !_options.onlyModify {
-			let handler = ZsignHandler(appUrl: movedAppPath, options: _options, cert: appCertificate)
+			let handler = ZsignHandler(
+                appUrl: movedAppPath,
+                options: _options,
+                cert: appCertificate,
+                archiveContext: archiveContext
+            )
 			
 			if _options.doAdhocSigning {
 				try await handler.adhocSign()
@@ -142,25 +184,88 @@ final class SigningHandler: NSObject {
 		guard let movedAppPath = _movedAppPath else {
 			throw SigningFileHandlerError.appNotFound
 		}
-		
+
 		var destinationURL = try await _directory()
-		
 		try _fileManager.createDirectoryIfNeeded(at: destinationURL)
-		
+
+		if let sourceArchive = _archiveSourceURL, let rootAppPath = _archiveRootAppPath {
+			let archiveDestination = destinationURL.appendingPathComponent("Archive.ipa", isDirectory: false)
+			var finalDeletedPaths = _archiveExplicitDeletedPaths
+
+			// The tweak compatibility fallback starts from a complete extracted app,
+			// and tweak/deb installation may remove arbitrary files without going
+			// through SigningHandler's explicit removeFiles option. Record anything
+			// that existed in the source archive but is physically gone now so the
+			// merge cannot raw-copy a deleted source member back into the signed IPA.
+			if _archiveUsesFullExtractionFallback {
+				for relativePath in _archiveOriginalRelativePaths {
+					let candidate = movedAppPath.appendingPathComponent(relativePath)
+					let exists = _fileManager.fileExists(atPath: candidate.path) ||
+						((try? _fileManager.destinationOfSymbolicLink(atPath: candidate.path)) != nil)
+					if !exists {
+						finalDeletedPaths.insert(relativePath)
+					}
+				}
+			}
+
+			// embedded.mobileprovision is removed before signing so the source copy
+			// must never leak through. If zsign generated a replacement, the overlay
+			// contains it and it is preserved instead of being marked deleted here.
+			let finalProvision = movedAppPath.appendingPathComponent("embedded.mobileprovision")
+			if !_fileManager.fileExists(atPath: finalProvision.path) {
+				finalDeletedPaths.insert("embedded.mobileprovision")
+			}
+
+			try ASignArchive.rebuildWithOverlay(
+				from: sourceArchive,
+				at: archiveDestination,
+				rootAppPath: rootAppPath,
+				overlayAppURL: movedAppPath,
+				deletedPaths: finalDeletedPaths,
+				omitExistingCodeSignatures: !_options.onlyModify,
+				compression: .none
+			)
+			_signedArchiveURL = archiveDestination
+			print("[\(_uuid)] Built archive-backed signed IPA: \(archiveDestination.path)")
+			try? _fileManager.removeItem(at: _uniqueWorkDir)
+			return
+		}
+
+		// Legacy filesystem-backed records retain the existing stored .app layout.
 		destinationURL = destinationURL.appendingPathComponent(movedAppPath.lastPathComponent)
-		
 		try _fileManager.moveItem(at: movedAppPath, to: destinationURL)
 		print("[\(_uuid)] Moved App to: \(destinationURL.path)")
 		try? _fileManager.removeItem(at: _uniqueWorkDir)
 	}
-	
+
 	func addToDatabase() async throws {
+		if let signedArchiveURL = _signedArchiveURL {
+			let archiveApp = try ArchiveBackedApp(archiveURL: signedArchiveURL)
+			let metadata = try archiveApp.metadata()
+			let destinationDirectory = signedArchiveURL.deletingLastPathComponent()
+			let cachedIcon = try archiveApp.cachePrimaryIcon(in: destinationDirectory)
+
+			await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+				Storage.shared.addSigned(
+					uuid: _uuid,
+					certificate: _options.doAdhocSigning ? nil : appCertificate,
+					appName: metadata.name,
+					appIdentifier: metadata.identifier,
+					appVersion: metadata.version,
+					appIcon: cachedIcon
+				) { _ in
+					Logger.signing.info("[\(self._uuid)] Added archive-backed signed app to database")
+					continuation.resume()
+				}
+			}
+			return
+		}
+
 		let app = try await _directory()
-		
 		guard let appUrl = _fileManager.getPath(in: app, for: "app") else {
 			return
 		}
-		
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let bundle = Bundle(url: appUrl)
 
@@ -177,7 +282,25 @@ final class SigningHandler: NSObject {
             }
 		}
 	}
-	
+
+	private func _zsignArchiveContext() -> ArchiveSigningContext? {
+		guard
+			!_archiveUsesFullExtractionFallback,
+			let archiveURL = _archiveSourceURL,
+			let rootAppPath = _archiveRootAppPath
+		else {
+			return nil
+		}
+
+		var deletedPaths = _archiveExplicitDeletedPaths
+		deletedPaths.formUnion(_archiveSigningHiddenPaths)
+		return ArchiveSigningContext(
+			archiveURL: archiveURL,
+			rootAppPath: rootAppPath,
+			deletedPaths: deletedPaths
+		)
+	}
+
 	private func _directory() async throws -> URL {
 		// Documents/App/Signed/\(UUID)
 		_fileManager.signed(_uuid)
@@ -261,20 +384,40 @@ extension SigningHandler {
 	}
 	
 	private func _removePlaceholderWatch(for app: URL) async throws {
-		let path = app.appendingPathComponent("com.apple.WatchPlaceholder")
+		let relativePath = "com.apple.WatchPlaceholder"
+		if _archiveSourceURL != nil {
+			_archiveExplicitDeletedPaths.insert(relativePath)
+		}
+		let path = app.appendingPathComponent(relativePath)
 		try _fileManager.removeFileIfNeeded(at: path)
 	}
 	
 	private func _removeFiles(for app: URL, from appendingComponent: [String]) async throws {
-		let filesToRemove = appendingComponent.map {
-			app.appendingPathComponent($0)
-		}
-		
-		for url in filesToRemove {
-			try _fileManager.removeFileIfNeeded(at: url)
+		for component in appendingComponent {
+			let normalized = try _normalizedArchiveRelativePath(component)
+			if _archiveSourceURL != nil {
+				_archiveExplicitDeletedPaths.insert(normalized)
+			}
+			try _fileManager.removeFileIfNeeded(at: app.appendingPathComponent(normalized))
 		}
 	}
-	
+
+	private func _normalizedArchiveRelativePath(_ path: String) throws -> String {
+		let slashNormalized = path.replacingOccurrences(of: "\\", with: "/")
+		let normalized = slashNormalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+		let components = normalized.split(separator: "/", omittingEmptySubsequences: false)
+		guard
+			!normalized.isEmpty,
+			!slashNormalized.hasPrefix("/"),
+			!normalized.contains("\n"),
+			!normalized.contains("\r"),
+			!components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." })
+		else {
+			throw SigningFileHandlerError.unsafeRemovalPath(path)
+		}
+		return normalized
+	}
+
 	private func _modifyLocalesForName(_ name: String, for app: URL) async throws {
 		let localizationBundles = try _fileManager
 			.contentsOfDirectory(at: app, includingPropertiesForKeys: nil)
@@ -296,15 +439,27 @@ extension SigningHandler {
 	}
     
     private func _removeCodeSignature(for app: URL) async throws {
+        // Normal archive-backed signing drops every source CodeSignature during
+        // the merge and lets zsign append regenerated signatures from the overlay.
+        // onlyModify preserves nested signatures like the legacy filesystem path,
+        // but the root signature is still explicitly removed by this operation.
+        if _archiveSourceURL != nil && _options.onlyModify {
+            _archiveExplicitDeletedPaths.insert("_CodeSignature")
+        }
+
         let provisioningFilePath = app.appendingPathComponent("_CodeSignature")
         try _fileManager.removeFileIfNeeded(at: provisioningFilePath)
     }
 	
 	private func _removeProvisioning(for app: URL) async throws {
-		let provisioningFilePath = app.appendingPathComponent("embedded.mobileprovision")
+		let relativePath = "embedded.mobileprovision"
+		if _archiveSourceURL != nil {
+			_archiveSigningHiddenPaths.insert(relativePath)
+		}
+		let provisioningFilePath = app.appendingPathComponent(relativePath)
 		try _fileManager.removeFileIfNeeded(at: provisioningFilePath)
 	}
-	
+
 	private func _inject(for app: URL, with tweaks: [URL], with options: Options) async throws {
 		let handler = TweakHandler(app: app, with: tweaks, options: options)
 		do {
@@ -366,6 +521,7 @@ enum SigningFileHandlerError: Error, LocalizedError {
 	case missingCertifcate
 	case disinjectFailed
 	case signFailed
+	case unsafeRemovalPath(String)
 	
 	var errorDescription: String? {
 		switch self {
@@ -379,6 +535,8 @@ enum SigningFileHandlerError: Error, LocalizedError {
 			return "Removing mach-O load paths failed."
 		case .signFailed:
 			return "Signing failed."
+		case .unsafeRemovalPath(let path):
+			return "Refusing to remove an unsafe app-relative path: \(path)"
 		}
 	}
 }

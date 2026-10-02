@@ -225,6 +225,9 @@ int zsign(
     NSString *bundleversion,
     bool adhoc,
     bool dontGenerateEmbeddedMobileProvision,
+    NSString *archivePath,
+    NSString *archiveRootPath,
+    NSArray<NSString *> *archiveDeletedPaths,
     void (^ _Nullable completionHandler)(BOOL success)
 ) {
     @autoreleasepool {
@@ -265,7 +268,16 @@ int zsign(
 
         vector<string> injectDylibs;
         vector<string> removeDylibs;
+        vector<string> archiveDeleted;
+        for (NSString *path in archiveDeletedPaths) {
+            archiveDeleted.push_back(ToString(path));
+        }
         ZBundle bundle;
+        const string archive = ToString(archivePath);
+        const string archiveRoot = ToString(archiveRootPath);
+        if (!archive.empty() && !archiveRoot.empty()) {
+            bundle.SetArchiveBacking(archive, archiveRoot, archiveDeleted);
+        }
         const bool success = bundle.SignFolder(
             &asset,
             appPath,

@@ -6,30 +6,20 @@
 //
 
 import Foundation
-import ASignArchiveKit
-import ZIPFoundation
-import SwiftUI
-import SWCompression
-import Foundation.NSByteCountFormatter
 
 final class AppFileHandler: NSObject, @unchecked Sendable {
 	private let _fileManager = FileManager.default
 	private let _uuid = UUID().uuidString
-	private let _memoryJobID = UUID()
 	private let _uniqueWorkDir: URL
-	var uniqueWorkDirPayload: URL?
 
 	private let _ipa: URL
 	private let _install: Bool
 	private let _download: Download?
+	private var _metadata: ArchiveBackedAppMetadata?
+	private var _cachedIconURL: URL?
+	private var _canonicalArchiveURL: URL?
+	private var _usedMove = false
 
-	// Last whole-percent value forwarded to the main thread during extraction.
-	// Archive callbacks can fire far more often than the UI can use; without this
-	// gate, hopping to the main actor on every tick floods it and freezes the
-	// app for the whole extraction. Touched only from the single extraction
-	// thread, so a plain Int is fine.
-	private var _lastReportedPercent = -1
-	
 	init(
 		file ipa: URL,
 		install: Bool = false,
@@ -44,202 +34,111 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		super.init()
 		print("Import initiated for: \(_ipa.lastPathComponent) with ID: \(_uuid)")
 	}
-	
+
+	/// Archive-backed imports deliberately keep the IPA compressed. This stage
+	/// validates the archive and reads only the root Info.plist plus (when one can
+	/// be resolved) the primary icon used by the library UI.
 	func extract() async throws {
-		// There used to be a `copy()` step here that duplicated the whole .ipa
-		// into this work directory before unzipping it. Nothing needed that:
-		// both unzip paths below only ever read the archive, and they read it
-		// from wherever it already is. On a 400MB import it was 400MB written
-		// and then deleted again.
-		//
-		// The two sources are a Files-app URL — whose security scope is opened
-		// in `FeatherApp._handleURL` and never closed, so it stays readable —
-		// and a finished download already sitting in the container. Neither is
-		// touched or removed here; this handler only owns its work directory.
+		try Task.checkCancellation()
 		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
-		
-		let download = self._download
-		let library = ArchiveExtractionLibrary.normalized(
-			UserDefaults.standard.string(forKey: "Feather.extractionLibrary")
-		)
-
-		let gate = ArchiveMemoryCoordinator.shared
-		let lease = try await gate.acquire(
-			job: _memoryJobID,
-			attempt: UUID(),
-			workload: _memoryWorkload(for: library)
-		)
-
-		var result: Result<Void, Error>
-		do {
-			try Task.checkCancellation()
-			result = await withCheckedContinuation { continuation in
-				DispatchQueue.global(qos: .utility).async {
-					let extractionResult: Result<Void, Error> = Result {
-						try autoreleasepool {
-							gate.checkpoint(lease, "before native")
-							defer { gate.checkpoint(lease, "native returned") }
-
-							if library == ArchiveExtractionLibrary.zipFoundation {
-								try self._ZIPFoundation(download: download)
-							} else {
-								try self._MiniZip(download: download)
-							}
-							self.uniqueWorkDirPayload = self._uniqueWorkDir.appendingPathComponent("Payload")
-						}
-					}
-					continuation.resume(returning: extractionResult)
-				}
-			}
-		} catch {
-			result = .failure(error)
-		}
-
-		gate.checkpoint(lease, "temporary objects released")
-		await gate.settle()
-		if Task.isCancelled { result = .failure(CancellationError()) }
-		let succeeded: Bool
-		switch result {
-		case .success: succeeded = true
-		case .failure: succeeded = false
-		}
-		gate.finish(lease, succeeded: succeeded)
-
-		if case .failure(let error) = result {
-			print("[\(_uuid)] Extraction error: \(error.localizedDescription)")
-		}
-		try result.get()
-	}
-
-	private func _memoryWorkload(for library: String) -> ArchiveWorkload {
-		let operation: ArchiveOperation = library == ArchiveExtractionLibrary.zipFoundation
-			? .zipFoundationExtraction
-			: .miniZipExtraction
-		var archiveBytes: Double = 0
-		var complete = true
 
 		do {
-			let values = try _ipa.resourceValues(forKeys: [.fileSizeKey])
-			if let fileSize = values.fileSize {
-				archiveBytes = Double(fileSize)
-			} else {
-				complete = false
-			}
+			let archive = try ArchiveBackedApp(archiveURL: _ipa)
+			_metadata = try archive.metadata()
+			_cachedIconURL = try archive.cachePrimaryIcon(in: _uniqueWorkDir)
+				.map { _uniqueWorkDir.appendingPathComponent($0) }
+			_reportProgress(1)
+			print("[\(_uuid)] Archive-backed import prepared; no Payload extraction performed")
+		} catch let error as ArchiveBackedAppError {
+			print("[\(_uuid)] Archive validation failed: \(error.localizedDescription)")
+			throw error
 		} catch {
-			complete = false
+			print("[\(_uuid)] Archive validation failed: \(error.localizedDescription)")
+			throw ImportedFileHandlerError.extractionFailed
 		}
+	}
 
-		return ArchiveWorkload(
-			entries: 1,
-			pathBytes: Double(_ipa.lastPathComponent.utf8.count),
-			uncompressedBytes: archiveBytes,
-			compression: 0,
-			complete: complete,
-			operation: operation
-		)
-	}
-	
-	private func _MiniZip(download: Download?) throws {
-		try ASignArchive.extract(
-			_ipa,
-			to: _uniqueWorkDir,
-			progress: { progress in
-				guard let download = download else { return }
-				// Only forward when the whole-percent value actually changes.
-				// Collapses thousands of main-thread hops into ~100.
-				let percent = Int(progress * 100)
-				guard percent != self._lastReportedPercent else { return }
-				self._lastReportedPercent = percent
-				DispatchQueue.main.async {
-					download.unpackageProgress = progress
-					BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-				}
-			}
-		)
-	}
-	
-	private func _ZIPFoundation(download: Download?) throws {
-		let archive = try Archive(url: _ipa, accessMode: .read)
-		let entries = Array(archive)
-		let totalEntries = max(entries.count, 1)
-		
-		for (index, entry) in entries.enumerated() {
-			let progress = Double(index) / Double(totalEntries)
-			if let download = download {
-				let percent = Int(progress * 100)
-				if percent != _lastReportedPercent {
-					_lastReportedPercent = percent
-					DispatchQueue.main.async {
-						download.unpackageProgress = progress
-						BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-					}
-				}
-			}
-			let destinationPath = _uniqueWorkDir.appendingPathComponent(entry.path)
-			switch entry.type {
-			case .directory:
-				try _fileManager.createDirectory(at: destinationPath, withIntermediateDirectories: true)
-			default:
-				let parent = destinationPath.deletingLastPathComponent()
-				try _fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-				try archive.extract(entry, to: destinationPath)
-			}
-		}
-	}
-	
+	/// Move the canonical IPA into Unsigned/<UUID>/Archive.ipa. Files/provider
+	/// URLs and cross-volume sources can reject a move; copying is the fallback.
 	func move() async throws {
-		guard let payloadURL = uniqueWorkDirPayload else {
-			throw ImportedFileHandlerError.payloadNotFound
+		try Task.checkCancellation()
+		guard _metadata != nil else { throw ImportedFileHandlerError.extractionFailed }
+
+		let destinationDirectory = try await _directory()
+		try _fileManager.createDirectoryIfNeeded(at: destinationDirectory)
+		let destinationArchive = destinationDirectory.appendingPathComponent("Archive.ipa")
+		try _fileManager.removeFileIfNeeded(at: destinationArchive)
+
+		// The explicit "save App Store downloads" preference means the user
+		// asked to retain that downloaded IPA in Documents/Downloads. Preserve it
+		// and copy into the library; every other import still prefers a true move.
+		let preserveDownloadedSource = _download != nil && OptionsManager.shared.options.saveAppStoreDownloadsToDownloadsFolder
+		if preserveDownloadedSource {
+			try _fileManager.copyItem(at: _ipa, to: destinationArchive)
+			_usedMove = false
+			print("[\(_uuid)] Preserved saved download; copied IPA to: \(destinationArchive.path)")
+		} else {
+			do {
+				try _fileManager.moveItem(at: _ipa, to: destinationArchive)
+				_usedMove = true
+				print("[\(_uuid)] Moved IPA directly to: \(destinationArchive.path)")
+			} catch {
+				try Task.checkCancellation()
+				try _fileManager.removeFileIfNeeded(at: destinationArchive)
+				try _fileManager.copyItem(at: _ipa, to: destinationArchive)
+				_usedMove = false
+				print("[\(_uuid)] Source could not be moved; copied IPA to: \(destinationArchive.path)")
+			}
 		}
-		
-		let destinationURL = try await _directory()
-		
-		guard _fileManager.fileExists(atPath: payloadURL.path) else {
-			throw ImportedFileHandlerError.payloadNotFound
+
+		_canonicalArchiveURL = destinationArchive
+
+		if let cachedIconURL = _cachedIconURL,
+			_fileManager.fileExists(atPath: cachedIconURL.path) {
+			let iconDestination = destinationDirectory.appendingPathComponent(cachedIconURL.lastPathComponent)
+			try _fileManager.removeFileIfNeeded(at: iconDestination)
+			try _fileManager.moveItem(at: cachedIconURL, to: iconDestination)
+			_cachedIconURL = iconDestination
 		}
-		
-		try _fileManager.moveItem(at: payloadURL, to: destinationURL)
-		print("[\(_uuid)] Moved Payload to: \(destinationURL.path)")
-		
+
 		try? _fileManager.removeItem(at: _uniqueWorkDir)
 	}
-	
+
 	func addToDatabase() async throws {
-		let app = try await _directory()
-		
-		guard let appUrl = _fileManager.getPath(in: app, for: "app") else {
-			return
+		guard let metadata = _metadata else {
+			throw ImportedFileHandlerError.extractionFailed
 		}
-		
-		let bundle = Bundle(url: appUrl)
-		
-		// `addImported` now hops onto the Core Data context's own queue, so it
-		// returns before the row actually exists. Awaiting it here keeps the
-		// old ordering: `FR.handlePackageFile` doesn't report success — and
-		// the download row doesn't disappear — until the app is really in the
-		// library. Without this the UI could get ahead of the database on a
-		// busy main thread.
+
+		let iconName = _cachedIconURL?.lastPathComponent
 		await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
 			Storage.shared.addImported(
 				uuid: _uuid,
-				appName: bundle?.name,
-				appIdentifier: bundle?.bundleIdentifier,
-				appVersion: bundle?.version,
-				appIcon: bundle?.iconFileName
+				source: _canonicalArchiveURL ?? _ipa,
+				appName: metadata.name,
+				appIdentifier: metadata.identifier,
+				appVersion: metadata.version,
+				appIcon: iconName
 			) { _ in
-				print("[\(self._uuid)] Added to database")
+				print("[\(self._uuid)] Added archive-backed app to database (\(self._usedMove ? "move" : "copy"))")
 				continuation.resume()
 			}
 		}
 	}
-	
+
 	private func _directory() async throws -> URL {
-		// Documents/Feather/Unsigned/\(UUID)
 		_fileManager.unsigned(_uuid)
 	}
-	
+
 	func clean() async throws {
 		try _fileManager.removeFileIfNeeded(at: _uniqueWorkDir)
+	}
+
+	private func _reportProgress(_ progress: Double) {
+		guard let download = _download else { return }
+		DispatchQueue.main.async {
+			download.unpackageProgress = progress
+			BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
+		}
 	}
 }
 
@@ -258,7 +157,7 @@ enum ImportedFileHandlerError: Error, CustomStringConvertible {
 			let availableStr = ByteCountFormatter.string(fromByteCount: available, countStyle: .file)
 			return "Not enough disk space. Needed: \(neededStr), Available: \(availableStr)"
 		case .extractionFailed:
-			return "Failed to extract the archive. The file may be corrupted."
+			return "Failed to read the archive. The file may be corrupted."
 		case .zipLibraryNotAvailable:
 			return "The archive library is not available on this platform."
 		}

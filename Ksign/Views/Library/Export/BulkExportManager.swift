@@ -112,19 +112,33 @@ final class BulkExportManager: ObservableObject {
 			let viewModel = InstallerStatusViewModel(isIdevice: false)
 
 			do {
-				let handler = ArchiveHandler(app: app, viewModel: viewModel)
-				try await handler.move()
-				let packageUrl = try await handler.archive()
-
-				// Rename Archive.ipa to something recognisable, keeping names
-				// unique within this batch so the picker doesn't collide.
 				let fileName = _uniqueFileName(for: app, used: &usedNames)
-				let dest = handler.workDir.appendingPathComponent(fileName)
-				try? FileManager.default.removeItem(at: dest)
-				try FileManager.default.moveItem(at: packageUrl, to: dest)
 
-				exportURLs.append(dest)
-				_workDirs.append(handler.workDir)
+				if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+					// Archive-backed records are already IPAs. Stage only a named
+					// clone/copy for the document picker; never rebuild Payload.
+					let workDir = FileManager.default.temporaryDirectory
+						.appendingPathComponent("FeatherBulkExport_\(UUID().uuidString)", isDirectory: true)
+					try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+					let dest = workDir.appendingPathComponent(fileName)
+					do {
+						try FileManager.default.cloneItem(at: archiveURL, to: dest)
+					} catch {
+						try FileManager.default.copyItem(at: archiveURL, to: dest)
+					}
+					exportURLs.append(dest)
+					_workDirs.append(workDir)
+				} else {
+					let handler = ArchiveHandler(app: app, viewModel: viewModel)
+					try await handler.move()
+					let packageUrl = try await handler.archive()
+					let dest = handler.workDir.appendingPathComponent(fileName)
+					try? FileManager.default.removeItem(at: dest)
+					try FileManager.default.moveItem(at: packageUrl, to: dest)
+
+					exportURLs.append(dest)
+					_workDirs.append(handler.workDir)
+				}
 			} catch {
 				_failures.append(app.name ?? .localized("Unknown"))
 			}

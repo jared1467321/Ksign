@@ -4,9 +4,9 @@ import PackageDescription
 let package = Package(
     name: "ZsignLatest",
     platforms: [
-        .iOS(.v12),
-        .macOS(.v10_15),
-        .tvOS(.v12),
+        .iOS(.v14),
+        .macOS(.v11),
+        .tvOS(.v14),
         .watchOS(.v8),
         .custom("xros", versionString: "1.3")
     ],
@@ -15,13 +15,15 @@ let package = Package(
         .library(name: "Zsign", targets: ["Zsign"])
     ],
     dependencies: [
-        .package(url: "https://github.com/krzyzanowskim/OpenSSL", exact: "3.3.3001")
+        .package(url: "https://github.com/krzyzanowskim/OpenSSL", exact: "3.3.3001"),
+        .package(url: "https://github.com/SideStore/minizip-ng.git", branch: "develop")
     ],
     targets: [
         .target(
             name: "ZsignC",
             dependencies: [
-                .product(name: "OpenSSL", package: "OpenSSL")
+                .product(name: "OpenSSL", package: "OpenSSL"),
+                .product(name: "minizip-ng", package: "minizip-ng")
             ],
             path: "Sources/ZsignC",
             sources: [

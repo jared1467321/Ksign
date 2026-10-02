@@ -9,19 +9,28 @@ import Foundation
 import Zsign
 import UIKit
 
+struct ArchiveSigningContext {
+	let archiveURL: URL
+	let rootAppPath: String
+	let deletedPaths: Set<String>
+}
+
 final class ZsignHandler {
 	private var _appUrl: URL
 	private var _options: Options
 	private var _certificate: CertificatePair?
+	private var _archiveContext: ArchiveSigningContext?
 	
 	init(
 		appUrl: URL,
 		options: Options = OptionsManager.shared.options,
-		cert: CertificatePair? = nil
+		cert: CertificatePair? = nil,
+		archiveContext: ArchiveSigningContext? = nil
 	) {
 		self._appUrl = appUrl
 		self._options = options
 		self._certificate = cert
+		self._archiveContext = archiveContext
 	}
 	
 	func disinject() async throws {
@@ -51,7 +60,10 @@ final class ZsignHandler {
             customIdentifier: _options.appIdentifier ?? "",
             customName: _options.appName ?? "",
             customVersion: _options.appVersion ?? "",
-            removeProvision: !_options.removeProvisioning
+            removeProvision: !_options.removeProvisioning,
+            archivePath: _archiveContext?.archiveURL.path ?? "",
+            archiveRootPath: _archiveContext?.rootAppPath ?? "",
+            archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted()
         ) else {
             throw SigningFileHandlerError.signFailed
         }
@@ -65,7 +77,10 @@ final class ZsignHandler {
 			customName: _options.appName ?? "",
 			customVersion: _options.appVersion ?? "",
 			adhoc: true,
-            removeProvision: !_options.removeProvisioning
+            removeProvision: !_options.removeProvisioning,
+            archivePath: _archiveContext?.archiveURL.path ?? "",
+            archiveRootPath: _archiveContext?.rootAppPath ?? "",
+            archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted()
         ) else {
             throw SigningFileHandlerError.signFailed
         }

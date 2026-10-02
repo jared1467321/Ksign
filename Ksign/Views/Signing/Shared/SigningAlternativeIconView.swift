@@ -14,6 +14,7 @@ struct SigningAlternativeIconView: View {
 	@Environment(\.dismiss) var dismiss
 	
 	@State private var _alternateIcons: [(name: String, path: String)] = []
+	@State private var _archiveIconImages: [String: UIImage] = [:]
 	
 	var app: AppInfoPresentable
 	@Binding var appIcon: UIImage?
@@ -64,29 +65,48 @@ extension SigningAlternativeIconView {
 	
 	
 	private func _iconUrl(_ path: String) -> UIImage? {
-		guard let app = Storage.shared.getAppDirectory(for: app) else {
-			return nil
+		if Storage.shared.isArchiveBacked(app) {
+			return _archiveIconImages[path]
 		}
-		return UIImage(contentsOfFile: app.appendingPathComponent(path).relativePath)?.resizeToSquare()
+		guard let appDirectory = Storage.shared.getAppDirectory(for: app) else { return nil }
+		return UIImage(contentsOfFile: appDirectory.appendingPathComponent(path).relativePath)?.resizeToSquare()
 	}
 	
 	private func _loadAlternateIcons() {
-		guard let appDirectory = Storage.shared.getAppDirectory(for: app) else { return }
-		
-		let infoPlistPath = appDirectory.appendingPathComponent("Info.plist")
-		guard
-			let infoPlist = NSDictionary(contentsOf: infoPlistPath),
-			let iconDict = infoPlist["CFBundleIcons"] as? [String: Any],
-			let alternateIconsDict = iconDict["CFBundleAlternateIcons"] as? [String: [String: Any]]
-		else {
+		if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+			do {
+				let archivedApp = try ArchiveBackedApp(archiveURL: archiveURL)
+				guard let plistData = try archivedApp.data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024),
+					let infoPlist = try PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any]
+				else { return }
+				_loadAlternateIcons(from: infoPlist, archivedApp: archivedApp)
+			} catch {
+				print("[ArchiveBacked] Failed to load alternate icons: \(error)")
+			}
 			return
 		}
-		
-		_alternateIcons = alternateIconsDict.compactMap { (name, details) in
-			if let files = details["CFBundleIconFiles"] as? [String], let path = files.first {
-				return (name, path)
+
+		guard let appDirectory = Storage.shared.getAppDirectory(for: app) else { return }
+		let infoPlistPath = appDirectory.appendingPathComponent("Info.plist")
+		guard let infoPlist = NSDictionary(contentsOf: infoPlistPath) as? [String: Any] else { return }
+		_loadAlternateIcons(from: infoPlist, archivedApp: nil)
+	}
+
+	private func _loadAlternateIcons(from infoPlist: [String: Any], archivedApp: ArchiveBackedApp?) {
+		guard
+			let iconDict = infoPlist["CFBundleIcons"] as? [String: Any],
+			let alternateIconsDict = iconDict["CFBundleAlternateIcons"] as? [String: [String: Any]]
+		else { return }
+
+		_archiveIconImages.removeAll()
+		_alternateIcons = alternateIconsDict.compactMap { name, details in
+			guard let files = details["CFBundleIconFiles"] as? [String], let path = files.first else { return nil }
+			if let archivedApp,
+				let data = try? archivedApp.resourceData(named: path, maximumBytes: 32 * 1024 * 1024),
+				let image = UIImage(data: data)?.resizeToSquare() {
+				_archiveIconImages[path] = image
 			}
-			return nil
+			return (name, path)
 		}
 	}
 }

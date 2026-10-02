@@ -28,6 +28,7 @@ struct InstallPreviewView: View {
 	// before, so every single-app install left a full-size archive in tmp
 	// until the next cold start.
 	@State private var _archiveWorkDir: URL?
+	@State private var _usesCanonicalArchive = false
 	
 	var app: AppInfoPresentable
 	@StateObject var viewModel: InstallerStatusViewModel
@@ -135,6 +136,11 @@ struct InstallPreviewView: View {
 	// Idempotent — dismissal and the terminal status both land here, and
 	// whichever arrives first wins.
 	private func _cleanupArchive() {
+		if _usesCanonicalArchive {
+			_usesCanonicalArchive = false
+			installer.packageUrl = nil
+			return
+		}
 		guard let dir = _archiveWorkDir else { return }
 		_archiveWorkDir = nil
 		installer.packageUrl = nil
@@ -162,6 +168,42 @@ struct InstallPreviewView: View {
 
 		Task.detached {
 			do {
+				if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+					SingleInstallLiveActivityReporter.shared.updatePackage(1)
+
+					if await !isSharing {
+						if await _installationMethod == 0 {
+							SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
+							await MainActor.run {
+								_usesCanonicalArchive = true
+								installer.packageUrl = archiveURL
+								viewModel.packageProgress = 1
+								viewModel.status = .ready
+							}
+						} else if await _installationMethod == 1 {
+							let handler = await InstallationProxy(viewModel: viewModel)
+							try await handler.install(
+								at: archiveURL,
+								suspend: app.identifier == Bundle.main.bundleIdentifier!
+							)
+						}
+					} else if await _useShareSheet {
+						await MainActor.run {
+							dismiss()
+							UIActivityViewController.show(activityItems: [archiveURL])
+						}
+					} else {
+						let package = try Self._copyArchiveBackedExport(archiveURL, name: app.name, version: app.version)
+						await MainActor.run {
+							UIApplication.open(FileManager.default.archives.toSharedDocumentsURL()!)
+							dismiss()
+						}
+						_ = package
+					}
+					return
+				}
+
+				// Legacy filesystem-backed records retain the packaging/export path.
 				let handler = ArchiveHandler(
 					app: app,
 					viewModel: viewModel,
@@ -170,14 +212,14 @@ struct InstallPreviewView: View {
 					}
 				)
 				try await handler.move()
-				
 				let workDir = handler.workDir
 				let packageUrl = try await handler.archive()
-				
+
 				await MainActor.run {
 					_archiveWorkDir = workDir
+					_usesCanonicalArchive = false
 				}
-				
+
 				if await !isSharing {
                     if await _installationMethod == 0 {
                         SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
@@ -185,25 +227,20 @@ struct InstallPreviewView: View {
                             installer.packageUrl = packageUrl
                             viewModel.status = .ready
                         }
-                        
                     }
                     else if await _installationMethod == 1 {
-                        let handler = await InstallationProxy(viewModel: viewModel)
-                        try await handler.install(at: packageUrl, suspend: app.identifier == Bundle.main.bundleIdentifier!)
+                        let proxy = await InstallationProxy(viewModel: viewModel)
+                        try await proxy.install(at: packageUrl, suspend: app.identifier == Bundle.main.bundleIdentifier!)
                     }
 				} else {
 					let package = try await handler.moveToArchive(packageUrl, shouldOpen: !_useShareSheet)
-					
+
 					if await !_useShareSheet {
+						await MainActor.run { dismiss() }
+					} else if let package {
 						await MainActor.run {
 							dismiss()
-						}
-					} else {
-						if let package {
-							await MainActor.run {
-								dismiss()
-								UIActivityViewController.show(activityItems: [package])
-							}
+							UIActivityViewController.show(activityItems: [package])
 						}
 					}
 				}
@@ -221,6 +258,20 @@ struct InstallPreviewView: View {
 				}
 			}
 		}
+	}
+
+	private static func _copyArchiveBackedExport(_ archiveURL: URL, name: String?, version: String?) throws -> URL {
+		let rawName = (name ?? "App").replacingOccurrences(of: "/", with: "-")
+		let version = version ?? "0"
+		let fileName = "\(rawName)_\(version)_\(Int(Date().timeIntervalSince1970)).ipa"
+		let destination = FileManager.default.archives.appendingPathComponent(fileName)
+		try? FileManager.default.removeItem(at: destination)
+		do {
+			try FileManager.default.cloneItem(at: archiveURL, to: destination)
+		} catch {
+			try FileManager.default.copyItem(at: archiveURL, to: destination)
+		}
+		return destination
 	}
 
 }

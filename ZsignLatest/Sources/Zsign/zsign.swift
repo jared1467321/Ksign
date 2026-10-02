@@ -33,6 +33,9 @@ public enum Zsign {
         customVersion: String = "",
         adhoc: Bool = false,
         removeProvision: Bool = false,
+        archivePath: String = "",
+        archiveRootPath: String = "",
+        archiveDeletedPaths: [String] = [],
         completion: ((Bool) -> Void)? = nil
     ) -> Bool {
         zsign(
@@ -46,6 +49,9 @@ public enum Zsign {
             customVersion,
             adhoc,
             removeProvision,
+            archivePath,
+            archiveRootPath,
+            archiveDeletedPaths,
             completion.map { callback in
                 { success in callback(success) }
             }
