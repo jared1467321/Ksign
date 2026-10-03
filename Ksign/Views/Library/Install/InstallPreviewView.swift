@@ -53,9 +53,6 @@ struct InstallPreviewView: View {
 						viewModel: viewModel,
 						isServerInstall: method == 0
 					)
-				},
-				payloadProgressReporter: { progress in
-					SingleInstallLiveActivityReporter.shared.updateInstall(progress, isPayload: true)
 				}
 			)
 		)
@@ -323,7 +320,6 @@ final class SingleInstallLiveActivityReporter {
 	private var _stage: _Stage = .packaging
 	private var _packageProgress: Double = 0
 	private var _installProgress: Double = 0
-	private var _hasPayloadProgress = false
 	private var _fraction: Double = 0
 	private var _currentItem: String?
 	private let _serverMonitorID = UUID()
@@ -336,7 +332,6 @@ final class SingleInstallLiveActivityReporter {
 			self._stage = .packaging
 			self._packageProgress = 0
 			self._installProgress = 0
-			self._hasPayloadProgress = false
 			self._fraction = 0
 			self._currentItem = name
 
@@ -374,27 +369,17 @@ final class SingleInstallLiveActivityReporter {
 		self._publish()
 	}
 
-	func updateInstall(_ progress: Double, isPayload: Bool = false) {
+	func updateInstall(_ progress: Double) {
 		_queue.async {
 			guard self._active, self._stage != .completed, self._stage != .failed else { return }
 			let value = min(1, max(0, progress))
-			if isPayload {
-				guard self._stage == .sendingPayload else { return }
-				self._hasPayloadProgress = true
-				let next = max(self._fraction, 0.5 + value * 0.25)
-				guard next > self._fraction else { return }
-				self._fraction = next
-				self._publish()
-				return
-			}
 			let stageChanged = self._stage != .installing
 			let progressChanged = value != self._installProgress
 			guard stageChanged || progressChanged else { return }
 
 			self._installProgress = value
 			self._stage = .installing
-			let base = self._hasPayloadProgress ? 0.75 : 0.5
-			let next = min(1, max(self._fraction, base + (value * (1 - base))))
+			let next = min(1, max(self._fraction, 0.5 + (value * 0.5)))
 			let fractionChanged = next != self._fraction
 			self._fraction = next
 			guard stageChanged || fractionChanged else { return }
@@ -459,8 +444,7 @@ final class SingleInstallLiveActivityReporter {
 				self._fraction = max(self._fraction, 0.5)
 			case .installing:
 				self._stage = .installing
-				let base = self._hasPayloadProgress ? 0.75 : 0.5
-				self._fraction = min(1, max(self._fraction, base + (self._installProgress * (1 - base))))
+				self._fraction = min(1, max(self._fraction, 0.5 + (self._installProgress * 0.5)))
 			case .completed:
 				self._stage = .completed
 				self._fraction = 1

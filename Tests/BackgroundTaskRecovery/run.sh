@@ -10,8 +10,6 @@ trap 'rm -rf "$test_dir"' EXIT
 cat Tests/BackgroundTaskRecovery/Stubs.swift > "$test_dir/Recovery.swift"
 sed '/^import BackgroundTasks$/d; /^import UIKit$/d' \
   Ksign/Utilities/BackgroundTaskManager.swift >> "$test_dir/Recovery.swift"
-sed -n '/^final class BulkInstallLiveActivityReporter/,$p' \
-  Ksign/Views/Library/Install/InstallSession.swift >> "$test_dir/Recovery.swift"
 cat Tests/BackgroundTaskRecovery/RecoveryTests.swift >> "$test_dir/Recovery.swift"
 swiftc -swift-version 5 -parse-as-library "$test_dir/Recovery.swift" -o "$test_dir/recovery-tests"
 "$test_dir/recovery-tests"

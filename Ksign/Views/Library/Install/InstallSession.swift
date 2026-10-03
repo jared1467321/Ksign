@@ -115,12 +115,6 @@ final class InstallSession: ObservableObject {
 
 	func start(apps: [AppInfoPresentable]) {
 		guard !apps.isEmpty else { return }
-		InstallDiagnostics.shared.record("install_batch_requested", details: [
-			"requested_count": String(apps.count),
-			"installation_method": String(UserDefaults.standard.integer(forKey: "Feather.installationMethod")),
-			"server_method": String(UserDefaults.standard.integer(forKey: "Feather.serverMethod"))
-		])
-		InstallDiagnostics.shared.startSampling()
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
@@ -374,8 +368,6 @@ final class InstallSession: ObservableObject {
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
 
-		InstallDiagnostics.shared.record("install_batch_settled")
-		InstallDiagnostics.shared.stopSampling()
 		_recomputeProgress()
 		BulkInstallLiveActivityReporter.shared.finish()
 		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase == .completed })
@@ -384,8 +376,6 @@ final class InstallSession: ObservableObject {
 
 	private func _finishIfIdle(success: Bool) {
 		guard jobs.isEmpty else { return }
-		InstallDiagnostics.shared.record("install_session_idle", details: ["success": String(success)])
-		InstallDiagnostics.shared.stopSampling()
 
 		// Publish the terminal snapshot while the task is still owned. `report`
 		// deliberately cannot create a task by itself, so this ordering also makes
@@ -480,7 +470,6 @@ final class InstallSession: ObservableObject {
 
 	private func _fireBatchGroup(_ group: [InstallJob]) {
 		guard let host = group.first else { return }
-		InstallDiagnostics.shared.record("local_manifest_group", details: ["count": String(group.count), "host_job": host.id.uuidString])
 		let members = Array(group.dropFirst())
 
 		// One server for the whole group: the host serves its own payload and
@@ -577,7 +566,6 @@ final class BulkInstallLiveActivityReporter {
 		var stage: _Stage = .queued
 		var packageProgress: Double = 0
 		var installProgress: Double = 0
-		var hasPayloadProgress = false
 		var fraction: Double = 0
 		var sequence: Int = 0
 		var lastPackageProgressSequence: Int = 0
@@ -703,23 +691,10 @@ final class BulkInstallLiveActivityReporter {
 		self._publish()
 	}
 
-	func updateInstall(jobID: UUID, progress: Double, isPayload: Bool = false) {
+	func updateInstall(jobID: UUID, progress: Double) {
 		_queue.async {
 			guard var job = self._jobs[jobID], !job.isTerminal else { return }
 			let value = min(1, max(0, progress))
-			if isPayload {
-				guard job.stage == .sendingPayload else { return }
-				job.hasPayloadProgress = true
-				let next = max(job.fraction, 0.5 + value * 0.25)
-				guard next > job.fraction else { return }
-				job.fraction = next
-				self._progressSequence += 1
-				job.lastInstallProgressSequence = self._progressSequence
-				self._jobs[jobID] = job
-				self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastInstallProgressSequence)
-				self._publish()
-				return
-			}
 
 			// @Published immediately emits its current value to new subscribers.
 			// A fresh InstallerStatusViewModel therefore reports installProgress == 0
@@ -732,8 +707,7 @@ final class BulkInstallLiveActivityReporter {
 			let before = job
 			job.installProgress = value
 			job.stage = .installing
-			let base = job.hasPayloadProgress ? 0.75 : 0.5
-			job.fraction = min(1, max(job.fraction, base + (value * (1 - base))))
+			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
 
 			let madeGenuineProgress = job.fraction > before.fraction
 			if madeGenuineProgress {
@@ -782,8 +756,7 @@ final class BulkInstallLiveActivityReporter {
 			case .installing:
 				if !job.isCompleted {
 					job.stage = .installing
-					let base = job.hasPayloadProgress ? 0.75 : 0.5
-					job.fraction = min(1, max(job.fraction, base + (job.installProgress * (1 - base))))
+					job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
 				}
 			case .completed:
 				job.stage = .completed
@@ -903,3 +876,4 @@ final class BulkInstallLiveActivityReporter {
 		)
 	}
 }
+

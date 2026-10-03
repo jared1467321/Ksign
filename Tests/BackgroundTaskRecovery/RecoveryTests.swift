@@ -49,7 +49,6 @@ extension BackgroundTaskManager {
             // Missing UI without an expiration callback leaves this reference
             // non-nil. Foreground renewal must replace it anyway.
             manager._recoverActiveTasks(renewLeases: true)
-            assert(!manager.hasActiveWorkflowGrant(owner)) // Gate closes before queued renewal.
             manager.drainRecovery()
             assert(second.completions == [true])
             let third = manager.launch(owner)
@@ -140,90 +139,6 @@ extension BackgroundTaskManager {
     }
 }
 
-extension BackgroundTaskManager {
-    @MainActor static func runGrantTests() async throws {
-        let manager = BackgroundTaskManager()
-        manager.claim(.bulkInstalls)
-        manager._submissionQueue.sync { }
-        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
-        var passedGate = false
-        let waiting = Task { @MainActor in
-            try await manager.waitForWorkflowGrant(.bulkInstalls)
-            passedGate = true
-        }
-        try await Task.sleep(nanoseconds: 150_000_000)
-        assert(!passedGate) // Submitted/queued is insufficient.
-        let first = manager.launch(.bulkInstalls)
-        try await waiting.value
-        assert(passedGate && manager.hasActiveWorkflowGrant(.bulkInstalls))
-
-        UIApplication.shared.applicationState = .background
-        first.expirationHandler!()
-        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
-        let cancelled = Task { try await manager.waitForWorkflowGrant(.bulkInstalls) }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        cancelled.cancel()
-        do { try await cancelled.value; assertionFailure("Cancelled gate passed") }
-        catch is CancellationError { }
-        manager.release(.bulkInstalls)
-        do { try await manager.waitForWorkflowGrant(.bulkInstalls); assertionFailure("Ended batch passed") }
-        catch is CancellationError { }
-
-        UIApplication.shared.applicationState = .active
-        BGTaskScheduler.shared.rejectSubmission = true
-        manager.claim(.bulkInstalls)
-        manager._submissionQueue.sync { }
-        do { try await manager.waitForWorkflowGrant(.bulkInstalls); assertionFailure("Rejected submission passed") }
-        catch { assert(!(error is CancellationError)) }
-        BGTaskScheduler.shared.rejectSubmission = false
-        manager.claim(.bulkInstalls) // A foreground retry resubmits.
-        manager._submissionQueue.sync { }
-        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
-        let replacement = manager.launch(.bulkInstalls)
-        try await manager.waitForWorkflowGrant(.bulkInstalls)
-        manager.release(.bulkInstalls)
-        assert(replacement.completions == [true])
-        print("Background grant gating tests passed")
-    }
-}
-
-extension BulkInstallLiveActivityReporter {
-    static func runPayloadProgressTests() {
-        let reporter = BulkInstallLiveActivityReporter()
-        let job = UUID()
-        reporter.reset()
-        reporter.register(job, name: "Large IPA")
-        reporter.updateStatus(jobID: job, status: .ready)
-        reporter.updateStatus(jobID: job, status: .sendingPayload)
-        reporter.updateInstall(jobID: job, progress: 0.5, isPayload: true)
-        reporter.updateInstall(jobID: job, progress: 0) // Initial UI emission is not install progress.
-        reporter._queue.sync {
-            assert(reporter._jobs[job]!.stage == .sendingPayload)
-            assert(reporter._jobs[job]!.fraction == 0.625)
-        }
-        reporter.updateInstall(jobID: job, progress: 0.2, isPayload: true) // Retry cannot move backwards.
-        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 0.625) }
-        reporter.updateInstall(jobID: job, progress: 1, isPayload: true)
-        reporter.updateStatus(jobID: job, status: .installing)
-        reporter.updateInstall(jobID: job, progress: 0.5)
-        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 0.875) }
-        reporter.updateStatus(jobID: job, status: .completed(.success(())))
-        reporter.updateInstall(jobID: job, progress: 0.1, isPayload: true)
-        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 1) }
-
-        let idevice = UUID()
-        reporter.register(idevice, name: "iDevice IPA")
-        reporter.updateStatus(jobID: idevice, status: .installing)
-        reporter.updateInstall(jobID: idevice, progress: 0.5)
-        reporter._queue.sync { assert(reporter._jobs[idevice]!.fraction == 0.75) }
-        print("Payload progress reporting tests passed")
-    }
-}
-
 @main enum RecoveryTests {
-    @MainActor static func main() async throws {
-        BackgroundTaskManager.runRecoveryTests()
-        try await BackgroundTaskManager.runGrantTests()
-        BulkInstallLiveActivityReporter.runPayloadProgressTests()
-    }
+    static func main() { BackgroundTaskManager.runRecoveryTests() }
 }

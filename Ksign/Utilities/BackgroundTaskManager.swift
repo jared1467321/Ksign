@@ -92,9 +92,6 @@ final class BackgroundTaskManager: ObservableObject {
     // Weak entries make completion idempotent without retaining retired tasks.
     private let _completedTasks = NSHashTable<BGContinuedProcessingTask>.weakObjects()
     private var _needsForegroundRenewal = false // Main queue only.
-    // Renewal is queued behind submissions. Close the prompt gate immediately,
-    // before that queue gets a chance to retire the old task reference.
-    private var _pendingWorkflowRenewals = 0 // Protected by _lock.
     private let _heartbeatQueue = DispatchQueue(
         label: "AppAssassin.signer.ipa.background-task-heartbeat",
         qos: .utility
@@ -122,15 +119,6 @@ final class BackgroundTaskManager: ObservableObject {
 
         _lifecycleObservers.append(
             NotificationCenter.default.addObserver(
-                forName: UIApplication.didEnterBackgroundNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                self?._recordWorkflowGrants()
-            }
-        )
-        _lifecycleObservers.append(
-            NotificationCenter.default.addObserver(
                 forName: UIApplication.willEnterForegroundNotification,
                 object: nil,
                 queue: .main
@@ -150,57 +138,6 @@ final class BackgroundTaskManager: ObservableObject {
                 self._recoverActiveTasks(renewLeases: renew)
             }
         )
-    }
-
-    // Snapshot after releasing the state lock: diagnostic disk work is asynchronous.
-    private func _recordWorkflowGrants() {
-        var rows: [[String: String]] = []
-        _lock.lock()
-        for (owner, state) in _workflowStates where state.identityClaimed || state.count > 0 {
-            rows.append([
-                "owner": owner.rawValue,
-                "identifier": state.identifier ?? "none",
-                "grant_active": String(state.task != nil),
-                "request_outstanding": String(state.requestOutstanding)
-            ])
-        }
-        _lock.unlock()
-        for row in rows { InstallDiagnostics.shared.record("background_grant_snapshot", details: row) }
-    }
-
-    // Submission acceptance is not an execution grant. Local prompts wait for
-    // the launch callback; this does not wait for individual apps to prepare.
-    private enum WorkflowGrantState { case active, waiting, unavailable, ended }
-
-    private func _workflowGrantState(_ owner: Owner) -> WorkflowGrantState {
-        _lock.lock()
-        defer { _lock.unlock() }
-        guard let state = _workflowStates[owner], state.identityClaimed || state.count > 0 else { return .ended }
-        if _pendingWorkflowRenewals > 0 { return .waiting }
-        if state.task != nil { return .active }
-        if state.identifier != nil && !state.requestOutstanding { return .unavailable }
-        return .waiting
-    }
-
-    func hasActiveWorkflowGrant(_ owner: Owner) -> Bool {
-        if case .active = _workflowGrantState(owner) { return true }
-        return false
-    }
-
-    func waitForWorkflowGrant(_ owner: Owner) async throws {
-        while true {
-            try Task.checkCancellation()
-            switch _workflowGrantState(owner) {
-            case .active: return
-            case .ended: throw CancellationError()
-            case .unavailable:
-                throw NSError(domain: "dev.ksign.background", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "Background execution could not be started. Return to ASign and retry the install."
-                ])
-            case .waiting:
-                try await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
     }
 
     // MARK: - Workflow ownership
@@ -623,12 +560,10 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         if shouldReject {
-            InstallDiagnostics.shared.record("background_workflow_launch_rejected", details: ["owner": owner.rawValue, "identifier": identifier])
             _completeTask(task, success: false)
             return
         }
 
-        InstallDiagnostics.shared.record("background_workflow_launched", details: ["owner": owner.rawValue, "identifier": identifier])
         task.expirationHandler = { [weak self, weak task] in
             guard let self, let task else { return }
             self._workflowExpired(owner, task: task)
@@ -658,7 +593,6 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         guard ownsTask else { return }
-        InstallDiagnostics.shared.record("background_workflow_expired", details: ["owner": owner.rawValue])
         print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
         _completeTask(task, success: false)
         DispatchQueue.main.async { [weak self] in
@@ -669,12 +603,6 @@ final class BackgroundTaskManager: ObservableObject {
     private func _recoverActiveTasks(renewLeases: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard UIApplication.shared.applicationState == .active else { return }
-
-        if renewLeases {
-            _lock.lock()
-            _pendingWorkflowRenewals += 1
-            _lock.unlock()
-        }
 
         // Run behind earlier submissions so a retired request cannot be
         // submitted *after* we cancel it. Tokens reject any later stale work.
@@ -721,7 +649,6 @@ final class BackgroundTaskManager: ObservableObject {
                     self._downloadBatchState = state
                 }
             }
-            if renewLeases { self._pendingWorkflowRenewals -= 1 }
             self._lock.unlock()
 
             if renewLeases, !owners.isEmpty || recoverDownloads {
@@ -829,9 +756,7 @@ final class BackgroundTaskManager: ObservableObject {
             else { return }
 
             do {
-                InstallDiagnostics.shared.record("background_workflow_submitting", details: ["owner": owner.rawValue, "identifier": identifier])
                 try BGTaskScheduler.shared.submit(request)
-                InstallDiagnostics.shared.record("background_workflow_submitted", details: ["owner": owner.rawValue, "identifier": identifier])
             } catch {
                 self._workflowSubmissionCompleted(
                     owner,
@@ -859,7 +784,6 @@ final class BackgroundTaskManager: ObservableObject {
         }
         _lock.unlock()
 
-        InstallDiagnostics.shared.record("background_workflow_registration_failed", details: ["owner": owner.rawValue, "identifier": identifier])
         print("BGContinuedProcessingTask registration failed for \(identifier)")
     }
 
@@ -895,7 +819,6 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         if isCurrent {
-            InstallDiagnostics.shared.record("background_workflow_submission_failed", details: ["owner": owner.rawValue, "identifier": identifier, "error": String(describing: error)])
             print("Failed to submit continued processing task \(identifier): \(error)")
         }
     }
@@ -994,7 +917,6 @@ final class BackgroundTaskManager: ObservableObject {
         defer { _taskProgressLock.unlock() }
         guard !_completedTasks.contains(task) else { return }
         _completedTasks.add(task)
-        InstallDiagnostics.shared.record("background_task_completed", details: ["identifier": task.identifier, "success": String(success)])
         task.expirationHandler = nil
         task.setTaskCompleted(success: success)
     }
@@ -1040,11 +962,6 @@ final class BackgroundTaskManager: ObservableObject {
             if shouldPulse {
                 self._pulseProgress(task)
             }
-            InstallDiagnostics.shared.record("background_workflow_heartbeat", details: [
-                "owner": owner.rawValue,
-                "identifier": task.identifier,
-                "pulse_requested": String(shouldPulse)
-            ])
             self._scheduleWorkflowHeartbeat(owner, task: task, token: token)
         }
     }
@@ -1185,7 +1102,6 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         guard ownsTask else { return }
-        InstallDiagnostics.shared.record("background_downloads_expired")
         print("BGContinuedProcessingTask expired for aggregate downloads")
         _completeTask(task, success: false)
         DispatchQueue.main.async { [weak self] in

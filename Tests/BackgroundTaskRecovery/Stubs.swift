@@ -2,24 +2,15 @@ import Foundation
 
 protocol ObservableObject: AnyObject {}
 
-final class InstallerStatusViewModel {
-    enum InstallerStatus {
-        case none, ready, sendingManifest, sendingPayload, installing
-        case completed(Result<Void, Error>)
-        case broken(Error)
-    }
-}
-
 final class UIApplication {
     enum State { case active, background }
     static let shared = UIApplication()
-    static let didEnterBackgroundNotification = Notification.Name("test.background")
     static let willEnterForegroundNotification = Notification.Name("test.foreground")
     static let didBecomeActiveNotification = Notification.Name("test.active")
     var applicationState = State.active
 }
 
-class BGTask: NSObject { let identifier = "test.task" }
+class BGTask: NSObject {}
 final class BGContinuedProcessingTask: BGTask {
     let progress = Progress(totalUnitCount: 0)
     var expirationHandler: (() -> Void)?
@@ -70,9 +61,4 @@ final class BackgroundAudioManager {
     static let shared = BackgroundAudioManager()
     func claimSystemTask(_ key: String) {}
     func releaseSystemTask(_ key: String) {}
-}
-
-final class InstallDiagnostics {
-    static let shared = InstallDiagnostics()
-    func record(_ event: String, details: [String: String] = [:]) { }
 }
