@@ -16,6 +16,9 @@ struct CertificatesView: View {
 	
 	@State private var _isAddingPresenting = false
 	@State private var _isSelectedInfoPresenting: CertificatePair?
+	@State private var _isRenamingPresenting = false
+	@State private var _renamingCertificate: CertificatePair?
+	@State private var _certificateName = ""
 
 	// MARK: Fetch
 	@FetchRequest(
@@ -91,6 +94,22 @@ struct CertificatesView: View {
 			CertificatesAddView()
 				.presentationDetents([.medium])
 		}
+		.alert(.localized("Rename Certificate"), isPresented: $_isRenamingPresenting) {
+			TextField(.localized("Nickname (Optional)"), text: $_certificateName)
+			Button(.localized("Save")) {
+				if let cert = _renamingCertificate, !cert.isDeleted {
+					let name = _certificateName.trimmingCharacters(in: .whitespacesAndNewlines)
+					cert.nickname = name.isEmpty ? nil : name
+					Storage.shared.saveContext()
+				}
+				_renamingCertificate = nil
+			}
+			Button(.localized("Cancel"), role: .cancel) {
+				_renamingCertificate = nil
+			}
+		} message: {
+			Text(.localized("Leave the nickname empty to use the original certificate name."))
+		}
 	}
 }
 
@@ -151,6 +170,13 @@ extension CertificatesView {
 	
 	@ViewBuilder
 	private func _contextActions(for cert: CertificatePair) -> some View {
+		Button {
+			_renamingCertificate = cert
+			_certificateName = cert.nickname ?? ""
+			_isRenamingPresenting = true
+		} label: {
+			Label(.localized("Rename"), systemImage: "pencil")
+		}
 		Button {
 			_isSelectedInfoPresenting = cert
 		} label: {
