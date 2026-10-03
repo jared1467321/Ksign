@@ -75,10 +75,12 @@ struct DownloadItemView: View {
 			
 			HStack {
 				Text(verbatim: "\(Int(overallProgress * 100))%")
+				.nbThemeForeground(.textSecondary)
 					.contentTransition(.numericText())
 				Spacer()
 				if totalBytes > 0 {
 					Text(verbatim: "\(formatByteCount(bytesDownloaded)) / \(formatByteCount(totalBytes))")
+					.nbThemeForeground(.textSecondary)
 						.contentTransition(.numericText())
 				}
 			}

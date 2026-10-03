@@ -1254,6 +1254,7 @@ private struct IPAVaultSettingsView: View {
                     Text("Server")
                 } footer: {
                     Text("IPA Vault uses the nginx JSON directory listing and HTTP Range requests for downloads, and HTTP PUT for uploads.")
+                    .nbThemeForeground(.textSecondary)
                 }
 
                 Section {
@@ -1284,6 +1285,7 @@ private struct IPAVaultSettingsView: View {
                     Text("Downloads")
                 } footer: {
                     Text("Every batch starts fresh at 1 IPA × 2 streams. Ksign quickly tunes file concurrency first, then streams per file using total useful throughput. Once optimized it locks those settings and stops probing; tuning only reopens after a sustained meaningful speed drop. All learned state is discarded when the batch ends. Hard limits are 8 files and 10 streams per file.")
+                    .nbThemeForeground(.textSecondary)
                 }
 
                 Section {
@@ -1361,6 +1363,7 @@ private struct IPAVaultSettingsView: View {
                     Text("Diagnostic Benchmark")
                 } footer: {
                     Text("Optional manual benchmark only; normal IPA Vault downloads no longer wait for calibration or use its result. Streams mode tests 1–10 at the selected benchmark concurrency. Combined mode runs 4 broad scouting tests followed by 12 adaptive refinement tests. Benchmark data is discarded.")
+                    .nbThemeForeground(.textSecondary)
                 }
                 }
                 .nbThemeRow()

@@ -19,6 +19,7 @@ struct ExpandableText: View {
 	var body: some View {
 		VStack(alignment: .leading, spacing: 4) {
 			Text(text)
+                .nbThemeForeground(.text)
 				.lineLimit(expanded ? nil : lineLimit)
 				.background(
 					Text(text)

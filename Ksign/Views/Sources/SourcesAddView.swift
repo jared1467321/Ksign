@@ -32,6 +32,7 @@ struct SourcesAddView: View {
 						.keyboardType(.URL)
 				} footer: {
 					Text(.localized("Enter a URL to start validation."))
+					.nbThemeForeground(.textSecondary)
 				}
 				
 				Section {
@@ -53,6 +54,7 @@ struct SourcesAddView: View {
 					}
 				} footer: {
 					Text(.localized("Supports importing from KravaSign/MapleSign and ESign"))
+					.nbThemeForeground(.textSecondary)
 				}
 				}
 				.nbThemeRow()

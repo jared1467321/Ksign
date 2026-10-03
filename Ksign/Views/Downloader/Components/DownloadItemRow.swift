@@ -101,6 +101,7 @@ struct DownloadItemRow: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title)
+                .nbThemeForeground(.text)
                     .font(.body)
                     .lineLimit(1)
                 
@@ -271,6 +272,7 @@ struct AppStoreDownloadItemRow: View {
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(download.fileName)
+                .nbThemeForeground(.text)
                     .font(.body)
                     .lineLimit(1)
                 

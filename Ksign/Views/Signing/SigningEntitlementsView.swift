@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -19,6 +20,7 @@ struct SigningEntitlementsView: View {
 		NBList(.localized("Entitlements")) {
 			if let ent = bindingValue {
 				Text(ent.lastPathComponent)
+				.nbThemeForeground(.text)
 					.swipeActions() {
 						Button(.localized("Delete")) {
 							FileManager.default.deleteStored(ent) { _ in

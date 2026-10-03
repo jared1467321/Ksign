@@ -31,7 +31,9 @@ struct AboutNyaView: View {
                     
                     HStack(spacing: 4) {
                         Text("Version")
+                        .nbThemeForeground(.text)
                         Text(Bundle.main.version)
+                        .nbThemeForeground(.textSecondary)
                     }
                     .font(.footnote)
                     .nbThemeForeground(.textSecondary)
@@ -66,11 +68,13 @@ struct AboutNyaView: View {
                 NavigationLink(destination: AboutView()) {
                     HStack {
                         Text("About the original Feather")
+                        .nbThemeForeground(.heading)
                         Spacer()
                     }
                 }
             } footer: {
                 Text(Bundle.main.bundleIdentifier ?? "")
+                .nbThemeForeground(.textSecondary)
             }
 		}
 		.onAppear {

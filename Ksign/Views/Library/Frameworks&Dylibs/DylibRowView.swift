@@ -21,6 +21,7 @@ struct DylibRowView: View {
             
             VStack(alignment: .leading) {
                 Text(fileURL.lastPathComponent)
+                .nbThemeForeground(.text)
                     .font(.body)
                 
                 Text(fileURL.pathExtension.uppercased())

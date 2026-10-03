@@ -73,6 +73,7 @@ struct HexEditorView: View {
             Spacer()
             
             Text(fileURL.lastPathComponent)
+            .nbThemeForeground(.navigationText)
                 .font(.headline)
                 .fontWeight(.semibold)
             
@@ -215,6 +216,7 @@ struct HexEditorView: View {
                 .padding(.horizontal, 16)
             
             Text(viewModel.stringRepresentation)
+            .nbThemeForeground(.text)
                 .font(.system(.body, design: .monospaced))
                 .padding(.horizontal, 16)
                 .textSelection(.enabled)

@@ -44,6 +44,7 @@ private struct ExtractProgressItemView: View {
 	var body: some View {
 		VStack(alignment: .leading, spacing: 4) {
 			Text(item.fileName)
+			.nbThemeForeground(.text)
 				.font(.subheadline)
 				.lineLimit(1)
 
@@ -53,6 +54,7 @@ private struct ExtractProgressItemView: View {
 
 			HStack {
 				Text(verbatim: "\(Int(item.progress * 100))%")
+				.nbThemeForeground(.textSecondary)
 					.contentTransition(.numericText())
 				Spacer()
 			}

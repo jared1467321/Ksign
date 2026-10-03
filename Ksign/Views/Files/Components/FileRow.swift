@@ -93,6 +93,7 @@ struct FileRow: View {
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(file.name)
+                    .nbThemeForeground(.text, elementID: "files.name|" + file.url.standardizedFileURL.path)
                     .font(.body)
                     .lineLimit(1)
                 

@@ -23,6 +23,7 @@ struct CertificatesInfoEntitlementCellView: View {
 		} else {
 			HStack {
 				Text(key)
+				.nbThemeForeground(.text)
 				Spacer()
 				Text(_formatted(value))
 					.nbThemeForeground(.textSecondary)
@@ -37,6 +38,7 @@ struct CertificatesInfoEntitlementCellView: View {
 			}
 		} label: {
 			Text(key)
+			.nbThemeForeground(.text)
 		}
 	}
 	

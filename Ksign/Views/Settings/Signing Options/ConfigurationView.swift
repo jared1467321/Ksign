@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -41,6 +42,7 @@ struct ConfigurationView: View {
 				))
 			} footer: {
 				Text(.localized("Prefix/Suffix will be added to the app name before and after the app name."))
+				.nbThemeForeground(.textSecondary)
 			}
 			
 			SigningOptionsView(options: $_optionsManager.options)

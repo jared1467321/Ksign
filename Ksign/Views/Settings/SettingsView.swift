@@ -58,6 +58,7 @@ struct SettingsView: View {
                  
                 } footer: {
                     Text(.localized("Add and manage certificates used for signing applications."))
+                    .nbThemeForeground(.textSecondary)
                 }
 				
 				NBSection(.localized("Features")) {
@@ -86,6 +87,7 @@ struct SettingsView: View {
                     }
                 } footer: {
                     Text("Reset the applications sources, certificates, apps, and general contents.")
+                    .nbThemeForeground(.textSecondary)
                 }
 
 				}
@@ -109,6 +111,7 @@ extension SettingsView {
 			}
 		} footer: {
 			Text(.localized("All of Ksign files except certificates are contained in the documents directory, here are some quick links to these."))
+			.nbThemeForeground(.textSecondary)
 		}
 	}
 }

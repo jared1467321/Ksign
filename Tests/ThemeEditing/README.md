@@ -55,3 +55,13 @@ Theme-picker ownership checks:
 - [OWNERSHIP.md](OWNERSHIP.md) documents the registration pipeline, ordering
   contract, Downloads regression, limits, and device checks. The portable
   metadata tests do not substitute for SwiftUI/UIKit execution.
+
+File browser and bottom-tab regression checks on iOS:
+
+- On the launch Files screen, pick the App and Downloads folder names. Change
+  This Element, save, and verify each name changes independently of its icon
+  and the other folders. Cancel/reset and relaunch to verify persistence.
+- Pick each bottom tab. The chooser must offer that tab's label and icon for
+  its current selected/unselected state, plus the shared role and background.
+  Edit the label and icon independently, switch tabs, return, and relaunch.
+  Verify both compact and regular layouts and right-to-left layout.

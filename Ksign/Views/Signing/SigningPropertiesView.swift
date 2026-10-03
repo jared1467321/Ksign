@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -38,6 +39,7 @@ struct SigningPropertiesView: View {
                     .disabled(certAppId == nil)
                 } footer: {
                     Text(.localized("Use certiticate's app ID, this will help the app have access to features that uses certificate's entitlements."))
+                    .nbThemeForeground(.textSecondary)
                 }
             }
         }

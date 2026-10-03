@@ -36,6 +36,7 @@ struct DefaultTweaksView: View {
 					}
 				} footer: {
 					Text(.localized("Enabled tweaks are injected into every app you sign, in addition to any tweaks you add for a specific app."))
+					.nbThemeForeground(.textSecondary)
 				}
 			}
 		}
@@ -189,6 +190,7 @@ extension DefaultTweaksView {
 
 		HStack {
 			Text(name)
+			.nbThemeForeground(.text)
 				.lineLimit(2)
 				.frame(maxWidth: .infinity, alignment: .leading)
 

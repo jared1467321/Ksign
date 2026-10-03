@@ -47,6 +47,7 @@ public struct NBPillView: View {
                     .foregroundStyle(color.opacity(0.9))
             }
 			Text(title)
+			.nbThemeForeground(.text)
 				.font(.caption.bold())
 		}
 		.frame(maxWidth: .infinity)

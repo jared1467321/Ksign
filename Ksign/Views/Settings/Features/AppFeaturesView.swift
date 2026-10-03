@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 import UserNotifications
 
@@ -20,6 +21,7 @@ struct AppFeaturesView: View {
                 }
             } footer: {
                 Text(.localized("This will show the logs of the signing process when you start signing."))
+                .nbThemeForeground(.textSecondary)
             }
             Section {
                 Toggle(isOn: $_optionsManager.options.notifications) {
@@ -30,6 +32,7 @@ struct AppFeaturesView: View {
                 }
             } footer: {
                 Text(.localized("This will notify you when the download is completed."))
+                .nbThemeForeground(.textSecondary)
             }
             Section {
                 Toggle(isOn: $_optionsManager.options.saveAppStoreDownloadsToDownloadsFolder) {
@@ -37,6 +40,7 @@ struct AppFeaturesView: View {
                 }
             } footer: {
                 Text(.localized("This will save the App Store downloads to the Downloads folder, turning this off will help reduce disk usage."))
+                .nbThemeForeground(.textSecondary)
             }
         }
         .onChange(of: _optionsManager.options) { _ in

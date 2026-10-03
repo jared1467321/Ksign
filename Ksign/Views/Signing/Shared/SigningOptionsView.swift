@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 // MARK: - View
@@ -31,6 +32,7 @@ struct SigningOptionsView: View {
 //                    .disabled(!options.ppqProtection)
             } footer: {
                 Text(.localized("Enabling any protection will append a random string to the bundleidentifiers of the apps you sign, this is to ensure your Apple ID does not get flagged by Apple. However, when using a signing service you can ignore this."))
+                .nbThemeForeground(.textSecondary)
             }
             Section {
                 _toggle(.localized("Remove app after signed"),
@@ -40,6 +42,7 @@ struct SigningOptionsView: View {
                 )
             } footer: {
                 Text(.localized("This will remove app after signed (Downloaded apps)"))
+                .nbThemeForeground(.textSecondary)
             }
         } else {
             NBSection(.localized("General")) {
@@ -103,6 +106,7 @@ struct SigningOptionsView: View {
             )
         } footer: {
             Text(.localized("These options will change apps behaviours"))
+            .nbThemeForeground(.textSecondary)
         }
         
         NBSection(.localized("Removal")) {
@@ -131,6 +135,7 @@ struct SigningOptionsView: View {
             )
         } footer: {
             Text(.localized("These options will remove stuff in unsigned IPAs"))
+            .nbThemeForeground(.textSecondary)
         }
         
         Section {
@@ -141,6 +146,7 @@ struct SigningOptionsView: View {
             )
         } footer: {
             Text(.localized("This will force the app to use localizations"))
+            .nbThemeForeground(.textSecondary)
         }
         
         NBSection(.localized("Advanced")) {
@@ -151,6 +157,7 @@ struct SigningOptionsView: View {
             )
         } footer: {
             Text(.localized("Only use this when you have Ad Hoc certificates"))
+            .nbThemeForeground(.textSecondary)
         }
         
         NBSection(.localized("Experiments")) {
@@ -174,6 +181,7 @@ struct SigningOptionsView: View {
 			}
         } footer: {
             Text(.localized("This option force converts apps to try to use the new liquid glass redesign iOS 26 introduced, this may not work for all applications due to differing frameworks."))
+            .nbThemeForeground(.textSecondary)
         }
 
 		Section {
@@ -190,6 +198,7 @@ struct SigningOptionsView: View {
 			}
 		} footer: {
 			Text(.localized("This option try to disable liquid glass on iOS 26 if the app support it (might not work for all apps)."))
+			.nbThemeForeground(.textSecondary)
 		}
     }
     

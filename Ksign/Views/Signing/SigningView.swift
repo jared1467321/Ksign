@@ -293,6 +293,7 @@ extension SigningView {
 		} label: {
 			LabeledContent(title) {
 				Text(desc ?? .localized("Unknown"))
+                    .nbThemeForeground(.textSecondary)
 			}
 		}
 	}

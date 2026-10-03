@@ -168,6 +168,17 @@ private struct ThemeEditingCandidate: Identifiable, Equatable {
 
     var id: String { "\(role.rawValue)|\(elementID ?? "role")" }
     var isExactElement: Bool { elementID != nil }
+    var displayName: String {
+        guard let elementID else { return "All \(role.displayName)" }
+        if elementID.hasPrefix("tab.item|") {
+            let parts = elementID.components(separatedBy: "|")
+            if parts.count == 4 {
+                return "\(parts[1]) \(parts[3] == "icon" ? "Icon" : "Label") · \(parts[2] == "selected" ? "Selected" : "Unselected")"
+            }
+        }
+        if elementID.hasPrefix("files.name|") { return "File or Folder Name" }
+        return "This Element"
+    }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.role == rhs.role && lhs.elementID == rhs.elementID
@@ -554,7 +565,7 @@ private struct ThemeEditingOverlayWindowView: View {
                                         .frame(width: 24, height: 24)
                                         .overlay { Circle().stroke(.white.opacity(0.3), lineWidth: 1) }
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(candidate.isExactElement ? "This Element" : "All \(role.displayName)")
+                                        Text(candidate.displayName)
                                             .font(.subheadline.weight(.semibold))
                                         Text(candidate.isExactElement
                                              ? "Only this paint · currently uses \(role.displayName)"
@@ -941,11 +952,46 @@ private enum ThemeUIKitTargetDiscovery {
             if let tab = view as? UITabBar {
                 add(.tabBackground, rect, to: &targets)
                 add(.tabShadow, CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 4), to: &targets)
-                let items = tab.subviews.compactMap { $0 as? UIControl }
-                    .filter { !$0.isHidden && $0.bounds.width > 10 }
-                for item in items {
-                    let itemRect = NBThemeInspectorRegistry.visibleFrame(of: item, in: window)
-                    add(item.isSelected ? .tabSelected : .tabUnselected, itemRect, to: &targets)
+                // SwiftUI/iOS can nest the tab buttons inside wrapper views.
+                // Find outer controls recursively; UIControl.isSelected is not
+                // a reliable reflection of UITabBar.selectedItem.
+                func controls(in view: UIView) -> [UIControl] {
+                    view.subviews.flatMap { child -> [UIControl] in
+                        guard !child.isHidden, child.alpha > 0.02 else { return [] }
+                        if let control = child as? UIControl, control.bounds.width > 10 {
+                            return [control]
+                        }
+                        return controls(in: child)
+                    }
+                }
+                let buttons = controls(in: tab).sorted {
+                    let left = $0.convert($0.bounds, to: window).minX
+                    let right = $1.convert($1.bounds, to: window).minX
+                    return tab.effectiveUserInterfaceLayoutDirection == .rightToLeft ? left > right : left < right
+                }
+                let items = tab.items ?? []
+                for (index, item) in items.enumerated() {
+                    let selected = item === tab.selectedItem
+                    let role: NBThemeRole = selected ? .tabSelected : .tabUnselected
+                    let itemRect: CGRect
+                    if buttons.count == items.count {
+                        itemRect = NBThemeInspectorRegistry.visibleFrame(of: buttons[index], in: window)
+                    } else {
+                        // Equal-width slots keep labels selectable when UIKit
+                        // does not expose tab buttons as UIControls.
+                        let width = rect.width / CGFloat(items.count)
+                        let slot = tab.effectiveUserInterfaceLayoutDirection == .rightToLeft
+                            ? items.count - index - 1 : index
+                        itemRect = CGRect(x: rect.minX + CGFloat(slot) * width,
+                                          y: rect.minY, width: width, height: rect.height)
+                    }
+                    for icon in [false, true] {
+                        let id = HalloweenAppearance.tabElementID(item, index: index, selected: selected, icon: icon)
+                        targets.append(.init(role: role, frame: itemRect, elementID: id,
+                                             initialColor: NBThemeManager.shared.activeColor(for: role),
+                                             kind: .foreground,
+                                             alpha: NBThemeManager.shared.activeColor(for: role, elementID: id).alpha))
+                    }
                 }
             }
 
@@ -982,15 +1028,19 @@ private enum ThemeUIKitTargetDiscovery {
     private static func add(
         _ role: NBThemeRole,
         _ frame: CGRect,
+        elementID: String? = nil,
         to targets: inout [NBThemeInspectorTargetFrame]
     ) {
         guard !frame.isNull, !frame.isEmpty,
               frame.minX.isFinite, frame.minY.isFinite,
               frame.width.isFinite, frame.height.isFinite else { return }
         let isChrome = role == .navigationBackground || role == .tabBackground
-        targets.append(.init(role: role, frame: frame,
+        let color = elementID.map { NBThemeManager.shared.activeColor(for: role, elementID: $0) }
+            ?? NBThemeManager.shared.activeColor(for: role)
+        targets.append(.init(role: role, frame: frame, elementID: elementID,
+                             initialColor: NBThemeManager.shared.activeColor(for: role),
                              kind: isChrome ? .chrome : .control,
-                             alpha: NBThemeManager.shared.activeColor(for: role).alpha))
+                             alpha: color.alpha))
     }
 
     private static func ancestor<T: UIView>(_ type: T.Type, from view: UIView) -> T? {

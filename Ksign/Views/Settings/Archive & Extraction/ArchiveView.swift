@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import ASignArchiveKit
 import NimbleViews
 
@@ -40,12 +41,14 @@ struct ArchiveView: View {
 				Toggle(.localized("Show Sheet when Exporting"), systemImage: "square.and.arrow.up", isOn: $_useShareSheet)
 			} footer: {
 				Text(.localized("Toggling show sheet will present a share sheet after exporting to your files."))
+				.nbThemeForeground(.textSecondary)
 			}
             
             Section {
                 Toggle(.localized("Use last copied location"), systemImage: "clock.arrow.circlepath", isOn: $_useLastExportLocation)
             } footer: {
                 Text(.localized("Whether to remember the last location where a file was copied/moved to or use Ksign's documents folder as default."))
+                .nbThemeForeground(.textSecondary)
             }
 
             Section {
@@ -56,6 +59,7 @@ struct ArchiveView: View {
                 }
             } footer: {
                 Text("minizip-ng is the default archive engine. ZIPFoundation remains available as an alternative compatibility engine.")
+                .nbThemeForeground(.textSecondary)
             }
 		}
 		.onAppear {

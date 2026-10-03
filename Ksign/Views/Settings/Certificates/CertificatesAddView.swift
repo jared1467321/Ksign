@@ -55,6 +55,7 @@ struct CertificatesAddView: View {
 					SecureField(.localized("Enter Password"), text: $_p12Password)
 				} footer: {
 					Text(.localized("Enter the password associated with the private key. Leave it blank if theres no password required."))
+					.nbThemeForeground(.textSecondary)
 				}
 				
 				Section {

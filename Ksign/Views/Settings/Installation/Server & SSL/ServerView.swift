@@ -47,6 +47,7 @@ struct ServerView: View {
 				.disabled(_serverMethod != 0)
 			} footer: {
 				Text("Fully Local installs can share one confirmation across several apps. This sets how many apps go into each prompt. 1 gives a separate prompt per app.")
+				.nbThemeForeground(.textSecondary)
 			}
 
 			Section {

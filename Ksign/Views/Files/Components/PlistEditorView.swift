@@ -81,6 +81,7 @@ struct PlistEditorView: View {
                         .nbThemeForeground(.textSecondary)
                     
                     Text("Empty Property List")
+                    .nbThemeForeground(.heading)
                         .font(.title3)
                         .fontWeight(.semibold)
                     
@@ -100,6 +101,7 @@ struct PlistEditorView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Root Dictionary")
+                    .nbThemeForeground(.heading)
                         .font(.headline)
                         .fontWeight(.semibold)
                     
@@ -217,6 +219,7 @@ struct PlistItemRow: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.key)
+                    .nbThemeForeground(.text)
                         .font(.body)
                         .fontWeight(.medium)
                     

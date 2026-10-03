@@ -94,6 +94,7 @@ struct SigningTweaksView: View {
 					}
 				} footer: {
 					Text(.localized("Tweaks from your default profile start switched on. Switching one off here only affects this app — it stays in your defaults."))
+					.nbThemeForeground(.textSecondary)
 				}
 			}
 		}
@@ -241,6 +242,7 @@ extension SigningTweaksView {
 		HStack {
 			VStack(alignment: .leading, spacing: 2) {
 				Text(name)
+				.nbThemeForeground(.text)
 					.lineLimit(2)
 				
 				if isMissing {

@@ -73,6 +73,36 @@ enum HalloweenAppearance {
         return appearance
     }
 
+    // Stable per-item keys shared by native discovery and the appearance bridge.
+    static func tabElementID(_ item: UITabBarItem, index: Int, selected: Bool, icon: Bool) -> String {
+        "tab.item|\(item.title ?? String(index))|\(selected ? "selected" : "normal")|\(icon ? "icon" : "text")"
+    }
+
+    private static func _configureTabItems(_ bar: UITabBar) {
+        for (index, item) in (bar.items ?? []).enumerated() {
+            let appearance = _tabAppearance()
+            for layout in [appearance.stackedLayoutAppearance,
+                           appearance.inlineLayoutAppearance,
+                           appearance.compactInlineLayoutAppearance] {
+                for selected in [false, true] {
+                    let role: NBThemeRole = selected ? .tabSelected : .tabUnselected
+                    let state = selected ? layout.selected : layout.normal
+                    state.iconColor = NBThemeManager.shared.activeColor(
+                        for: role, elementID: tabElementID(item, index: index, selected: selected, icon: true)
+                    ).uiColor
+                    let text = NBThemeManager.shared.activeColor(
+                        for: role, elementID: tabElementID(item, index: index, selected: selected, icon: false)
+                    ).uiColor
+                    state.titleTextAttributes = [.foregroundColor: text]
+                    item.setTitleTextAttributes([.foregroundColor: text], for: selected ? .selected : .normal)
+                }
+            }
+            item.standardAppearance = appearance
+            item.scrollEdgeAppearance = appearance
+        }
+        bar.setNeedsLayout()
+    }
+
     private static func _tabBars() {
         let appearance = _tabAppearance()
         let bar = UITabBar.appearance()
@@ -184,6 +214,7 @@ enum HalloweenAppearance {
             bar.scrollEdgeAppearance = tabAppearance
             bar.tintColor = NBHalloween.uiColor(.tabSelected)
             bar.unselectedItemTintColor = NBHalloween.uiColor(.tabUnselected)
+            _configureTabItems(bar)
 
         case let field as UISearchTextField:
             field.backgroundColor = NBHalloween.uiColor(.searchBackground)
