@@ -8,7 +8,7 @@ fi
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ksign-recovery-tests.XXXXXX")
 trap 'rm -rf "$test_dir"' EXIT
 cat Tests/BackgroundTaskRecovery/Stubs.swift > "$test_dir/Recovery.swift"
-sed '/^import BackgroundTasks$/d; /^import UIKit$/d' \
+sed '/^import BackgroundTasks$/d; /^import UIKit$/d; /^final class BackgroundTaskManager: ObservableObject {$/,/^\/\/ MARK: - iOS 26 continued processing implementation$/d; s/ContinuedBackgroundTaskManager/BackgroundTaskManager/g' \
   Ksign/Utilities/BackgroundTaskManager.swift >> "$test_dir/Recovery.swift"
 cat Tests/BackgroundTaskRecovery/RecoveryTests.swift >> "$test_dir/Recovery.swift"
 swiftc -swift-version 5 -parse-as-library "$test_dir/Recovery.swift" -o "$test_dir/recovery-tests"

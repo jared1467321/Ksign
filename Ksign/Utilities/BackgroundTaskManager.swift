@@ -2,46 +2,168 @@
 //  BackgroundTaskManager.swift
 //  Ksign
 //
-//  Owns BGContinuedProcessingTask-backed execution and system Live Activity
-//  progress for every long-running workflow in the app.
+//  Routes workflows to continued processing on iOS 26 and the original
+//  audio keep-alive / local Live Activity on earlier supported releases.
 //
 
 import BackgroundTasks
 import Foundation
 import UIKit
 
+enum BackgroundTaskOwner: String {
+    case bulkInstalls
+    case singleInstall
+    case bulkExport
+    case importing
+    case signing
+    case extracting
+    case ipaVaultDownloads
+
+    func title(total: Int?) -> String {
+        let count = total.flatMap { $0 > 0 ? $0 : nil }
+        switch self {
+        case .bulkInstalls:
+            return count.map { "Installing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Installing Apps"
+        case .singleInstall:
+            return "Installing App"
+        case .bulkExport:
+            return count.map { "Exporting \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Exporting Apps"
+        case .importing:
+            return count.map { "Importing \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Importing IPAs"
+        case .signing:
+            return count.map { "Signing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Signing Apps"
+        case .extracting:
+            return count.map { "Extracting \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Extracting IPAs"
+        case .ipaVaultDownloads:
+            return count.map { "Downloading \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "IPA Vault Downloads"
+        }
+    }
+}
+
+// Select the execution API at runtime; the app itself still supports iOS 16.
 final class BackgroundTaskManager: ObservableObject {
     static let shared = BackgroundTaskManager()
+    typealias Owner = BackgroundTaskOwner
+    private let lock = NSLock()
+    private var claims: Set<Owner> = []
+    private var counts: [Owner: Int] = [:]
+    private var downloads: [String: Double] = [:]
+    private init() {}
 
-    enum Owner: String {
-        case bulkInstalls
-        case singleInstall
-        case bulkExport
-        case importing
-        case signing
-        case extracting
-        case ipaVaultDownloads
+    private func audioOwner(_ owner: Owner) -> BackgroundAudioManager.Owner {
+        switch owner {
+        case .bulkInstalls: return .bulkInstalls
+        case .singleInstall: return .singleInstall
+        case .bulkExport: return .bulkExport
+        case .importing: return .importing
+        case .signing: return .signing
+        case .extracting: return .extracting
+        case .ipaVaultDownloads: return .ipaVaultDownloads
+        }
+    }
 
-        func title(total: Int?) -> String {
-            let count = total.flatMap { $0 > 0 ? $0 : nil }
-            switch self {
-            case .bulkInstalls:
-                return count.map { "Installing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Installing Apps"
-            case .singleInstall:
-                return "Installing App"
-            case .bulkExport:
-                return count.map { "Exporting \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Exporting Apps"
-            case .importing:
-                return count.map { "Importing \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Importing IPAs"
-            case .signing:
-                return count.map { "Signing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Signing Apps"
-            case .extracting:
-                return count.map { "Extracting \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "Extracting IPAs"
-            case .ipaVaultDownloads:
-                return count.map { "Downloading \($0) \($0 == 1 ? "IPA" : "IPAs")" } ?? "IPA Vault Downloads"
+    private func changeOwnership(_ owner: Owner, claim: Bool? = nil, delta: Int = 0) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let claim {
+            if claim { claims.insert(owner) } else { claims.remove(owner) }
+        }
+        counts[owner] = max(0, (counts[owner] ?? 0) + delta)
+        if claims.contains(owner) || counts[owner, default: 0] > 0 {
+            BackgroundAudioManager.shared.claim(audioOwner(owner))
+        } else {
+            BackgroundAudioManager.shared.release(audioOwner(owner))
+        }
+    }
+
+    func claim(_ owner: Owner) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.claim(owner) }
+        else { changeOwnership(owner, claim: true) }
+    }
+    func release(_ owner: Owner, success: Bool = true) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.release(owner, success: success) }
+        else { changeOwnership(owner, claim: false) }
+    }
+    func begin(_ owner: Owner) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.begin(owner) }
+        else { changeOwnership(owner, delta: 1) }
+    }
+    func end(_ owner: Owner, success: Bool) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.end(owner, success: success) }
+        else { changeOwnership(owner, delta: -1) }
+    }
+    func report(_ owner: Owner, completed: Int?, total: Int?, fraction: Double?, detail: String?, currentItem: String? = nil) {
+        if #available(iOS 26.0, *) {
+            ContinuedBackgroundTaskManager.shared.report(owner, completed: completed, total: total, fraction: fraction, detail: detail, currentItem: currentItem)
+        } else if #available(iOS 16.2, *) {
+            KeepAliveActivityController.shared.report(audioOwner(owner), completed: completed, total: total, fraction: fraction, detail: detail ?? currentItem)
+        }
+    }
+    func report(_ owner: Owner, completed: Int, total: Int?) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.report(owner, completed: completed, total: total) }
+        else if #available(iOS 16.2, *) { KeepAliveActivityController.shared.report(audioOwner(owner), completed: completed, total: total) }
+    }
+    func report(_ owner: Owner, fraction: Double?) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.report(owner, fraction: fraction) }
+        else if #available(iOS 16.2, *) { KeepAliveActivityController.shared.report(audioOwner(owner), fraction: fraction) }
+    }
+    func report(_ owner: Owner, detail: String?) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.report(owner, detail: detail) }
+        else if #available(iOS 16.2, *) { KeepAliveActivityController.shared.report(audioOwner(owner), detail: detail) }
+    }
+    func clearReport(_ owner: Owner) {
+        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.clearReport(owner) }
+        else if #available(iOS 16.2, *) { KeepAliveActivityController.shared.clearReport(audioOwner(owner)) }
+    }
+    func startTask(for downloadId: String, filename: String, subtitle: String = "Downloading") {
+        if #available(iOS 26.0, *) {
+            ContinuedBackgroundTaskManager.shared.startTask(for: downloadId, filename: filename, subtitle: subtitle)
+        } else {
+            lock.lock()
+            defer { lock.unlock() }
+            downloads[downloadId] = downloads[downloadId] ?? 0
+            BackgroundAudioManager.shared.claim(.downloads)
+            if #available(iOS 16.2, *) {
+                KeepAliveActivityController.shared.report(.downloads, detail: filename)
             }
         }
     }
+    func updateProgress(for downloadId: String, progress: Double) {
+        if #available(iOS 26.0, *) {
+            ContinuedBackgroundTaskManager.shared.updateProgress(for: downloadId, progress: progress)
+        } else {
+            lock.lock()
+            defer { lock.unlock() }
+            guard downloads[downloadId] != nil else { return }
+            downloads[downloadId] = min(1, max(0, progress))
+            if #available(iOS 16.2, *) {
+                KeepAliveActivityController.shared.report(.downloads, fraction: downloads.values.reduce(0, +) / Double(downloads.count))
+            }
+        }
+    }
+    func stopTask(for downloadId: String, success: Bool) {
+        if #available(iOS 26.0, *) {
+            ContinuedBackgroundTaskManager.shared.stopTask(for: downloadId, success: success)
+        } else {
+            lock.lock()
+            defer { lock.unlock() }
+            guard downloads.removeValue(forKey: downloadId) != nil else { return }
+            if downloads.isEmpty {
+                if #available(iOS 16.2, *) {
+                    KeepAliveActivityController.shared.report(.downloads, fraction: success ? 1 : nil)
+                }
+                BackgroundAudioManager.shared.release(.downloads)
+            }
+        }
+    }
+}
+
+// MARK: - iOS 26 continued processing implementation
+@available(iOS 26.0, *)
+final class ContinuedBackgroundTaskManager: ObservableObject {
+    static let shared = ContinuedBackgroundTaskManager()
+
+    typealias Owner = BackgroundTaskOwner
 
     private struct Report: Equatable {
         var completed: Int?

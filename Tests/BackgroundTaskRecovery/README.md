@@ -1,5 +1,5 @@
 Run `bash Tests/BackgroundTaskRecovery/run.sh` on macOS with Swift command-line
-tools. The runner compiles the actual manager with scheduler/UIKit/audio test
+tools. The runner compiles the actual iOS 26 backend with scheduler/UIKit/audio test
 doubles; it does not submit real system tasks or change production imports.
 
 Coverage:
@@ -26,3 +26,10 @@ activation (such as closing a permission prompt) only retries missing requests.
 This recovers in-process batches, not work lost when the app itself crashes or
 is force-quit. The OS may still show an expired lease as failed; that event no
 longer makes the underlying batch fail.
+
+Compatibility validation requires Xcode with the iOS 26 SDK: build with the
+iOS 16 deployment target, then run on iOS 18 and iOS 26. On iOS 18, enable the
+existing background audio option and confirm the original local Live Activity
+updates for downloads and workflows, including overlapping signing workers.
+On iOS 26, confirm the system continued-processing activity is used. iOS 16.0
+and 16.1 retain audio execution but do not support the local Live Activity.
