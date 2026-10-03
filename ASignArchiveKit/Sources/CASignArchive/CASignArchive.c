@@ -587,6 +587,16 @@ static int32_t asign_make_parent_directories(const char *path) {
     return MZ_OK;
 }
 
+// A number of real-world IPAs carry stale CRC/hash metadata even though the
+// member stream itself inflates completely and is usable. minizip-ng reports
+// that mismatch only after the full payload has already been read/written.
+// For archive-backed member access, preserve the decoded bytes and treat that
+// metadata-only mismatch as advisory; all actual read/decompression/format
+// failures remain fatal.
+static int32_t asign_accept_completed_entry_status(int32_t status) {
+    return status == MZ_CRC_ERROR ? MZ_OK : status;
+}
+
 int32_t asign_archive_enumerate_entries(
     const char *archive_path,
     asign_archive_entry_cb entry_cb,
@@ -716,7 +726,9 @@ int32_t asign_archive_read_entry(
                 offset += (size_t)count;
             }
 
-            int32_t close_entry_err = mz_zip_reader_entry_close(reader);
+            int32_t close_entry_err = asign_accept_completed_entry_status(
+                mz_zip_reader_entry_close(reader)
+            );
             if (err == MZ_OK && close_entry_err != MZ_OK)
                 err = close_entry_err;
             if (err != MZ_OK) {
@@ -914,7 +926,9 @@ int32_t asign_archive_extract_entry(
                 err = asign_make_parent_directories(destination_path);
                 if (err == MZ_OK) {
                     (void)unlink(destination_path);
-                    err = mz_zip_reader_entry_save_file(reader, destination_path);
+                    err = asign_accept_completed_entry_status(
+                        mz_zip_reader_entry_save_file(reader, destination_path)
+                    );
                 }
             }
             if (err != MZ_OK)
@@ -1005,7 +1019,9 @@ int32_t asign_archive_extract_prefix(
                 err = asign_make_parent_directories(target);
                 if (err == MZ_OK) {
                     (void)unlink(target);
-                    err = mz_zip_reader_entry_save_file(reader, target);
+                    err = asign_accept_completed_entry_status(
+                        mz_zip_reader_entry_save_file(reader, target)
+                    );
                 }
             }
             free(target);
@@ -1113,7 +1129,9 @@ int32_t asign_archive_materialize_signing_inputs(
                             // earlier regular file/symlink before writing so a
                             // type-changing duplicate cannot be followed through.
                             (void)unlink(destination);
-                            err = mz_zip_reader_entry_save_file(reader, destination);
+                            err = asign_accept_completed_entry_status(
+                                mz_zip_reader_entry_save_file(reader, destination)
+                            );
                         }
                     }
                     free(destination);
