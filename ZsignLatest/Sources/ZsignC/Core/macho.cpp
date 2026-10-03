@@ -169,6 +169,15 @@ bool ZMachO::ReallocCodeSignSpace()
 {
 	ZLog::Warn(">>> Realloc CodeSignature space... \n");
 
+#ifndef _WIN32
+	// Growing the signature replaces the inode. Keep the executable's mode
+	// instead of inheriting the temporary file's fopen/umask permissions.
+	struct stat originalStat = {};
+	if (0 != stat(m_strFile.c_str(), &originalStat)) {
+		return false;
+	}
+#endif
+
 	vector<uint32_t> arrMachOesSizes;
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
 		string strNewArchOFile;
@@ -183,9 +192,14 @@ bool ZMachO::ReallocCodeSignSpace()
 	ZLog::Warn(">>> Success!\n");
 
 	if (1 == m_arrArchOes.size()) {
+		string strNewArchOFile = m_strFile + ".archo.0";
+#ifndef _WIN32
+		if (0 != chmod(strNewArchOFile.c_str(), originalStat.st_mode & 07777)) {
+			return false;
+		}
+#endif
 		CloseFile();
 		ZFile::RemoveFile(m_strFile.c_str());
-		string strNewArchOFile = m_strFile + ".archo.0";
 		if (0 == rename(strNewArchOFile.c_str(), m_strFile.c_str())) {
 			return OpenFile(m_strFile.c_str());
 		}
@@ -252,6 +266,11 @@ bool ZMachO::ReallocCodeSignSpace()
 			ZFile::RemoveFile(strNewArchOFile.c_str());
 		}
 
+#ifndef _WIN32
+		if (0 != chmod(strNewFatMachOFile.c_str(), originalStat.st_mode & 07777)) {
+			return false;
+		}
+#endif
 		ZFile::RemoveFile(m_strFile.c_str());
 		if (0 == rename(strNewFatMachOFile.c_str(), m_strFile.c_str())) {
 			return OpenFile(m_strFile.c_str());

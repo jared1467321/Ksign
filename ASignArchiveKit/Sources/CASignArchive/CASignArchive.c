@@ -587,15 +587,98 @@ static int32_t asign_make_parent_directories(const char *path) {
     return MZ_OK;
 }
 
-// A number of real-world IPAs carry stale CRC/hash metadata even though the
-// member stream itself inflates completely and is usable. minizip-ng reports
-// that mismatch only after the full payload has already been read/written.
-// For archive-backed member access, preserve the decoded bytes and treat that
-// metadata-only mismatch as advisory; all actual read/decompression/format
-// failures remain fatal.
-static int32_t asign_accept_completed_entry_status(int32_t status) {
-    return status == MZ_CRC_ERROR ? MZ_OK : status;
+// Resolve duplicate ZIP names before selecting sparse inputs or emitting output.
+// zsign's logical archive index uses the last central-directory entry for a name.
+typedef struct asign_entry_position_s {
+    char *name;
+    int64_t position;
+} asign_entry_position;
+
+typedef struct asign_entry_index_s {
+    asign_entry_position *entries;
+    size_t count;
+} asign_entry_index;
+
+static void asign_entry_index_free(asign_entry_index *index) {
+    for (size_t i = 0; i < index->count; i++)
+        free(index->entries[i].name);
+    free(index->entries);
 }
+
+static int asign_entry_position_compare(const void *lhs, const void *rhs) {
+    const asign_entry_position *a = lhs, *b = rhs;
+    int name_order = strcmp(a->name, b->name);
+    if (name_order != 0)
+        return name_order;
+    return (a->position > b->position) - (a->position < b->position);
+}
+
+static int32_t asign_entry_index_build(void *reader, asign_entry_index *index, void **zip_handle) {
+    int32_t err = mz_zip_reader_get_zip_handle(reader, zip_handle);
+    if (err != MZ_OK)
+        return err;
+    size_t capacity = 0;
+    err = mz_zip_reader_goto_first_entry(reader);
+    while (err == MZ_OK) {
+        mz_zip_file *info = NULL;
+        err = mz_zip_reader_entry_get_info(reader, &info);
+        if (err != MZ_OK)
+            break;
+        if (info == NULL || info->filename == NULL) {
+            err = MZ_FORMAT_ERROR;
+            break;
+        }
+        if (index->count == capacity) {
+            size_t next = capacity == 0 ? 64 : capacity * 2;
+            asign_entry_position *grown = realloc(index->entries, next * sizeof(*grown));
+            if (grown == NULL) {
+                err = MZ_MEM_ERROR;
+                break;
+            }
+            index->entries = grown;
+            capacity = next;
+        }
+        char *name = strdup(info->filename);
+        if (name == NULL) {
+            err = MZ_MEM_ERROR;
+            break;
+        }
+        index->entries[index->count++] = (asign_entry_position){name, mz_zip_get_entry(*zip_handle)};
+        err = mz_zip_reader_goto_next_entry(reader);
+    }
+    if (err != MZ_END_OF_LIST)
+        return err;
+    if (index->count > 1)
+        qsort(index->entries, index->count, sizeof(*index->entries), asign_entry_position_compare);
+    size_t unique = 0;
+    for (size_t i = 0; i < index->count; i++) {
+        if (i + 1 < index->count && strcmp(index->entries[i].name, index->entries[i + 1].name) == 0)
+            free(index->entries[i].name);
+        else
+            index->entries[unique++] = index->entries[i];
+    }
+    index->count = unique;
+    return MZ_OK;
+}
+
+static int asign_entry_index_is_current(const asign_entry_index *index, const char *name, void *zip_handle) {
+    size_t lo = 0, hi = index->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int order = strcmp(name, index->entries[mid].name);
+        if (order == 0)
+            return index->entries[mid].position == mz_zip_get_entry(zip_handle);
+        if (order < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return 0;
+}
+
+// CRC mismatches remain fatal. A complete decoded stream alone cannot prove
+// whether its bytes or the stored checksum are corrupt; raw copying would retain
+// a stale checksum anyway. Normalize only with independent evidence of validity.
 
 int32_t asign_archive_enumerate_entries(
     const char *archive_path,
@@ -726,9 +809,7 @@ int32_t asign_archive_read_entry(
                 offset += (size_t)count;
             }
 
-            int32_t close_entry_err = asign_accept_completed_entry_status(
-                mz_zip_reader_entry_close(reader)
-            );
+            int32_t close_entry_err = mz_zip_reader_entry_close(reader);
             if (err == MZ_OK && close_entry_err != MZ_OK)
                 err = close_entry_err;
             if (err != MZ_OK) {
@@ -926,9 +1007,7 @@ int32_t asign_archive_extract_entry(
                 err = asign_make_parent_directories(destination_path);
                 if (err == MZ_OK) {
                     (void)unlink(destination_path);
-                    err = asign_accept_completed_entry_status(
-                        mz_zip_reader_entry_save_file(reader, destination_path)
-                    );
+                    err = mz_zip_reader_entry_save_file(reader, destination_path);
                 }
             }
             if (err != MZ_OK)
@@ -1019,9 +1098,7 @@ int32_t asign_archive_extract_prefix(
                 err = asign_make_parent_directories(target);
                 if (err == MZ_OK) {
                     (void)unlink(target);
-                    err = asign_accept_completed_entry_status(
-                        mz_zip_reader_entry_save_file(reader, target)
-                    );
+                    err = mz_zip_reader_entry_save_file(reader, target);
                 }
             }
             free(target);
@@ -1073,6 +1150,10 @@ int32_t asign_archive_materialize_signing_inputs(
     int32_t err = mz_zip_reader_set_recover(reader, 1);
     if (err == MZ_OK)
         err = mz_zip_reader_open_file(reader, archive_path);
+    asign_entry_index entries = {0};
+    void *zip_handle = NULL;
+    if (err == MZ_OK)
+        err = asign_entry_index_build(reader, &entries, &zip_handle);
     if (err == MZ_OK)
         err = mz_zip_reader_goto_first_entry(reader);
 
@@ -1081,6 +1162,15 @@ int32_t asign_archive_materialize_signing_inputs(
         err = mz_zip_reader_entry_get_info(reader, &file_info);
         if (err != MZ_OK)
             break;
+
+        if (file_info == NULL || file_info->filename == NULL) {
+            err = MZ_FORMAT_ERROR;
+            break;
+        }
+        if (!asign_entry_index_is_current(&entries, file_info->filename, zip_handle)) {
+            err = mz_zip_reader_goto_next_entry(reader);
+            continue;
+        }
 
         const char *relative = NULL;
         if (file_info != NULL && file_info->filename != NULL &&
@@ -1129,9 +1219,7 @@ int32_t asign_archive_materialize_signing_inputs(
                             // earlier regular file/symlink before writing so a
                             // type-changing duplicate cannot be followed through.
                             (void)unlink(destination);
-                            err = asign_accept_completed_entry_status(
-                                mz_zip_reader_entry_save_file(reader, destination)
-                            );
+                            err = mz_zip_reader_entry_save_file(reader, destination);
                         }
                     }
                     free(destination);
@@ -1146,6 +1234,7 @@ int32_t asign_archive_materialize_signing_inputs(
 
     if (err == MZ_END_OF_LIST)
         err = MZ_OK;
+    asign_entry_index_free(&entries);
     int32_t close_err = mz_zip_reader_close(reader);
     mz_zip_reader_delete(&reader);
     free(root);
@@ -1378,6 +1467,11 @@ int32_t asign_archive_rebuild_with_overlay(
             err = size_status;
     }
 
+    asign_entry_index entries = {0};
+    void *zip_handle = NULL;
+    if (err == MZ_OK)
+        err = asign_entry_index_build(reader, &entries, &zip_handle);
+
     asign_string_set written = {0};
     int64_t processed = 0;
     if (err == MZ_OK) {
@@ -1394,6 +1488,12 @@ int32_t asign_archive_rebuild_with_overlay(
         if (file_info == NULL || file_info->filename == NULL) {
             err = MZ_FORMAT_ERROR;
             break;
+        }
+
+        // Emit exactly the duplicate that zsign hashed/materialized.
+        if (!asign_entry_index_is_current(&entries, file_info->filename, zip_handle)) {
+            err = mz_zip_reader_goto_next_entry(reader);
+            continue;
         }
 
         const char *entry_name = file_info->filename;
@@ -1438,7 +1538,13 @@ int32_t asign_archive_rebuild_with_overlay(
         }
 
         if (!skip && !replaced) {
+            // minizip's write-open changes the method to STORE at level zero,
+            // even in raw mode. Raw payloads must retain their source method:
+            // a DEFLATE stream labeled STORE is not a valid resource. The level
+            // is unused for raw compression; restore it for overlay additions.
+            mz_zip_writer_set_compress_level(writer, MZ_COMPRESS_LEVEL_DEFAULT);
             err = mz_zip_writer_copy_from_reader(writer, reader);
+            mz_zip_writer_set_compress_level(writer, compression_level);
             if (err != MZ_OK)
                 break;
             err = asign_string_set_add(&written, entry_name);
@@ -1461,6 +1567,7 @@ int32_t asign_archive_rebuild_with_overlay(
                                                compression_level, deleted_paths, &written);
     }
 
+    asign_entry_index_free(&entries);
     asign_string_set_free(&written);
     int32_t reader_close = mz_zip_reader_close(reader);
     int32_t writer_close = mz_zip_writer_close(writer);
