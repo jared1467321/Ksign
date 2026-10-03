@@ -593,6 +593,7 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         guard ownsTask else { return }
+        InstallDiagnostics.shared.record("background_workflow_expired", details: ["owner": owner.rawValue])
         print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
         _completeTask(task, success: false)
         DispatchQueue.main.async { [weak self] in
@@ -917,6 +918,7 @@ final class BackgroundTaskManager: ObservableObject {
         defer { _taskProgressLock.unlock() }
         guard !_completedTasks.contains(task) else { return }
         _completedTasks.add(task)
+        InstallDiagnostics.shared.record("background_task_completed", details: ["identifier": task.identifier, "success": String(success)])
         task.expirationHandler = nil
         task.setTaskCompleted(success: success)
     }
@@ -1102,6 +1104,7 @@ final class BackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         guard ownsTask else { return }
+        InstallDiagnostics.shared.record("background_downloads_expired")
         print("BGContinuedProcessingTask expired for aggregate downloads")
         _completeTask(task, success: false)
         DispatchQueue.main.async { [weak self] in

@@ -643,6 +643,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Replaces the view's `.onDisappear`. Only called when the session is
 	// actually tearing the job down — *not* when the drawer collapses.
 	func cancel() {
+		InstallDiagnostics.shared.record("install_job_cancelled", details: ["job": id.uuidString])
 		_statusEpoch.cancel()
 		_retryAfterPackaging = false
 		_packagingAttempt?.cancel()
@@ -673,6 +674,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
+		InstallDiagnostics.shared.record("install_job_status", details: [
+			"job": id.uuidString,
+			"bundle_id": app.identifier ?? "unknown",
+			"status": String(describing: newStatus)
+		])
 		// Per-job ActivityKit *state* does not live here. Jobs forward primitive
 		// progress/status callbacks into one batch reporter, which derives a single
 		// aggregate snapshot; the controller then serializes/coalesces that snapshot.
@@ -785,6 +791,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			_packagingTask?.cancel()
 			return
 		}
+		InstallDiagnostics.shared.record("packaging_started", details: ["job": id.uuidString, "bundle_id": app.identifier ?? "unknown"])
 		let app = self.app
 		let viewModel = self.viewModel
 		let method = _installationMethod

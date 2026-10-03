@@ -115,6 +115,12 @@ final class InstallSession: ObservableObject {
 
 	func start(apps: [AppInfoPresentable]) {
 		guard !apps.isEmpty else { return }
+		InstallDiagnostics.shared.record("install_batch_requested", details: [
+			"requested_count": String(apps.count),
+			"installation_method": String(UserDefaults.standard.integer(forKey: "Feather.installationMethod")),
+			"server_method": String(UserDefaults.standard.integer(forKey: "Feather.serverMethod"))
+		])
+		InstallDiagnostics.shared.startSampling()
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
@@ -368,6 +374,8 @@ final class InstallSession: ObservableObject {
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
 
+		InstallDiagnostics.shared.record("install_batch_settled")
+		InstallDiagnostics.shared.stopSampling()
 		_recomputeProgress()
 		BulkInstallLiveActivityReporter.shared.finish()
 		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase == .completed })
@@ -376,6 +384,8 @@ final class InstallSession: ObservableObject {
 
 	private func _finishIfIdle(success: Bool) {
 		guard jobs.isEmpty else { return }
+		InstallDiagnostics.shared.record("install_session_idle", details: ["success": String(success)])
+		InstallDiagnostics.shared.stopSampling()
 
 		// Publish the terminal snapshot while the task is still owned. `report`
 		// deliberately cannot create a task by itself, so this ordering also makes
@@ -470,6 +480,7 @@ final class InstallSession: ObservableObject {
 
 	private func _fireBatchGroup(_ group: [InstallJob]) {
 		guard let host = group.first else { return }
+		InstallDiagnostics.shared.record("local_manifest_group", details: ["count": String(group.count), "host_job": host.id.uuidString])
 		let members = Array(group.dropFirst())
 
 		// One server for the whole group: the host serves its own payload and

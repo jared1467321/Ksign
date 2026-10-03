@@ -21,6 +21,7 @@ struct FeatherApp: App {
     @StateObject var extractManager = ExtractManager.shared
 	@StateObject var logsManager = LogsManager.shared
 	let storage = Storage.shared
+	private let installDiagnostics = InstallDiagnostics.shared
 
 	var body: some Scene {
 		WindowGroup {

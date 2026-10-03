@@ -10,7 +10,7 @@ final class UIApplication {
     var applicationState = State.active
 }
 
-class BGTask: NSObject {}
+class BGTask: NSObject { let identifier = "test.task" }
 final class BGContinuedProcessingTask: BGTask {
     let progress = Progress(totalUnitCount: 0)
     var expirationHandler: (() -> Void)?
@@ -61,4 +61,9 @@ final class BackgroundAudioManager {
     static let shared = BackgroundAudioManager()
     func claimSystemTask(_ key: String) {}
     func releaseSystemTask(_ key: String) {}
+}
+
+final class InstallDiagnostics {
+    static let shared = InstallDiagnostics()
+    func record(_ event: String, details: [String: String] = [:]) { }
 }

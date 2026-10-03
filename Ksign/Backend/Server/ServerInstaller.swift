@@ -124,9 +124,23 @@ class ServerInstaller: Identifiable, ObservableObject {
 						return Response(status: .notFound)
 					}
 
+					let startedAt = Date()
+					let attributes = try? FileManager.default.attributesOfItem(atPath: packageUrl.path)
+					let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+					InstallDiagnostics.shared.record("payload_requested", details: [
+						"server_app": target.id.uuidString,
+						"bundle_id": target.app.identifier ?? "unknown",
+						"file_bytes": String(size),
+						"range": req.headers.first(name: .range) ?? "full"
+					])
 					target.report(.sendingPayload)
 
 					return req.fileio.streamFile(at: packageUrl.path) { result in
+						InstallDiagnostics.shared.record("payload_stream_finished", details: [
+							"server_app": target.id.uuidString,
+							"elapsed_seconds": String(Date().timeIntervalSince(startedAt)),
+							"result": String(describing: result)
+						])
 						switch result {
 						case .success:
 							target.report(.installing)
