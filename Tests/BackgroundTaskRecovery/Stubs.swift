@@ -5,6 +5,7 @@ protocol ObservableObject: AnyObject {}
 final class UIApplication {
     enum State { case active, background }
     static let shared = UIApplication()
+    static let didEnterBackgroundNotification = Notification.Name("test.background")
     static let willEnterForegroundNotification = Notification.Name("test.foreground")
     static let didBecomeActiveNotification = Notification.Name("test.active")
     var applicationState = State.active

@@ -26,3 +26,13 @@ activation (such as closing a permission prompt) only retries missing requests.
 This recovers in-process batches, not work lost when the app itself crashes or
 is force-quit. The OS may still show an expired lease as failed; that event no
 longer makes the underlying batch fail.
+
+Local install prompts now wait for the batch's continued-processing launch
+callback, rather than submission acceptance. Grant tests cover queued requests,
+launch, expiration, cancelled waits, ended batches, submission rejection and
+foreground retry. On device, verify a 100-app manifest still opens one prompt,
+no prompt opens before `background_workflow_launched`, queued waits remain
+cancellable, and cancel/retry cannot open stale prompts. A grant can still be
+revoked by iOS after the prompt opens; this change only gates the initial handoff.
+Foreground renewal closes the grant gate immediately, including while retirement
+of the old task is still queued behind scheduler submissions.

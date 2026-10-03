@@ -281,6 +281,7 @@ final class InstallJob: ObservableObject, Identifiable {
 
 	private var _cancellables = Set<AnyCancellable>()
 	private var _installTask: Task<Void, Never>?
+	private var _promptTask: Task<Void, Never>?
 	private var _packagingTask: Task<Void, Never>?
 	private var _packagingAttempt: PackagingAttempt?
 	private var _retryAfterPackaging = false
@@ -513,6 +514,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	// simply sitting idle at `.sendingManifest` waiting for a payload request
 	// that will never come. Nothing is broken, so nothing needs rebuilding.
 	func retry() {
+		_promptTask?.cancel()
+		_promptTask = nil
 		_statusEpoch.advance()
 		// A manual retry always re-prompts this one app on its own — the shared
 		// group prompt has already happened, so fold it back to a solo install.
@@ -596,6 +599,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Drops a batched app back into the ready pool so the session can fold it
 	// into a fresh manifest with whatever else is waiting or still building.
 	func rejoinPool() {
+		_promptTask?.cancel()
+		_promptTask = nil
 		_statusEpoch.advance()
 		// Shed any role from the manifest it was just in. A demoted host also
 		// stops serving — a fresh host will serve the regrouped manifest.
@@ -644,6 +649,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	// actually tearing the job down — *not* when the drawer collapses.
 	func cancel() {
 		InstallDiagnostics.shared.record("install_job_cancelled", details: ["job": id.uuidString])
+		_promptTask?.cancel()
+		_promptTask = nil
 		_statusEpoch.cancel()
 		_retryAfterPackaging = false
 		_packagingAttempt?.cancel()
@@ -715,6 +722,8 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		switch newStatus {
 		case .completed, .broken:
+			_promptTask?.cancel()
+			_promptTask = nil
 			if case .broken = newStatus, _packagingTask != nil {
 				// An external installer failure may arrive before packaging ends.
 				// Its worker must not subsequently resurrect the job as .ready.
@@ -758,20 +767,50 @@ final class InstallJob: ObservableObject, Identifiable {
 	// initial `.ready` transition and a manual retry come through here.
 	private func _triggerReadyAction() {
 		if _serverMethod == 0 {
-			// This app (the host, or a solo retry) serves the prompt, so its
-			// server has to be up before the link opens. Members never reach here.
-			do {
-				try installer?.startServing()
-			} catch {
-				viewModel.status = .broken(error)
-				return
-			}
-			if let link = installer?.iTunesLink, let url = URL(string: link) {
-				// Route through the coordinator instead of opening directly.
-				// If many apps fire itms-services opens at the same instant
-				// iOS drops some, and those apps never get an install prompt.
-				InstallPromptCoordinator.shared.enqueue {
-					UIApplication.shared.open(url)
+			guard _promptTask == nil else { return }
+			// Idempotent; also resubmits a rejected request on a foreground retry.
+			BackgroundTaskManager.shared.claim(.bulkInstalls)
+			let epoch = _statusEpoch.current
+			let jobID = id
+			InstallDiagnostics.shared.record("local_prompt_waiting_for_grant", details: ["job": jobID.uuidString])
+			_promptTask = Task { @MainActor [weak self] in
+				do {
+					// Permission/installation prompts can temporarily deactivate the
+					// app. Wait without blocking MainActor, then verify the current
+					// lease again after any foreground renewal.
+					while true {
+						try await BackgroundTaskManager.shared.waitForWorkflowGrant(.bulkInstalls)
+						if UIApplication.shared.applicationState == .active { break }
+						try await Task.sleep(nanoseconds: 100_000_000)
+					}
+					try Task.checkCancellation()
+					guard let self, self._statusEpoch.matches(epoch), self.isAtReady,
+					      self.phase == .running else { return }
+					try self.installer?.startServing()
+					guard let link = self.installer?.iTunesLink, let url = URL(string: link) else {
+						self._promptTask = nil
+						return
+					}
+					InstallPromptCoordinator.shared.enqueue { [weak self] in
+						guard let self, self._statusEpoch.matches(epoch), self.isAtReady,
+						      self.phase == .running else { return }
+						self._promptTask = nil
+						// The coordinator may delay delivery. Never open against a
+						// lease that expired or was replaced in that gap.
+						guard UIApplication.shared.applicationState == .active,
+						      BackgroundTaskManager.shared.hasActiveWorkflowGrant(.bulkInstalls) else {
+							self._triggerReadyAction()
+							return
+						}
+						InstallDiagnostics.shared.record("local_prompt_opening_with_grant", details: ["job": jobID.uuidString])
+						UIApplication.shared.open(url)
+					}
+				} catch is CancellationError {
+					// Cancel/retry owns cleanup; an old attempt cannot clear a new gate.
+				} catch {
+					guard let self, self._statusEpoch.matches(epoch) else { return }
+					self._promptTask = nil
+					self.viewModel.status = .broken(error)
 				}
 			}
 		} else if _serverMethod == 1 {
@@ -797,6 +836,8 @@ final class InstallJob: ObservableObject, Identifiable {
 		let method = _installationMethod
 		let installer = self.installer
 		let jobID = self.id
+		_promptTask?.cancel()
+		_promptTask = nil
 		_statusEpoch.advance()
 		_packagingAttempt?.cancel()
 		let attempt = PackagingAttempt()

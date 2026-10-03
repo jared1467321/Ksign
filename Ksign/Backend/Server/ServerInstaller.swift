@@ -131,6 +131,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 						"server_app": target.id.uuidString,
 						"bundle_id": target.app.identifier ?? "unknown",
 						"file_bytes": String(size),
+						"method": req.method.rawValue,
 						"range": req.headers.first(name: .range) ?? "full"
 					])
 					target.report(.sendingPayload)

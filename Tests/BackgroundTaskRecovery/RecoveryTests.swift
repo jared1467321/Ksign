@@ -49,6 +49,7 @@ extension BackgroundTaskManager {
             // Missing UI without an expiration callback leaves this reference
             // non-nil. Foreground renewal must replace it anyway.
             manager._recoverActiveTasks(renewLeases: true)
+            assert(!manager.hasActiveWorkflowGrant(owner)) // Gate closes before queued renewal.
             manager.drainRecovery()
             assert(second.completions == [true])
             let third = manager.launch(owner)
@@ -139,6 +140,56 @@ extension BackgroundTaskManager {
     }
 }
 
+extension BackgroundTaskManager {
+    @MainActor static func runGrantTests() async throws {
+        let manager = BackgroundTaskManager()
+        manager.claim(.bulkInstalls)
+        manager._submissionQueue.sync { }
+        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
+        var passedGate = false
+        let waiting = Task { @MainActor in
+            try await manager.waitForWorkflowGrant(.bulkInstalls)
+            passedGate = true
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        assert(!passedGate) // Submitted/queued is insufficient.
+        let first = manager.launch(.bulkInstalls)
+        try await waiting.value
+        assert(passedGate && manager.hasActiveWorkflowGrant(.bulkInstalls))
+
+        UIApplication.shared.applicationState = .background
+        first.expirationHandler!()
+        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
+        let cancelled = Task { try await manager.waitForWorkflowGrant(.bulkInstalls) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        cancelled.cancel()
+        do { try await cancelled.value; assertionFailure("Cancelled gate passed") }
+        catch is CancellationError { }
+        manager.release(.bulkInstalls)
+        do { try await manager.waitForWorkflowGrant(.bulkInstalls); assertionFailure("Ended batch passed") }
+        catch is CancellationError { }
+
+        UIApplication.shared.applicationState = .active
+        BGTaskScheduler.shared.rejectSubmission = true
+        manager.claim(.bulkInstalls)
+        manager._submissionQueue.sync { }
+        do { try await manager.waitForWorkflowGrant(.bulkInstalls); assertionFailure("Rejected submission passed") }
+        catch { assert(!(error is CancellationError)) }
+        BGTaskScheduler.shared.rejectSubmission = false
+        manager.claim(.bulkInstalls) // A foreground retry resubmits.
+        manager._submissionQueue.sync { }
+        assert(!manager.hasActiveWorkflowGrant(.bulkInstalls))
+        let replacement = manager.launch(.bulkInstalls)
+        try await manager.waitForWorkflowGrant(.bulkInstalls)
+        manager.release(.bulkInstalls)
+        assert(replacement.completions == [true])
+        print("Background grant gating tests passed")
+    }
+}
+
 @main enum RecoveryTests {
-    static func main() { BackgroundTaskManager.runRecoveryTests() }
+    @MainActor static func main() async throws {
+        BackgroundTaskManager.runRecoveryTests()
+        try await BackgroundTaskManager.runGrantTests()
+    }
 }
