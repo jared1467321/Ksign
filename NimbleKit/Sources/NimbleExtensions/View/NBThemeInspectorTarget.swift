@@ -447,8 +447,13 @@ public extension View {
     /// Marks a real UI element as a consumer of a semantic theme role.
     /// Geometry is reported in window coordinates so the global overlay can
     /// select it even when it lives inside a separately presented sheet.
-    func nbThemeInspectorTarget(_ role: NBThemeRole, kind: NBThemePaintKind = .foreground) -> some View {
-        modifier(NBThemeInspectorTargetModifier(role: role, elementID: nil, initialColor: nil, kind: kind))
+    func nbThemeInspectorTarget(
+        _ role: NBThemeRole,
+        kind: NBThemePaintKind = .foreground,
+        elementID: String? = nil,
+        initialColor: NBThemeColor? = nil
+    ) -> some View {
+        modifier(NBThemeInspectorTargetModifier(role: role, elementID: elementID, initialColor: initialColor, kind: kind))
     }
 
     /// Applies a semantic foreground color and registers the exact call site as
@@ -569,9 +574,8 @@ public extension View {
         ))
     }
 
-    /// Apply to List/Form content, not the List itself: row traits must be
-    /// inside the builder. Inherited text and separators are role-wide targets;
-    /// explicit foreground helpers on child labels still take precedence.
+    /// Apply inside List/Form builders. Each row exposes independent inherited
+    /// primary text, secondary text, separator and control tint overrides.
     func nbThemeRow(
         fileID: StaticString = #fileID,
         line: UInt = #line,
@@ -627,6 +631,42 @@ public struct NBThemePaint: View {
                 elementID: elementID,
                 initialColor: semantic,
                 kind: .fill, alpha: resolved.alpha
+            ))
+    }
+}
+
+/// A fade whose colored endpoint supports the same local save/preview path as
+/// a flat paint. The transparent endpoint and gradient geometry are preserved.
+public struct NBThemeGradient: View {
+    @ObservedObject private var themes = NBThemeManager.shared
+    private let role: NBThemeRole
+    private let startPoint: UnitPoint
+    private let endPoint: UnitPoint
+    private let elementID: String
+
+    public init(
+        _ role: NBThemeRole,
+        startPoint: UnitPoint,
+        endPoint: UnitPoint,
+        elementID explicitElementID: String? = nil,
+        fileID: StaticString = #fileID,
+        line: UInt = #line,
+        column: UInt = #column
+    ) {
+        self.role = role
+        self.startPoint = startPoint
+        self.endPoint = endPoint
+        self.elementID = explicitElementID ?? nbThemeSourceID("gradient", fileID, line, column)
+    }
+
+    public var body: some View {
+        let semantic = themes.activeColor(for: role)
+        let resolved = themes.activeColor(for: role, elementID: elementID)
+        LinearGradient(colors: [resolved.color, resolved.color.opacity(0)],
+                       startPoint: startPoint, endPoint: endPoint)
+            .modifier(NBThemeInspectorTargetModifier(
+                role: role, elementID: elementID, initialColor: semantic,
+                kind: .foreground, alpha: resolved.alpha
             ))
     }
 }
@@ -908,13 +948,29 @@ private struct NBThemeRowModifier: ViewModifier {
     let elementID: String
 
     func body(content: Content) -> some View {
+        let primaryID = elementID + "|text"
+        let secondaryID = elementID + "|textSecondary"
+        let separatorID = elementID + "|separator"
+        let primary = themes.activeColor(for: .text, elementID: primaryID)
+        let secondary = themes.activeColor(for: .textSecondary, elementID: secondaryID)
+        let separator = themes.activeColor(for: .separator, elementID: separatorID)
         content
-            .foregroundStyle(themes.activeColor(for: .text).color, themes.activeColor(for: .textSecondary).color)
-            .listRowSeparatorTint(themes.activeColor(for: .separator).color)
+            .foregroundStyle(primary.color, secondary.color)
+            .listRowSeparatorTint(separator.color)
             .listRowBackground(NBThemePaint(.elevated, elementID: elementID))
-            .nbThemeInspectorTarget(.text)
-            .nbThemeInspectorTarget(.textSecondary)
-            .nbThemeInspectorTarget(.separator)
+            .nbThemeTint(.accent, elementID: elementID + "|tint")
+            .modifier(NBThemeInspectorTargetModifier(
+                role: .text, elementID: primaryID,
+                initialColor: themes.activeColor(for: .text), kind: .foreground, alpha: primary.alpha
+            ))
+            .modifier(NBThemeInspectorTargetModifier(
+                role: .textSecondary, elementID: secondaryID,
+                initialColor: themes.activeColor(for: .textSecondary), kind: .foreground, alpha: secondary.alpha
+            ))
+            .modifier(NBThemeInspectorTargetModifier(
+                role: .separator, elementID: separatorID,
+                initialColor: themes.activeColor(for: .separator), kind: .control, alpha: separator.alpha
+            ))
     }
 }
 

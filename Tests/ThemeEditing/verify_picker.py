@@ -47,7 +47,10 @@ class PickerSourceTests(unittest.TestCase):
             ('Settings/Installation/Tunnel & Pairing/TunnelHeaderCellView.swift', 'warning'),
         ):
             source = (ROOT / 'Ksign/Views' / relative).read_text()
-            self.assertIn(f'.nbThemeInspectorTarget(.{role})', source)
+            if role in ('imageScrim', 'mask'):
+                self.assertRegex(source, rf'NBThemeGradient\(\s*\.{role},')
+            else:
+                self.assertRegex(source, rf'\.nbThemeInspectorTarget\(\.{role}(?:,|\))')
             self.assertIn('@ObservedObject', source)
 
     def test_legacy_decode_and_override_lifecycle(self):

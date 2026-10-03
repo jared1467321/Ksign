@@ -75,6 +75,7 @@ struct SourcesAddView: View {
 				} else {
 					ToolbarItem(placement: .confirmationAction) {
 						ProgressView()
+						.nbThemeTint(.accent)
 					}
 				}
 			}

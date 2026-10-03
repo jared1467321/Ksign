@@ -257,15 +257,11 @@ extension SourceAppsDetailView {
 			NBVariableBlurView()
 				.rotationEffect(.degrees(-180))
 				.nbThemeOverlay(
-					LinearGradient(
-						gradient: Gradient(colors: [
-							themes.activeColor(for: .mask).color,
-							Color.clear
-						]),
+					NBThemeGradient(
+                        .mask,
 						startPoint: .top,
 						endPoint: .bottom
 					)
-                    .nbThemeInspectorTarget(.mask)
 				)
                 .nbThemePaintLayer(1)
 		}

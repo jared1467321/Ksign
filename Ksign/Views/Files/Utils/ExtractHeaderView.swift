@@ -48,6 +48,7 @@ private struct ExtractProgressItemView: View {
 				.lineLimit(1)
 
 			ProgressView(value: item.progress)
+			.nbThemeTint(.accent)
 				.progressViewStyle(.linear)
 
 			HStack {

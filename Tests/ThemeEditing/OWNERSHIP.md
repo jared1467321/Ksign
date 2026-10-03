@@ -99,8 +99,10 @@ This is a paint-ownership model, not a rendering engine. Unannotated sibling
 zIndex, custom masks, blur halos, presentation-layer animation geometry and glyph
 alpha cannot be reconstructed perfectly from SwiftUI anchors. Foreground and
 control rectangles do not claim opaque coverage of every pixel inside them.
-Gradients/pulses retain semantic-only editing, without per-stop exact editing or
-per-pixel alpha reconstruction. UIKit discovery remains semantic-only and uses
+Gradient fades expose an exact colored endpoint override while retaining their
+transparent endpoint. The tunnel pulse exposes a local fill override; without
+an override it continues interpolating the Success and Warning roles. Neither
+attempts per-pixel alpha reconstruction. UIKit discovery remains semantic-only and uses
 its existing control geometry heuristics. System pickers/Safari/Quick Look,
 Live Activities, generated installer icons and theme-profile swatches are not
 made exact-editable app paint.
@@ -134,3 +136,20 @@ scroll, navigation, sheets, rotation and safe areas; hidden loading content;
 animated progress/masks; ColorPicker save/cancel/reset/duplicate/relaunch.
 Swift/Xcode compilation is a separate required platform check. Passing Linux
 C/Python checks is not evidence that SwiftUI compiled or ran.
+
+Recoloring coverage:
+
+- List/Form rows expose separate persistent overrides for inherited primary and
+  secondary text, separator color and tint, in addition to the existing surface.
+  Explicit child foreground/tint modifiers still own their own paints. Repeated
+  rows at one source call site continue to share an override.
+- Progress indicators register their actual control tint instead of relying on
+  an inherited accent alone. Glass sheet buttons resolve their registered local
+  fill, and reusable title/subtitle labels paint their registered foregrounds.
+- IPA icons, screenshots, news artwork and file image thumbnails remain content
+  blockers, as requested. Theme editing never changes the original artwork.
+
+On iOS, check local row text/separator/tint save/cancel/reset, progress tint in
+Downloads/Vault/import/export, both header gradient fades, the tunnel pulse and
+an iOS 26 glass sheet button. Reopen each screen and relaunch to check saved
+colors. Verify icons and screenshots remain unchanged.

@@ -332,6 +332,7 @@ struct LibraryView: View {
                     .transition(.opacity)
                 } else if _cryptCheckExtractedRunning {
                     ProgressView("Running Crypt Check Extracted…")
+                    .nbThemeTint(.accent)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
                         .nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 14))

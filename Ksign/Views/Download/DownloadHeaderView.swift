@@ -65,10 +65,12 @@ struct DownloadItemView: View {
 	var body: some View {
 		VStack(alignment: .leading, spacing: 4) {
 			Text(download.fileName)
+                .nbThemeForeground(.text)
 				.font(.subheadline)
 				.lineLimit(1)
 			
 			ProgressView(value: overallProgress)
+			.nbThemeTint(.accent)
 				.progressViewStyle(.linear)
 			
 			HStack {

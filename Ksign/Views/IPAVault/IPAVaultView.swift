@@ -382,6 +382,7 @@ struct IPAVaultView: View {
                     } label: {
                         if loading {
                             ProgressView()
+                            .nbThemeTint(.accent)
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -467,6 +468,7 @@ struct IPAVaultView: View {
         if loading && remoteFiles.isEmpty {
             Spacer()
             ProgressView("Loading IPA Vault…")
+            .nbThemeTint(.accent)
             Spacer()
         } else if remoteFiles.isEmpty {
             Spacer()
@@ -926,6 +928,7 @@ private struct IPAVaultUploadRow: View {
 
             if case .uploading = job.state {
                 ProgressView(value: job.progress)
+                .nbThemeTint(.accent)
             }
         }
         .padding(.vertical, 2)
@@ -1315,6 +1318,7 @@ private struct IPAVaultSettingsView: View {
                         HStack {
                             if calibrationRunning {
                                 ProgressView()
+                                .nbThemeTint(.accent)
                             }
                             Text(calibrationRunning ? "Benchmarking…" : "Run Benchmark")
                         }

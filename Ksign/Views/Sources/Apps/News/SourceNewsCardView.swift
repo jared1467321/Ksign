@@ -41,12 +41,11 @@ struct SourceNewsCardView: View {
             }
             .nbThemePaintLayer(0)
 
-			LinearGradient(
-				gradient: Gradient(colors: [themes.activeColor(for: .imageScrim).color, .clear]),
+			NBThemeGradient(
+                .imageScrim,
 				startPoint: .bottom,
 				endPoint: .top
 			)
-			.nbThemeInspectorTarget(.imageScrim)
             .nbThemePaintLayer(1)
 			.frame(height: 70)
 			.frame(maxWidth: .infinity, alignment: .bottom)

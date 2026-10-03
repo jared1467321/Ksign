@@ -133,6 +133,7 @@ struct InstallDrawerSheet: View {
 
 				HStack(spacing: 10) {
 					ProgressView(value: session.aggregateProgress)
+					.nbThemeTint(.accent)
 						.progressViewStyle(.linear)
 
 					// Installing right now over apps still on the drawer, not

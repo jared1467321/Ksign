@@ -11,6 +11,21 @@ import NimbleExtensions
 public struct NBSheetButton: View {
 	@ObservedObject private var themes = NBThemeManager.shared
 	private var _title: String
+    private let glassFillID = "NBSheetButton.glassFill"
+
+    private var glassDefault: NBThemeColor {
+        var color = themes.activeColor(for: .accent)
+        color.alpha *= 0.9
+        return color
+    }
+
+    private var glassFill: NBThemeColor {
+        if themes.hasElementOverride(glassFillID) ||
+            themes.isPreviewing(.accent, elementID: glassFillID, in: themes.selectedThemeID) {
+            return themes.activeColor(for: .accent, elementID: glassFillID)
+        }
+        return glassDefault
+    }
 	
 	public init(title: String) {
 		self._title = title
@@ -23,13 +38,14 @@ public struct NBSheetButton: View {
                 .background(Color.clear)
                 .nbThemeForeground(.onAccent)
                 .nbThemeInspectorTarget(.onAccent)
-                .nbThemeInspectorTarget(.accent)
+                .nbThemeInspectorTarget(.accent, elementID: glassFillID,
+                    initialColor: glassDefault)
                 .nbThemeClipShape(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
                 )
                 .bold()
                 .frame(height: 50)
-                .glassEffect(.regular.tint(themes.activeColor(for: .accent).color.opacity(0.9)).interactive(), in: .rect(cornerRadius: 28))
+                .glassEffect(.regular.tint(glassFill.color).interactive(), in: .rect(cornerRadius: 28))
                 .padding()
         } else {
             Text(_title)

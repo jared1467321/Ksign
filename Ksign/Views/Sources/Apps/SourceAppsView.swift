@@ -80,6 +80,7 @@ struct SourceAppsView: View {
                 if #available(iOS 17, *) {
                     ContentUnavailableView {
                         ProgressView()
+                        .nbThemeTint(.accent)
                         Label(.localized("Fetching..."), systemImage: "")
                         .nbThemeForeground(.heading)
                     } description: {
@@ -87,7 +88,7 @@ struct SourceAppsView: View {
                         .nbThemeForeground(.textSecondary)
                     }
                 }
-                else { ProgressView() }
+                else { ProgressView().nbThemeTint(.accent) }
             }
         }
         .nbThemeCanvas()

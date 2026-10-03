@@ -24,6 +24,7 @@ struct ImageRow: View {
                     .nbThemeContentSurface()
             } else if isLoading {
                 ProgressView()
+                .nbThemeTint(.accent)
                     .scaleEffect(0.6)
             } else {
                 Image(systemName: "photo")

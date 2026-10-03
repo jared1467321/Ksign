@@ -136,6 +136,7 @@ struct DownloaderView: View {
                         }
                         HStack(spacing: 12) {
                             ProgressView()
+                            .nbThemeTint(.accent)
                             Text(.localized("Importing apps, please wait"))
                                 .nbThemeForeground(.textSecondary)
                             Spacer()
@@ -191,6 +192,7 @@ struct DownloaderView: View {
             .nbThemeOverlay {
                 if cryptCheckRunning {
                     ProgressView("Running Crypt Check…")
+                    .nbThemeTint(.accent)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
                         .nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 14))

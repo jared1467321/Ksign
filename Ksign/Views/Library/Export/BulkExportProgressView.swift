@@ -17,6 +17,7 @@ struct BulkExportProgressView: View {
 	var body: some View {
 		VStack(spacing: 14) {
 			ProgressView(value: manager.overallProgress)
+			.nbThemeTint(.accent)
 				.progressViewStyle(.linear)
 
 			VStack(spacing: 6) {
@@ -25,6 +26,7 @@ struct BulkExportProgressView: View {
 
 				HStack(spacing: 6) {
 					ProgressView()
+					.nbThemeTint(.accent)
 						.controlSize(.small)
 					Text(manager.currentName)
 						.font(.subheadline)

@@ -27,6 +27,7 @@ struct TunnelPulseRing: View {
     @ObservedObject private var themes = NBThemeManager.shared
 	@State private var _animationProgress = 0.0
 	
+	private let elementID = "TunnelPulseRing.fill"
 	private let _animationDuration = 10.0
 	private let _colorStartThreshold = 0.5
 	private let _colorTransitionDuration = 9.0
@@ -42,14 +43,19 @@ struct TunnelPulseRing: View {
 				max(0.0, (timeSinceHeartbeat - _colorStartThreshold) / _colorTransitionDuration)
 			)
 			
-			let pulseColor = themes.activeColor(for: .success).interpolated(
+			let semantic = themes.activeColor(for: .success).interpolated(
 				to: themes.activeColor(for: .warning),
 				fraction: colorTransitionProgress
-			).color
+			)
+            let hasLocalColor = themes.hasElementOverride(elementID) ||
+                themes.isPreviewing(.success, elementID: elementID, in: themes.selectedThemeID)
+            let pulseColor = hasLocalColor
+                ? themes.activeColor(for: .success, elementID: elementID)
+                : semantic
 
 			Circle()
-				.fill(pulseColor)
-                .nbThemeInspectorTarget(.success)
+				.fill(pulseColor.color)
+                .nbThemeInspectorTarget(.success, elementID: elementID, initialColor: semantic)
                 .nbThemeInspectorTarget(.warning)
 				.frame(width: 10, height: 10)
 				.scaleEffect(1.0 - (0.5 * progress))
