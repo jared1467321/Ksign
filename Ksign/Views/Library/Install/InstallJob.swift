@@ -382,6 +382,9 @@ final class InstallJob: ObservableObject, Identifiable {
 				default:
 					break
 				}
+			},
+			payloadProgressReporter: { progress in
+				BulkInstallLiveActivityReporter.shared.updateInstall(jobID: jobID, progress: progress, isPayload: true)
 			}
 		)
 	}

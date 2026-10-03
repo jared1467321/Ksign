@@ -2,6 +2,14 @@ import Foundation
 
 protocol ObservableObject: AnyObject {}
 
+final class InstallerStatusViewModel {
+    enum InstallerStatus {
+        case none, ready, sendingManifest, sendingPayload, installing
+        case completed(Result<Void, Error>)
+        case broken(Error)
+    }
+}
+
 final class UIApplication {
     enum State { case active, background }
     static let shared = UIApplication()

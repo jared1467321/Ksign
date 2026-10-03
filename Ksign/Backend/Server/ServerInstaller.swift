@@ -13,6 +13,8 @@ import NIOSSL
 import NIOTLS
 import SwiftUI
 import IDeviceSwift
+import NIOCore
+import NIOPosix
 
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
@@ -32,16 +34,19 @@ class ServerInstaller: Identifiable, ObservableObject {
 	@ObservedObject var viewModel: InstallerStatusViewModel
 	private var _server: Application?
 	private let _statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)?
+	private let _payloadProgressReporter: ((Double) -> Void)?
 
 	init(
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
 		startsServer: Bool = true,
-		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil
+		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil,
+		payloadProgressReporter: ((Double) -> Void)? = nil
 	) throws {
 		self.app = app
 		self.viewModel = viewModel
 		self._statusReporter = statusReporter
+		self._payloadProgressReporter = payloadProgressReporter
 		if startsServer {
 			try startServing()
 		}
@@ -134,21 +139,77 @@ class ServerInstaller: Identifiable, ObservableObject {
 						"method": req.method.rawValue,
 						"range": req.headers.first(name: .range) ?? "full"
 					])
+					// Keep Vapor's range/cache/HEAD metadata, but report progress
+					// after each completed chunk write instead of only at EOF.
+					let response = req.fileio.streamFile(at: packageUrl.path)
+					guard req.method == .GET,
+					      response.status == .ok || response.status == .partialContent else { return response }
+					let byteCount = response.body.count
+					let offset: Int64
+					if response.status == .partialContent {
+						guard let range = response.headers.first(name: .contentRange),
+						      let start = range.split(separator: " ").last?.split(separator: "-").first,
+						      let value = Int64(start) else { return response }
+						offset = value
+					} else { offset = 0 }
+					let isFullPayload = offset == 0 && UInt64(byteCount) == size
 					target.report(.sendingPayload)
-
-					return req.fileio.streamFile(at: packageUrl.path) { result in
-						InstallDiagnostics.shared.record("payload_stream_finished", details: [
-							"server_app": target.id.uuidString,
-							"elapsed_seconds": String(Date().timeIntervalSince(startedAt)),
-							"result": String(describing: result)
+					response.body = .init(stream: { stream in
+						InstallDiagnostics.shared.record("payload_stream_started", details: [
+							"server_app": target.id.uuidString, "response_bytes": String(byteCount),
+							"offset": String(offset)
 						])
-						switch result {
-						case .success:
-							target.report(.installing)
-						case .failure(let error):
-							target.report(.broken(error))
+						// All mutable counters are confined to this request's event loop.
+						var sent = 0
+						var lastProgressAt = Date.distantPast
+						var lastDiagnosticAt = Date.distantPast
+						let transfer = req.eventLoop.flatSubmit {
+							do {
+								let handle = try NIOFileHandle(path: packageUrl.path)
+								let read = req.application.fileio.readChunked(
+									fileHandle: handle, fromOffset: offset, byteCount: byteCount,
+									chunkSize: 128 * 1024, allocator: req.byteBufferAllocator,
+									eventLoop: req.eventLoop
+								) { chunk in
+									let count = chunk.readableBytes
+									return stream.write(.buffer(chunk)).map {
+										sent += count
+										let now = Date()
+										if isFullPayload && (now.timeIntervalSince(lastProgressAt) >= 1 || sent == byteCount) {
+											lastProgressAt = now
+											if byteCount > 0 { target._payloadProgressReporter?(Double(sent) / Double(byteCount)) }
+										}
+										if now.timeIntervalSince(lastDiagnosticAt) >= 5 || sent == byteCount {
+											lastDiagnosticAt = now
+											InstallDiagnostics.shared.record("payload_stream_progress", details: [
+												"server_app": target.id.uuidString, "bytes_sent": String(sent),
+												"response_bytes": String(byteCount), "offset": String(offset)
+											])
+										}
+									}
+								}
+								read.whenComplete { _ in try? handle.close() }
+								return read
+							} catch { return req.eventLoop.makeFailedFuture(error) }
 						}
-					}
+						transfer.whenComplete { result in
+							InstallDiagnostics.shared.record("payload_stream_finished", details: [
+								"server_app": target.id.uuidString,
+								"bytes_sent": String(sent),
+								"elapsed_seconds": String(Date().timeIntervalSince(startedAt)),
+								"result": String(describing: result)
+							])
+							switch result {
+							case .success:
+								stream.write(.end, promise: nil)
+								target.report(.installing)
+							case .failure(let error):
+								stream.write(.error(error), promise: nil)
+								target.report(.broken(error))
+							}
+						}
+					}, count: byteCount, byteBufferAllocator: req.byteBufferAllocator)
+					return response
 				}
 
 				if path == "/\(target.id)-57.png" {

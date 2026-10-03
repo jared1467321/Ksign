@@ -36,3 +36,12 @@ cancellable, and cancel/retry cannot open stale prompts. A grant can still be
 revoked by iOS after the prompt opens; this change only gates the initial handoff.
 Foreground renewal closes the grant gate immediately, including while retirement
 of the old task is still queued behind scheduler submissions.
+
+The runner also compiles the production bulk install reporter. Transfer tests
+verify that real payload progress advances the batch while it remains in the
+sending-payload stage, ignores stale numeric regressions and initial UI zeros,
+reserves progress for installation after transfer, and ignores terminal updates.
+On device, a large fully local IPA should produce `payload_stream_started`,
+periodic `payload_stream_progress` byte counts and `payload_stream_finished`.
+HEAD metadata requests must not change the install status. Verify the system
+activity advances during transfer, including after backgrounding the app.

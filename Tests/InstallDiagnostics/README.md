@@ -8,6 +8,11 @@ one rotated diagnostics-previous.jsonl (about 2 MB each). Share both files after
 reproducing the failure. Each JSON line has a UTC timestamp and process run ID.
 Payload completion describes one HTTP response, which may be only a range; it
 does not prove the whole IPA was received or that installation succeeded.
+`payload_stream_started` marks entry into the response body producer;
+`payload_stream_progress` records completed socket writes, their byte count,
+response length and starting offset. These distinguish a stream that never
+starts from a stream that stalls after writing some data. Progress is logged
+at most once every five seconds, plus its final chunk, for each response.
 
 The logger samples process footprint and advisory available memory every five
 seconds while installs are active. Lifecycle events, memory warnings, install

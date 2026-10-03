@@ -187,9 +187,43 @@ extension BackgroundTaskManager {
     }
 }
 
+extension BulkInstallLiveActivityReporter {
+    static func runPayloadProgressTests() {
+        let reporter = BulkInstallLiveActivityReporter()
+        let job = UUID()
+        reporter.reset()
+        reporter.register(job, name: "Large IPA")
+        reporter.updateStatus(jobID: job, status: .ready)
+        reporter.updateStatus(jobID: job, status: .sendingPayload)
+        reporter.updateInstall(jobID: job, progress: 0.5, isPayload: true)
+        reporter.updateInstall(jobID: job, progress: 0) // Initial UI emission is not install progress.
+        reporter._queue.sync {
+            assert(reporter._jobs[job]!.stage == .sendingPayload)
+            assert(reporter._jobs[job]!.fraction == 0.625)
+        }
+        reporter.updateInstall(jobID: job, progress: 0.2, isPayload: true) // Retry cannot move backwards.
+        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 0.625) }
+        reporter.updateInstall(jobID: job, progress: 1, isPayload: true)
+        reporter.updateStatus(jobID: job, status: .installing)
+        reporter.updateInstall(jobID: job, progress: 0.5)
+        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 0.875) }
+        reporter.updateStatus(jobID: job, status: .completed(.success(())))
+        reporter.updateInstall(jobID: job, progress: 0.1, isPayload: true)
+        reporter._queue.sync { assert(reporter._jobs[job]!.fraction == 1) }
+
+        let idevice = UUID()
+        reporter.register(idevice, name: "iDevice IPA")
+        reporter.updateStatus(jobID: idevice, status: .installing)
+        reporter.updateInstall(jobID: idevice, progress: 0.5)
+        reporter._queue.sync { assert(reporter._jobs[idevice]!.fraction == 0.75) }
+        print("Payload progress reporting tests passed")
+    }
+}
+
 @main enum RecoveryTests {
     @MainActor static func main() async throws {
         BackgroundTaskManager.runRecoveryTests()
         try await BackgroundTaskManager.runGrantTests()
+        BulkInstallLiveActivityReporter.runPayloadProgressTests()
     }
 }
