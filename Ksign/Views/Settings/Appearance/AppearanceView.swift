@@ -251,7 +251,20 @@ private struct ThemeProfileEditorView: View {
             }
 
             if !searchText.isEmpty && NBThemeRole.Category.allCases.allSatisfy({ _visibleRoles(in: $0).isEmpty }) {
-                ContentUnavailableView.search(text: searchText)
+                if #available(iOS 17.0, *) {
+                    ContentUnavailableView.search(text: searchText)
+                } else {
+                    VStack(spacing: 8) {
+                        Label(.localized("No Results"), systemImage: "magnifyingglass")
+                            .font(.headline)
+                            .nbThemeForeground(.heading)
+                        Text(searchText)
+                            .font(.subheadline)
+                            .nbThemeForeground(.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical)
+                }
             }
         }
         .searchable(text: $searchText, prompt: .localized("Find a color or screen element"))
