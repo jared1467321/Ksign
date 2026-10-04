@@ -476,9 +476,9 @@ struct IPAVaultView: View {
                 Image(systemName: "externaldrive.badge.wifi")
                     .font(.system(size: 38))
                     .nbThemeForeground(.textSecondary)
-                Text("No IPA files found")
+                Text("No files found")
                     .font(.headline)
-                Text("Check the server address or add IPA files to the VPS folder.")
+                Text("Check the server address or add files to the VPS folder.")
                     .font(.footnote)
                     .nbThemeForeground(.textSecondary)
                     .multilineTextAlignment(.center)
@@ -705,8 +705,8 @@ struct IPAVaultView: View {
         let downloads = selected.map { (url: $0.url, filename: $0.name, size: $0.size) }
         downloadManager.enqueueIPAVaultDownloads(downloads)
         statusMessage = selected.count == 1
-            ? "Added 1 IPA to Ksign Downloads."
-            : "Added \(selected.count) IPAs to Ksign Downloads."
+            ? "Added 1 file to Ksign Downloads."
+            : "Added \(selected.count) files to Ksign Downloads."
         presentationSession.selectedRemoteIDs.removeAll()
     }
 
@@ -856,7 +856,6 @@ struct IPAVaultView: View {
             let entries = try JSONDecoder().decode([IPAVaultNginxEntry].self, from: data)
             remoteFiles = entries.compactMap { entry in
                 guard entry.type == "file",
-                      entry.name.lowercased().hasSuffix(".ipa"),
                       !entry.name.hasPrefix(".ipavault-"),
                       let size = entry.size,
                       size > 0 else { return nil }
@@ -999,7 +998,7 @@ private struct IPAVaultCalibrationSample {
 
 /// Runs a single timed IPA Vault transport benchmark. Each logical file is split
 /// into the same HTTP Range layout used by the real Vault downloader. Completed
-/// ranges are immediately restarted so small IPAs cannot end a timed sample early.
+/// ranges are immediately restarted so small files cannot end a timed sample early.
 private final class IPAVaultCalibrationProbe: NSObject, URLSessionDownloadDelegate {
     private struct StreamSpec {
         let request: URLRequest
@@ -1041,7 +1040,7 @@ private final class IPAVaultCalibrationProbe: NSObject, URLSessionDownloadDelega
         measurementSeconds: TimeInterval
     ) async throws -> Double {
         guard !files.isEmpty else {
-            throw NSError(domain: "IPAVaultCalibration", code: 1, userInfo: [NSLocalizedDescriptionKey: "No IPA files are available for calibration."])
+            throw NSError(domain: "IPAVaultCalibration", code: 1, userInfo: [NSLocalizedDescriptionKey: "No files are available for calibration."])
         }
 
         let requests = makeStreamRequests(
@@ -1050,7 +1049,7 @@ private final class IPAVaultCalibrationProbe: NSObject, URLSessionDownloadDelega
             streams: max(1, streams)
         )
         guard !requests.isEmpty else {
-            throw NSError(domain: "IPAVaultCalibration", code: 2, userInfo: [NSLocalizedDescriptionKey: "The selected IPA files are too small to test."])
+            throw NSError(domain: "IPAVaultCalibration", code: 2, userInfo: [NSLocalizedDescriptionKey: "The selected files are too small to test."])
         }
 
         lock.lock()
@@ -1717,7 +1716,6 @@ private struct IPAVaultSettingsView: View {
         let entries = try JSONDecoder().decode([IPAVaultNginxEntry].self, from: data)
         let files = entries.compactMap { entry -> IPAVaultRemoteFile? in
             guard entry.type == "file",
-                  entry.name.lowercased().hasSuffix(".ipa"),
                   !entry.name.hasPrefix(".ipavault-"),
                   let size = entry.size,
                   size > 0 else { return nil }
@@ -1730,7 +1728,7 @@ private struct IPAVaultSettingsView: View {
         .sorted { $0.size > $1.size }
 
         guard !files.isEmpty else {
-            throw NSError(domain: "IPAVaultCalibration", code: 14, userInfo: [NSLocalizedDescriptionKey: "No IPA files were found in this Vault."])
+            throw NSError(domain: "IPAVaultCalibration", code: 14, userInfo: [NSLocalizedDescriptionKey: "No downloadable files were found in this Vault."])
         }
 
         // Eight is the maximum concurrency, so more files cannot participate in a sample.
