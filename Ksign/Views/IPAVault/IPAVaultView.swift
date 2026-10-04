@@ -1283,7 +1283,7 @@ private struct IPAVaultSettingsView: View {
                 } header: {
                     Text("Downloads")
                 } footer: {
-                    Text("Every batch starts fresh at 1 IPA × 2 streams. Ksign quickly tunes file concurrency first, then streams per file using total useful throughput. Once optimized it locks those settings and stops probing; tuning only reopens after a sustained meaningful speed drop. All learned state is discarded when the batch ends. Hard limits are 8 files and 10 streams per file.")
+                    Text("Every batch starts fresh at 1 IPA × 2 streams. Ksign tunes file concurrency first, then checks nearby stream counts using fresh measurements of useful throughput. Clear results finish quickly; close or noisy results receive a brief extra check. Once optimized it locks those settings and stops probing; tuning only reopens after a sustained meaningful speed drop. All learned state is discarded when the batch ends. Hard limits are 8 files and 10 streams per file.")
                     .nbThemeForeground(.textSecondary)
                 }
 
