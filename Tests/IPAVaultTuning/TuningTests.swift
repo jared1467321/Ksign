@@ -35,6 +35,19 @@ final class TuningTests {
         continueIPAVaultBatchProbe(probe, now: time)
     }
     func run() {
+        let cached = IPAVaultFreshMeasurement(concurrency: 3, streams: 2,
+            bps: 90_000_000, noise: 0.01, measuredAt: 10, jobIDs: ["a", "b", "c"])
+        assert(cached.isValid(concurrency: 3, jobIDs: ["a", "b", "c"], now: 16))
+        assert(!cached.isValid(concurrency: 3, jobIDs: ["a", "b", "c"], now: 16.01))
+        assert(!cached.isValid(concurrency: 2, jobIDs: ["a", "b", "c"], now: 11))
+        assert(!cached.isValid(concurrency: 3, jobIDs: ["a", "b", "d"], now: 11))
+        assert(!cached.isValid(concurrency: 3, jobIDs: ["a", "b", "c"], now: 9))
+        assert(cached.clearlyFails(threshold: 98_500_000, baselineBPS: 100_000_000))
+        assert(!cached.clearlyFails(threshold: 91_000_000, baselineBPS: 100_000_000))
+        let noisyCache = IPAVaultFreshMeasurement(concurrency: 3, streams: 2,
+            bps: 90_000_000, noise: 0.15, measuredAt: 10, jobIDs: ["a", "b", "c"])
+        assert(!noisyCache.clearlyFails(threshold: 98_500_000, baselineBPS: 100_000_000))
+
         // Pre-probe bytes must never inflate the candidate measurement.
         ipavaultTotalUsefulBytes = 9_000_000_000
         let fast = probe()

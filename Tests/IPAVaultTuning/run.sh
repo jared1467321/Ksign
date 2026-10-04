@@ -14,6 +14,7 @@ source = Path('Ksign/Views/Downloader/ViewModels/IPADownloadManager.swift').read
 def section(start, end):
     return source[source.index(start):source.index(end, source.index(start))]
 parts = [
+    section('    private struct IPAVaultFreshMeasurement', '    private struct IPAVaultObservedConfiguration'),
     section('    private enum IPAVaultBatchProbeDimension', '    private enum IPAVaultBatchTuningPhase'),
     section('    private final class IPAVaultBatchAdaptiveProbe', '    private final class IPAVaultConcurrencyTrial'),
     section('    private func nextIPAVaultStreamSearchTarget()', '    private func finishIPAVaultConcurrencySearch'),
