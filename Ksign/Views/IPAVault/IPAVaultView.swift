@@ -339,17 +339,6 @@ struct IPAVaultView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 10)
 
-                DisclosureGroup("Server address") {
-                    TextField("http://100.x.x.x:8765/", text: $serverURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                        .onSubmit { Task { await refreshCurrentMode() } }
-                }
-                .font(.footnote)
-                .padding(.horizontal)
-                .padding(.bottom, 10)
-
                 Divider().nbThemeOverlay(.separator)
 
                 if mode == .download {
