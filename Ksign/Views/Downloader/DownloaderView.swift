@@ -49,7 +49,7 @@ struct DownloaderView: View {
     }
 
     private var hasActiveIPAVaultDownloads: Bool {
-        downloadManager.activeItems.contains { $0.isIPAVaultDownload }
+        downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
     }
 
     private var ipavaultLiveThroughputText: String {
@@ -67,21 +67,19 @@ struct DownloaderView: View {
     // Shared by a real IPA Vault download and the inspector's non-networked
     // sample, so the inspected separator has precisely the production layout.
     private func ipaVaultStatusRow(speed: String, streams: String, isSample: Bool = false) -> some View {
-        HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
                 .fontWeight(.semibold)
-            Spacer()
-            Text(speed).monospacedDigit()
-            Text("•")
-                .nbThemeForeground(.textTertiary)
-                .nbThemeInspectorTarget(.textTertiary)
-            Text(streams).monospacedDigit()
+            LabeledContent("Live throughput", value: speed)
+            LabeledContent("Batch tuning", value: isSample ? "Optimized" : downloadManager.ipavaultAdaptiveStatus)
+            LabeledContent("Target concurrent files", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveConcurrentCount)")
+            LabeledContent("Target streams / file", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveStreamsPerFile)")
+            LabeledContent("Active streams (all jobs)", value: streams)
         }
         .font(.caption)
         .nbThemeForeground(.textSecondary)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
-        .accessibilityValue("\(speed), \(streams)")
     }
 
     var body: some View {
@@ -128,9 +126,8 @@ struct DownloaderView: View {
                     // The finished list underneath is only a selection surface
                     // during an import, so it now stays completely still.
                     NBSection(.localized("Importing")) {
-                        // Imports normally replace the active-download section.
-                        // Keep the inspected live status visible in the copy.
-                        if inspectorSampleDownloadStatus && hasActiveIPAVaultDownloads {
+                        // Keep live batch statistics visible while completed files import.
+                        if hasActiveIPAVaultDownloads {
                             ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
                                               streams: ipavaultActiveStreamsText)
                         }
@@ -142,7 +139,7 @@ struct DownloaderView: View {
                             Spacer()
                         }
                     }
-                } else if !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
+                } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
                     NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
                         if hasActiveIPAVaultDownloads {
                             ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
