@@ -21,8 +21,10 @@ class IPADownloadManager: NSObject, ObservableObject {
         downloadItems.filter { $0.isFinished }
     }
 
-    // Temporary diagnostics: disable this switch once adaptive tuning is settled.
-    private let ipavaultDiagnosticsEnabled = true
+    // Shared with the IPA Vault picker. Logging is opt-in and persists across launches.
+    private var ipavaultDiagnosticsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "IPAVaultDiagnosticsEnabled")
+    }
     private let ipavaultDiagnosticWriter = IPAVaultDiagnosticWriter()
     private var ipavaultDiagnosticBatchStartedAt: TimeInterval = 0
     private var ipavaultDiagnosticLastSnapshotAt: TimeInterval = 0
@@ -37,7 +39,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         // Keep the current log and three previous segments, at most 32 MiB total.
         func append(_ message: String, date: Date) {
             queue.async {
-                guard !self.failed else { return }
+                guard !self.failed, UserDefaults.standard.bool(forKey: "IPAVaultDiagnosticsEnabled") else { return }
                 do {
                     let directory = URL.documentsDirectory.appendingPathComponent("Logs", isDirectory: true)
                     let url = directory.appendingPathComponent("IPAVault-Tuning.txt")
@@ -81,8 +83,8 @@ class IPADownloadManager: NSObject, ObservableObject {
     }
 
     private func logIPAVault(_ message: String) {
-        print(message)
         guard ipavaultDiagnosticsEnabled else { return }
+        print(message)
         let elapsed = max(0, ProcessInfo.processInfo.systemUptime - ipavaultDiagnosticBatchStartedAt)
         ipavaultDiagnosticWriter.append("elapsed=\(String(format: "%.3f", elapsed))s \(message)", date: Date())
     }
@@ -215,6 +217,43 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
     }
 
+    private struct IPAVaultConcurrencyValidation {
+        enum Outcome { case waiting, validated, regressed, inconclusive }
+        let previousConcurrency: Int
+        let previousStreams: Int
+        let referenceBPS: Double
+        let targetConcurrency: Int
+        let targetStreams: Int
+        let startedAt: TimeInterval
+        var samples: [Double] = []
+        var lowSince: TimeInterval?
+        var eligibleSince: TimeInterval?
+
+        mutating func observe(bps: Double, eligible: Bool, now: TimeInterval) -> Outcome {
+            guard eligible else {
+                lowSince = nil
+                eligibleSince = nil
+                samples.removeAll(keepingCapacity: true)
+                return now - startedAt >= 8 ? .inconclusive : .waiting
+            }
+            if eligibleSince == nil { eligibleSince = now }
+            samples.append(bps)
+            if samples.count > 8 { samples.removeFirst() }
+            // Require multiple readings: a short trough must not undo a good increase.
+            let recent = samples.suffix(4).sorted()
+            guard recent.count >= 3 else { return .waiting }
+            let sustainedBPS = recent[recent.count / 2]
+            if sustainedBPS < referenceBPS * 0.97 {
+                if lowSince == nil { lowSince = now }
+                if now - lowSince! >= 1.5 { return .regressed }
+            } else {
+                lowSince = nil
+                if now - eligibleSince! >= 3 { return .validated }
+            }
+            return now - startedAt >= 8 ? .inconclusive : .waiting
+        }
+    }
+
     private struct IPAVaultFreshMeasurement {
         let concurrency: Int
         let streams: Int
@@ -337,6 +376,7 @@ class IPADownloadManager: NSObject, ObservableObject {
     private var ipavaultBatchTuningPhase: IPAVaultBatchTuningPhase = .concurrency
     private var ipavaultBatchProbe: IPAVaultBatchAdaptiveProbe?
     private var ipavaultBatchConcurrencyTrial: IPAVaultConcurrencyTrial?
+    private var ipavaultBatchConcurrencyValidation: IPAVaultConcurrencyValidation?
     private var ipavaultBatchControllerThroughputSamples: [(time: TimeInterval, bps: Double)] = []
     private var ipavaultBatchConcurrencyUpperBound: Int?
     private var ipavaultBatchStreamSearchCandidates: [Int] = []
@@ -1462,7 +1502,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         rebalanceIPAVaultStreams()
     }
 
-    private func cancelIPAVaultStreams(_ job: IPAVaultJob, requeueUnfinished: Bool) {
+    private func cancelIPAVaultStreams(_ job: IPAVaultJob, requeueUnfinished: Bool, preserveReceivedBytes: Bool = false) {
         let taskIDs = Array(job.tasks.keys)
         for taskID in taskIDs {
             guard let task = job.tasks.removeValue(forKey: taskID),
@@ -1470,6 +1510,11 @@ class IPADownloadManager: NSObject, ObservableObject {
                 continue
             }
 
+            if preserveReceivedBytes {
+                let receivedEnd = min(metadata.currentPosition, metadata.effectiveEnd)
+                job.committedBytes += max(0, receivedEnd - metadata.committedEnd)
+                metadata.committedEnd = max(metadata.committedEnd, receivedEnd)
+            }
             if requeueUnfinished, metadata.committedEnd < metadata.effectiveEnd {
                 job.freeRanges.append(
                     IPAVaultRange(
@@ -1709,6 +1754,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchTuningPhase = .concurrency
         ipavaultBatchProbe = nil
         ipavaultBatchConcurrencyTrial = nil
+        ipavaultBatchConcurrencyValidation = nil
         ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
         ipavaultBatchConcurrencyUpperBound = nil
         ipavaultBatchConfirmedBaseline = nil
@@ -1751,6 +1797,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchTuningPhase = .concurrency
         ipavaultBatchProbe = nil
         ipavaultBatchConcurrencyTrial = nil
+        ipavaultBatchConcurrencyValidation = nil
         ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
         ipavaultBatchConcurrencyUpperBound = nil
         ipavaultBatchConfirmedBaseline = nil
@@ -2120,7 +2167,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
         // A clear gain already justifies this concurrency; tune its streams locally.
         let clearGain = trial.bestBPS >= trial.goalBPS * 1.05
-        if normalEnd || bonusEnd || clearGain {
+        if normalEnd || bonusEnd || clearGain || trial.firstGoalReachedCandidateIndex != nil {
             finishIPAVaultConcurrencyTrial(now: now)
         }
     }
@@ -2149,6 +2196,13 @@ class IPADownloadManager: NSObject, ObservableObject {
                 ipavaultBatchConfirmedBaseline = winner
             }
             ipavaultBatchLastStableBPS = trial.bestBPS
+            ipavaultBatchConcurrencyValidation = IPAVaultConcurrencyValidation(
+                previousConcurrency: trial.previousConcurrency, previousStreams: trial.previousStreams,
+                referenceBPS: trial.goalBPS, targetConcurrency: trial.targetConcurrency,
+                targetStreams: trial.bestStreams, startedAt: now
+            )
+            updateIPAVaultAdaptivePresentation(status: "Verifying concurrency")
+            logIPAVault("VERIFY BEGIN previous=\(trial.previousConcurrency)x\(trial.previousStreams) candidate=\(trial.targetConcurrency)x\(trial.bestStreams) referenceBps=\(trial.goalBPS)")
             logIPAVault(
                 "IPA Vault adaptive: keep higher concurrency \(trial.targetConcurrency) at " +
                 "\(trial.bestStreams) stream(s)/file; best \(String(format: "%.1f", trial.bestBPS / 1_000_000)) MB/s " +
@@ -2178,6 +2232,48 @@ class IPADownloadManager: NSObject, ObservableObject {
             "\(trial.previousConcurrency)×\(trial.previousStreams)."
         )
         finishIPAVaultConcurrencySearch(now: now)
+    }
+
+    private func continueIPAVaultConcurrencyValidation(now: TimeInterval, bps: Double) {
+        guard var validation = ipavaultBatchConcurrencyValidation else { return }
+        if availableIPAVaultBatchConcurrency() < validation.targetConcurrency {
+            logIPAVault("VERIFY INCONCLUSIVE: batch tail; do not compare fewer files against the previous full configuration")
+            ipavaultBatchConcurrencyValidation = nil
+            advanceIPAVaultTuningToStreams(now: now)
+            return
+        }
+        let eligible = runningIPAVaultDownloadCount == validation.targetConcurrency &&
+            transferringIPAVaultDownloadCount == validation.targetConcurrency &&
+            !tunerIPAVaultDrainInProgress && !tunerIPAVaultStreamDrainInProgress
+        let outcome = validation.observe(bps: bps, eligible: eligible, now: now)
+        logIPAVault("VERIFY candidate=\(validation.targetConcurrency)x\(validation.targetStreams) Bps=\(bps) referenceBps=\(validation.referenceBPS) eligible=\(eligible) outcome=\(outcome)")
+        ipavaultBatchConcurrencyValidation = validation
+        switch outcome {
+        case .waiting: return
+        case .validated:
+            ipavaultBatchConcurrencyValidation = nil
+            ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
+            ipavaultBatchLastDecisionAt = now
+            ipavaultBatchConfirmedBaseline = nil
+            updateIPAVaultAdaptivePresentation(status: "Tuning concurrency")
+        case .inconclusive:
+            ipavaultBatchConcurrencyValidation = nil
+            advanceIPAVaultTuningToStreams(now: now)
+        case .regressed:
+            ipavaultBatchConcurrencyValidation = nil
+            logIPAVault("VERIFY ROLLBACK: sustained regression; restore \(validation.previousConcurrency)x\(validation.previousStreams), block \(validation.targetConcurrency) files until conditions change")
+            setIPAVaultBatchConcurrency(validation.previousConcurrency)
+            // Release the removed file's requests promptly; preserve every byte already written.
+            for itemID in tunerSuspendedIPAVaultDownloadIDs {
+                if let job = ipavaultJobs[itemID] {
+                    cancelIPAVaultStreams(job, requeueUnfinished: true, preserveReceivedBytes: true)
+                }
+            }
+            setIPAVaultBatchStreams(validation.previousStreams)
+            ipavaultBatchConcurrencyUpperBound = validation.targetConcurrency
+            ipavaultBatchLastStableBPS = validation.referenceBPS
+            advanceIPAVaultTuningToStreams(now: now)
+        }
     }
 
     private func advanceIPAVaultTuningToStreams(now: TimeInterval) {
@@ -2231,6 +2327,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchTestedStreams.removeAll(keepingCapacity: true)
         ipavaultBatchProbe = nil
         ipavaultBatchConcurrencyTrial = nil
+        ipavaultBatchConcurrencyValidation = nil
         ipavaultBatchControllerThroughputSamples.removeAll(keepingCapacity: true)
         ipavaultBatchSpeedDropStartedAt = nil
         ipavaultBatchLastStableBPS = max(1, currentBPS)
@@ -2270,6 +2367,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchControllerThroughputSamples.removeAll()
         ipavaultBatchProbe = nil
         ipavaultBatchConcurrencyTrial = nil
+        ipavaultBatchConcurrencyValidation = nil
         ipavaultBatchConfirmedBaseline = nil
     }
 
@@ -2292,6 +2390,11 @@ class IPADownloadManager: NSObject, ObservableObject {
             streamCount: displayedStreamCount,
             speedBPS: aggregateBPS
         )
+
+        if ipavaultBatchConcurrencyValidation != nil {
+            continueIPAVaultConcurrencyValidation(now: now, bps: aggregateBPS)
+            return
+        }
 
         // Probe deadlines must advance even when every worker has stopped.
         if let probe = ipavaultBatchProbe {

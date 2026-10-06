@@ -29,6 +29,17 @@ parts = [
 constants = '\n'.join(line for line in source.splitlines() if line.strip().startswith('private let ipavault') and any(name in line for name in ['Probe', 'HigherConcurrencyTolerance', 'HardMaxStreams', 'ConcurrencyTrialStreamAttempts', 'RetuneCooldown']))
 harness = Path('Tests/IPAVaultTuning/TuningTests.swift').read_text()
 Path(sys.argv[1]).write_text(harness.replace('// ACTUAL_CONTROLLER_CODE', '\n'.join(parts) + '\n' + constants))
+recovery_parts = [
+    section('    private struct IPAVaultRange', '    private struct IPAVaultWorkerRateSample'),
+    section('    private struct IPAVaultWorkerRateSample', '    private struct IPAVaultAggregateSample'),
+    section('    private final class IPAVaultTaskMetadata', '    private final class IPAVaultJob'),
+    section('    private func cancelIPAVaultStreams(', '    private func maybeFinishIPAVaultDownload('),
+]
+recovery = Path('Tests/IPAVaultTuning/RecoveryTests.swift').read_text()
+Path(sys.argv[1]).with_name('Recovery.swift').write_text(recovery.replace('// ACTUAL_RECOVERY_CODE', '\n'.join(recovery_parts)))
 PY
 swiftc "$test_dir/Tuning.swift" -o "$test_dir/tuning-tests"
 "$test_dir/tuning-tests"
+
+swiftc "$test_dir/Recovery.swift" -o "$test_dir/recovery-tests"
+"$test_dir/recovery-tests"

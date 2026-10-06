@@ -59,6 +59,25 @@ final class TuningTests {
         continueIPAVaultBatchProbe(probe, now: time)
     }
     func run() {
+        func validation() -> IPAVaultConcurrencyValidation {
+            IPAVaultConcurrencyValidation(previousConcurrency: 7, previousStreams: 3,
+                referenceBPS: 43_300_000, targetConcurrency: 8, targetStreams: 3, startedAt: 0)
+        }
+        var good = validation()
+        for tick in 0..<12 { assert(good.observe(bps: 44_000_000, eligible: true, now: Double(tick) * 0.25) == .waiting) }
+        assert(good.observe(bps: 44_000_000, eligible: true, now: 3) == .validated)
+        var overshot = validation()
+        for tick in 0..<8 { assert(overshot.observe(bps: 35_000_000, eligible: true, now: Double(tick) * 0.25) == .waiting) }
+        assert(overshot.observe(bps: 35_000_000, eligible: true, now: 2) == .regressed)
+        var briefDip = validation()
+        for tick in 0..<4 { _ = briefDip.observe(bps: 35_000_000, eligible: true, now: Double(tick) * 0.25) }
+        for tick in 4..<12 { assert(briefDip.observe(bps: 44_000_000, eligible: true, now: Double(tick) * 0.25) == .waiting) }
+        assert(briefDip.observe(bps: 44_000_000, eligible: true, now: 3) == .validated)
+        var shrinkingValidation = validation()
+        _ = shrinkingValidation.observe(bps: 35_000_000, eligible: true, now: 0)
+        assert(shrinkingValidation.observe(bps: 20_000_000, eligible: false, now: 8) == .inconclusive)
+
+
         // An old peak must not become the speed reference for a new lock.
         ipavaultBatchObservedCeilingBPS = 50_000_000
         advanceIPAVaultTuningToSteady(now: 48, stableBPS: 32_000_000)

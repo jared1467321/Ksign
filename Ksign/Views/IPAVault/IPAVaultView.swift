@@ -308,6 +308,7 @@ struct IPAVaultView: View {
     @AppStorage("Ksign.IPAVault.serverURL") private var serverURL = "http://100.89.243.68:8765/"
     @AppStorage("Ksign.IPAVault.mode") private var modeRaw = IPAVaultMode.download.rawValue
 
+    @AppStorage("IPAVaultDiagnosticsEnabled") private var diagnosticsEnabled = false
     @State private var remoteFiles: [IPAVaultRemoteFile] = []
     @State private var localFiles: [IPAVaultLocalFile] = []
     @State private var loading = false
@@ -605,6 +606,11 @@ struct IPAVaultView: View {
         if mode == .download && !presentationSession.selectedRemoteIDs.isEmpty {
             VStack(spacing: 0) {
                 Divider().nbThemeOverlay(.separator)
+                Toggle("Tuning logs", isOn: $diagnosticsEnabled)
+                    .font(.subheadline)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .accessibilityHint("Save detailed download diagnostics in the Asign Logs folder")
                 HStack(spacing: 10) {
                     Button {
                         downloadSelected()
