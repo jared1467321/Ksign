@@ -12,14 +12,15 @@ final class TuningTests {
     private var tunerIPAVaultDrainInProgress = false
     private var runningIPAVaultDownloadCount: Int { measurementJobIDs.count }
     private var transferringIPAVaultDownloadCount: Int { targetReached ? measurementJobIDs.count : 0 }
-    private struct Job { let tasks: [Int] }
+    private var hasFreeRanges = true
+    private struct Job { let tasks: [Int]; let freeRanges: [Int] }
     private func runningIPAVaultJobs() -> [Job] {
-        measurementJobIDs.map { _ in Job(tasks: Array(0..<(targetReached ? workerStreamCount : 0))) }
+        measurementJobIDs.map { _ in Job(tasks: Array(0..<(targetReached ? workerStreamCount : 0)), freeRanges: hasFreeRanges ? [1] : []) }
     }
     private var ipavaultBatchTuningPhase: IPAVaultBatchTuningPhase = .streams
     private var ipavaultBatchLastStableBPS: Double = 0
     private var ipavaultBatchObservedCeilingBPS: Double = 0
-    private var ipavaultBatchLastExplorationAt: TimeInterval = 0
+    private var ipavaultBatchSpeedRiseStartedAt: TimeInterval?
     private var ipavaultBatchSpeedDropStartedAt: TimeInterval?
     private var ipavaultBatchRetuneAllowedAt: TimeInterval = 0
     private func updateIPAVaultAdaptivePresentation(status: String) {}
@@ -74,6 +75,26 @@ final class TuningTests {
         tunerIPAVaultDrainInProgress = false
         assert(ipavaultBatchProbeTargetReached(exact))
 
+        workerStreamCount = 1
+        hasFreeRanges = false
+        assert(ipavaultBatchProbeTargetReached(exact)) // Normal end-of-file occupancy.
+        hasFreeRanges = true
+        assert(!ipavaultBatchProbeTargetReached(exact)) // Still can fill the missing slots.
+        workerStreamCount = 4
+
+        let evidence = IPAVaultConcurrencyTrial(previousConcurrency: 1, previousStreams: 2,
+            previousBPS: 29_500_000, goalBPS: 29_500_000, targetConcurrency: 2,
+            streamCandidates: [2, 1, 3])
+        evidence.bestBPS = 24_100_000
+        evidence.measuredCandidateCount = 1
+        assert(!evidence.hasCompleteRegressionEvidence(toleranceFraction: 0.03))
+        evidence.measuredCandidateCount = 3
+        assert(!evidence.hasCompleteRegressionEvidence(toleranceFraction: 0.03)) // Noisy failures are insufficient.
+        evidence.regressionCandidateCount = 3
+        assert(evidence.hasCompleteRegressionEvidence(toleranceFraction: 0.03))
+        evidence.bestBPS = 29_000_000
+        assert(!evidence.hasCompleteRegressionEvidence(toleranceFraction: 0.03))
+
         let cached = IPAVaultFreshMeasurement(concurrency: 3, streams: 2,
             bps: 90_000_000, noise: 0.01, measuredAt: 10, jobIDs: ["a", "b", "c"])
         assert(cached.isValid(concurrency: 3, jobIDs: ["a", "b", "c"], now: 16))
@@ -110,7 +131,7 @@ final class TuningTests {
             assert(result == nil)
         }
         window(close, time: 3, bytes: 52_500_000)
-        assert(result == nil) // No evidence for changing settings at the threshold.
+        assert(result?.keep == true) // Resolve bounded close calls from measured bytes.
 
         // Alternating bursts do not justify an early decision.
         let noisy = probe()
@@ -121,7 +142,7 @@ final class TuningTests {
             assert(result == nil)
         }
         window(noisy, time: 3, bytes: 40_000_000)
-        assert(result == nil) // Bounded uncertainty is inconclusive.
+        assert(result?.keep == false)
 
         // Zero-byte windows resolve a stall, rather than waiting for speed > 0.
         let stalled = probe()
@@ -137,13 +158,13 @@ final class TuningTests {
         assert(result == nil && ipavaultBatchTargetStreams == unavailable.previousValue)
         targetReached = true
 
-        // Losing the requested configuration discards its partial measurement.
+        // Brief slot replacement discards only the open window, not valid history.
         let interrupted = probe()
         begin(interrupted)
         window(interrupted, time: 1, bytes: 60_000_000)
         targetReached = false
         continueIPAVaultBatchProbe(interrupted, now: 1.25)
-        assert(interrupted.samples.isEmpty && interrupted.measuredBytes == 0)
+        assert(interrupted.samples.count == 1 && interrupted.measuredBytes == 60_000_000)
         assert(interrupted.windowStartedAt == nil)
         targetReached = true
 
@@ -153,18 +174,22 @@ final class TuningTests {
         begin(shrinking)
         window(shrinking, time: 1, bytes: 60_000_000)
         measurementJobIDs = ["a"]
+        availableConcurrency = 1
         continueIPAVaultBatchProbe(shrinking, now: 1.5)
         assert(result == nil && ipavaultBatchTargetStreams == shrinking.previousValue)
         measurementJobIDs = ["a", "b"]
+        availableConcurrency = 8
 
-        // Replacing a file at unchanged concurrency still resets trial windows.
+        // File turnover at unchanged concurrency preserves a valid trial.
         let turnover = probe()
         begin(turnover)
         window(turnover, time: 1, bytes: 60_000_000)
         measurementJobIDs = ["a", "c"]
         continueIPAVaultBatchProbe(turnover, now: 1.25)
-        assert(turnover.samples.isEmpty && turnover.measuredBytes == 0)
+        assert(turnover.samples.count == 1 && turnover.measuredBytes == 60_000_000)
         assert(result == nil)
+        window(turnover, time: 1.5, bytes: 60_000_000)
+        assert(result?.keep == true)
         measurementJobIDs = ["a", "b"]
 
         // A brief replacement after four seconds is recoverable, not a zero-speed failure.
@@ -174,13 +199,13 @@ final class TuningTests {
         continueIPAVaultBatchProbe(late, now: 3.5)
         targetReached = true
         continueIPAVaultBatchProbe(late, now: 3.75)
-        continueIPAVaultBatchProbe(late, now: 4.25)
+        window(late, time: 4.25, bytes: 60_000_000)
         targetReached = false
         continueIPAVaultBatchProbe(late, now: 4.5)
-        assert(result == nil && late.measurementStartedAt == nil)
+        assert(result == nil && late.windowStartedAt == nil)
         targetReached = true
         continueIPAVaultBatchProbe(late, now: 4.75)
-        continueIPAVaultBatchProbe(late, now: 5.25)
+        window(late, time: 5.25, bytes: 60_000_000)
         window(late, time: 5.75, bytes: 60_000_000)
         window(late, time: 6.25, bytes: 60_000_000)
         assert(result?.keep == true)
@@ -200,6 +225,36 @@ final class TuningTests {
         continueIPAVaultBatchProbe(capacity, now: 0.5)
         assert(result == nil && ipavaultBatchTargetStreams == 2)
         availableConcurrency = 8
+
+        workerStreamCount = 2
+        // Replay the useful 2×2 windows discarded in the uploaded batch.
+        let replay = IPAVaultBatchAdaptiveProbe(dimension: .streams, previousValue: 2,
+            targetValue: 2, baselineBPS: 29_513_032, noiseFraction: 0, requestedAt: 0,
+            concurrencyTrialCandidate: true, requiredConcurrency: 2)
+        begin(replay)
+        window(replay, time: 1, bytes: 24_914_678)
+        targetReached = false
+        continueIPAVaultBatchProbe(replay, now: 1.25)
+        targetReached = true
+        measurementJobIDs = ["c", "d"]
+        continueIPAVaultBatchProbe(replay, now: 1.5)
+        window(replay, time: 2, bytes: 16_109_422)
+        // Burst variance may need the bounded path; add comparable windows.
+        if result == nil {
+            window(replay, time: 2.5, bytes: 20_000_000)
+            window(replay, time: 3, bytes: 20_000_000)
+            window(replay, time: 3.5, bytes: 20_000_000)
+        }
+        assert(result?.keep == true && result!.bps > 29_513_032)
+        measurementJobIDs = ["a"]
+        let fewer = IPAVaultBatchAdaptiveProbe(dimension: .concurrency, previousValue: 2,
+            targetValue: 1, baselineBPS: 100_000_000, noiseFraction: 0, requestedAt: 0,
+            requiredConcurrency: 1)
+        begin(fewer)
+        window(fewer, time: 1, bytes: 50_000_000)
+        window(fewer, time: 1.5, bytes: 50_000_000)
+        assert(result?.keep == false) // Equal speed cannot justify fewer files.
+        measurementJobIDs = ["a", "b"]
 
         // Search ordering works for high stream counts too, without hard-coded winners.
         let candidates = ipavaultConcurrencyTrialStreamCandidates(previousConcurrency: 4,

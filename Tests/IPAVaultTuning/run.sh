@@ -17,6 +17,7 @@ parts = [
     section('    private struct IPAVaultFreshMeasurement', '    private struct IPAVaultObservedConfiguration'),
     section('    private enum IPAVaultBatchTuningPhase', '    private final class IPAVaultBatchAdaptiveProbe'),
     section('    private enum IPAVaultBatchProbeDimension', '    private enum IPAVaultBatchTuningPhase'),
+    section('    private final class IPAVaultConcurrencyTrial', '    private struct IPAVaultFreshMeasurement'),
     section('    private final class IPAVaultBatchAdaptiveProbe', '    private final class IPAVaultConcurrencyTrial'),
     section('    private func ipavaultConcurrencyTrialStreamCandidates(', '    private func nextIPAVaultConcurrencySearchTarget()'),
     section('    private func nextIPAVaultStreamSearchTarget()', '    private func finishIPAVaultConcurrencySearch'),
