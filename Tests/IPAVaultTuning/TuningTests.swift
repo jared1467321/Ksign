@@ -3,6 +3,7 @@ import Foundation
 // The runner embeds the production probe evaluator, types, constants and search
 // selection. Only transport and completion callbacks are replaced by stubs.
 final class TuningTests {
+    private func logIPAVault(_ message: String) {}
     // ACTUAL_CONTROLLER_CODE
     private var ipavaultTotalUsefulBytes: Int64 = 0
     private var availableConcurrency = 8

@@ -21,6 +21,85 @@ class IPADownloadManager: NSObject, ObservableObject {
         downloadItems.filter { $0.isFinished }
     }
 
+    // Temporary diagnostics: disable this switch once adaptive tuning is settled.
+    private let ipavaultDiagnosticsEnabled = true
+    private let ipavaultDiagnosticWriter = IPAVaultDiagnosticWriter()
+    private var ipavaultDiagnosticBatchStartedAt: TimeInterval = 0
+    private var ipavaultDiagnosticLastSnapshotAt: TimeInterval = 0
+
+    private final class IPAVaultDiagnosticWriter {
+        private let queue = DispatchQueue(label: "IPAVault.diagnostics", qos: .utility)
+        private var handle: FileHandle?
+        private var size = 0
+        private var failed = false
+        private let timestamp = ISO8601DateFormatter()
+
+        // Keep the current log and three previous segments, at most 32 MiB total.
+        func append(_ message: String, date: Date) {
+            queue.async {
+                guard !self.failed else { return }
+                do {
+                    let directory = URL.documentsDirectory.appendingPathComponent("Logs", isDirectory: true)
+                    let url = directory.appendingPathComponent("IPAVault-Tuning.txt")
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    if self.handle == nil {
+                        if !FileManager.default.fileExists(atPath: url.path) {
+                            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                                throw NSError(domain: "IPAVaultDiagnostics", code: 1)
+                            }
+                        }
+                        self.handle = try FileHandle(forWritingTo: url)
+                        self.size = Int(try self.handle!.seekToEnd())
+                    }
+                    let line = "[\(self.timestamp.string(from: date))] \(message.replacingOccurrences(of: "\n", with: " "))\n"
+                    let data = Data(line.utf8)
+                    if self.size + data.count > 8 * 1024 * 1024 {
+                        try self.handle?.close()
+                        self.handle = nil
+                        for index in stride(from: 3, through: 1, by: -1) {
+                            let target = directory.appendingPathComponent("IPAVault-Tuning-\(index).txt")
+                            let source = index == 1 ? url : directory.appendingPathComponent("IPAVault-Tuning-\(index - 1).txt")
+                            if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: target) }
+                            if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.moveItem(at: source, to: target) }
+                        }
+                        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                            throw NSError(domain: "IPAVaultDiagnostics", code: 2)
+                        }
+                        self.handle = try FileHandle(forWritingTo: url)
+                        self.size = 0
+                    }
+                    try self.handle?.write(contentsOf: data)
+                    self.size += data.count
+                } catch {
+                    self.failed = true
+                    try? self.handle?.close()
+                    self.handle = nil
+                    print("IPA Vault diagnostics unavailable: \((error as NSError).domain) code=\((error as NSError).code)")
+                }
+            }
+        }
+    }
+
+    private func logIPAVault(_ message: String) {
+        print(message)
+        guard ipavaultDiagnosticsEnabled else { return }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - ipavaultDiagnosticBatchStartedAt)
+        ipavaultDiagnosticWriter.append("elapsed=\(String(format: "%.3f", elapsed))s \(message)", date: Date())
+    }
+
+    private func logIPAVaultSnapshot(now: TimeInterval, bps: Double) {
+        guard ipavaultDiagnosticsEnabled, now - ipavaultDiagnosticLastSnapshotAt >= 1 else { return }
+        ipavaultDiagnosticLastSnapshotAt = now
+        logIPAVault("SNAPSHOT phase=\(ipavaultBatchTuningPhase) target=\(ipavaultBatchTargetConcurrency)x\(ipavaultBatchTargetStreams) runningFiles=\(runningIPAVaultDownloadCount) transferringFiles=\(transferringIPAVaultDownloadCount) streams=\(totalRunningIPAVaultStreamCount()) queued=\(pendingIPAVaultDownloads.count) paused=\(pausedIPAVaultDownloadIDs.count) fileDrain=\(tunerIPAVaultDrainInProgress) streamDrain=\(tunerIPAVaultStreamDrainInProgress) usefulBytes=\(ipavaultTotalUsefulBytes) Bps=\(bps) stableBps=\(ipavaultBatchLastStableBPS) ceilingBps=\(ipavaultBatchObservedCeilingBPS)")
+        for job in ipavaultJobs.values.sorted(by: { $0.itemID < $1.itemID }) {
+            logIPAVault("FILE id=\(job.itemID) totalBytes=\(job.totalBytes) committedBytes=\(job.committedBytes) desiredStreams=\(job.desiredStreams) activeStreams=\(job.tasks.count) freeRanges=\(job.freeRanges.count) assembling=\(job.assembling)")
+            for taskID in job.tasks.keys.sorted() {
+                guard let worker = ipavaultTaskMetadata[taskID] else { continue }
+                logIPAVault("STREAM file=\(job.itemID) task=\(taskID) range=\(worker.leaseStart)..<\(worker.effectiveEnd) position=\(worker.currentPosition) committedEnd=\(worker.committedEnd) attempt=\(worker.attempt) validated=\(worker.responseValidated) preempted=\(worker.preempted) age=\(now - worker.startedAt) idleSeconds=\(now - worker.lastProgressAt) Bps=\(effectiveIPAVaultWorkerBPS(worker, now: now))")
+            }
+        }
+    }
+
     private struct PendingIPAVaultDownload {
         let itemID: String
         let url: URL
@@ -412,6 +491,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private func setIPAVaultPresentationActive(_ active: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
+        if ipavaultBatchIsActive { logIPAVault("LIFECYCLE appActive=\(active)") }
         ipavaultPresentationIsAppActive = active
 
         if active {
@@ -676,6 +756,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                         totalBytes: file.size
                     )
                 )
+                if self.ipavaultBatchIsActive { self.logIPAVault("QUEUED id=\(item.id.uuidString) totalBytes=\(file.size)") }
                 self.ipavaultActivityItemIDs.insert(item.id.uuidString)
             }
 
@@ -874,6 +955,7 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func setIPAVaultPausedState(itemID: String, isPaused: Bool) {
         guard let index = downloadItems.firstIndex(where: { $0.id.uuidString == itemID }) else { return }
         var item = downloadItems[index]
+        logIPAVault("PAUSE file=\(itemID) paused=\(isPaused)")
         item.isPaused = isPaused
         downloadItems[index] = item
     }
@@ -926,6 +1008,9 @@ class IPADownloadManager: NSObject, ObservableObject {
     private func cancelIPAVaultDownloadIfPresent(itemID: String) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
 
+        if pendingIPAVaultDownloads.contains(where: { $0.itemID == itemID }) || ipavaultJobs[itemID] != nil {
+            logIPAVault("CANCEL file=\(itemID)")
+        }
         if let index = pendingIPAVaultDownloads.firstIndex(where: { $0.itemID == itemID }) {
             pendingIPAVaultDownloads.remove(at: index)
             downloadItems.removeAll { $0.id.uuidString == itemID }
@@ -1161,6 +1246,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         job.tasks[task.taskIdentifier] = task
         ipavaultTaskMetadata[task.taskIdentifier] = metadata
         task.countOfBytesClientExpectsToReceive = lease.length
+        logIPAVault("LEASE file=\(job.itemID) task=\(task.taskIdentifier) start=\(lease.start) end=\(lease.end) attempt=\(lease.attempt)")
         task.resume()
         return true
     }
@@ -1240,7 +1326,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         victim.job.freeRanges.append(
             IPAVaultRange(start: cut, end: oldEnd, attempt: victim.metadata.attempt)
         )
-        print(
+        logIPAVault(
             "IPA Vault adaptive: split \(oldEnd - cut) bytes from a straggler " +
             "(projected save \(String(format: "%.2f", projectedSaving))s)."
         )
@@ -1288,6 +1374,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         guard let metadata = ipavaultTaskMetadata[taskIdentifier],
               let job = ipavaultJobs[metadata.itemID] else { return }
 
+        logIPAVault("STREAM END file=\(job.itemID) task=\(taskIdentifier) bytes=\(metadata.currentPosition - metadata.leaseStart) seconds=\(ProcessInfo.processInfo.systemUptime - metadata.startedAt) preempted=\(metadata.preempted) errorDomain=\((error as NSError?)?.domain ?? "none") errorCode=\((error as NSError?)?.code ?? 0)")
         job.tasks.removeValue(forKey: taskIdentifier)
         ipavaultTaskMetadata.removeValue(forKey: taskIdentifier)
 
@@ -1337,6 +1424,8 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
 
         let nextAttempt = metadata.attempt + 1
+        let diagnosticError = reason as NSError?
+        logIPAVault("RETRY file=\(job.itemID) start=\(retryStart) end=\(metadata.effectiveEnd) attempt=\(nextAttempt) errorDomain=\(diagnosticError?.domain ?? "short-range") errorCode=\(diagnosticError?.code ?? 0)")
         if nextAttempt > ipavaultMaximumRangeRetries {
             let detail = reason?.localizedDescription ?? "range ended before all committed bytes arrived"
             failIPAVaultDownload(
@@ -1464,6 +1553,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 item.bytesDownloaded = job.totalBytes
                 downloadItems[index] = item
 
+                logIPAVault("COMPLETED file=\(itemID) totalBytes=\(job.totalBytes)")
                 completedIPAVaultActivityItemIDs.insert(itemID)
                 if ipavaultCurrentActivityItemID == itemID {
                     ipavaultCurrentActivityItemID = nil
@@ -1485,7 +1575,7 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private func failIPAVaultDownload(itemID: String, error: Error) {
         dispatchPrecondition(condition: .onQueue(.main))
-        print("IPA Vault download failed: \(error.localizedDescription)")
+        logIPAVault("FAILED file=\(itemID) errorDomain=\((error as NSError).domain) errorCode=\((error as NSError).code)")
 
         if let job = ipavaultJobs.removeValue(forKey: itemID) {
             cancelIPAVaultStreams(job, requeueUnfinished: false)
@@ -1563,6 +1653,36 @@ class IPADownloadManager: NSObject, ObservableObject {
 
     private func beginIPAVaultBatch() {
         let now = ProcessInfo.processInfo.systemUptime
+        ipavaultDiagnosticBatchStartedAt = now
+        ipavaultDiagnosticLastSnapshotAt = 0
+        logIPAVault("BATCH BEGIN id=\(UUID().uuidString) app=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "unknown") build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") ?? "unknown") os=\(ProcessInfo.processInfo.operatingSystemVersionString) units=bytes/second")
+        logIPAVault("CONFIG ipavaultHardMaxConcurrentDownloads=\(ipavaultHardMaxConcurrentDownloads)")
+        logIPAVault("CONFIG ipavaultHardMaxStreamsPerFile=\(ipavaultHardMaxStreamsPerFile)")
+        logIPAVault("CONFIG ipavaultBatchInitialStreamsPerFile=\(ipavaultBatchInitialStreamsPerFile)")
+        logIPAVault("CONFIG ipavaultBlockSize=\(ipavaultBlockSize)")
+        logIPAVault("CONFIG ipavaultMinimumLeaseBytes=\(ipavaultMinimumLeaseBytes)")
+        logIPAVault("CONFIG ipavaultDefaultLeaseBytes=\(ipavaultDefaultLeaseBytes)")
+        logIPAVault("CONFIG ipavaultMaximumLeaseBytes=\(ipavaultMaximumLeaseBytes)")
+        logIPAVault("CONFIG ipavaultLeaseTargetSeconds=\(ipavaultLeaseTargetSeconds)")
+        logIPAVault("CONFIG ipavaultTailMinimumBytes=\(ipavaultTailMinimumBytes)")
+        logIPAVault("CONFIG ipavaultTailMinimumSavingsSeconds=\(ipavaultTailMinimumSavingsSeconds)")
+        logIPAVault("CONFIG ipavaultSpeedWindowSeconds=\(ipavaultSpeedWindowSeconds)")
+        logIPAVault("CONFIG ipavaultControllerTickSeconds=\(ipavaultControllerTickSeconds)")
+        logIPAVault("CONFIG ipavaultProbeSettleSeconds=\(ipavaultProbeSettleSeconds)")
+        logIPAVault("CONFIG ipavaultProbeWindowSeconds=\(ipavaultProbeWindowSeconds)")
+        logIPAVault("CONFIG ipavaultProbeMaximumMeasureSeconds=\(ipavaultProbeMaximumMeasureSeconds)")
+        logIPAVault("CONFIG ipavaultProbeTargetTimeoutSeconds=\(ipavaultProbeTargetTimeoutSeconds)")
+        logIPAVault("CONFIG ipavaultHigherConcurrencyToleranceFraction=\(ipavaultHigherConcurrencyToleranceFraction)")
+        logIPAVault("CONFIG ipavaultConcurrencyTrialStreamAttempts=\(ipavaultConcurrencyTrialStreamAttempts)")
+        logIPAVault("CONFIG ipavaultObservedCeilingSimilarityBPS=\(ipavaultObservedCeilingSimilarityBPS)")
+        logIPAVault("CONFIG ipavaultRetuneDropFraction=\(ipavaultRetuneDropFraction)")
+        logIPAVault("CONFIG ipavaultRetuneDropHoldSeconds=\(ipavaultRetuneDropHoldSeconds)")
+        logIPAVault("CONFIG ipavaultRetuneCooldownSeconds=\(ipavaultRetuneCooldownSeconds)")
+        logIPAVault("CONFIG ipavaultWorkerStallSeconds=\(ipavaultWorkerStallSeconds)")
+        logIPAVault("CONFIG ipavaultStallDetectionFloorSeconds=\(ipavaultStallDetectionFloorSeconds)")
+        logIPAVault("CONFIG ipavaultMaximumRangeRetries=\(ipavaultMaximumRangeRetries)")
+        logIPAVault("CONFIG ipavaultPresentationInterval=\(ipavaultPresentationInterval)")
+        for file in pendingIPAVaultDownloads { logIPAVault("QUEUED id=\(file.itemID) totalBytes=\(file.totalBytes)") }
         BackgroundTaskManager.shared.clearReport(.ipaVaultDownloads)
         ipavaultBackgroundTaskSnapshot = nil
         ipavaultBatchIsActive = true
@@ -1594,15 +1714,17 @@ class IPADownloadManager: NSObject, ObservableObject {
             streamCount: 0,
             speedBPS: 0
         )
-        print("IPA Vault adaptive: new batch starts at 1 file × 2 streams.")
+        logIPAVault("IPA Vault adaptive: new batch starts at 1 file × 2 streams.")
     }
 
     private func endIPAVaultBatch() {
         guard ipavaultBatchIsActive else { return }
-        print(
+        logIPAVault(
             "IPA Vault adaptive: batch ended at \(ipavaultBatchTargetConcurrency) file(s) × " +
             "\(ipavaultBatchTargetStreams) streams; discard all learned state."
         )
+        let duration = max(0.001, ProcessInfo.processInfo.systemUptime - ipavaultDiagnosticBatchStartedAt)
+        logIPAVault("BATCH END duration=\(duration)s usefulBytes=\(ipavaultTotalUsefulBytes) averageBps=\(Double(ipavaultTotalUsefulBytes) / duration) ceilingBps=\(ipavaultBatchObservedCeilingBPS)")
         ipavaultBatchIsActive = false
         ipavaultBatchTargetConcurrency = 1
         ipavaultBatchTargetStreams = ipavaultBatchInitialStreamsPerFile
@@ -1742,7 +1864,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         if bps > oldCeiling {
             ipavaultBatchObservedCeilingBPS = bps
             if oldCeiling > 0 {
-                print(
+                logIPAVault(
                     "IPA Vault adaptive: observed ceiling raised from " +
                     "\(String(format: "%.1f", oldCeiling / 1_000_000)) to " +
                     "\(String(format: "%.1f", bps / 1_000_000)) MB/s."
@@ -1762,7 +1884,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 : nil
         })
         if distinctConfigurations.count >= 2 && !previousNearCeilingKeys.contains(currentKey) {
-            print(
+            logIPAVault(
                 "IPA Vault adaptive: different configurations are clustering near " +
                 "\(String(format: "%.1f", ceiling / 1_000_000)) MB/s; treating that as the live batch goal."
             )
@@ -1878,7 +2000,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchLastDecisionAt = now
 
         setIPAVaultBatchConcurrency(targetConcurrency)
-        print(
+        logIPAVault(
             "IPA Vault adaptive: trying \(targetConcurrency) concurrent file(s); " +
             "giving streams up to \(candidates.count) quick configuration(s) to recover the " +
             "\(String(format: "%.1f", max(goalBPS, ipavaultBatchObservedCeilingBPS) / 1_000_000)) MB/s batch goal."
@@ -1910,7 +2032,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             requiredConcurrency: trial.targetConcurrency
         )
         ipavaultBatchLastDecisionAt = now
-        print(
+        logIPAVault(
             "IPA Vault adaptive: concurrency \(trial.targetConcurrency) stream try " +
             "\(trial.nextCandidateIndex)/\(trial.streamCandidates.count): \(candidateStreams) stream(s)/file."
         )
@@ -1946,7 +2068,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 streams: ipavaultBatchTargetStreams,
                 bps: measuredBPS
             )
-            print(
+            logIPAVault(
                 "IPA Vault adaptive: \(trial.targetConcurrency)×\(ipavaultBatchTargetStreams) measured " +
                 "\(String(format: "%.1f", measuredBPS / 1_000_000)) MB/s; " +
                 "goal \(String(format: "%.1f", trial.goalBPS / 1_000_000)) MB/s."
@@ -2002,7 +2124,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                 ipavaultBatchConfirmedBaseline = winner
             }
             ipavaultBatchLastStableBPS = max(trial.goalBPS, ipavaultBatchObservedCeilingBPS)
-            print(
+            logIPAVault(
                 "IPA Vault adaptive: keep higher concurrency \(trial.targetConcurrency) at " +
                 "\(trial.bestStreams) stream(s)/file; best \(String(format: "%.1f", trial.bestBPS / 1_000_000)) MB/s " +
                 "is within 3% of the \(String(format: "%.1f", trial.goalBPS / 1_000_000)) MB/s goal."
@@ -2014,7 +2136,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         setIPAVaultBatchStreams(trial.previousStreams)
         ipavaultBatchConcurrencyUpperBound = trial.targetConcurrency
         ipavaultBatchLastStableBPS = max(trial.goalBPS, trial.previousBPS)
-        print(
+        logIPAVault(
             "IPA Vault adaptive: higher concurrency \(trial.targetConcurrency) could not recover the batch goal " +
             "after \(trial.measuredCandidateCount) stream configuration(s); reverting to " +
             "\(trial.previousConcurrency)×\(trial.previousStreams)."
@@ -2041,7 +2163,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         updateIPAVaultAdaptivePresentation(
             status: ipavaultBatchRetuneAllowedAt > 0 ? "Retuning streams" : "Tuning streams"
         )
-        print(
+        logIPAVault(
             "IPA Vault adaptive: concurrency settled at \(ipavaultBatchTargetConcurrency); " +
             "tuning streams from \(ipavaultBatchTargetStreams)."
         )
@@ -2055,7 +2177,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         ipavaultBatchSpeedDropStartedAt = nil
         ipavaultBatchRetuneAllowedAt = now + ipavaultRetuneCooldownSeconds
         updateIPAVaultAdaptivePresentation(status: "Optimized")
-        print(
+        logIPAVault(
             "IPA Vault adaptive: optimized and locked at \(ipavaultBatchTargetConcurrency) file(s) × " +
             "\(ipavaultBatchTargetStreams) streams; watching for a sustained throughput drop."
         )
@@ -2091,7 +2213,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         setIPAVaultBatchConcurrency(concurrencySeed)
         setIPAVaultBatchStreams(streamSeed)
 
-        print(
+        logIPAVault(
             "IPA Vault adaptive: sustained throughput drop detected; retuning from " +
             "\(previousConcurrency)×\(previousStreams) using seed \(concurrencySeed)×\(streamSeed)."
         )
@@ -2134,6 +2256,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         let displayedConcurrency = min(ipavaultBatchTargetConcurrency, availableIPAVaultBatchConcurrency())
         let displayedStreamCount = totalRunningIPAVaultStreamCount()
         let aggregateBPS = currentIPAVaultAggregateBPS(now: now)
+        logIPAVaultSnapshot(now: now, bps: aggregateBPS)
 
         updateIPAVaultAdaptivePresentation(
             concurrentCount: displayedConcurrency,
@@ -2286,7 +2409,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                     }
                 } else {
                     ipavaultBatchSpeedDropStartedAt = now
-                    print(
+                    logIPAVault(
                         "IPA Vault adaptive: throughput below lock threshold; " +
                         "waiting for sustained drop before retuning."
                     )
@@ -2322,7 +2445,7 @@ class IPADownloadManager: NSObject, ObservableObject {
             requestedAt: now
         )
         let dimensionLabel = dimension == .concurrency ? "files" : "streams"
-        print(
+        logIPAVault(
             "IPA Vault adaptive: probe \(dimensionLabel) \(previous)→\(targetValue) from " +
             "\(String(format: "%.1f", baselineBPS / 1_000_000)) MB/s aggregate."
         )
@@ -2381,6 +2504,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         }
 
         guard ipavaultBatchProbeTargetReached(probe) else {
+            logIPAVault("PROBE WAIT target not reached; reset measurement; dimension=\(probe.dimension) target=\(probe.targetValue) age=\(now - probe.requestedAt) timeout=\(ipavaultProbeTargetTimeoutSeconds)")
             // A worker disappearing invalidates this measurement. A new stable
             // configuration needs a fresh settle interval and byte counter.
             probe.measurementStartedAt = nil
@@ -2418,6 +2542,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         probe.measuredSeconds += elapsed
         probe.windowStartedAt = now
         probe.windowStartedBytes = ipavaultTotalUsefulBytes
+        logIPAVault("PROBE WINDOW dimension=\(probe.dimension) previous=\(probe.previousValue) target=\(probe.targetValue) trial=\(probe.concurrencyTrialCandidate) bytes=\(bytes) seconds=\(elapsed) Bps=\(Double(bytes) / elapsed) baselineBps=\(probe.baselineBPS) baselineNoise=\(probe.noiseFraction)")
         guard probe.samples.count >= 2 else { return }
 
         // Non-overlapping byte windows prevent the previous configuration's
@@ -2437,10 +2562,11 @@ class IPADownloadManager: NSObject, ObservableObject {
         let uncertainty = max(0.02, relativeNoise(probe.samples, around: measured)) * probe.baselineBPS
         let clearlyAbove = measured > threshold + uncertainty && probe.samples.suffix(2).allSatisfy { $0 > threshold + uncertainty }
         let clearlyBelow = measured < threshold - uncertainty && probe.samples.suffix(2).allSatisfy { $0 < threshold - uncertainty }
+        logIPAVault("PROBE EVALUATION measuredBps=\(measured) thresholdBps=\(threshold) uncertaintyBps=\(uncertainty) clearlyAbove=\(clearlyAbove) clearlyBelow=\(clearlyBelow) seconds=\(probe.measuredSeconds) samples=\(probe.samples)")
         guard clearlyAbove || clearlyBelow ||
               probe.measuredSeconds >= ipavaultProbeMaximumMeasureSeconds else { return }
 
-        print(
+        logIPAVault(
             "IPA Vault adaptive: fresh measurement over " +
             "\(String(format: "%.2f", probe.measuredSeconds))s (\(probe.samples.count) windows); " +
             (clearlyAbove || clearlyBelow ? "clear result." : "bounded close-call result.")
@@ -2491,7 +2617,7 @@ class IPADownloadManager: NSObject, ObservableObject {
         )
         let resultLabel = keepTarget ? "keep" : "revert"
         let dimensionLabel = probe.dimension == .concurrency ? "files" : "streams"
-        print(
+        logIPAVault(
             "IPA Vault adaptive: \(resultLabel) \(probe.targetValue) \(dimensionLabel); baseline " +
             "\(String(format: "%.1f", probe.baselineBPS / 1_000_000)) MB/s, measured " +
             "\(String(format: "%.1f", measuredBPS / 1_000_000)) MB/s aggregate."
@@ -2578,7 +2704,7 @@ class IPADownloadManager: NSObject, ObservableObject {
                     )
                 )
             }
-            print(
+            logIPAVault(
                 "IPA Vault adaptive: recycling stalled stream at byte \(stalled.metadata.committedEnd)."
             )
             stalled.metadata.suppressCompletion = true
@@ -2725,6 +2851,7 @@ extension IPADownloadManager: URLSessionDownloadDelegate, URLSessionDataDelegate
             return
         }
 
+        logIPAVault("HTTP file=\(job.itemID) task=\(dataTask.taskIdentifier) status=\(http.statusCode) expectedBytes=\(response.expectedContentLength)")
         guard http.statusCode == 206 else {
             let message = http.statusCode == 200
                 ? "The server ignored the HTTP Range request required for adaptive downloading."
