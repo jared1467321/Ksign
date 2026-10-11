@@ -116,7 +116,7 @@ enum CryptCheckAnalyzer {
         let previewBaseOffset: UInt64
     }
 
-    static func generateReport(for ipaURL: URL) throws -> URL {
+    static func generateReport(for ipaURL: URL) throws -> CryptCheckReport {
         guard let archive = try? Archive(url: ipaURL, accessMode: .read) else {
             throw CryptCheckError.invalidArchive
         }
@@ -178,7 +178,12 @@ enum CryptCheckAnalyzer {
         let reportURL = reportDirectory
             .appendingPathComponent("cryptcheck_\(base)_\(stamp).html")
         try html.write(to: reportURL, atomically: true, encoding: .utf8)
-        return reportURL
+        let statuses = entries.flatMap { $0.slices.compactMap(\.status) }
+        return CryptCheckReport(
+            url: reportURL,
+            encryptedCount: statuses.filter { $0 == "ENCRYPTED" }.count,
+            possiblyEncryptedCount: statuses.filter { $0.contains("LIKELY") }.count
+        )
     }
 
     private static func readEntryPrefix(
@@ -1388,79 +1393,15 @@ enum CryptCheckAnalyzer {
 
 struct CryptCheckReportCollection: Identifiable {
     let id = UUID()
-    let reportURLs: [URL]
+    let reports: [CryptCheckReport]
 }
 
 struct CryptCheckReportView: View {
-    let reportURLs: [URL]
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var exportError: String?
-    @State private var showExporter = false
-    @State private var selectedIndex = 0
-
-    private var currentReportURL: URL? {
-        guard reportURLs.indices.contains(selectedIndex) else { return reportURLs.first }
-        return reportURLs[selectedIndex]
-    }
-
-    private var navigationTitle: String {
-        guard reportURLs.count > 1 else { return "Crypt Check" }
-        return "Crypt Check \(selectedIndex + 1) of \(reportURLs.count)"
-    }
+    let reports: [CryptCheckReport]
 
     var body: some View {
-        NavigationView {
-            TabView(selection: $selectedIndex) {
-                ForEach(Array(reportURLs.enumerated()), id: \.offset) { index, reportURL in
-                    CryptCheckHTMLView(url: reportURL)
-                        .ignoresSafeArea(edges: .bottom)
-                        .tag(index)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: reportURLs.count > 1 ? .automatic : .never))
-            .navigationTitle(navigationTitle)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Close") { dismiss() }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save") {
-                        guard let currentReportURL else { return }
-                        do {
-                            try ThemeReportBridge.shared.persistCurrentTheme(to: [currentReportURL])
-                            showExporter = true
-                        } catch {
-                            exportError = error.localizedDescription
-                        }
-                    }
-                    .disabled(currentReportURL == nil)
-                }
-            }
-        }
-        .alert("Could Not Save Report", isPresented: Binding(
-            get: { exportError != nil },
-            set: { if !$0 { exportError = nil } }
-        )) {
-            Button("OK", role: .cancel) { exportError = nil }
-        } message: {
-            Text(exportError ?? "")
-        }
-        .sheet(isPresented: $showExporter) {
-            if let currentReportURL {
-                FileExporterRepresentableView(
-                    urlsToExport: [currentReportURL],
-                    asCopy: true,
-                    useLastLocation: false,
-                    onCompletion: { _ in showExporter = false }
-                )
-            }
-        }
-        .onDisappear {
-            // Reports are deliberately temporary. Saving exports a copy;
-            // closing without saving leaves nothing behind in the app container.
-            Set(reportURLs).forEach { try? FileManager.default.removeItem(at: $0) }
+        CryptCheckBatchReportView(title: "Crypt Check", reports: reports) { report in
+            CryptCheckHTMLView(url: report.url)
         }
     }
 }

@@ -279,7 +279,7 @@ struct DownloaderView: View {
                 webViewSheet(url: url)
             }
             .fullScreenCover(item: $cryptCheckReports) { reports in
-                CryptCheckReportView(reportURLs: reports.reportURLs)
+                CryptCheckReportView(reports: reports.reports)
             }
             .sheet(isPresented: $showDocumentPicker) {
                 documentPickerSheet
@@ -438,20 +438,20 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
         cryptCheckRunning = true
 
         DispatchQueue.global(qos: .userInitiated).async {
-            var reportURLs: [URL] = []
+            var reports: [CryptCheckReport] = []
 
             do {
                 for item in finishedItems {
-                    let reportURL = try CryptCheckAnalyzer.generateReport(for: item.localPath)
-                    reportURLs.append(reportURL)
+                    let report = try CryptCheckAnalyzer.generateReport(for: item.localPath)
+                    reports.append(report)
                 }
 
                 DispatchQueue.main.async {
                     cryptCheckRunning = false
-                    cryptCheckReports = CryptCheckReportCollection(reportURLs: reportURLs)
+                    cryptCheckReports = CryptCheckReportCollection(reports: reports)
                 }
             } catch {
-                reportURLs.forEach { try? FileManager.default.removeItem(at: $0) }
+                reports.forEach { try? FileManager.default.removeItem(at: $0.url) }
                 DispatchQueue.main.async {
                     cryptCheckRunning = false
                     UIAlertController.showAlertWithOk(

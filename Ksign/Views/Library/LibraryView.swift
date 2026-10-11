@@ -364,7 +364,7 @@ struct LibraryView: View {
 					.compatNavigationTransition(id: app.base.uuid ?? "", ns: _namespace)
 			}
             .fullScreenCover(item: $_cryptCheckExtractedReports) { reports in
-                CryptCheckExtractedReportView(reportURLs: reports.reportURLs)
+                CryptCheckExtractedReportView(reports: reports.reports)
             }
 			.fullScreenCover(item: $_bulkSignRequest) { request in
 				BulkSigningView(apps: request.apps, signAndInstall: request.signAndInstall)
@@ -592,7 +592,7 @@ extension LibraryView {
 
         _cryptCheckExtractedRunning = true
         DispatchQueue.global(qos: .userInitiated).async {
-            var reportURLs: [URL] = []
+            var reports: [CryptCheckReport] = []
             var temporaryRoots: [URL] = []
             defer { temporaryRoots.forEach { try? FileManager.default.removeItem(at: $0) } }
 
@@ -616,16 +616,16 @@ extension LibraryView {
                         appURL = extractedApp
                     }
 
-                    let reportURL = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
-                    reportURLs.append(reportURL)
+                    let report = try CryptCheckExtractedAnalyzer.generateReport(for: appURL)
+                    reports.append(report)
                 }
 
                 DispatchQueue.main.async {
                     _cryptCheckExtractedRunning = false
-                    _cryptCheckExtractedReports = CryptCheckExtractedReportCollection(reportURLs: reportURLs)
+                    _cryptCheckExtractedReports = CryptCheckExtractedReportCollection(reports: reports)
                 }
             } catch {
-                reportURLs.forEach { try? FileManager.default.removeItem(at: $0) }
+                reports.forEach { try? FileManager.default.removeItem(at: $0.url) }
                 DispatchQueue.main.async {
                     _cryptCheckExtractedRunning = false
                     UIAlertController.showAlertWithOk(
