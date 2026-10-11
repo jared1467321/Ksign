@@ -84,14 +84,28 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var navigation = CryptCheckBatchNavigation()
-    @State private var intervalSeconds = 3
+    @AppStorage("Ksign.cryptCheck.autoScrollIntervalSeconds") private var intervalSeconds = 3.0
+    @State private var intervalText = ""
+    @FocusState private var intervalFocused: Bool
     @State private var exportError: String?
     @State private var showExporter = false
 
     private struct AdvanceSchedule: Equatable {
         let isRunning: Bool
         let index: Int
-        let seconds: Int
+        let seconds: Double
+    }
+
+    private var enteredInterval: Double? {
+        let normalized = intervalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+        guard let seconds = Double(normalized), Self.isValidInterval(seconds) else { return nil }
+        return seconds
+    }
+
+    private static func isValidInterval(_ seconds: Double) -> Bool {
+        let nanoseconds = seconds * 1_000_000_000
+        return seconds.isFinite && nanoseconds >= 1 && nanoseconds < Double(UInt64.max)
     }
 
     private var currentReportURL: URL? {
@@ -146,16 +160,33 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
                     }
                     .disabled(currentReportURL == nil)
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { intervalFocused = false }
+                }
             }
+        }
+        .onAppear {
+            if !Self.isValidInterval(intervalSeconds) { intervalSeconds = 3 }
+            intervalText = intervalSeconds.formatted(
+                .number.grouping(.never).precision(.fractionLength(0...9))
+            )
+        }
+        .onChange(of: intervalText) { _ in
+            // Save each valid edit immediately, including before app closure.
+            if let enteredInterval { intervalSeconds = enteredInterval }
+        }
+        .onChange(of: intervalFocused) { focused in
+            if focused { navigation.pause() }
         }
         .task(id: AdvanceSchedule(
             isRunning: navigation.isRunning,
             index: navigation.selectedIndex,
             seconds: intervalSeconds
         )) {
-            guard navigation.isRunning else { return }
+            guard navigation.isRunning, Self.isValidInterval(intervalSeconds) else { return }
             do {
-                try await Task.sleep(nanoseconds: UInt64(intervalSeconds) * 1_000_000_000)
+                try await Task.sleep(nanoseconds: UInt64(intervalSeconds * 1_000_000_000))
                 try Task.checkCancellation()
                 withAnimation(.easeInOut(duration: 0.25)) {
                     navigation.advance(reports: reports)
@@ -199,6 +230,9 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
                     if navigation.isRunning {
                         navigation.pause()
                     } else {
+                        guard let enteredInterval else { return }
+                        intervalSeconds = enteredInterval
+                        intervalFocused = false
                         navigation.start(reports: reports)
                     }
                 } label: {
@@ -208,19 +242,27 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
                     )
                 }
                 .buttonStyle(.bordered)
-                .disabled(navigation.message == "Batch complete")
+                .disabled(navigation.message == "Batch complete" || enteredInterval == nil)
 
                 Spacer()
                 Text("Every")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Picker("Interval", selection: $intervalSeconds) {
-                    ForEach([1, 2, 3, 5, 10], id: \.self) { seconds in
-                        Text("\(seconds) seconds").tag(seconds)
-                    }
-                }
-                .pickerStyle(.menu)
-                .accessibilityLabel("Auto-scroll interval")
+                TextField("Seconds", text: $intervalText)
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 72)
+                    .focused($intervalFocused)
+                    .accessibilityLabel("Auto-scroll interval in seconds")
+                Text("s")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if enteredInterval == nil {
+                Text("Enter a valid positive interval in seconds.")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
             }
             Text(navigation.message ?? (navigation.isRunning
                 ? "Auto-scrolling · Report \(navigation.selectedIndex + 1) of \(reports.count)"
