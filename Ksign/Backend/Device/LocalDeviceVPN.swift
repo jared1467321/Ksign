@@ -5,6 +5,11 @@ import NetworkExtension
 final class LocalDeviceVPN {
     private var manager: NETunnelProviderManager?
     private var startedByKsign = false
+    private let extensionIdentifier: @MainActor () -> String?
+
+    init(extensionIdentifier: @escaping @MainActor () -> String? = { LocalDeviceVPN.extensionBundleIdentifier }) {
+        self.extensionIdentifier = extensionIdentifier
+    }
 
     static var extensionBundleIdentifier: String? {
         guard let plugins = Bundle.main.builtInPlugInsURL,
@@ -16,8 +21,9 @@ final class LocalDeviceVPN {
 
     var isConnected: Bool { manager?.connection.status == .connected }
 
-    func connect() async throws {
-        guard let extensionID = Self.extensionBundleIdentifier else {
+    func connect(restarting: Bool = false) async throws {
+        try Task.checkCancellation()
+        guard let extensionID = extensionIdentifier() else {
             throw DeviceSetupError("This Ksign build does not include the local VPN extension. Update Ksign, or select Manual Setup.")
         }
         do {
@@ -27,12 +33,28 @@ final class LocalDeviceVPN {
                     else { continuation.resume(returning: managers ?? []) }
                 }
             }
+            try Task.checkCancellation()
             let manager = configurations.first {
                 ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == extensionID
             } ?? NETunnelProviderManager()
             self.manager = manager
-            if manager.connection.status == .connected { return }
-            if manager.protocolConfiguration == nil || !manager.isEnabled {
+            let existing = manager.protocolConfiguration as? NETunnelProviderProtocol
+            let needsConfiguration = existing?.providerBundleIdentifier != extensionID ||
+                existing?.serverAddress != "On this device" || existing?.disconnectOnSleep != false ||
+                !manager.isEnabled || manager.isOnDemandEnabled
+            if restarting || needsConfiguration {
+                // An app update can leave the previous extension running. Only
+                // stop the configuration matched to this build's extension ID.
+                manager.connection.stopVPNTunnel()
+                let deadline = Date().addingTimeInterval(20)
+                while manager.connection.status != .disconnected && manager.connection.status != .invalid {
+                    try Task.checkCancellation()
+                    guard Date() < deadline else {
+                        throw DeviceSetupError("The previous local VPN did not disconnect. Turn off Ksign Local Installation in VPN settings and retry setup.")
+                    }
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                }
+                try Task.checkCancellation()
                 let config = NETunnelProviderProtocol()
                 config.providerBundleIdentifier = extensionID
                 config.serverAddress = "On this device"
@@ -40,6 +62,7 @@ final class LocalDeviceVPN {
                 manager.protocolConfiguration = config
                 manager.localizedDescription = "Ksign Local Installation"
                 manager.isEnabled = true
+                manager.isOnDemandEnabled = false
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     manager.saveToPreferences { error in
                         if let error { continuation.resume(throwing: error) }
@@ -53,6 +76,7 @@ final class LocalDeviceVPN {
                     }
                 }
             }
+            if manager.connection.status == .connected { return }
             try Task.checkCancellation()
             let deadline = Date().addingTimeInterval(20)
             while manager.connection.status == .disconnecting {

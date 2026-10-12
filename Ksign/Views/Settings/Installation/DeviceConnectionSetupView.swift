@@ -41,6 +41,9 @@ struct DeviceConnectionSetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Device Connection", systemImage: "iphone.and.arrow.forward")
                     .font(.headline)
+                if let notice = manager.setupNotice {
+                    Text(notice).font(.callout)
+                }
                 switch manager.phase {
                 case .pairing:
                     Text("Allow Local Network access. Open Settings → Privacy & Security → Developer Mode, enable it if needed, then choose Pair with Ksign. Return here after entering the code.")

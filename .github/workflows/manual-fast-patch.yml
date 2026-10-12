@@ -68,6 +68,9 @@ jobs:
       - name: Verify IPA packaging
         run: python3 .github/scripts/test_package_ipa.py
 
+      - name: Verify device connection recovery
+        run: python3 .github/scripts/test_device_connection.py
+
       - name: Cache native device library
         if: ${{ inputs.clean != true }}
         uses: actions/cache@v4

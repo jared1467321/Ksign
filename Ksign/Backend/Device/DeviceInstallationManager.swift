@@ -13,11 +13,16 @@ final class DeviceInstallationManager: ObservableObject {
     static let shared = DeviceInstallationManager()
     enum Phase: Equatable { case idle, connecting, pairing, ready, configured, failed(String) }
     @Published private(set) var phase: Phase = .idle
+    @Published private(set) var setupNotice: String?
     @Published var mode: DeviceConnectionMode {
-        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "Ksign.deviceConnectionMode") }
+        didSet { defaults.set(mode.rawValue, forKey: "Ksign.deviceConnectionMode") }
     }
     @Published private(set) var pendingOperations = 0
-    private let vpn = LocalDeviceVPN()
+    private let vpn: LocalDeviceVPN
+    private let defaults: UserDefaults
+    private let legacyPairingExists: @MainActor () -> Bool
+    private let canCreatePairing: @MainActor () -> Bool
+    private static let freshPairingKey = "Ksign.needsFreshBuiltInPairing"
     private var configuredMode: DeviceConnectionMode?
     private var setupFailure: Error?
     private var tail: Task<Void, Never>?
@@ -26,11 +31,22 @@ final class DeviceInstallationManager: ObservableObject {
     private var workflows: Set<UUID> = []
     private var cleanupTask: Task<Void, Never>?
 
-    private init() {
-        if let raw = UserDefaults.standard.string(forKey: "Ksign.deviceConnectionMode"),
+    init(vpn: LocalDeviceVPN? = nil, defaults: UserDefaults = .standard,
+         legacyPairingExists: @escaping @MainActor () -> Bool = {
+             FileManager.default.fileExists(atPath: DeviceInstallationManager.legacyPairingPath)
+         },
+         canCreatePairing: @escaping @MainActor () -> Bool = {
+             if #available(iOS 27.0, *) { return true }
+             return false
+         }) {
+        self.vpn = vpn ?? LocalDeviceVPN()
+        self.defaults = defaults
+        self.legacyPairingExists = legacyPairingExists
+        self.canCreatePairing = canCreatePairing
+        if let raw = defaults.string(forKey: "Ksign.deviceConnectionMode"),
            let saved = DeviceConnectionMode(rawValue: raw) { mode = saved }
-        else if #available(iOS 27.0, *), LocalDeviceVPN.extensionBundleIdentifier != nil,
-                !FileManager.default.fileExists(atPath: Self.legacyPairingPath) { mode = .builtIn }
+        else if canCreatePairing(), LocalDeviceVPN.extensionBundleIdentifier != nil,
+                !legacyPairingExists() { mode = .builtIn }
         else { mode = .manual }
         DevicePairingStore.removeWorkingCopy()
     }
@@ -47,7 +63,11 @@ final class DeviceInstallationManager: ObservableObject {
 
     func retainWorkflow(_ id: UUID) { workflows.insert(id) }
     func releaseWorkflow(_ id: UUID) { workflows.remove(id); cleanUpIfIdle() }
-    func clearSetupFailure() { setupFailure = nil; if case .failed = phase { phase = .idle } }
+    func clearSetupFailure() {
+        setupFailure = nil
+        setupNotice = nil
+        if case .failed = phase { phase = .idle }
+    }
 
     func setUp() async {
         guard !isBusy else { return }
@@ -66,7 +86,14 @@ final class DeviceInstallationManager: ObservableObject {
         HeartbeatManager.configurePairingPath(nil)
         vpn.disconnectIfOwned()
         configuredMode = nil
-        do { try DevicePairingStore.reset(); clearSetupFailure(); phase = .idle }
+        do {
+            try DevicePairingStore.reset()
+            // Do not silently reuse an imported pairing after the user asks to
+            // pair again. Keep that file intact for Manual Setup.
+            defaults.set(canCreatePairing(), forKey: Self.freshPairingKey)
+            clearSetupFailure()
+            phase = .idle
+        }
         catch { phase = .failed(error.localizedDescription) }
     }
 
@@ -125,41 +152,89 @@ final class DeviceInstallationManager: ObservableObject {
         phase = .connecting
         do {
             await HeartbeatManager.shared.resetInstallationConnection()
+            try Task.checkCancellation()
             if mode == .builtIn {
-                // Check VPN provisioning before asking the user to perform pairing.
-                try await vpn.connect()
-                var record = try DevicePairingStore.load()
-                if record == nil, !FileManager.default.fileExists(atPath: Self.legacyPairingPath) {
-                    phase = .pairing
-                    let paired = try await DevicePairingService.shared.pair()
-                    try Task.checkCancellation()
-                    try DevicePairingStore.save(paired)
-                    record = paired
-                }
-                if let record {
-                    HeartbeatManager.configurePairingPath(try DevicePairingStore.materialize(record).path)
-                } else {
-                    HeartbeatManager.configurePairingPath(nil)
-                }
+                try await prepareBuiltInConnection()
             } else {
                 vpn.disconnectIfOwned()
                 HeartbeatManager.configurePairingPath(nil)
-                guard FileManager.default.fileExists(atPath: Self.legacyPairingPath) else {
+                guard legacyPairingExists() else {
                     throw DeviceSetupError("Import a pairing file and connect your local VPN in Manual Setup, or choose Built-in Connection on a supported device.")
                 }
+                try await HeartbeatManager.shared.prepareInstallationConnection()
             }
             try Task.checkCancellation()
-            phase = .connecting
-            try await HeartbeatManager.shared.prepareInstallationConnection()
-            try Task.checkCancellation()
             configuredMode = mode
+            setupNotice = nil
             phase = .ready
         } catch {
             configuredMode = nil
+            setupNotice = nil
             let failure = error is CancellationError ? DeviceSetupError("Device setup was cancelled. Tap Retry Setup when you are ready.") : error
             setupFailure = failure
             phase = .failed(failure.localizedDescription)
             throw failure
+        }
+    }
+
+    private func prepareBuiltInConnection() async throws {
+        let needsFreshPairing = defaults.bool(forKey: Self.freshPairingKey)
+        // Validate VPN provisioning before asking for pairing consent.
+        try await vpn.connect(restarting: needsFreshPairing)
+        try Task.checkCancellation()
+        var record = try DevicePairingStore.load()
+        let usesLegacyPairing = record == nil && legacyPairingExists() && !needsFreshPairing
+        let reusedPairing = record != nil || usesLegacyPairing
+        if record == nil && !usesLegacyPairing { record = try await createPairing() }
+        try configurePairing(record)
+        phase = .connecting
+        do {
+            try await HeartbeatManager.shared.prepareInstallationConnection()
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
+            // Retry the handshake, never an installation that may have committed.
+            setupNotice = "Restarting the local VPN to recover the device connection…"
+            await HeartbeatManager.shared.resetInstallationConnection()
+            try Task.checkCancellation()
+            try await vpn.connect(restarting: true)
+            try Task.checkCancellation()
+            do {
+                try await HeartbeatManager.shared.prepareInstallationConnection()
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+                guard reusedPairing else { throw error }
+                guard canCreatePairing() else {
+                    throw DeviceSetupError("The saved pairing could not connect after restarting the local VPN. Import a fresh pairing file in Manual Setup and retry.\n\n\(error.localizedDescription)")
+                }
+                setupNotice = "The saved pairing could not reconnect. Pair with Ksign again in Settings to repair the connection."
+                await HeartbeatManager.shared.resetInstallationConnection()
+                try Task.checkCancellation()
+                // Keep the previous credentials until replacement pairing succeeds.
+                record = try await createPairing()
+                try configurePairing(record)
+                phase = .connecting
+                try await HeartbeatManager.shared.prepareInstallationConnection()
+            }
+        }
+    }
+
+    private func createPairing() async throws -> DevicePairingRecord {
+        try Task.checkCancellation()
+        phase = .pairing
+        let record = try await DevicePairingService.shared.pair()
+        try Task.checkCancellation()
+        try DevicePairingStore.save(record)
+        defaults.set(false, forKey: Self.freshPairingKey)
+        return record
+    }
+
+    private func configurePairing(_ record: DevicePairingRecord?) throws {
+        if let record {
+            HeartbeatManager.configurePairingPath(try DevicePairingStore.materialize(record).path)
+        } else {
+            HeartbeatManager.configurePairingPath(nil)
         }
     }
 

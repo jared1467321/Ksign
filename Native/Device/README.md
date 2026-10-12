@@ -40,12 +40,25 @@ recreated by the scripts; the submodule commit is unchanged.
   alone. A new VPN connection may replace another active VPN.
 - **Forget Built-in Pairing** removes Ksign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
+- If the device handshake fails, Built-in Connection refreshes and restarts
+  this app's local VPN once before retrying. If saved or imported credentials
+  still fail on iOS 27 or later, it guides a replacement pairing. Existing
+  credentials remain saved until replacement pairing succeeds. A newly created
+  pairing does not trigger repeated pairing attempts in the same setup.
+- Forgetting a built-in pairing requests fresh pairing even if an old imported
+  file remains, including after relaunch. Manual Setup retains that file.
+  Connection recovery finishes before installation starts; a failed app install
+  is never automatically replayed.
 
 The initial installation of Ksign, Apple signing and trust requirements, and
 system consent prompts cannot be automated by this implementation. No network
 service operated by Ksign is required for direct installation.
 
 ## Verification status
+
+Run `python3 .github/scripts/test_device_connection.py` on a machine with Swift
+to exercise production connection recovery against VPN and pairing doubles.
+The manual build runs these regression checks before building the IPA.
 
 The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and
