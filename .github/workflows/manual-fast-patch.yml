@@ -68,6 +68,11 @@ jobs:
       - name: Verify IPA packaging
         run: python3 .github/scripts/test_package_ipa.py
 
+      - name: Verify VPN reconnect links
+        run: |
+          swiftc Ksign/Backend/Device/VPNReconnectRequest.swift .github/scripts/tests/vpn-reconnect/main.swift -o "$RUNNER_TEMP/ksign-vpn-reconnect-tests"
+          "$RUNNER_TEMP/ksign-vpn-reconnect-tests"
+
       - name: Cache native device library
         if: ${{ inputs.clean != true }}
         uses: actions/cache@v4

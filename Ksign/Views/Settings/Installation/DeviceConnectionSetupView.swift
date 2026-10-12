@@ -27,6 +27,7 @@ struct DeviceConnectionSettingsView: View {
             } message: {
                 Text("The next built-in installation will ask you to pair again. To remove trust from iOS too, use Developer settings.")
             }
+            VPNReconnectSettingsView()
         }
     }
 }
@@ -34,6 +35,7 @@ struct DeviceConnectionSettingsView: View {
 struct DeviceConnectionSetupView: View {
     @ObservedObject private var manager = DeviceInstallationManager.shared
     @ObservedObject private var pairing = DevicePairingService.shared
+    @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     var alwaysVisible = false
 
     var body: some View {
@@ -71,7 +73,25 @@ struct DeviceConnectionSetupView: View {
                     Label("Connected", systemImage: "checkmark.circle")
                 case .configured:
                     Label("Setup complete", systemImage: "checkmark.circle")
-                    Text("Ksign's temporary VPN is off. It will reconnect automatically when you install apps. If you use another VPN, reconnect it in that app or iOS VPN Settings.").font(.footnote)
+                    Text("Ksign's temporary VPN is off. It will reconnect automatically when you install apps.").font(.footnote)
+                    if reconnect.isEnabled {
+                        switch reconnect.status {
+                        case .waiting:
+                            Text("Your reconnect shortcut will open when Ksign is active and installations have finished.").font(.footnote)
+                            Button("Run Reconnect Shortcut") { reconnect.tryPending() }
+                        case .opening:
+                            ProgressView("Opening reconnect shortcut…")
+                        case .requested:
+                            Text("Reconnect shortcut opened. Check your VPN app if it did not connect.").font(.footnote)
+                        case .failed(let message):
+                            Text(message).font(.footnote)
+                            Button("Retry Reconnect Shortcut") { reconnect.request() }
+                        case .idle:
+                            EmptyView()
+                        }
+                    } else {
+                        Text("If you use another VPN, reconnect it in that app or iOS VPN Settings, or configure a reconnect shortcut in Installation settings.").font(.footnote)
+                    }
                 case .idle:
                     Text("Ksign connects automatically when you install apps. You can also set up and check the connection now.")
                     Button("Set Up Connection") { Task { await manager.setUp() } }

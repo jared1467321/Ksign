@@ -26,6 +26,7 @@ final class DeviceInstallationManager: ObservableObject {
     private var operations: [UUID: Task<Void, Error>] = [:]
     private var workflows: Set<UUID> = []
     private var cleanupTask: Task<Void, Never>?
+    private var shouldReconnectVPN = false
 
     private init() {
         if let raw = UserDefaults.standard.string(forKey: "Ksign.deviceConnectionMode"),
@@ -136,6 +137,10 @@ final class DeviceInstallationManager: ObservableObject {
         do {
             await HeartbeatManager.shared.resetInstallationConnection()
             if mode == .builtIn {
+                // A deferred handoff from the last workflow must not interrupt
+                // this one. Request one new handoff after its final cleanup.
+                VPNReconnectCoordinator.shared.cancelPending()
+                shouldReconnectVPN = true
                 // Check VPN provisioning before asking the user to perform pairing.
                 try await vpn.connect()
                 var record = try DevicePairingStore.load()
@@ -177,6 +182,7 @@ final class DeviceInstallationManager: ObservableObject {
         guard pendingOperations == 0, workflows.isEmpty, cleanupTask == nil else { return }
         cleanupTask = Task { @MainActor in
             let previousPhase = self.phase
+            var requestReconnect = false
             if self.vpn.needsDisconnection { self.phase = .disconnecting }
             // Give the asynchronous stop/preferences save time to complete if
             // the user leaves Ksign immediately after the last app installs.
@@ -184,6 +190,8 @@ final class DeviceInstallationManager: ObservableObject {
             defer {
                 if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
                 self.cleanupTask = nil
+                if requestReconnect { VPNReconnectCoordinator.shared.request() }
+                else { VPNReconnectCoordinator.shared.tryPending() }
             }
             await HeartbeatManager.shared.resetInstallationConnection()
             self.configuredMode = nil
@@ -191,6 +199,8 @@ final class DeviceInstallationManager: ObservableObject {
             DevicePairingStore.removeWorkingCopy()
             do {
                 try await self.vpn.disconnectIfOwned()
+                requestReconnect = self.shouldReconnectVPN
+                self.shouldReconnectVPN = false
                 switch previousPhase {
                 case .ready, .configured, .cleanupFailed, .disconnecting: self.phase = .configured
                 default: self.phase = previousPhase
