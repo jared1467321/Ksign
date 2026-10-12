@@ -4,7 +4,7 @@ import NetworkExtension
 @MainActor
 final class LocalDeviceVPN {
     private var manager: NETunnelProviderManager?
-    private var managesSession = false
+    private var startedByKsign = false
 
     static var extensionBundleIdentifier: String? {
         guard let plugins = Bundle.main.builtInPlugInsURL,
@@ -15,7 +15,6 @@ final class LocalDeviceVPN {
     }
 
     var isConnected: Bool { manager?.connection.status == .connected }
-    var needsDisconnection: Bool { managesSession }
 
     func connect() async throws {
         guard let extensionID = Self.extensionBundleIdentifier else {
@@ -32,11 +31,8 @@ final class LocalDeviceVPN {
                 ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == extensionID
             } ?? NETunnelProviderManager()
             self.manager = manager
-            // This is Ksign's own installation profile, including a connection
-            // left running by an earlier process. Adopt it for this workflow so
-            // it is also stopped afterward. Other apps' profiles are inaccessible.
-            managesSession = true
-            if manager.protocolConfiguration == nil || !manager.isEnabled || manager.isOnDemandEnabled {
+            if manager.connection.status == .connected { return }
+            if manager.protocolConfiguration == nil || !manager.isEnabled {
                 let config = NETunnelProviderProtocol()
                 config.providerBundleIdentifier = extensionID
                 config.serverAddress = "On this device"
@@ -44,8 +40,6 @@ final class LocalDeviceVPN {
                 manager.protocolConfiguration = config
                 manager.localizedDescription = "Ksign Local Installation"
                 manager.isEnabled = true
-                manager.isOnDemandEnabled = false
-                manager.onDemandRules = nil
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     manager.saveToPreferences { error in
                         if let error { continuation.resume(throwing: error) }
@@ -60,7 +54,6 @@ final class LocalDeviceVPN {
                 }
             }
             try Task.checkCancellation()
-            if manager.connection.status == .connected { return }
             let deadline = Date().addingTimeInterval(20)
             while manager.connection.status == .disconnecting {
                 try Task.checkCancellation()
@@ -70,6 +63,7 @@ final class LocalDeviceVPN {
             // If a previously started connection is still settling, wait for it.
             if manager.connection.status != .connecting && manager.connection.status != .reasserting {
                 try manager.connection.startVPNTunnel()
+                startedByKsign = true
             }
             while manager.connection.status != .connected {
                 try Task.checkCancellation()
@@ -80,50 +74,16 @@ final class LocalDeviceVPN {
                 try await Task.sleep(nanoseconds: 200_000_000)
             }
         } catch is CancellationError {
-            try? await disconnectIfOwned()
+            disconnectIfOwned()
             throw CancellationError()
         } catch {
-            try? await disconnectIfOwned()
+            disconnectIfOwned()
             throw DeviceSetupError("Cannot start Ksign's local VPN. Allow the VPN configuration when asked. Ksign and its VPN extension must both be signed with profiles authorizing packet-tunnel-provider.\n\n\(error.localizedDescription)")
         }
     }
 
-    func disconnectIfOwned() async throws {
-        guard managesSession, let manager else { return }
-        // Cleanup must finish even when the install task that requested it was
-        // cancelled. An unstructured task does not inherit that cancellation.
-        let cleanup = Task { @MainActor in
-            manager.connection.stopVPNTunnel()
-            let deadline = Date().addingTimeInterval(10)
-            while manager.connection.status != .disconnected && manager.connection.status != .invalid {
-                guard Date() < deadline else {
-                    throw DeviceSetupError("Ksign's installation VPN is still disconnecting. You can stop it in iOS VPN Settings.")
-                }
-                try await Task.sleep(nanoseconds: 100_000_000)
-            }
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                manager.loadFromPreferences { error in
-                    if let error { continuation.resume(throwing: error) }
-                    else { continuation.resume() }
-                }
-            }
-            // Stopping only the tunnel leaves this profile selected/enabled.
-            // Disable our profile without deleting it, preserving first-run
-            // permission and allowing automatic re-enable on the next install.
-            if manager.isEnabled || manager.isOnDemandEnabled {
-                manager.isEnabled = false
-                manager.isOnDemandEnabled = false
-                manager.onDemandRules = nil
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    manager.saveToPreferences { error in
-                        if let error { continuation.resume(throwing: error) }
-                        else { continuation.resume() }
-                    }
-                }
-            }
-        }
-        try await cleanup.value
-        // Retain ownership on failure so a subsequent cleanup can retry.
-        managesSession = false
+    func disconnectIfOwned() {
+        if startedByKsign { manager?.connection.stopVPNTunnel() }
+        startedByKsign = false
     }
 }
