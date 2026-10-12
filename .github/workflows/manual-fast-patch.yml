@@ -57,13 +57,22 @@ jobs:
           restore-keys: |
             deriveddata-${{ runner.os }}-
 
-      # IDeviceKit is a submodule consumed as a local Swift package, so its
-      # sources can't be committed from this repo — they're patched here on
-      # the runner instead. The script asserts every replacement and fails the
-      # build if one no longer matches, so this can never silently produce an
-      # unpatched IPA.
-      - name: Patch IDeviceKit
-        run: python3 .github/scripts/patch_idevicekit.py
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install native toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+
+      - name: Cache native device library
+        if: ${{ inputs.clean != true }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/device-native
+            IDeviceKit/.build/IDevice.xcframework
+          key: idevice-${{ runner.os }}-${{ hashFiles('Native/Device/**', '.github/scripts/build_device_native.py') }}
 
       - name: Build
         run: |

@@ -12,7 +12,7 @@ TMP := $(if $(DERIVED_DATA),$(DERIVED_DATA),$(TMPDIR)/$(NAME))
 STAGE := $(TMP)/stage
 APP := $(TMP)/Build/Products/Release-$(PLATFORM)
 
-.PHONY: all clean deps $(SCHEMES)
+.PHONY: all clean deps native $(SCHEMES)
 
 all: $(SCHEMES)
 
@@ -26,7 +26,11 @@ deps:
 	mkdir -p deps
 	python3 .github/scripts/fetch_backloop_certs.py deps
 
-$(SCHEMES): deps
+native:
+	python3 .github/scripts/build_device_native.py
+	python3 .github/scripts/patch_idevicekit.py
+
+$(SCHEMES): native deps
 	xcodebuild \
 	    -project Ksign.xcodeproj \
 	    -scheme "$@" \
@@ -38,26 +42,4 @@ $(SCHEMES): deps
 	    CODE_SIGNING_ALLOWED=NO \
 	    ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO
 
-	rm -rf Payload
-	rm -rf "$(STAGE)/"
-	mkdir -p "$(STAGE)/Payload"
-
-	mv "$(APP)/$(OUTPUT_NAME).app" "$(STAGE)/Payload/$(OUTPUT_NAME).app"
-
-	chmod -R 0755 "$(STAGE)/Payload/$(OUTPUT_NAME).app"
-
-	# Nested code first. `codesign` does not sign embedded bundles for you, and
-	# an .appex left with a stale or missing signature is a common reason a
-	# sideloader rejects the whole IPA. The `|| true` keeps builds working if
-	# there is no PlugIns directory.
-	codesign --force --sign - --timestamp=none "$(STAGE)/Payload/$(OUTPUT_NAME).app/PlugIns/"*.appex 2>/dev/null || true
-	codesign --force --sign - --timestamp=none "$(STAGE)/Payload/$(OUTPUT_NAME).app"
-
-	cp deps/* "$(STAGE)/Payload/$(OUTPUT_NAME).app/" || true
-
-	rm -rf "$(STAGE)/Payload/$(OUTPUT_NAME).app/_CodeSignature"
-	rm -rf "$(STAGE)/Payload/$(OUTPUT_NAME).app/PlugIns/"*.appex/_CodeSignature 2>/dev/null || true
-	ln -sf "$(STAGE)/Payload" Payload
-	
-	mkdir -p packages
-	zip -r9 "packages/$(OUTPUT_NAME).ipa" Payload
+	python3 .github/scripts/package_ipa.py --app "$(APP)/$(OUTPUT_NAME).app" --output packages

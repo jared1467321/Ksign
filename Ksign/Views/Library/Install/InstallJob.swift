@@ -277,6 +277,9 @@ final class InstallJob: ObservableObject, Identifiable {
 	private let _willBatch: Bool
 
 	private let _installationMethod: Int
+	private let _deviceConnectionMode: DeviceConnectionMode
+	var isDeviceInstall: Bool { _installationMethod == 1 }
+	var isSelfUpdate: Bool { isDeviceInstall && app.identifier == Bundle.main.bundleIdentifier }
 	private let _serverMethod: Int
 
 	private var _cancellables = Set<AnyCancellable>()
@@ -311,6 +314,7 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
 		self._installationMethod = method
+		self._deviceConnectionMode = DeviceInstallationManager.shared.mode
 		self._serverMethod = UserDefaults.standard.integer(forKey: "Feather.serverMethod")
 
 		// Batching applies only to the local server method (method 0, server 0) —
@@ -442,7 +446,9 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		_installTask = Task { @MainActor [weak self] in
 			// Waits for a slot. Returns false if cancelled while waiting.
-			let gotSlot = await InstallQueueCoordinator.shared.acquire(for: jobId)
+			let gotSlot = await InstallQueueCoordinator.shared.acquire(for: jobId) {
+				InstallSession.shared.mayStartDeviceJob(jobId)
+			}
 			// `acquire` returns false only when it was cancelled *before*
 			// claiming anything, so there's nothing to hand back here.
 			guard gotSlot else { return }
@@ -557,7 +563,9 @@ final class InstallJob: ObservableObject, Identifiable {
 		let jobId = id
 
 		_installTask = Task { @MainActor [weak self] in
-			let gotSlot = await InstallQueueCoordinator.shared.acquire(for: jobId)
+			let gotSlot = await InstallQueueCoordinator.shared.acquire(for: jobId) {
+				InstallSession.shared.mayStartDeviceJob(jobId)
+			}
 			guard gotSlot else { return }
 			guard !Task.isCancelled, let self, self.phase == .queued else {
 				InstallQueueCoordinator.shared.release(jobId)
@@ -789,6 +797,7 @@ final class InstallJob: ObservableObject, Identifiable {
 		let viewModel = self.viewModel
 		let method = _installationMethod
 		let installer = self.installer
+		let connectionMode = _deviceConnectionMode
 		let jobID = self.id
 		_statusEpoch.advance()
 		_packagingAttempt?.cancel()
@@ -823,11 +832,13 @@ final class InstallJob: ObservableObject, Identifiable {
 							return true
 						}
 					} else if method == 1 {
-						let proxy = await InstallationProxy(viewModel: viewModel)
 						try Task.checkCancellation()
-						try await proxy.install(
+						try await DeviceInstallationManager.shared.install(
 							at: packageURL,
-							suspend: app.identifier == Bundle.main.bundleIdentifier!
+							viewModel: viewModel,
+							suspend: app.identifier == Bundle.main.bundleIdentifier!,
+							mode: connectionMode,
+							isCurrent: { attempt.isCurrent }
 						)
 					}
 				} catch let error as CancellationError {
@@ -872,9 +883,10 @@ final class InstallJob: ObservableObject, Identifiable {
 							return true
 						}
 					} else if method == 1 {
-						let proxy = await InstallationProxy(viewModel: viewModel)
 						try Task.checkCancellation()
-						try await proxy.install(at: packageURL, suspend: app.identifier == Bundle.main.bundleIdentifier!)
+						try await DeviceInstallationManager.shared.install(at: packageURL, viewModel: viewModel,
+							suspend: app.identifier == Bundle.main.bundleIdentifier!, mode: connectionMode,
+							isCurrent: { attempt.isCurrent })
 					}
 				} catch let error as CancellationError {
 					if !Task.isCancelled && attempt.isCurrent { failure = error }
@@ -1157,14 +1169,14 @@ final class InstallQueueCoordinator {
 	// Returns false if the calling task is cancelled while waiting. Because this
 	// runs on MainActor, check + admission + claim are atomic: waiting jobs cannot
 	// all sample the same headroom and stampede through together.
-	func acquire(for id: UUID) async -> Bool {
+	func acquire(for id: UUID, mayStart: () -> Bool = { true }) async -> Bool {
 		while true {
 			if Task.isCancelled { return false }
 
 			_reclaimOrphans()
 
 			let effectiveMax = _effectiveMaxConcurrent
-			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax {
+			if !_isPaused, mayStart(), effectiveMax > 0, _holders.count < effectiveMax {
 				if !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: id) {
 					_holders.insert(id)
 					ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)

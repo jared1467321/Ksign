@@ -179,6 +179,9 @@ struct InstallDrawerSheet: View {
 			.padding(.bottom, 14)
 
 			ScrollView {
+				DeviceConnectionSetupView()
+					.padding(.horizontal, 20)
+					.padding(.bottom, 12)
 				BulkInstallPreviewView(
 					jobs: session.jobs,
 					originalCount: session.totalCount

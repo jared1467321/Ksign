@@ -108,6 +108,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // after they're set, so this has to run ahead of the first window.
         HalloweenAppearance.apply()
 
+        DevicePairingService.registerBackgroundTask()
+
         _createPipeline()
         _createSourcesDirectory()
         if !UserDefaults.standard.bool(forKey: "hasInitializedBuiltInSources") {

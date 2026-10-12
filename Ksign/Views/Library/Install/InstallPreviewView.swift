@@ -20,7 +20,6 @@ struct InstallPreviewView: View {
 	@AppStorage("Feather.useShareSheetForArchiving") private var _useShareSheet: Bool = false
 	
 	// Methods
-    @AppStorage("Feather.installationMethod") private var _installationMethod: Int = 0
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@State private var _isWebviewPresenting = false
 	@State private var _activityCancellables = Set<AnyCancellable>()
@@ -29,6 +28,8 @@ struct InstallPreviewView: View {
 	// until the next cold start.
 	@State private var _archiveWorkDir: URL?
 	@State private var _usesCanonicalArchive = false
+	@State private var _ownsBackgroundTask = false
+	private let _initialInstallationMethod: Int
 	
 	var app: AppInfoPresentable
 	@StateObject var viewModel: InstallerStatusViewModel
@@ -39,6 +40,7 @@ struct InstallPreviewView: View {
 		self.app = app
 		self.isSharing = isSharing
         let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
+		self._initialInstallationMethod = method
 		let viewModel = InstallerStatusViewModel(isIdevice: method == 1)
 		self._viewModel = StateObject(wrappedValue: viewModel)
 		let bundleID = app.identifier
@@ -46,6 +48,7 @@ struct InstallPreviewView: View {
 			wrappedValue: try! ServerInstaller(
 				app: app,
 				viewModel: viewModel,
+				startsServer: method == 0 && !isSharing,
 				statusReporter: { status in
 					SingleInstallLiveActivityReporter.shared.handleServerStatus(
 						status,
@@ -96,15 +99,26 @@ struct InstallPreviewView: View {
 			}
 		}
 		.onAppear {
+			if !isSharing, _initialInstallationMethod == 1 {
+				// Single and bulk device installs share setup, native serialization,
+				// cancellation, and a drawer that survives leaving this preview.
+				InstallSession.shared.start(apps: [app])
+				dismiss()
+				return
+			}
 			SingleInstallLiveActivityReporter.shared.begin(name: app.name)
 			BackgroundTaskManager.shared.claim(.singleInstall)
+			_ownsBackgroundTask = true
 			_startLiveActivityBridge()
 			_install()
 		}
 		.onDisappear {
 			_activityCancellables.removeAll()
-			SingleInstallLiveActivityReporter.shared.end()
-			BackgroundTaskManager.shared.release(.singleInstall, success: false)
+			if _ownsBackgroundTask {
+				SingleInstallLiveActivityReporter.shared.end()
+				BackgroundTaskManager.shared.release(.singleInstall, success: false)
+				_ownsBackgroundTask = false
+			}
 			// Covers dismissal before a terminal status ever arrives.
 			_cleanupArchive()
 		}
@@ -158,7 +172,7 @@ struct InstallPreviewView: View {
 	}
 	
 	private func _install() {
-        guard isSharing || app.identifier != Bundle.main.bundleIdentifier! || _installationMethod == 1 else {
+        guard isSharing || app.identifier != Bundle.main.bundleIdentifier! else {
             UIAlertController.showAlertWithOk(
                 title: .localized("Install"),
                 message: .localized("You cannot update ‘%@‘ with itself, please use an alternative tool to update it.", arguments: Bundle.main.name)
@@ -172,20 +186,12 @@ struct InstallPreviewView: View {
 					SingleInstallLiveActivityReporter.shared.updatePackage(1)
 
 					if await !isSharing {
-						if await _installationMethod == 0 {
-							SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
-							await MainActor.run {
-								_usesCanonicalArchive = true
-								installer.packageUrl = archiveURL
-								viewModel.packageProgress = 1
-								viewModel.status = .ready
-							}
-						} else if await _installationMethod == 1 {
-							let handler = await InstallationProxy(viewModel: viewModel)
-							try await handler.install(
-								at: archiveURL,
-								suspend: app.identifier == Bundle.main.bundleIdentifier!
-							)
+						SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
+						await MainActor.run {
+							_usesCanonicalArchive = true
+							installer.packageUrl = archiveURL
+							viewModel.packageProgress = 1
+							viewModel.status = .ready
 						}
 					} else if await _useShareSheet {
 						await MainActor.run {
@@ -221,16 +227,10 @@ struct InstallPreviewView: View {
 				}
 
 				if await !isSharing {
-                    if await _installationMethod == 0 {
-                        SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
-                        await MainActor.run {
-                            installer.packageUrl = packageUrl
-                            viewModel.status = .ready
-                        }
-                    }
-                    else if await _installationMethod == 1 {
-                        let proxy = await InstallationProxy(viewModel: viewModel)
-                        try await proxy.install(at: packageUrl, suspend: app.identifier == Bundle.main.bundleIdentifier!)
+                    SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
+                    await MainActor.run {
+                        installer.packageUrl = packageUrl
+                        viewModel.status = .ready
                     }
 				} else {
 					let package = try await handler.moveToArchive(packageUrl, shouldOpen: !_useShareSheet)

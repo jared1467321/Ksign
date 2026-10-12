@@ -199,7 +199,11 @@
 		</dict>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Ksign IPA Vault connects to your private file server to browse, download, and upload IPA files.</string>
+	<string>Ksign uses the local network to pair with this device for app installation and to connect to your private IPA Vault server.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remotepairing-pairable-host._tcp</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

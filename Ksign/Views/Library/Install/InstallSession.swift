@@ -66,6 +66,7 @@ final class InstallSession: ObservableObject {
 	// small: building is the rationed part; the manifest can hold far more apps
 	// than this, they just build a few at a time.
 	private let _batchBuildConcurrency = 5
+	private let _deviceWorkflowID = UUID()
 
 	private init() {
 		let center = NotificationCenter.default
@@ -115,11 +116,16 @@ final class InstallSession: ObservableObject {
 
 	func start(apps: [AppInfoPresentable]) {
 		guard !apps.isEmpty else { return }
+		let isDeviceInstall = UserDefaults.standard.integer(forKey: "Feather.installationMethod") == 1
+		if isDeviceInstall {
+			DeviceInstallationManager.shared.clearSetupFailure()
+			DeviceInstallationManager.shared.retainWorkflow(_deviceWorkflowID)
+		}
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
-		// into one and runs the group concurrently; idevice and the external
-		// server keep the default limit and prompt per app as before.
+		// into one and runs the group concurrently. Device installs run serially;
+		// the external server retains the ordinary concurrency limit.
 		if jobs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.reset()
 
@@ -145,10 +151,14 @@ final class InstallSession: ObservableObject {
 			// while the pool fills, so a 100-app manifest is still built a few at a
 			// time — and a stuck install can't wedge the queue, because it isn't
 			// holding a slot.
-			InstallQueueCoordinator.shared.setMaxConcurrent(_willBatch ? _batchBuildConcurrency : 3)
+			InstallQueueCoordinator.shared.setMaxConcurrent(_willBatch ? _batchBuildConcurrency : (isDeviceInstall ? 1 : 3))
 		}
 
-		for app in apps {
+		// Replacing the running Ksign app must be the last item in this selection.
+		let orderedApps = isDeviceInstall
+			? apps.filter { $0.identifier != Bundle.main.bundleIdentifier } + apps.filter { $0.identifier == Bundle.main.bundleIdentifier }
+			: apps
+		for app in orderedApps {
 			// A failed row for this app would otherwise block re-installing it
 			// entirely — `start` would see it as a duplicate and skip, so the
 			// Install button would silently do nothing. Clear it out first.
@@ -179,7 +189,10 @@ final class InstallSession: ObservableObject {
 
 		if _willBatch { _admitBatchJobs() }
 
-		guard isActive else { return }
+		guard isActive else {
+			DeviceInstallationManager.shared.releaseWorkflow(_deviceWorkflowID)
+			return
+		}
 
 		// Claimed once for the whole batch rather than once per row. The rows
 		// each used to start and stop this, which meant the *first* app to
@@ -195,6 +208,21 @@ final class InstallSession: ObservableObject {
 	}
 
 	// MARK: - Finishing
+
+	// The coordinator polls for admission rather than maintaining a FIFO. Gate
+	// device jobs explicitly so they keep selection order and a waiting Ksign
+	// update also follows apps added to the workflow later.
+	func mayStartDeviceJob(_ id: UUID) -> Bool {
+		guard let index = jobs.firstIndex(where: { $0.id == id }) else { return false }
+		let job = jobs[index]
+		guard job.isDeviceInstall else { return true }
+		let unfinished: (InstallJob) -> Bool = { candidate in
+			candidate.isDeviceInstall && candidate.id != id &&
+			candidate.phase != .completed && candidate.phase != .failed
+		}
+		if job.isSelfUpdate { return !jobs.contains(where: unfinished) }
+		return !jobs.prefix(index).contains { !$0.isSelfUpdate && unfinished($0) }
+	}
 
 	func jobDidFinish(_ job: InstallJob) {
 		if _willBatch {
@@ -277,8 +305,12 @@ final class InstallSession: ObservableObject {
 	}
 
 	func retry(_ job: InstallJob) {
+		if job.isDeviceInstall {
+			DeviceInstallationManager.shared.clearSetupFailure()
+			DeviceInstallationManager.shared.retainWorkflow(_deviceWorkflowID)
+		}
 		guard _willBatch else {
-			// idevice / external server: re-prompt just this app.
+			// Device / external server: retry just this app.
 			job.retry()
 			return
 		}
@@ -367,6 +399,7 @@ final class InstallSession: ObservableObject {
 	// never called and the continued-processing task stayed owned indefinitely.
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
+		DeviceInstallationManager.shared.releaseWorkflow(_deviceWorkflowID)
 
 		_recomputeProgress()
 		BulkInstallLiveActivityReporter.shared.finish()
@@ -376,6 +409,7 @@ final class InstallSession: ObservableObject {
 
 	private func _finishIfIdle(success: Bool) {
 		guard jobs.isEmpty else { return }
+		DeviceInstallationManager.shared.releaseWorkflow(_deviceWorkflowID)
 
 		// Publish the terminal snapshot while the task is still owned. `report`
 		// deliberately cannot create a task by itself, so this ordering also makes

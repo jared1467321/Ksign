@@ -1,0 +1,24 @@
+{
+  "Package.swift": [
+    "7213f941601c9e4057eff12bc61e35e64bb2da0ffa9da452e587be80adc5c8b2"
+  ],
+  "Sources/IDeviceSwift/Heartbeat/Heartbeat.swift": [
+    "cfbb7681e245ea8114e02c0d276e47a39b7fe7d2829562275d6858a6212bd310"
+  ],
+  "Sources/IDeviceSwift/Heartbeat/Heartbeat+start.swift": [
+    "4d11ef63974e18a08a29ce840c10bce8becb7f993819671ad5d262719ee5b1ed"
+  ],
+  "Sources/IDeviceSwift/InstallationProxy/InstallationProxy.swift": [
+    "5497ecda8c7ceeb769dbb39d29787025e6da96fa29640d6ab10605ef3b08a5d4",
+    "13fe3b46b4e3fd834cd2caf36dafe2be4d26ab61f0c5618f680a3d8876d38dde"
+  ],
+  "Sources/IDeviceSwift/InstallationProxy/InstallationAppProxy.swift": [
+    "0f8b245ed3734262883fc25cc4d068edb67e3dc9892a61913f4b115979b7bdda"
+  ],
+  "Sources/IDeviceSwift/Trace/SystemLogManager.swift": [
+    "9a88d6750fde0fc596deae9515690c1038d397d1e1779e5327903c74eb132152"
+  ],
+  "Sources/IDeviceSwift/IDeviceSwiftError.swift": [
+    "511b194a6df0efb38acfb684a82499659ab377d688fc24d508e90457e71bd505"
+  ]
+}
