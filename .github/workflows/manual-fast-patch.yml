@@ -65,6 +65,9 @@ jobs:
       - name: Install native toolchain
         run: rustup toolchain install 1.99.0 --profile minimal
 
+      - name: Verify IPA packaging
+        run: python3 .github/scripts/test_package_ipa.py
+
       - name: Cache native device library
         if: ${{ inputs.clean != true }}
         uses: actions/cache@v4
