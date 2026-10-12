@@ -12,7 +12,7 @@ struct DeviceConnectionSettingsView: View {
             }
             .disabled(manager.isBusy || InstallSession.shared.isActive)
         } footer: {
-            Text("Built-in Connection manages a local VPN inside Ksign. Creating a pairing on this device requires iOS 27 or later and approval in Settings. The VPN requires a compatible signing profile and may replace another active VPN.")
+            Text("Built-in Connection manages a temporary local VPN inside Ksign and disables it when the installation workflow ends. Creating a pairing on this device requires iOS 27 or later and approval in Settings. The VPN requires a compatible signing profile and may replace another active VPN. You may need to reconnect your usual VPN afterward.")
         }
         if manager.mode == .manual {
             TunnelView()
@@ -56,6 +56,12 @@ struct DeviceConnectionSetupView: View {
                     ProgressView("Connecting to this device…")
                     Text("Allow Ksign to add its VPN configuration if iOS asks.").font(.footnote)
                     Button("Cancel Setup", role: .cancel) { manager.cancelSetup() }
+                case .disconnecting:
+                    ProgressView("Disconnecting installation VPN…")
+                case .cleanupFailed(let message):
+                    Text(message).font(.callout)
+                    Button("Disconnect VPN") { manager.retryDisconnect() }
+                        .disabled(manager.isBusy)
                 case .failed(let message):
                     Text(message).font(.callout)
                     Button("Retry Setup") { Task { await manager.setUp() } }
@@ -65,7 +71,7 @@ struct DeviceConnectionSetupView: View {
                     Label("Connected", systemImage: "checkmark.circle")
                 case .configured:
                     Label("Setup complete", systemImage: "checkmark.circle")
-                    Text("Ksign will reconnect automatically when you install apps.").font(.footnote)
+                    Text("Ksign's temporary VPN is off. It will reconnect automatically when you install apps. If you use another VPN, reconnect it in that app or iOS VPN Settings.").font(.footnote)
                 case .idle:
                     Text("Ksign connects automatically when you install apps. You can also set up and check the connection now.")
                     Button("Set Up Connection") { Task { await manager.setUp() } }

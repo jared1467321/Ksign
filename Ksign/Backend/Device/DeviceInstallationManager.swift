@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import IDeviceSwift
+import UIKit
 
 enum DeviceConnectionMode: String, CaseIterable, Identifiable {
     case builtIn, manual
@@ -11,7 +12,7 @@ enum DeviceConnectionMode: String, CaseIterable, Identifiable {
 @MainActor
 final class DeviceInstallationManager: ObservableObject {
     static let shared = DeviceInstallationManager()
-    enum Phase: Equatable { case idle, connecting, pairing, ready, configured, failed(String) }
+    enum Phase: Equatable { case idle, connecting, pairing, ready, disconnecting, configured, failed(String), cleanupFailed(String) }
     @Published private(set) var phase: Phase = .idle
     @Published var mode: DeviceConnectionMode {
         didSet { UserDefaults.standard.set(mode.rawValue, forKey: "Ksign.deviceConnectionMode") }
@@ -40,9 +41,9 @@ final class DeviceInstallationManager: ObservableObject {
             .appendingPathComponent("pairingFile.plist").path
     }
 
-    var isBusy: Bool { pendingOperations > 0 }
+    var isBusy: Bool { pendingOperations > 0 || cleanupTask != nil }
     var showsSetup: Bool {
-        switch phase { case .connecting, .pairing, .failed: return true; default: return false }
+        switch phase { case .connecting, .pairing, .disconnecting, .failed, .cleanupFailed: return true; default: return false }
     }
 
     func retainWorkflow(_ id: UUID) { workflows.insert(id) }
@@ -64,10 +65,19 @@ final class DeviceInstallationManager: ObservableObject {
         if let cleanupTask { await cleanupTask.value }
         await HeartbeatManager.shared.resetInstallationConnection()
         HeartbeatManager.configurePairingPath(nil)
-        vpn.disconnectIfOwned()
         configuredMode = nil
-        do { try DevicePairingStore.reset(); clearSetupFailure(); phase = .idle }
+        do {
+            try await vpn.disconnectIfOwned()
+            try DevicePairingStore.reset()
+            clearSetupFailure()
+            phase = .idle
+        }
         catch { phase = .failed(error.localizedDescription) }
+    }
+
+    func retryDisconnect() {
+        guard pendingOperations == 0, workflows.isEmpty else { return }
+        cleanUpIfIdle()
     }
 
     func install(at url: URL, viewModel: InstallerStatusViewModel, suspend: Bool,
@@ -142,7 +152,7 @@ final class DeviceInstallationManager: ObservableObject {
                     HeartbeatManager.configurePairingPath(nil)
                 }
             } else {
-                vpn.disconnectIfOwned()
+                try await vpn.disconnectIfOwned()
                 HeartbeatManager.configurePairingPath(nil)
                 guard FileManager.default.fileExists(atPath: Self.legacyPairingPath) else {
                     throw DeviceSetupError("Import a pairing file and connect your local VPN in Manual Setup, or choose Built-in Connection on a supported device.")
@@ -166,13 +176,28 @@ final class DeviceInstallationManager: ObservableObject {
     private func cleanUpIfIdle() {
         guard pendingOperations == 0, workflows.isEmpty, cleanupTask == nil else { return }
         cleanupTask = Task { @MainActor in
+            let previousPhase = self.phase
+            if self.vpn.needsDisconnection { self.phase = .disconnecting }
+            // Give the asynchronous stop/preferences save time to complete if
+            // the user leaves Ksign immediately after the last app installs.
+            let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Disconnect installation VPN")
+            defer {
+                if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
+                self.cleanupTask = nil
+            }
             await HeartbeatManager.shared.resetInstallationConnection()
             self.configuredMode = nil
             HeartbeatManager.configurePairingPath(nil)
             DevicePairingStore.removeWorkingCopy()
-            self.vpn.disconnectIfOwned()
-            if case .ready = self.phase { self.phase = .configured }
-            self.cleanupTask = nil
+            do {
+                try await self.vpn.disconnectIfOwned()
+                switch previousPhase {
+                case .ready, .configured, .cleanupFailed, .disconnecting: self.phase = .configured
+                default: self.phase = previousPhase
+                }
+            } catch {
+                self.phase = .cleanupFailed("Ksign could not fully disable its installation VPN. Tap Disconnect VPN to retry, or stop it in iOS VPN Settings.\n\n\(error.localizedDescription)")
+            }
         }
     }
 }

@@ -36,8 +36,17 @@ recreated by the scripts; the submodule commit is unchanged.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
 - When the workflow ends, Ksign removes the protected temporary pairing file
-  and stops a VPN connection it started. It leaves an already connected VPN
-  alone. A new VPN connection may replace another active VPN.
+  and waits for its installation VPN to disconnect, then disables its saved
+  profile and Connect On Demand. The profile is kept for the next workflow;
+  Ksign re-enables it automatically. An existing Ksign installation connection
+  is also adopted and stopped when the workflow ends. Cleanup continues after
+  cancellation, and a failed disconnect has an explicit retry button.
+- A new VPN connection may replace another active VPN. Ksign cannot enumerate
+  or restart VPN configurations owned by other apps using the public API:
+  https://developer.apple.com/documentation/networkextension/netunnelprovidermanager/loadallfrompreferences(completionhandler:)
+  Disabling Ksign's profile does not guarantee restoration of the previous VPN.
+  Reconnect it in its app or iOS VPN Settings. An app-specific reconnect action
+  could support an optional handoff, but must be evaluated for that VPN app.
 - **Forget Built-in Pairing** removes Ksign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
 
@@ -47,8 +56,10 @@ service operated by Ksign is required for direct installation.
 
 ## Verification status
 
-The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
-device testing are still required. Verify first-run consent/PIN, relaunch and
+The Rust pairing cancellation test has passed on Linux. The user reported a
+successful Xcode build and device installation after the packaging permission
+fix. The asynchronous disconnect/profile-disable update still needs a new
+Xcode build and device testing. Verify first-run consent/PIN, relaunch and
 automatic reconnect, a multi-app install, cancellation during setup/upload,
 retry after a connection failure, self-update last, and the existing Server,
 Manual Setup, signing, and export paths on a real device before release.
