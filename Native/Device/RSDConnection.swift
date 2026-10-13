@@ -67,6 +67,18 @@ extension HeartbeatManager {
         // Use the path directly: pairingFile() also acquires connectionLock.
         let path = Self.privatePairingPath ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("pairingFile.plist").path
+        let connection = try makeRSDConnection(pairingPath: path)
+        Self.connection = connection
+        return connection
+    }
+
+    // Never share an adapter/handshake between concurrent install attempts.
+    // The caller creates, uses and releases this lease on its own native thread.
+    internal func makeInstallationRSDConnection() throws -> RSDConnection {
+        try makeRSDConnection(pairingPath: Self.pairingFile())
+    }
+
+    private func makeRSDConnection(pairingPath path: String) throws -> RSDConnection {
         var pairing: OpaquePointer?
         if let error = rp_pairing_file_read(path, &pairing) {
             defer { idevice_error_free(error) }
@@ -96,8 +108,6 @@ extension HeartbeatManager {
             if let handshake { rsd_handshake_free(handshake) }
             throw IDeviceSwiftError(message: "The device did not provide an installation connection.")
         }
-        let connection = RSDConnection(adapter: adapter, handshake: handshake)
-        Self.connection = connection
-        return connection
+        return RSDConnection(adapter: adapter, handshake: handshake)
     }
 }

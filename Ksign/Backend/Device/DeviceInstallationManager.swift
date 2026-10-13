@@ -30,6 +30,10 @@ final class DeviceInstallationManager: ObservableObject {
     private var operations: [UUID: Task<Void, Error>] = [:]
     private var workflows: Set<UUID> = []
     private var cleanupTask: Task<Void, Never>?
+    private var activeInstallations: Set<UUID> = []
+    private var installingBundles: [String: UUID] = [:]
+    private var exclusiveInstallation: UUID?
+    private var needsConnectionRecovery = false
 
     init(vpn: LocalDeviceVPN? = nil, defaults: UserDefaults = .standard,
          legacyPairingExists: @escaping @MainActor () -> Bool = {
@@ -98,27 +102,59 @@ final class DeviceInstallationManager: ObservableObject {
     }
 
     func install(at url: URL, viewModel: InstallerStatusViewModel, suspend: Bool,
-                 mode: DeviceConnectionMode, isCurrent: @escaping () -> Bool = { true }) async throws {
-        try await enqueue {
+                 mode: DeviceConnectionMode, bundleIdentifier: String? = nil,
+                 isCurrent: @escaping () -> Bool = { true }) async throws {
+        let id = UUID()
+        pendingOperations += 1
+        defer {
+            activeInstallations.remove(id)
+            if let bundleIdentifier, installingBundles[bundleIdentifier] == id {
+                installingBundles[bundleIdentifier] = nil
+            }
+            if exclusiveInstallation == id { exclusiveInstallation = nil }
+            pendingOperations -= 1
+            cleanUpIfIdle()
+        }
+        // Serialize preparation and reservation only. Once admitted, each proxy
+        // owns its connection and can upload/install alongside the other jobs.
+        try await enqueue(countsOperation: false) {
+            while self.exclusiveInstallation != nil ||
+                bundleIdentifier.map({ self.installingBundles[$0] != nil }) == true ||
+                (!self.activeInstallations.isEmpty &&
+                (suspend || self.needsConnectionRecovery || self.configuredMode != mode ||
+                 (mode == .builtIn && !self.vpn.isConnected))) {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
             try Task.checkCancellation()
             guard isCurrent() else { throw CancellationError() }
+            if self.needsConnectionRecovery {
+                self.configuredMode = nil
+                self.needsConnectionRecovery = false
+            }
             try await self.prepare(mode)
             try Task.checkCancellation()
-            do {
-                let proxy = InstallationProxy(viewModel: viewModel)
-                try await proxy.install(at: url, suspend: suspend, isCurrent: isCurrent)
-            } catch {
-                // The next app can reconnect, but never automatically reinstall
-                // an IPA whose commit may already have reached the device.
-                await HeartbeatManager.shared.resetInstallationConnection()
-                self.configuredMode = nil
-                throw error
+            guard isCurrent() else { throw CancellationError() }
+            self.activeInstallations.insert(id)
+            if let bundleIdentifier { self.installingBundles[bundleIdentifier] = id }
+            if suspend { self.exclusiveInstallation = id }
+        }
+        do {
+            try Task.checkCancellation()
+            let proxy = InstallationProxy(viewModel: viewModel)
+            try await proxy.install(at: url, suspend: suspend, isCurrent: isCurrent)
+        } catch {
+            // A failed attempt must not reset the VPN beneath other installs.
+            // The next preparation recovers only after all active leases drain;
+            // never replay an IPA whose commit may already have reached iOS.
+            if !(error is CancellationError) {
+                needsConnectionRecovery = true
             }
+            throw error
         }
     }
 
-    private func enqueue(_ body: @escaping () async throws -> Void) async throws {
-        pendingOperations += 1
+    private func enqueue(countsOperation: Bool = true, _ body: @escaping () async throws -> Void) async throws {
+        if countsOperation { pendingOperations += 1 }
         let id = UUID()
         let previous = tail
         let operation = Task { @MainActor in
@@ -132,12 +168,12 @@ final class DeviceInstallationManager: ObservableObject {
         operations[id] = operation
         let completion = Task { _ = await operation.result }
         tail = completion
-        // Cancellation is forwarded, but we await real native completion before
-        // advancing the queue. Dismissing a row cannot overlap two native writes.
+        // Preparation is shared by the admitted installs. Cancelling one waiter
+        // must not cancel another waiter's preparation or release its lease.
         defer {
             operations[id] = nil
-            pendingOperations -= 1
-            if pendingOperations == 0 { tail = nil; activeOperation = nil }
+            if countsOperation { pendingOperations -= 1 }
+            if operations.isEmpty { tail = nil; activeOperation = nil }
             cleanUpIfIdle()
         }
         // Setup is only started by the head of the queue.
@@ -243,6 +279,7 @@ final class DeviceInstallationManager: ObservableObject {
         cleanupTask = Task { @MainActor in
             await HeartbeatManager.shared.resetInstallationConnection()
             self.configuredMode = nil
+            self.needsConnectionRecovery = false
             HeartbeatManager.configurePairingPath(nil)
             DevicePairingStore.removeWorkingCopy()
             self.vpn.disconnectIfOwned()

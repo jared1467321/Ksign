@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Apply Ksign's reviewed overlays to the pinned IDeviceKit submodule.
 
-Existing memory-mapped uploads and buffer-lifetime fixes are included in the new
-InstallationProxy. Unknown inputs fail before any writes. Edit Native/Device,
+Bounded uploads and buffer-lifetime fixes are included in InstallationProxy.
+Unknown inputs fail before any writes. Edit Native/Device,
 then rerun this script to refresh generated files for local and CI builds.
 """
 import argparse

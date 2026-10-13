@@ -11,13 +11,13 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     public init(viewModel: InstallerStatusViewModel) { self.viewModel = viewModel }
 
     // Each proxy is one attempt. Cancellation waits for any native call already
-    // in progress to return before releasing resources or admitting another IPA.
+    // in progress to return before releasing resources and its admission slot.
     public func install(at url: URL, suspend: Bool = false,
                         isCurrent: @escaping () -> Bool = { true }) async throws {
         self.isCurrent = isCurrent
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            try await IDeviceInstallationWorker.shared.perform { [self] in
+            try await IDeviceInstallationWorker.performInstallation { [self] in
                 try cancellation.check()
                 try installSynchronously(at: url, suspend: suspend)
             }
@@ -51,10 +51,13 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         guard FileManager.default.fileExists(atPath: HeartbeatManager.pairingFile()) else {
             throw IDeviceSwiftError(message: "Pair this device in Installation settings before installing.")
         }
-        // A strong lease keeps the adapter alive even if another service requests
-        // a reconnect. Setup is protected by a lock; in-progress is never ready.
-        let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
+        // Each concurrent attempt owns all of its native handles, including the
+        // tunnel. They are created and destroyed on this attempt's worker thread.
+        let connection = heartbeat.isRsd ? try heartbeat.makeInstallationRSDConnection() : nil
         defer { withExtendedLifetime(connection) {} }
+        let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
+        defer { idevice_provider_free(provider) }
+        try checkCancellation()
         var afc: OpaquePointer?
         var proxy: OpaquePointer?
         var file: OpaquePointer?
@@ -68,9 +71,6 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         if let connection {
             try check(afc_client_connect_rsd(connection.adapter, connection.handshake, &afc))
         } else {
-            guard heartbeat.checkSocketConnection().isConnected, let provider = heartbeat.provider else {
-                throw IDeviceSwiftError(message: "The device connection is unavailable. Connect your local VPN and restart the heartbeat.")
-            }
             try check(afc_client_connect(provider, &afc))
         }
         // PublicStaging normally exists. Ignore only AFC's OBJECT_EXISTS status.
@@ -81,18 +81,29 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         let stagingPath = "/PublicStaging/\(UUID().uuidString).ipa"
         remotePath = stagingPath
         try check(afc_file_open(afc, stagingPath, AfcWrOnly, &file))
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        guard !data.isEmpty else { throw IDeviceSwiftError(message: "The IPA is empty.") }
+        // Bound resident upload memory per admitted job, including files for
+        // which Data.mappedIfSafe would fall back to loading the entire IPA.
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        let byteCount = try input.seekToEnd()
+        try input.seek(toOffset: 0)
+        guard byteCount > 0 else { throw IDeviceSwiftError(message: "The IPA is empty.") }
         update { $0.packageProgress = 1; $0.status = .sendingPayload }
-        var offset = 0
-        while offset < data.count {
+        var offset: UInt64 = 0
+        while offset < byteCount {
             try checkCancellation()
-            let size = min(1024 * 1024, data.count - offset)
-            try data.withUnsafeBytes { bytes in
-                try check(afc_file_write(file, bytes.baseAddress!.assumingMemoryBound(to: UInt8.self).advanced(by: offset), size))
+            let size = Int(min(1024 * 1024, byteCount - offset))
+            let written = try autoreleasepool { () throws -> Int in
+                guard let data = try input.read(upToCount: size), !data.isEmpty else {
+                    throw IDeviceSwiftError(message: "The IPA ended before its upload completed.")
+                }
+                try data.withUnsafeBytes { bytes in
+                    try check(afc_file_write(file, bytes.baseAddress!.assumingMemoryBound(to: UInt8.self), data.count))
+                }
+                return data.count
             }
-            offset += size
-            let progress = Double(offset) / Double(data.count)
+            offset += UInt64(written)
+            let progress = Double(offset) / Double(byteCount)
             update { $0.uploadProgress = progress }
         }
         let closeResult = afc_file_close(file)
@@ -102,7 +113,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         if let connection {
             try check(installation_proxy_connect_rsd(connection.adapter, connection.handshake, &proxy))
         } else {
-            try check(installation_proxy_connect(heartbeat.provider, &proxy))
+            try check(installation_proxy_connect(provider, &proxy))
         }
         update { $0.status = .installing }
         let context = Unmanaged.passUnretained(self).toOpaque()
@@ -111,6 +122,31 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         }
         try check(installation_proxy_install_with_callback(proxy, stagingPath, nil, Self.progressCallback, context))
         try checkCancellation()
+    }
+
+    private func makeLegacyProvider(_ heartbeat: HeartbeatManager) throws -> OpaquePointer {
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = heartbeat.port.bigEndian
+        guard inet_pton(AF_INET, heartbeat.ipAddress, &address.sin_addr) == 1,
+              let pairing = heartbeat.getPairing() else {
+            throw IDeviceSwiftError(message: "The device pairing or address is unavailable.")
+        }
+        var provider: OpaquePointer?
+        let error = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: idevice_sockaddr.self, capacity: 1) {
+                idevice_tcp_provider_new($0, pairing, "Ksign installation", &provider)
+            }
+        }
+        // The constructor consumes pairing on success; the address and label
+        // above are valid, so an error leaves that ownership with us.
+        if let error {
+            idevice_pairing_file_free(pairing)
+            try check(error)
+        }
+        guard let provider else { throw IDeviceSwiftError(message: "Could not create the device connection.") }
+        return provider
     }
 
     private static let progressCallback: @convention(c) (UInt64, UnsafeMutableRawPointer?) -> Void = { progress, context in

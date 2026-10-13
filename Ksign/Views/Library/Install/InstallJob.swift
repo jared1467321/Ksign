@@ -803,6 +803,7 @@ final class InstallJob: ObservableObject, Identifiable {
 		_packagingAttempt?.cancel()
 		let attempt = PackagingAttempt()
 		_packagingAttempt = attempt
+		if method == 1 { InstallQueueCoordinator.shared.beginDeviceWork(jobID) }
 
 		_packagingTask = Task.detached { [weak self] in
 			var handedOff = false
@@ -838,6 +839,7 @@ final class InstallJob: ObservableObject, Identifiable {
 							viewModel: viewModel,
 							suspend: app.identifier == Bundle.main.bundleIdentifier!,
 							mode: connectionMode,
+							bundleIdentifier: app.identifier,
 							isCurrent: { attempt.isCurrent }
 						)
 					}
@@ -886,6 +888,7 @@ final class InstallJob: ObservableObject, Identifiable {
 						try Task.checkCancellation()
 						try await DeviceInstallationManager.shared.install(at: packageURL, viewModel: viewModel,
 							suspend: app.identifier == Bundle.main.bundleIdentifier!, mode: connectionMode,
+							bundleIdentifier: app.identifier,
 							isCurrent: { attempt.isCurrent })
 					}
 				} catch let error as CancellationError {
@@ -903,7 +906,9 @@ final class InstallJob: ObservableObject, Identifiable {
 				)
 			}
 			await MainActor.run { [weak self] in
+				if method == 1 { InstallQueueCoordinator.shared.endDeviceWork(jobID) }
 				self?._packagingFinished(attempt, error: packagingError)
+				if self == nil { InstallQueueCoordinator.shared.release(jobID) }
 			}
 		}
 	}
@@ -924,7 +929,9 @@ final class InstallJob: ObservableObject, Identifiable {
 		} else if attempt.isCurrent, let error {
 			Logger.misc.error("Install failed for \(self.app.identifier ?? "?"): \(error.localizedDescription)")
 			viewModel.status = .broken(error)
-			HeartbeatManager.shared.start(true)
+			// Native connection recovery belongs to DeviceInstallationManager,
+			// which waits for the other concurrent attempts before reconnecting.
+			if !isDeviceInstall { HeartbeatManager.shared.start(true) }
 		}
 	}
 
@@ -1128,6 +1135,8 @@ final class InstallQueueCoordinator {
 	// once. Tracking identity makes release/claim idempotent and also gives the
 	// adaptive learner an exact count of expensive build jobs currently alive.
 	private var _holders: Set<UUID> = []
+	private var _deviceWorkers: Set<UUID> = []
+	private var _deferredReleases: Set<UUID> = []
 	private var _isPaused = false
 
 	private init() {
@@ -1138,7 +1147,7 @@ final class InstallQueueCoordinator {
 
 	private var _usesAdaptiveMemoryAdmission: Bool {
 		// The ordinary install path is intentionally capped at 3 already. The
-		// adaptive ramp exists for the higher-concurrency batch builder, where 5
+		// adaptive ramp covers server batch builds and native installs, where 5
 		// remains the desired ceiling when memory permits it.
 		_configuredMaxConcurrent > 3
 	}
@@ -1199,7 +1208,22 @@ final class InstallQueueCoordinator {
 		}
 	}
 
+	// Native cancellation is cooperative: a synchronous install may still be
+	// using memory/handles after its row disappears. Keep counting that work.
+	func beginDeviceWork(_ id: UUID) {
+		_deviceWorkers.insert(id)
+	}
+
+	func endDeviceWork(_ id: UUID) {
+		_deviceWorkers.remove(id)
+		if _deferredReleases.remove(id) != nil { release(id) }
+	}
+
 	func release(_ id: UUID) {
+		if _deviceWorkers.contains(id) {
+			_deferredReleases.insert(id)
+			return
+		}
 		guard _holders.remove(id) != nil else { return }
 		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 
@@ -1617,7 +1641,7 @@ final class InstallQueueCoordinator {
 	// on the next acquisition attempt instead of wedging the queue indefinitely.
 	private func _reclaimOrphans() {
 		let live = Set(InstallSession.shared.jobs.map { $0.id })
-		let orphaned = _holders.subtracting(live)
+		let orphaned = _holders.subtracting(live).subtracting(_deviceWorkers)
 		guard !orphaned.isEmpty else { return }
 
 		_holders.subtract(orphaned)

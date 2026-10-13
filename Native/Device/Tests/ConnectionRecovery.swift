@@ -80,13 +80,19 @@ enum DevicePairingStore {
     }
 }
 final class InstallerStatusViewModel {}
-final class InstallationProxy {
+@MainActor final class InstallationProxy {
     static var calls = 0
     static var failure: Error?
+    static var holdInstalls = false
+    static var pending: [String: CheckedContinuation<Void, Error>] = [:]
     init(viewModel: InstallerStatusViewModel) {}
     func install(at url: URL, suspend: Bool, isCurrent: @escaping () -> Bool) async throws {
         Self.calls += 1
         if let failure = Self.failure { throw failure }
+        if Self.holdInstalls {
+            try await withCheckedThrowingContinuation { Self.pending[url.lastPathComponent] = $0 }
+        }
+        try Task.checkCancellation()
     }
 }
 
@@ -105,6 +111,8 @@ final class InstallationProxy {
         HeartbeatManager.shared.attempts = []
         InstallationProxy.calls = 0
         InstallationProxy.failure = nil
+        precondition(InstallationProxy.pending.isEmpty)
+        InstallationProxy.holdInstalls = false
         let manager = NETunnelProviderManager()
         let config = NETunnelProviderProtocol()
         config.providerBundleIdentifier = "test.ksign.tunnel"
@@ -268,7 +276,9 @@ final class InstallationProxy {
         expect(DevicePairingService.shared.calls == 2, "Retry Setup should allow a new pairing attempt")
         expect(HeartbeatManager.shared.attempts.first! == "/pairing/replacement.plist", "Retry Setup still avoids forgotten pairing")
 
-        defaults.removePersistentDomain(forName: "Ksign.ConnectionRecoveryTests")
         print("Passed 16 device connection recovery scenarios")
+        await settle()
+        try await runConcurrencyTests()
+        defaults.removePersistentDomain(forName: "Ksign.ConnectionRecoveryTests")
     }
 }

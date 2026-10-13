@@ -7,6 +7,21 @@ final class IDeviceInstallationWorker {
     private let condition = NSCondition()
     private var operations: [() -> Void] = []
 
+    // Admission is bounded by InstallQueueCoordinator. Each attempt owns its
+    // connection and runs its entire native lifetime on one finite-lived thread.
+    // The shared worker remains available for serialized connection setup.
+    static func performInstallation<T>(_ operation: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            let thread = Thread {
+                let result = autoreleasepool { Result(catching: operation) }
+                continuation.resume(with: result)
+            }
+            thread.name = "Ksign device install attempt"
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+    }
+
     private init() {
         let thread = Thread { [self] in
             while true {

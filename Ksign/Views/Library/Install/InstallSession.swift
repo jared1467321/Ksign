@@ -124,8 +124,8 @@ final class InstallSession: ObservableObject {
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
-		// into one and runs the group concurrently. Device installs run serially;
-		// the external server retains the ordinary concurrency limit.
+		// into one and runs the group concurrently. Device installs share the
+		// adaptive build ceiling; external server installs retain their limit.
 		if jobs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.reset()
 
@@ -151,7 +151,7 @@ final class InstallSession: ObservableObject {
 			// while the pool fills, so a 100-app manifest is still built a few at a
 			// time — and a stuck install can't wedge the queue, because it isn't
 			// holding a slot.
-			InstallQueueCoordinator.shared.setMaxConcurrent(_willBatch ? _batchBuildConcurrency : (isDeviceInstall ? 1 : 3))
+			InstallQueueCoordinator.shared.setMaxConcurrent((_willBatch || isDeviceInstall) ? _batchBuildConcurrency : 3)
 		}
 
 		// Replacing the running Ksign app must be the last item in this selection.
@@ -210,8 +210,8 @@ final class InstallSession: ObservableObject {
 	// MARK: - Finishing
 
 	// The coordinator polls for admission rather than maintaining a FIFO. Gate
-	// device jobs explicitly so they keep selection order and a waiting Ksign
-	// update also follows apps added to the workflow later.
+	// device jobs so queued apps enter in selection order without waiting for
+	// earlier running apps. Ksign's own update remains exclusive and last.
 	func mayStartDeviceJob(_ id: UUID) -> Bool {
 		guard let index = jobs.firstIndex(where: { $0.id == id }) else { return false }
 		let job = jobs[index]
@@ -220,8 +220,11 @@ final class InstallSession: ObservableObject {
 			candidate.isDeviceInstall && candidate.id != id &&
 			candidate.phase != .completed && candidate.phase != .failed
 		}
-		if job.isSelfUpdate { return !jobs.contains(where: unfinished) }
-		return !jobs.prefix(index).contains { !$0.isSelfUpdate && unfinished($0) }
+		if job.isSelfUpdate {
+			return !jobs.contains(where: unfinished) && InstallQueueCoordinator.shared.activeCount == 0
+		}
+		if jobs.contains(where: { $0.isSelfUpdate && $0.phase == .running }) { return false }
+		return !jobs.prefix(index).contains { !$0.isSelfUpdate && $0.phase == .queued && unfinished($0) }
 	}
 
 	func jobDidFinish(_ job: InstallJob) {
