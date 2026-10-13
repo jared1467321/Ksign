@@ -79,6 +79,9 @@ struct ExtendedTabbarView: View {
 		}
 		.tabViewStyle(.sidebarAdaptable)
 		.tabViewCustomization($customization)
+		.onReceive(InstallSession.shared.$installedSelectionRequest) { request in
+			if request != nil { _selectedTab = TabEnum.library.rawValue }
+		}
 		.sheet(isPresented: $_isAddingPresenting) {
 			SourcesAddView()
 				.presentationDetents([.medium])

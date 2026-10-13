@@ -139,6 +139,7 @@ struct LibraryView: View {
 	// MARK: Edit Mode
     @State private var _isEditMode: EditMode = .inactive
 	@State private var _selectedApps: Set<String> = []
+    @State private var _pendingInstalledSelection: InstallSession.InstalledAppsSelectionRequest?
 	
 	// Not @State-observed for a value change; it is only ever read from inside
 	// button actions, so it never needs to invalidate the view.
@@ -411,6 +412,20 @@ struct LibraryView: View {
 				// sheet dismissing at the same moment.
 				InstallSession.shared.start(apps: newest)
 			}
+            .onReceive(InstallSession.shared.$installedSelectionRequest) { request in
+                guard let request else { return }
+                // @Published delivers before storing its new value. Consume on
+                // the next actor turn so clearing this request takes effect.
+                Task { @MainActor in
+                    guard InstallSession.shared.installedSelectionRequest?.id == request.id else { return }
+                    _receiveInstalledSelection(request)
+                }
+            }
+            .onAppear {
+                if let request = InstallSession.shared.installedSelectionRequest {
+                    _receiveInstalledSelection(request)
+                }
+            }
         }
         .onChange(of: _isEditMode) { state in
             // Clear synchronously and without animation. Leaving edit mode
@@ -423,6 +438,13 @@ struct LibraryView: View {
             }
         }
         .onChange(of: _selectedTab) { _ in
+            // Switching to Signed normally clears selection. Apply the pending
+            // install result after that switch so the new selection survives.
+            if _selectedTab == 1, let request = _pendingInstalledSelection {
+                _pendingInstalledSelection = nil
+                _applyInstalledSelection(request)
+                return
+            }
             // Drop out of edit mode when the tab changes. The trailing buttons
             // differ per tab (Sign + Sign & Install on Downloaded, Install on
             // Signed), so switching tabs while editing made the toolbar swap its
@@ -442,6 +464,25 @@ struct LibraryView: View {
 }
 
 extension LibraryView {
+    private func _receiveInstalledSelection(_ request: InstallSession.InstalledAppsSelectionRequest) {
+        guard _selectedTab == 1 else {
+            _pendingInstalledSelection = request
+            _selectedTab = 1
+            return
+        }
+        // An onAppear can follow the publisher before onChange handles the tab
+        // switch. Let that handler apply the selection after its normal reset.
+        guard _pendingInstalledSelection == nil else { return }
+        _applyInstalledSelection(request)
+    }
+
+    private func _applyInstalledSelection(_ request: InstallSession.InstalledAppsSelectionRequest) {
+        _searchText = ""
+        _selectedApps = request.appIDs.intersection(_signedApps.compactMap { $0.uuid })
+        _isEditMode = _selectedApps.isEmpty ? .inactive : .active
+        InstallSession.shared.consumeInstalledSelection(request.id)
+    }
+
     // UUIDs of the apps in the currently-visible tab (respects the search
     // filter). Select All operates only on these, so it stays scoped to the
     // Downloaded tab or the Signed tab depending on where you are.

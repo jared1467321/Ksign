@@ -31,6 +31,18 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
 
+	// Keep successful library IDs after their rows retire. Bundle identifiers
+	// aren't sufficient: different signed copies can share the same bundle ID.
+	@Published private(set) var installedAppIDs: Set<String> = []
+	@Published private(set) var isFinished = false
+	private var _completedJobIDs: Set<UUID> = []
+
+	struct InstalledAppsSelectionRequest: Identifiable {
+		let id = UUID()
+		let appIDs: Set<String>
+	}
+	@Published private(set) var installedSelectionRequest: InstalledAppsSelectionRequest?
+
 	// Whether the drawer sheet is on screen. Dismissing it is now purely
 	// cosmetic — the jobs live here, so nothing stops and nothing restarts
 	// when it closes. That's what lets it be a plain sheet again.
@@ -97,7 +109,7 @@ final class InstallSession: ObservableObject {
 			queue: .main
 		) { [weak self] _ in
 			Task { @MainActor in
-				guard let self, self.isActive else { return }
+				guard let self, self.isDrawerAvailable else { return }
 				self._recomputeProgress()
 				self._startTicking()
 			}
@@ -111,6 +123,7 @@ final class InstallSession: ObservableObject {
 	}
 
 	var isActive: Bool { !jobs.isEmpty }
+	var isDrawerAvailable: Bool { isActive || isFinished }
 
 	// MARK: - Starting
 
@@ -128,6 +141,8 @@ final class InstallSession: ObservableObject {
 		// adaptive build ceiling; external server installs retain their limit.
 		if jobs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.reset()
+			installedAppIDs.removeAll()
+			_completedJobIDs.removeAll()
 
 			// Cleared here rather than at the end of the last batch. Zeroing
 			// these on finish would fire `didSet` and wipe the final "12 of 12"
@@ -153,6 +168,7 @@ final class InstallSession: ObservableObject {
 			// holding a slot.
 			InstallQueueCoordinator.shared.setMaxConcurrent((_willBatch || isDeviceInstall) ? _batchBuildConcurrency : 3)
 		}
+		isFinished = false
 
 		// Replacing the running Ksign app must be the last item in this selection.
 		let orderedApps = isDeviceInstall
@@ -228,6 +244,12 @@ final class InstallSession: ObservableObject {
 	}
 
 	func jobDidFinish(_ job: InstallJob) {
+		guard jobs.contains(where: { $0 === job }) else { return }
+		if job.phase == .completed {
+			guard _completedJobIDs.insert(job.id).inserted else { return }
+			if let uuid = job.app.uuid { installedAppIDs.insert(uuid) }
+			completedCount += 1
+		}
 		if _willBatch {
 			// Once every app in the current group is done, its shared server can
 			// shut down — before the next group brings its own up.
@@ -250,7 +272,6 @@ final class InstallSession: ObservableObject {
 		// Keep the foreground drawer's aggregate bar current. Live Activity
 		// completion is reported independently from the job's terminal callback.
 		_recomputeProgress()
-		completedCount += 1
 
 		_releaseIfNothingRunning()
 
@@ -308,6 +329,10 @@ final class InstallSession: ObservableObject {
 	}
 
 	func retry(_ job: InstallJob) {
+		guard jobs.contains(where: { $0 === job }), job.phase != .completed else { return }
+		isFinished = false
+		BackgroundTaskManager.shared.claim(.bulkInstalls)
+		_startTicking()
 		if job.isDeviceInstall {
 			DeviceInstallationManager.shared.clearSetupFailure()
 			DeviceInstallationManager.shared.retainWorkflow(_deviceWorkflowID)
@@ -333,6 +358,7 @@ final class InstallSession: ObservableObject {
 	}
 
 	func togglePause() {
+		guard !isFinished else { return }
 		isPaused.toggle()
 		InstallQueueCoordinator.shared.setPaused(isPaused)
 		BulkInstallLiveActivityReporter.shared.setPaused(isPaused)
@@ -365,11 +391,33 @@ final class InstallSession: ObservableObject {
 
 	// How many jobs are sitting in the queue rather than installing.
 	var waitingCount: Int {
-		jobs.filter { $0.phase == .queued }.count
+		jobs.filter { $0.phase == .queued || ($0.phase == .running && $0.batchRole == .awaiting) }.count
 	}
 
-	// How many apps are actually being installed at this moment — the ones
-	// holding a queue slot, not the ones lined up behind it.
+	// Parked server packages are safe to discard. Builders, active manifests,
+	// solo installs, and native workers still cleaning up must drain first.
+	var hasWorkInProgress: Bool {
+		InstallQueueCoordinator.shared.activeCount > 0 || jobs.contains { $0.hasWorkInProgress }
+	}
+
+	var canCancelAndSelectInstalled: Bool {
+		(isPaused || isFinished) && !hasWorkInProgress
+	}
+
+	func cancelAndSelectInstalled() {
+		guard canCancelAndSelectInstalled else { return }
+		let request = InstalledAppsSelectionRequest(appIDs: installedAppIDs)
+		dismissAll()
+		installedSelectionRequest = request
+	}
+
+	func consumeInstalledSelection(_ id: UUID) {
+		guard installedSelectionRequest?.id == id else { return }
+		installedSelectionRequest = nil
+	}
+
+	// Apps still building/installing. Parked server packages are waiting for a
+	// manifest, so they mustn't appear to be active work while paused.
 	//
 	// Recomputed rather than stored, and `phase` lives on the job rather than
 	// here, so a queued job flipping to running doesn't republish this object
@@ -377,7 +425,7 @@ final class InstallSession: ObservableObject {
 	// `aggregateProgress` the whole time a batch is live, which redraws
 	// anything reading this. Worst case the count is 0.4s stale.
 	var runningCount: Int {
-		jobs.filter { $0.phase == .running }.count
+		jobs.filter { $0.phase == .running && $0.hasWorkInProgress }.count
 	}
 
 	// How many rows are still on the drawer. Deliberately not `totalCount`:
@@ -390,6 +438,8 @@ final class InstallSession: ObservableObject {
 	func dismissAll() {
 		for job in jobs { job.cancel() }
 		withAnimation(.easeInOut(duration: 0.25)) { jobs.removeAll() }
+		isFinished = false
+		installedAppIDs.removeAll()
 		_finishIfIdle(success: false)
 	}
 
@@ -402,12 +452,14 @@ final class InstallSession: ObservableObject {
 	// never called and the continued-processing task stayed owned indefinitely.
 	private func _releaseIfNothingRunning() {
 		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
+		isFinished = true
 		DeviceInstallationManager.shared.releaseWorkflow(_deviceWorkflowID)
 
 		_recomputeProgress()
 		BulkInstallLiveActivityReporter.shared.finish()
 		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase == .completed })
-		_stopTicking()
+		// Keep observing native cleanup until the selection action is safe.
+		if !hasWorkInProgress { _stopTicking() }
 	}
 
 	private func _finishIfIdle(success: Bool) {
@@ -420,7 +472,7 @@ final class InstallSession: ObservableObject {
 		BulkInstallLiveActivityReporter.shared.finish()
 		BackgroundTaskManager.shared.release(.bulkInstalls, success: success)
 
-		_stopTicking()
+		if !isFinished || !hasWorkInProgress { _stopTicking() }
 		webviewJob = nil
 
 		// Don't let a pause outlive the batch that was paused — otherwise the
@@ -434,7 +486,9 @@ final class InstallSession: ObservableObject {
 		_activeHostInstaller = nil
 		InstallQueueCoordinator.shared.setMaxConcurrent(3)
 
-		isDrawerPresented = false
+		// Leave the result available until the user selects installed apps or
+		// closes it. Otherwise the last retiring row takes the action with it.
+		if !isFinished { isDrawerPresented = false }
 
 		// The reporter already published its terminal snapshot above; the next
 		// `start(apps:)` clears it before seeding the next batch.
@@ -452,7 +506,7 @@ final class InstallSession: ObservableObject {
 	// manifest's worth of servers is alive — archiving all of them up front is
 	// what pinned the device. As apps finish, the next ones are released.
 	private func _admitBatchJobs() {
-		guard _willBatch else { return }
+		guard _willBatch, !isPaused else { return }
 		while _admittedActiveCount < _batchGroupSize,
 			  let next = jobs.first(where: { !$0.hasStarted }) {
 			next.start()
@@ -533,6 +587,10 @@ final class InstallSession: ObservableObject {
 		_tickTask = Task { @MainActor [weak self] in
 			while !Task.isCancelled {
 				self?._recomputeProgress()
+				if let self, self.isFinished, !self.hasWorkInProgress {
+					self._stopTicking()
+					break
+				}
 
 				try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
 				if self == nil { break }
@@ -795,10 +853,10 @@ final class BulkInstallLiveActivityReporter {
 					job.stage = .installing
 					job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
 				}
-			case .completed:
+			case .completed(.success):
 				job.stage = .completed
 				job.fraction = 1
-			case .broken:
+			case .completed(.failure), .broken:
 				job.stage = .failed
 				job.fraction = 1
 			}

@@ -25,5 +25,8 @@ struct TabbarView: View {
 					.tag(tab)
 			}
 		}
+		.onReceive(InstallSession.shared.$installedSelectionRequest) { request in
+			if request != nil { selectedTab = .library }
+		}
 	}
 }

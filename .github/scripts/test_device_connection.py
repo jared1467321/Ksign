@@ -13,6 +13,42 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def swift_block(source, declaration):
+    """Extract a whole production declaration/closure, including its body."""
+    start = source.index(declaration)
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
+
+
+def session_controls_source():
+    session = (ROOT / "Ksign/Views/Library/Install/InstallSession.swift").read_text()
+    jobs = (ROOT / "Ksign/Views/Library/Install/InstallJob.swift").read_text()
+    library = (ROOT / "Ksign/Views/Library/LibraryView.swift").read_text()
+    tests = (ROOT / "Native/Device/Tests/InstallSessionControls.swift").read_text()
+    job_methods = "\n".join(swift_block(jobs, declaration) for declaration in (
+        "var hasWorkInProgress: Bool",
+        "var isInFlightGroupMember: Bool",
+        "private func _handleStatus(",
+    ))
+    library_methods = "\n".join(swift_block(library, declaration) for declaration in (
+        "private func _receiveInstalledSelection(",
+        "private func _applyInstalledSelection(",
+    ))
+    tab_change = swift_block(library, ".onChange(of: _selectedTab)")
+    tab_body = tab_change[tab_change.index("{ _ in") + len("{ _ in"):-1]
+    # EditMode's UI-only convenience accessor is replaced with its equivalent.
+    tab_body = tab_body.replace("_isEditMode.isEditing", "_isEditMode == .active")
+    tests = tests.replace("// PRODUCTION_JOB_METHODS", job_methods)
+    tests = tests.replace("// PRODUCTION_LIBRARY_METHODS", library_methods)
+    tests = tests.replace("// PRODUCTION_TAB_CHANGE", tab_body)
+    return tests + "\n" + swift_block(session, "@MainActor\nfinal class InstallSession:")
+
+
 def queue_lifetime_source():
     jobs = (ROOT / "Ksign/Views/Library/Install/InstallJob.swift").read_text()
     marker = "@MainActor\nfinal class InstallQueueCoordinator"
@@ -52,6 +88,11 @@ def main():
         source = directory / "ConnectionRecovery.swift"
         source.write_text("\n".join(sources))
         executable = directory / "ConnectionRecoveryTests"
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        source.write_text(session_controls_source())
         subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
                         str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)

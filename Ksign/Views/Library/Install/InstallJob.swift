@@ -486,6 +486,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	// is one that's queued but hasn't been let go to build.
 	var hasStarted: Bool { _started }
 
+	var hasWorkInProgress: Bool {
+		_holdsSlot || _packagingTask != nil || isInFlightGroupMember ||
+			(phase == .running && batchRole == .none)
+	}
+
 	// True while this job is sitting at the install prompt. A member reads this
 	// on its host to tell whether the shared prompt has been accepted yet.
 	var isAtReady: Bool {
@@ -681,6 +686,9 @@ final class InstallJob: ObservableObject, Identifiable {
 	}
 
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
+		// Terminal statuses can arrive through more than one callback. Don't
+		// count them twice or let a late callback turn a success into a failure.
+		guard phase != .completed, phase != .failed else { return }
 		// Per-job ActivityKit *state* does not live here. Jobs forward primitive
 		// progress/status callbacks into one batch reporter, which derives a single
 		// aggregate snapshot; the controller then serializes/coalesces that snapshot.
@@ -732,7 +740,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			// Free our slot so the next queued install can begin.
 			_releaseSlotIfNeeded()
 
-			if case .completed = newStatus {
+			if case .completed(.success) = newStatus {
 				phase = .completed
 				// The payload has been transferred and installed, so the
 				// staged .ipa is dead weight. Failures deliberately keep

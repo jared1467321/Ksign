@@ -62,7 +62,12 @@ final class NativeWorkerBarrier {
         try await Task.sleep(nanoseconds: 250_000_000)
         precondition(queue.activeCount == 1 && !secondStarted,
                      "Cancelled native work must retain its slot until cleanup")
+        queue.setPaused(true)
         queue.endDeviceWork(first)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 0 && !secondStarted,
+                     "Paused queues must let active work finish without admitting a successor")
+        queue.setPaused(false)
         let acquiredSecond = await waiting.value
         precondition(acquiredSecond && queue.activeCount == 1)
 

@@ -32,9 +32,15 @@ recreated by the scripts; the submodule commit is unchanged.
   Keychain. Subsequent workflows reconnect automatically. The app does not
   open Safari or require a separate VPN app for this path.
 - Select multiple signed apps and install them together. Device installs run
-  serially, share a connection across the workflow, and report progress per app.
+  concurrently, share a connection across the workflow, and report progress per app.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
+- For both iDevice and Server installs, pause the install drawer to stop new
+  work and let current work finish. Then choose **Cancel Task & Select Installed**
+  to cancel the remaining queue and select successfully installed entries in
+  **Library → Signed Apps**. Use the library trash button to remove those signed
+  files; failed and unstarted entries remain for later. A completed queue also
+  offers **Select Installed Apps** until its result is closed or a new queue starts.
 - When the workflow ends, Ksign removes the protected temporary pairing file
   and stops a VPN connection it started. It leaves an already connected VPN
   alone. A new VPN connection may replace another active VPN.
@@ -64,7 +70,9 @@ The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and
 automatic reconnect, a multi-app install, cancellation during setup/upload,
 retry after a connection failure, self-update last, and the existing Server,
-Manual Setup, signing, and export paths on a real device before release.
+Manual Setup, signing, and export paths on a real device before release. Also
+verify pause/drain/resume and cancelling a partial queue from another tab:
+only successful signed entries should be selected, including retired rows.
 
 ## Source attribution
 

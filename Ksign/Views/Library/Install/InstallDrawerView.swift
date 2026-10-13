@@ -31,14 +31,14 @@ struct InstallDrawerView: View {
 		// lip — but clipping only changes what's *drawn*, not what receives
 		// touches, so the invisible remainder was swallowing every tab tap.
 		ZStack(alignment: .bottom) {
-			if session.isActive, !session.isDrawerPresented {
+			if session.isDrawerAvailable, !session.isDrawerPresented {
 				_pill
 					.padding(.bottom, _tabBarInset)
 					.transition(.move(edge: .bottom).combined(with: .opacity))
 			}
 		}
 		.animation(.easeInOut(duration: 0.25), value: session.isDrawerPresented)
-		.animation(.easeInOut(duration: 0.25), value: session.isActive)
+		.animation(.easeInOut(duration: 0.25), value: session.isDrawerAvailable)
 		.sheet(isPresented: $session.isDrawerPresented) {
 			InstallDrawerSheet()
 				.presentationDetents([.medium, .large])
@@ -117,6 +117,7 @@ struct InstallDrawerSheet: View {
 								.nbThemeForeground(session.isPaused ? .accent : .textSecondary)
 						}
 						.buttonStyle(.plain)
+						.accessibilityLabel(session.isPaused ? String.localized("Resume") : String.localized("Pause"))
 					}
 
 					if _isSettled {
@@ -128,6 +129,8 @@ struct InstallDrawerSheet: View {
 								.nbThemeForeground(.textSecondary)
 						}
 						.buttonStyle(.plain)
+						.accessibilityLabel(String.localized("Close"))
+						.disabled(session.hasWorkInProgress)
 					}
 				}
 
@@ -154,6 +157,31 @@ struct InstallDrawerSheet: View {
 
 						Spacer(minLength: 0)
 					}
+				}
+
+				Text("\(session.completedCount) of \(session.totalCount) installed")
+					.font(.caption.monospacedDigit())
+					.nbThemeForeground(.textSecondary)
+
+				if session.isPaused || _isSettled {
+					if session.hasWorkInProgress {
+						Text("Waiting for current work to finish…")
+							.font(.caption)
+							.nbThemeForeground(.textSecondary)
+					}
+
+					Button {
+						session.cancelAndSelectInstalled()
+					} label: {
+						Label(
+							_isSettled ? String.localized("Select Installed Apps") : String.localized("Cancel Task & Select Installed"),
+							systemImage: "checkmark.circle"
+						)
+						.frame(maxWidth: .infinity)
+					}
+					.buttonStyle(.bordered)
+					.nbThemeTint(.accent)
+					.disabled(!session.canCancelAndSelectInstalled)
 				}
 
 				// Only while paused, and only when there's a manifest to reset:
@@ -201,14 +229,18 @@ struct InstallDrawerSheet: View {
 		}
 	}
 
-	// True once nothing is still working — i.e. everything left failed. That's
-	// the only time offering a close button makes sense.
+	// Results remain available after successful rows retire, including when
+	// some apps failed and others installed successfully.
 	private var _isSettled: Bool {
-		!session.jobs.isEmpty && session.jobs.allSatisfy { $0.phase == .failed }
+		session.isFinished
 	}
 
 	private var _title: String {
-		if _isSettled { return .localized("Install Failed") }
+		if _isSettled {
+			return session.completedCount == session.totalCount
+				? .localized("Installed")
+				: .localized("Finished with Errors")
+		}
 		return session.isPaused
 			? .localized("Paused")
 			: .localized("Installing")
