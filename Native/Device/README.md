@@ -16,6 +16,15 @@ overlays before Xcode resolves the local package. To prepare an Xcode checkout
 without building the app, run `make native` first. Generated IDeviceKit edits are
 recreated by the scripts; the submodule commit is unchanged.
 
+The native framework cache uses the builder's own fingerprint: the pinned
+source manifest, Rust pairing bridge, native build script, and actual Xcode
+and Rust versions. Swift overlay, test, and documentation edits reuse it.
+The workflow also separates caches by runner OS and architecture. The first
+build with a new fingerprint compiles both native targets and saves the cache;
+later builds reuse it. Selecting **Ignore caches and build from scratch**
+still bypasses all caches. Run `python3 .github/scripts/test_native_cache.py`
+to verify invalidation and the cached build path without Xcode or Rust.
+
 ## Requirements and workflow
 
 - Ksign and its embedded tunnel must be signed with provisioning profiles that

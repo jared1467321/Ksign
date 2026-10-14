@@ -3,6 +3,7 @@
 
 Run before opening Xcode or resolving packages. --prepare-only is useful for
 Linux cargo tests; --archive accepts an already downloaded, hash-checked archive.
+--cache-key prints the native build fingerprint without preparing or building.
 """
 import argparse
 import hashlib
@@ -22,6 +23,16 @@ OUTPUT = ROOT / "IDeviceKit/.build/IDevice.xcframework"
 
 def run(*args, cwd=None, env=None):
     subprocess.run(args, cwd=cwd, env=env, check=True)
+
+
+def build_fingerprint():
+    """Use the same native inputs for the CI cache and the local build stamp."""
+    toolchain = json.loads((CONFIG / "source.json").read_text())["rust_toolchain"]
+    return hashlib.sha256((CONFIG / "source.json").read_bytes() +
+                          (CONFIG / "ksign_pairing.rs").read_bytes() +
+                          Path(__file__).read_bytes() +
+                          subprocess.check_output(["xcodebuild", "-version"]) +
+                          subprocess.check_output(["rustc", f"+{toolchain}", "--version"])).hexdigest()
 
 
 def prepare(archive=None):
@@ -76,17 +87,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--cache-key", action="store_true")
     args = parser.parse_args()
+    if args.cache_key:
+        print(build_fingerprint())
+        return
     source = prepare(args.archive)
     if args.prepare_only:
         print(source)
         return
     toolchain = json.loads((CONFIG / "source.json").read_text())["rust_toolchain"]
-    stamp = hashlib.sha256((CONFIG / "source.json").read_bytes() +
-                           (CONFIG / "ksign_pairing.rs").read_bytes() +
-                           Path(__file__).read_bytes() +
-                           subprocess.check_output(["xcodebuild", "-version"]) +
-                           subprocess.check_output(["rustc", f"+{toolchain}", "--version"])).hexdigest()
+    stamp = build_fingerprint()
     stamp_path = WORK / "built-stamp"
     if OUTPUT.exists() and stamp_path.exists() and stamp_path.read_text() == stamp:
         print("Using cached Ksign iDevice framework")

@@ -63,13 +63,28 @@ jobs:
           python-version: '3.13'
 
       - name: Install native toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal
+        run: |
+          NATIVE_RUST_TOOLCHAIN="$(python3 -c 'import json; print(json.load(open("Native/Device/source.json"))["rust_toolchain"])')"
+          rustup toolchain install "$NATIVE_RUST_TOOLCHAIN" --profile minimal
+
+      - name: Verify native cache fingerprint
+        run: python3 .github/scripts/test_native_cache.py
 
       - name: Verify IPA packaging
         run: python3 .github/scripts/test_package_ipa.py
 
       - name: Verify device connection recovery
         run: python3 .github/scripts/test_device_connection.py
+
+      # Match the builder's own stamp: pinned source, Rust bridge, build script,
+      # and actual Xcode/Rust versions. Swift overlays, tests and documentation
+      # must not force both native targets to rebuild.
+      - name: Identify native device cache
+        id: native_cache_key
+        if: ${{ inputs.clean != true }}
+        run: |
+          NATIVE_CACHE_KEY="$(python3 .github/scripts/build_device_native.py --cache-key)"
+          echo "key=$NATIVE_CACHE_KEY" >> "$GITHUB_OUTPUT"
 
       - name: Cache native device library
         if: ${{ inputs.clean != true }}
@@ -78,7 +93,7 @@ jobs:
           path: |
             .build/device-native
             IDeviceKit/.build/IDevice.xcframework
-          key: idevice-${{ runner.os }}-${{ hashFiles('Native/Device/**', '.github/scripts/build_device_native.py') }}
+          key: idevice-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native_cache_key.outputs.key }}
 
       - name: Build
         run: |
