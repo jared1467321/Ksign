@@ -19,6 +19,7 @@ final class DeviceInstallationManager: ObservableObject {
     }
     @Published private(set) var pendingOperations = 0
     private let vpn: LocalDeviceVPN
+    private let vpnReconnect: VPNReconnectCoordinator
     private let defaults: UserDefaults
     private let legacyPairingExists: @MainActor () -> Bool
     private let canCreatePairing: @MainActor () -> Bool
@@ -28,14 +29,15 @@ final class DeviceInstallationManager: ObservableObject {
     private var tail: Task<Void, Never>?
     private var activeOperation: Task<Void, Error>?
     private var operations: [UUID: Task<Void, Error>] = [:]
-    private var workflows: Set<UUID> = []
-    private var cleanupTask: Task<Void, Never>?
+    @Published private var workflows: Set<UUID> = []
+    @Published private var cleanupTask: Task<Void, Never>?
     private var activeInstallations: Set<UUID> = []
     private var installingBundles: [String: UUID] = [:]
     private var exclusiveInstallation: UUID?
     private var needsConnectionRecovery = false
 
     init(vpn: LocalDeviceVPN? = nil, defaults: UserDefaults = .standard,
+         vpnReconnect: VPNReconnectCoordinator? = nil,
          legacyPairingExists: @escaping @MainActor () -> Bool = {
              FileManager.default.fileExists(atPath: DeviceInstallationManager.legacyPairingPath)
          },
@@ -44,6 +46,7 @@ final class DeviceInstallationManager: ObservableObject {
              return false
          }) {
         self.vpn = vpn ?? LocalDeviceVPN()
+        self.vpnReconnect = vpnReconnect ?? .shared
         self.defaults = defaults
         self.legacyPairingExists = legacyPairingExists
         self.canCreatePairing = canCreatePairing
@@ -65,8 +68,17 @@ final class DeviceInstallationManager: ObservableObject {
         switch phase { case .connecting, .pairing, .failed: return true; default: return false }
     }
 
-    func retainWorkflow(_ id: UUID) { workflows.insert(id) }
+    func retainWorkflow(_ id: UUID) {
+        vpnReconnect.beginDeviceWork()
+        workflows.insert(id)
+    }
     func releaseWorkflow(_ id: UUID) { workflows.remove(id); cleanUpIfIdle() }
+    var canReconnectVPN: Bool { pendingOperations == 0 && workflows.isEmpty && cleanupTask == nil }
+
+    func testVPNReconnectShortcut() async {
+        guard canReconnectVPN else { return }
+        await vpnReconnect.testShortcut()
+    }
     func clearSetupFailure() {
         setupFailure = nil
         setupNotice = nil
@@ -86,6 +98,8 @@ final class DeviceInstallationManager: ObservableObject {
     func resetPairing() async {
         guard !isBusy, workflows.isEmpty else { return }
         if let cleanupTask { await cleanupTask.value }
+        vpnReconnect.beginDeviceWork()
+        defer { cleanUpIfIdle() }
         await HeartbeatManager.shared.resetInstallationConnection()
         HeartbeatManager.configurePairingPath(nil)
         vpn.disconnectIfOwned()
@@ -105,6 +119,7 @@ final class DeviceInstallationManager: ObservableObject {
                  mode: DeviceConnectionMode, bundleIdentifier: String? = nil,
                  isCurrent: @escaping () -> Bool = { true }) async throws {
         let id = UUID()
+        vpnReconnect.beginDeviceWork()
         pendingOperations += 1
         defer {
             activeInstallations.remove(id)
@@ -154,7 +169,10 @@ final class DeviceInstallationManager: ObservableObject {
     }
 
     private func enqueue(countsOperation: Bool = true, _ body: @escaping () async throws -> Void) async throws {
-        if countsOperation { pendingOperations += 1 }
+        if countsOperation {
+            vpnReconnect.beginDeviceWork()
+            pendingOperations += 1
+        }
         let id = UUID()
         let previous = tail
         let operation = Task { @MainActor in
@@ -282,8 +300,13 @@ final class DeviceInstallationManager: ObservableObject {
             self.needsConnectionRecovery = false
             HeartbeatManager.configurePairingPath(nil)
             DevicePairingStore.removeWorkingCopy()
-            self.vpn.disconnectIfOwned()
+            let restoreVPN = await self.vpn.finishSession()
             if case .ready = self.phase { self.phase = .configured }
+            // New work waits for cleanup but can arrive while the tunnel is
+            // stopping. Never reconnect another VPN underneath that work.
+            if self.pendingOperations == 0, self.workflows.isEmpty {
+                await self.vpnReconnect.deviceWorkFinished(restoreVPN: restoreVPN && self.mode == .builtIn)
+            }
             self.cleanupTask = nil
         }
     }

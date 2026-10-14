@@ -5,6 +5,9 @@ import NetworkExtension
 final class LocalDeviceVPN {
     private var manager: NETunnelProviderManager?
     private var startedByKsign = false
+    // Keep this through failure/cancellation cleanup so the final handoff can
+    // still restore the user's VPN after an unsuccessful installation.
+    private var restorationNeeded = false
     private let extensionIdentifier: @MainActor () -> String?
 
     init(extensionIdentifier: @escaping @MainActor () -> String? = { LocalDeviceVPN.extensionBundleIdentifier }) {
@@ -88,6 +91,7 @@ final class LocalDeviceVPN {
             if manager.connection.status != .connecting && manager.connection.status != .reasserting {
                 try manager.connection.startVPNTunnel()
                 startedByKsign = true
+                restorationNeeded = true
             }
             while manager.connection.status != .connected {
                 try Task.checkCancellation()
@@ -109,5 +113,20 @@ final class LocalDeviceVPN {
     func disconnectIfOwned() {
         if startedByKsign { manager?.connection.stopVPNTunnel() }
         startedByKsign = false
+    }
+
+    /// True only when this session started a tunnel and it has now stopped.
+    func finishSession() async -> Bool {
+        let shouldRestore = restorationNeeded
+        restorationNeeded = false
+        disconnectIfOwned()
+        guard shouldRestore, let manager else { return false }
+        let deadline = Date().addingTimeInterval(20)
+        while manager.connection.status != .disconnected && manager.connection.status != .invalid {
+            guard Date() < deadline else { return false }
+            do { try await Task.sleep(nanoseconds: 100_000_000) }
+            catch { return false }
+        }
+        return true
     }
 }

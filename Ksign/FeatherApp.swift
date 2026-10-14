@@ -11,9 +11,11 @@ import OSLog
 import IDeviceSwift
 import NimbleExtensions
 import NimbleViews
+import UserNotifications
 
 @main
 struct FeatherApp: App {
+	@Environment(\.scenePhase) private var scenePhase
 	@UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 	let heartbeat = HeartbeatManager.shared
 	@StateObject var downloadManager = DownloadManager.shared
@@ -62,6 +64,12 @@ struct FeatherApp: App {
 			.onAppear {
 				HalloweenAppearance.apply(refreshExistingViews: true)
 				if logsManager.isCapturing { logsManager.startCapture() }
+				Task { await VPNReconnectCoordinator.shared.appBecameActive() }
+			}
+			.onChange(of: scenePhase) { phase in
+				if phase == .active {
+					Task { await VPNReconnectCoordinator.shared.appBecameActive() }
+				}
 			}
 		}
 	}
@@ -98,7 +106,7 @@ struct FeatherApp: App {
 	
 }
 
-class AppDelegate: NSObject, UIApplicationDelegate {
+class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -107,6 +115,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // Before anything else: appearance proxies only affect views created
         // after they're set, so this has to run ahead of the first window.
         HalloweenAppearance.apply()
+        UNUserNotificationCenter.current().delegate = self
 
         DevicePairingService.registerBackgroundTask()
 
@@ -127,6 +136,28 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _downloadSSLCertificates()
 #endif
         return true
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let id = response.notification.request.content.userInfo["ksignVPNReconnectID"] as? String,
+              response.notification.request.identifier == VPNReconnectCoordinator.notificationIdentifier + "." + id else {
+            completionHandler()
+            return
+        }
+        Task { @MainActor in
+            await VPNReconnectCoordinator.shared.notificationTapped(id: id)
+            completionHandler()
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler(notification.request.identifier.hasPrefix(VPNReconnectCoordinator.notificationIdentifier + ".")
+                          ? [.banner, .sound] : [])
     }
     
     private func _initializeBuiltInSources() { 

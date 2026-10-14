@@ -73,9 +73,11 @@ def main():
     sources = []
     for relative in (
         "Ksign/Backend/Device/LocalDeviceVPN.swift",
+        "Ksign/Backend/Device/VPNReconnectCoordinator.swift",
         "Ksign/Backend/Device/DeviceInstallationManager.swift",
         "Native/Device/Tests/ConnectionRecovery.swift",
         "Native/Device/Tests/InstallationConcurrency.swift",
+        "Native/Device/Tests/VPNReconnect.swift",
     ):
         source = (ROOT / relative).read_text()
         source = "\n".join(

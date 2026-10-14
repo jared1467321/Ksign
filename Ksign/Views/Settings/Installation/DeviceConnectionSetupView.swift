@@ -27,6 +27,45 @@ struct DeviceConnectionSettingsView: View {
             } message: {
                 Text("The next built-in installation will ask you to pair again. To remove trust from iOS too, use Developer settings.")
             }
+            VPNReconnectSettingsView()
+        }
+    }
+}
+
+private struct VPNReconnectSettingsView: View {
+    @AppStorage(VPNReconnectCoordinator.enabledKey) private var enabled = false
+    @AppStorage(VPNReconnectCoordinator.shortcutNameKey) private var shortcutName = VPNReconnectCoordinator.defaultShortcutName
+    @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
+    @ObservedObject private var manager = DeviceInstallationManager.shared
+
+    var body: some View {
+        Section {
+            Toggle("Reconnect VPN after installation", isOn: $enabled)
+            if enabled {
+                TextField("Shortcut name", text: $shortcutName)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Test Reconnect Shortcut") {
+                    Task { await manager.testVPNReconnectShortcut() }
+                }
+                .disabled(!manager.canReconnectVPN || InstallSession.shared.isActive ||
+                          shortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if reconnect.pendingShortcutName != nil {
+                    Button("Reconnect VPN") { Task { await reconnect.runPendingShortcut() } }
+                        .disabled(!manager.canReconnectVPN || InstallSession.shared.isActive)
+                }
+                if let notice = reconnect.notice {
+                    Text(notice).font(.footnote)
+                }
+            }
+        } header: {
+            Text("Restore your VPN")
+        } footer: {
+            Text("In Shortcuts, create a shortcut named Restore Tailscale with Tailscale's Connect action, or enter the name of your own VPN shortcut here. Ksign runs it after all device work ends and its local VPN disconnects. This briefly opens Shortcuts. If Ksign finishes in the background, tap the reconnect notification. You can add Open App → Ksign as the shortcut's last action to return here.")
+        }
+        .onChange(of: enabled) { enabled in
+            if enabled { Task { await reconnect.requestNotificationPermission() } }
+            else { reconnect.disable() }
         }
     }
 }

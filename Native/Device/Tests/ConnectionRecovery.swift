@@ -18,8 +18,9 @@ final class FakeVPNConnection {
     var status = NEVPNStatus.disconnected
     var starts = 0
     var stops = 0
+    var delayStop = false
     func startVPNTunnel() throws { starts += 1; status = .connected }
-    func stopVPNTunnel() { stops += 1; status = .disconnected }
+    func stopVPNTunnel() { stops += 1; status = delayStop ? .disconnecting : .disconnected }
 }
 final class NETunnelProviderManager {
     static var configurations: [NETunnelProviderManager] = []
@@ -126,6 +127,7 @@ final class InstallerStatusViewModel {}
         defaults.set("builtIn", forKey: "Ksign.deviceConnectionMode")
         let vpn = LocalDeviceVPN(extensionIdentifier: { "test.ksign.tunnel" })
         let installer = DeviceInstallationManager(vpn: vpn, defaults: defaults,
+            vpnReconnect: VPNReconnectCoordinator(defaults: defaults),
             legacyPairingExists: { legacy }, canCreatePairing: { canPair })
         return (installer, manager, defaults)
     }
@@ -279,6 +281,7 @@ final class InstallerStatusViewModel {}
         print("Passed 16 device connection recovery scenarios")
         await settle()
         try await runConcurrencyTests()
+        try await runVPNReconnectTests()
         defaults.removePersistentDomain(forName: "Ksign.ConnectionRecoveryTests")
     }
 }

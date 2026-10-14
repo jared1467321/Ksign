@@ -60,11 +60,47 @@ The initial installation of Ksign, Apple signing and trust requirements, and
 system consent prompts cannot be automated by this implementation. No network
 service operated by Ksign is required for direct installation.
 
+## Reconnect Tailscale after installation
+
+1. In Apple's Shortcuts app, create a shortcut named **Restore Tailscale** and
+   add Tailscale's **Connect** action. Run it once to check that it connects and
+   resolve any first-run permissions. Optionally add **Open App → Ksign** as
+   the final action to return to Ksign after reconnecting.
+2. In Ksign, open **Settings → Installation → iDevice → Built-in Connection**
+   and enable **Reconnect VPN after installation**. Allow notifications for
+   the background completion reminder. Enter a different shortcut name if
+   needed; other VPNs can use the same feature through their own shortcuts.
+3. Use **Test Reconnect Shortcut** while no installation is running.
+
+When all device operations and workflows finish, Ksign stops the local VPN it
+started and waits for disconnection before opening Shortcuts. Failed or
+cancelled work also restores the VPN once cleanup finishes. Setup checks use
+the same handoff. A VPN Ksign adopted without starting stays untouched and
+does not trigger reconnection. Manual Setup does not trigger reconnection.
+
+If Ksign finishes in the background, it saves a pending request and sends a
+notification. Tap it to open Ksign and run the shortcut. If notifications are
+unavailable, return to Installation settings and tap **Reconnect VPN**.
+Returning to the app alone does not run the shortcut. Starting new device work
+invalidates the previous request, including its notification, so an old tap
+cannot interrupt the next installation. Paused workflows retain their device
+connection until the workflow ends.
+
+This feature is off by default and briefly opens Shortcuts in the foreground.
+It cannot silently control another app's VPN or confirm the shortcut connected
+successfully; Shortcuts reports missing shortcuts or action failures. If the
+local VPN has not disconnected within 20 seconds, Ksign skips the handoff.
+Force quitting or replacing Ksign during self-update can prevent completion
+cleanup from running and still requires a manual reconnect.
+
 ## Verification status
 
 Run `python3 .github/scripts/test_device_connection.py` on a machine with Swift
 to exercise production connection recovery against VPN and pairing doubles.
 The manual build runs these regression checks before building the IPA.
+The checks include foreground/background shortcut handoff, pending requests
+across relaunch, URL encoding, notification permission failure, stale taps,
+new work racing with cleanup, and waiting for the actual VPN disconnection.
 
 The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and
@@ -73,6 +109,11 @@ retry after a connection failure, self-update last, and the existing Server,
 Manual Setup, signing, and export paths on a real device before release. Also
 verify pause/drain/resume and cancelling a partial queue from another tab:
 only successful signed entries should be selected, including retired rows.
+For VPN restoration, verify the configured Tailscale shortcut on a real iPhone,
+foreground completion, background/locked-screen notification taps, bulk
+completion, cancellation, and starting a new queue before tapping an old
+notification. The Linux checks use platform doubles and do not verify iOS
+Shortcuts execution or notification delivery.
 
 ## Source attribution
 
