@@ -131,7 +131,8 @@ final class DeviceInstallationManager: ObservableObject {
             cleanUpIfIdle()
         }
         // Serialize preparation and reservation only. Once admitted, each proxy
-        // owns its connection and can upload/install alongside the other jobs.
+        // leases the shared tunnel and owns clients that can upload/install
+        // alongside the other jobs.
         try await enqueue(countsOperation: false) {
             while self.exclusiveInstallation != nil ||
                 bundleIdentifier.map({ self.installingBundles[$0] != nil }) == true ||

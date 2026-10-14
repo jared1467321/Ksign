@@ -2,12 +2,23 @@ import Foundation
 import IDevice
 
 final class RSDConnection {
-    let adapter: OpaquePointer
-    let handshake: OpaquePointer
+    private let adapter: OpaquePointer
+    private let handshake: OpaquePointer
+    private let serviceConnectionLock = NSLock()
     init(adapter: OpaquePointer, handshake: OpaquePointer) {
         self.adapter = adapter
         self.handshake = handshake
     }
+
+    // RSD connect functions borrow the adapter and handshake mutably. Protect
+    // only service creation; each resulting client owns an independent stream
+    // and can upload/install concurrently on its attempt's worker thread.
+    func withServiceConnection<T>(_ body: (OpaquePointer, OpaquePointer) throws -> T) rethrows -> T {
+        serviceConnectionLock.lock()
+        defer { serviceConnectionLock.unlock() }
+        return try body(adapter, handshake)
+    }
+
     deinit {
         rsd_handshake_free(handshake)
         adapter_free(adapter)
@@ -70,12 +81,6 @@ extension HeartbeatManager {
         let connection = try makeRSDConnection(pairingPath: path)
         Self.connection = connection
         return connection
-    }
-
-    // Never share an adapter/handshake between concurrent install attempts.
-    // The caller creates, uses and releases this lease on its own native thread.
-    internal func makeInstallationRSDConnection() throws -> RSDConnection {
-        try makeRSDConnection(pairingPath: Self.pairingFile())
     }
 
     private func makeRSDConnection(pairingPath path: String) throws -> RSDConnection {

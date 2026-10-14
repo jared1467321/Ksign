@@ -41,7 +41,9 @@ to verify invalidation and the cached build path without Xcode or Rust.
   Keychain. Subsequent workflows reconnect automatically. The app does not
   open Safari or require a separate VPN app for this path.
 - Select multiple signed apps and install them together. Device installs run
-  concurrently, share a connection across the workflow, and report progress per app.
+  concurrently, share one native tunnel and handshake across the workflow, and
+  report progress per app. Each app has separate upload and installation clients;
+  only opening those clients is serialized, while uploads and installs overlap.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
 - For both iDevice and Server installs, pause the install drawer to stop new
@@ -124,6 +126,9 @@ cleanup from running and still requires a manual reconnect.
 Run `python3 .github/scripts/test_device_connection.py` on a machine with Swift
 to exercise production connection recovery against VPN and pairing doubles.
 The manual build runs these regression checks before building the IPA.
+The shared-tunnel check runs the production proxy against native FFI doubles,
+holds three uploads open concurrently, verifies one tunnel is used for all
+upload and installation clients, and checks lease cleanup after a cache reset.
 The checks include foreground/background shortcut handoff, pending requests
 across relaunch, URL encoding, notification permission failure, stale taps,
 new work racing with cleanup, and waiting for the actual VPN disconnection.

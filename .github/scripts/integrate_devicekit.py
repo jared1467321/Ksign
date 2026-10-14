@@ -39,10 +39,7 @@ def transform(inputs):
     source = inputs[key]
     start = source.index('\tprivate static var _adapter:')
     end = source.index('\t// MARK: - Start\n', start)
-    source = source[:start] + '''\tvar adapter: AdapterHandle? { (try? acquireRSDConnection())?.adapter }
-\tvar handshake: RsdHandshakeHandle? { (try? acquireRSDConnection())?.handshake }
-
-''' + source[end:]
+    source = source[:start] + source[end:]
     source = replace_once(source, '\t\t\tadapter = nil\n\t\t\thandshake = nil', '\t\t\tinvalidateRSDTunnel()')
     start = source.index('\tinternal func ensureRSDTunnel()')
     end = source.index('\t// MARK: - Start Heartbeat', start)
@@ -63,18 +60,38 @@ def transform(inputs):
     source = inputs[key]
     anchor = '\t\tlet allApps = try await Task.detached(priority: .userInitiated) { () -> [AppInfo] in'
     source = replace_once(source, anchor, anchor + '\n\t\t\tlet connection = self._heartbeat.isRsd ? try self._heartbeat.acquireRSDConnection() : nil\n\t\t\tdefer { withExtendedLifetime(connection) {} }')
-    source = source.replace('self._heartbeat.adapter, self._heartbeat.handshake', 'connection?.adapter, connection?.handshake')
+    source = replace_once(source,
+        'installation_proxy_connect_rsd(self._heartbeat.adapter, self._heartbeat.handshake, &installproxy)',
+        'connection?.withServiceConnection { adapter, handshake in installation_proxy_connect_rsd(adapter, handshake, &installproxy) }')
     start = source.index('\tstatic public func getAppIcon(for id: String) async throws -> UIImage? {')
     before, icon = source[:start], source[start:]
     needle = '\t\treturn try await Task.detached(priority: .userInitiated) {'
     icon = replace_once(icon, needle, needle + '\n\t\t\tlet connection = HeartbeatManager.shared.isRsd ? try HeartbeatManager.shared.acquireRSDConnection() : nil\n\t\t\tdefer { withExtendedLifetime(connection) {} }')
-    icon = icon.replace('HeartbeatManager.shared.adapter, HeartbeatManager.shared.handshake', 'connection?.adapter, connection?.handshake')
+    icon = replace_once(icon,
+        'springboard_services_connect_rsd(HeartbeatManager.shared.adapter, HeartbeatManager.shared.handshake, &springServices)',
+        'connection?.withServiceConnection { adapter, handshake in springboard_services_connect_rsd(adapter, handshake, &springServices) }')
     outputs[key] = before + icon
 
     key = "Sources/IDeviceSwift/Trace/SystemLogManager.swift"
     source = inputs[key]
     source = source.replace('try await self._connect()', 'try await self._connect()\n\t\t\tlet connection = self._heartbeat.isRsd ? try self._heartbeat.acquireRSDConnection() : nil\n\t\t\tdefer { withExtendedLifetime(connection) {} }')
-    source = source.replace('self._heartbeat.adapter', 'connection?.adapter').replace('self._heartbeat.handshake', 'connection?.handshake')
+    handles = '''\t\t\t\tguard let adapter = self._heartbeat.adapter else {
+\t\t\t\t\tthrow IDeviceSwiftError(message: "Cannot find RSD adapter")
+\t\t\t\t}
+\t\t\t\t
+\t\t\t\tguard let handshake = self._heartbeat.handshake else {
+\t\t\t\t\tthrow IDeviceSwiftError(message: "Cannot find RSD handshake")
+\t\t\t\t}'''
+    if source.count(handles) != 2:
+        raise RuntimeError("Expected two upstream trace connection blocks")
+    source = source.replace(handles, '''\t\t\t\tguard let connection else {
+\t\t\t\t\tthrow IDeviceSwiftError(message: "Cannot find RSD connection")
+\t\t\t\t}''')
+    for function, client in (("syslog_relay_connect_rsd", "syslogClient"),
+                             ("os_trace_relay_connect_rsd", "osTraceRelayClient")):
+        call = f"{function}(adapter, handshake, &self.{client})"
+        source = replace_once(source, call,
+            f"connection.withServiceConnection {{ adapter, handshake in {call} }}")
     outputs[key] = source
 
     for name, destination in {

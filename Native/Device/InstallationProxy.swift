@@ -51,9 +51,9 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         guard FileManager.default.fileExists(atPath: HeartbeatManager.pairingFile()) else {
             throw IDeviceSwiftError(message: "Pair this device in Installation settings before installing.")
         }
-        // Each concurrent attempt owns all of its native handles, including the
-        // tunnel. They are created and destroyed on this attempt's worker thread.
-        let connection = heartbeat.isRsd ? try heartbeat.makeInstallationRSDConnection() : nil
+        // Keep a lease on the workflow's shared tunnel until this attempt's
+        // clients are freed. Per-app handles stay on this worker thread.
+        let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
         defer { withExtendedLifetime(connection) {} }
         let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
         defer { idevice_provider_free(provider) }
@@ -69,7 +69,9 @@ public final class InstallationProxy: Identifiable, ObservableObject {
             afc_client_free(afc)
         }
         if let connection {
-            try check(afc_client_connect_rsd(connection.adapter, connection.handshake, &afc))
+            try connection.withServiceConnection { adapter, handshake in
+                try check(afc_client_connect_rsd(adapter, handshake, &afc))
+            }
         } else {
             try check(afc_client_connect(provider, &afc))
         }
@@ -111,7 +113,9 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         try check(closeResult)
         try checkCancellation()
         if let connection {
-            try check(installation_proxy_connect_rsd(connection.adapter, connection.handshake, &proxy))
+            try connection.withServiceConnection { adapter, handshake in
+                try check(installation_proxy_connect_rsd(adapter, handshake, &proxy))
+            }
         } else {
             try check(installation_proxy_connect(provider, &proxy))
         }

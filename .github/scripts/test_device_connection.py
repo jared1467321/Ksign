@@ -66,6 +66,21 @@ def queue_lifetime_source():
     ))
 
 
+def shared_rsd_source():
+    sources = [(ROOT / "Native/Device/Tests/SharedRSDConnection.swift").read_text()]
+    for name in ("RSDConnection.swift", "InstallationProxy.swift", "IDeviceInstallationWorker.swift"):
+        source = (ROOT / "Native/Device" / name).read_text()
+        source = "\n".join(line for line in source.splitlines()
+                           if line not in {"import IDevice", "import Combine", "import UIKit"})
+        # Only platform declarations differ; tunnel, client and worker logic
+        # stays verbatim. The UIApplication double accepts a selector name.
+        source = source.replace('#selector(NSXPCConnection.suspend)', '"suspend"')
+        if sys.platform != "darwin":
+            source = "\n".join(line for line in source.splitlines() if ".sin_len =" not in line)
+        sources.append(source)
+    return "\n".join(sources)
+
+
 def main():
     compiler = shutil.which("swiftc")
     if compiler is None:
@@ -90,6 +105,11 @@ def main():
         source = directory / "ConnectionRecovery.swift"
         source.write_text("\n".join(sources))
         executable = directory / "ConnectionRecoveryTests"
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        source.write_text(shared_rsd_source())
         subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
                         str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)

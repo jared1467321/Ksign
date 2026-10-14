@@ -8,8 +8,8 @@ final class IDeviceInstallationWorker {
     private var operations: [() -> Void] = []
 
     // Admission is bounded by InstallQueueCoordinator. Each attempt owns its
-    // connection and runs its entire native lifetime on one finite-lived thread.
-    // The shared worker remains available for serialized connection setup.
+    // clients and runs their native lifetime on one finite-lived thread, while
+    // retaining the shared tunnel. The shared worker handles connection setup.
     static func performInstallation<T>(_ operation: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             let thread = Thread {
