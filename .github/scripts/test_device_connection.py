@@ -85,7 +85,9 @@ def main():
     compiler = shutil.which("swiftc")
     if compiler is None:
         raise SystemExit("swiftc is required; run on macOS or a Swift-equipped Linux host")
-    sources = []
+    sources = [swift_block(
+        (ROOT / "Native/Device/InstallationProxy.swift").read_text(),
+        "public struct IDeviceInstallationRejection:")]
     for relative in (
         "Ksign/Backend/Device/LocalDeviceVPN.swift",
         "Ksign/Backend/Device/VPNReconnectCoordinator.swift",

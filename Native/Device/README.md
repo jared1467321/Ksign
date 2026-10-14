@@ -46,7 +46,9 @@ to verify invalidation and the cached build path without Xcode or Rust.
   only opening those clients is serialized, while uploads and installs overlap.
   A change in the VPN's reported status alone does not replace the prepared
   native connection during a workflow. Later apps keep using that connection;
-  an actual installation error requests recovery after active installs drain.
+  a connection error requests recovery after active installs drain. An app
+  rejected by iOS (for example, an incompatible platform or invalid signature)
+  fails individually without replacing the shared connection for later apps.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
 - For both iDevice and Server installs, pause the install drawer to stop new

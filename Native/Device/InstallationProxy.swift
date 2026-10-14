@@ -3,6 +3,14 @@ import Combine
 import UIKit
 import IDevice
 
+// A completed error response from iOS's installer means the app was rejected,
+// rather than the transport failing. Keep its original message for the row.
+public struct IDeviceInstallationRejection: LocalizedError {
+    private let message: String
+    public var errorDescription: String? { message }
+    init(message: String) { self.message = message }
+}
+
 public final class InstallationProxy: Identifiable, ObservableObject {
     public let viewModel: InstallerStatusViewModel
     private let cancellation = IDeviceInstallCancellation()
@@ -43,6 +51,11 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     private func check(_ error: UnsafeMutablePointer<IdeviceFfiError>?) throws {
         guard let error else { return }
         defer { idevice_error_free(error) }
+        // Pinned idevice: InstallationProxy = 107, OperationFailed = 1.
+        // Socket failures remain transport errors, even during installation.
+        if error.pointee.code == 107 && error.pointee.sub_code == 1 {
+            throw IDeviceInstallationRejection(message: IDeviceSwiftError(error).localizedDescription)
+        }
         throw IDeviceSwiftError(error)
     }
 

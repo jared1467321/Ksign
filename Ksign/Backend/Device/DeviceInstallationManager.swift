@@ -158,10 +158,11 @@ final class DeviceInstallationManager: ObservableObject {
             let proxy = InstallationProxy(viewModel: viewModel)
             try await proxy.install(at: url, suspend: suspend, isCurrent: isCurrent)
         } catch {
-            // A failed attempt must not reset the VPN beneath other installs.
+            // A rejected app does not invalidate a working device connection.
+            // Other failed attempts must not reset the VPN beneath peers.
             // The next preparation recovers only after all active leases drain;
             // never replay an IPA whose commit may already have reached iOS.
-            if !(error is CancellationError) {
+            if !(error is CancellationError), !(error is IDeviceInstallationRejection) {
                 needsConnectionRecovery = true
             }
             throw error

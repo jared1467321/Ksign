@@ -20,10 +20,13 @@ final class UIApplication {
     static let shared = UIApplication()
     func perform(_ selector: String) {}
 }
-struct IdeviceFfiError { var sub_code: Int32 = 0 }
-struct IDeviceSwiftError: Error {
-    init(_ error: UnsafeMutablePointer<IdeviceFfiError>?) {}
-    init(message: String) {}
+struct IdeviceFfiError { var code: Int32 = 0; var sub_code: Int32 = 0 }
+struct IDeviceSwiftError: LocalizedError {
+    let errorDescription: String?
+    init(_ error: UnsafeMutablePointer<IdeviceFfiError>?) {
+        errorDescription = "Native error \(error!.pointee.code)/\(error!.pointee.sub_code)"
+    }
+    init(message: String) { errorDescription = message }
 }
 typealias idevice_sockaddr = sockaddr_in
 let LOCKDOWN_PORT = 62078
@@ -57,6 +60,22 @@ final class NativeCalls {
     private var tunnelsFreed = 0
     private var clientsCreated = 0
     private var clientsFreed = 0
+    private var nextInstallationError: IdeviceFfiError?
+
+    func failNextInstallation(code: Int32, subCode: Int32) {
+        condition.lock()
+        defer { condition.unlock() }
+        nextInstallationError = IdeviceFfiError(code: code, sub_code: subCode)
+    }
+    func installationResult() -> UnsafeMutablePointer<IdeviceFfiError>? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard let error = nextInstallationError else { return nil }
+        nextInstallationError = nil
+        let pointer = UnsafeMutablePointer<IdeviceFfiError>.allocate(capacity: 1)
+        pointer.initialize(to: error)
+        return pointer
+    }
 
     func handle() -> OpaquePointer {
         condition.lock()
@@ -152,12 +171,12 @@ final class NativeCalls {
         defer { condition.unlock() }
         precondition(tunnelsFreed == count, "Tunnel lease lifetime is incorrect")
     }
-    func expectCleanClients() {
+    func expectCleanClients(_ count: Int = 6, tunnelCount: Int = 1) {
         condition.lock()
         defer { condition.unlock() }
-        precondition(clientsCreated == 6 && clientsFreed == 6 && files.isEmpty,
+        precondition(clientsCreated == count && clientsFreed == count && files.isEmpty,
                      "Every app must release its own AFC and installation clients")
-        precondition(clientTunnels.count == 1, "Installation clients must reuse the upload tunnel")
+        precondition(clientTunnels.count == tunnelCount, "Installation clients must reuse the upload tunnel")
     }
 }
 
@@ -175,7 +194,10 @@ func tunnel_create_rppairing(_ address: UnsafePointer<idevice_sockaddr>, _ lengt
 }
 func rsd_handshake_free(_ handshake: OpaquePointer?) {}
 func adapter_free(_ adapter: OpaquePointer?) { NativeCalls.shared.freeTunnel() }
-func idevice_error_free(_ error: UnsafeMutablePointer<IdeviceFfiError>?) {}
+func idevice_error_free(_ error: UnsafeMutablePointer<IdeviceFfiError>?) {
+    error?.deinitialize(count: 1)
+    error?.deallocate()
+}
 func idevice_provider_free(_ provider: OpaquePointer?) {}
 func idevice_pairing_file_free(_ pairing: OpaquePointer?) {}
 func idevice_tcp_provider_new(_ address: UnsafePointer<idevice_sockaddr>,
@@ -212,7 +234,10 @@ func installation_proxy_client_free(_ client: OpaquePointer?) { NativeCalls.shar
 func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: String,
     _ options: OpaquePointer?, _ callback: @convention(c) (UInt64, UnsafeMutableRawPointer?) -> Void,
     _ context: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<IdeviceFfiError>? {
-    NativeCalls.shared.use(client!); callback(100, context); return nil
+    NativeCalls.shared.use(client!)
+    if let error = NativeCalls.shared.installationResult() { return error }
+    callback(100, context)
+    return nil
 }
 
 @main struct SharedRSDConnectionTests {
@@ -243,9 +268,28 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         for attempt in attempts { try await attempt.value }
         NativeCalls.shared.expectCleanClients()
         NativeCalls.shared.expectFreed(1)
+
+        // Exercise classification through the production native error handler,
+        // including a socket failure returned by the installation call itself.
+        let ipa = directory.appendingPathComponent("app0.ipa")
+        for (code, subCode, isRejection) in [(Int32(107), Int32(1), true), (1, 1, false), (107, 2, false)] {
+            NativeCalls.shared.failNextInstallation(code: code, subCode: subCode)
+            do {
+                try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa)
+                preconditionFailure("Expected native installation error")
+            } catch {
+                precondition((error is IDeviceInstallationRejection) == isRejection,
+                             "Only a completed installer rejection can preserve the connection")
+                precondition(error.localizedDescription == "Native error \(code)/\(subCode)",
+                             "Preserve the original error message")
+            }
+        }
+        try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa)
+        NativeCalls.shared.expectCleanClients(14, tunnelCount: 2)
+        NativeCalls.shared.expectFreed(1)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(2)
         HeartbeatManager.configurePairingPath(nil)
-        print("Passed shared native tunnel, overlapping uploads, per-app clients and lease cleanup")
+        print("Passed shared native tunnel, overlapping uploads, installer error classification and lease cleanup")
     }
 }

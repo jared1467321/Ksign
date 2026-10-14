@@ -189,6 +189,41 @@ extension ConnectionRecoveryTests {
         try await original.value
         manager.releaseWorkflow(workflow)
         await settle()
-        print("Passed 9 native installation concurrency scenarios")
+        // A package rejection on cellular must not poison the remaining queue.
+        let (rejectionManager, rejectionTunnel, _) = fixture()
+        rejectionManager.retainWorkflow(workflow)
+        InstallationProxy.holdInstalls = true
+        let incompatible = launch(rejectionManager, "incompatible")
+        let peer = launch(rejectionManager, "peer")
+        try await waitUntil("Start rejected app and its peer") { InstallationProxy.pending.count == 2 }
+        rejectionTunnel.connection.status = .reasserting
+        finish("incompatible", error: IDeviceInstallationRejection(message: "DeviceFamilyNotSupported"))
+        do {
+            try await incompatible.value
+            preconditionFailure("Expected package rejection")
+        } catch let error as IDeviceInstallationRejection {
+            expect(error.localizedDescription == "DeviceFamilyNotSupported", "Preserve the app's failure message")
+        }
+        let following = launch(rejectionManager, "following")
+        try await waitUntil("Start next app without draining a healthy peer") {
+            InstallationProxy.pending["following"] != nil
+        }
+        finish("peer")
+        finish("following")
+        try await peer.value
+        try await following.value
+        let afterRejection = launch(rejectionManager, "afterRejection")
+        try await waitUntil("Continue the queue after peers finish") {
+            InstallationProxy.pending["afterRejection"] != nil
+        }
+        expect(HeartbeatManager.shared.attempts.count == 1, "A rejected package must not repeat setup")
+        expect(InstallationProxy.calls == 4, "Never replay the rejected package")
+        expect(DevicePairingService.shared.calls == 0 && rejectionTunnel.connection.starts == 0,
+               "A rejected package must not restart VPN or pairing")
+        finish("afterRejection")
+        try await afterRejection.value
+        rejectionManager.releaseWorkflow(workflow)
+        await settle()
+        print("Passed 10 native installation concurrency scenarios")
     }
 }
