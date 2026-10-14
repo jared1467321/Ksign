@@ -137,8 +137,7 @@ final class DeviceInstallationManager: ObservableObject {
             while self.exclusiveInstallation != nil ||
                 bundleIdentifier.map({ self.installingBundles[$0] != nil }) == true ||
                 (!self.activeInstallations.isEmpty &&
-                (suspend || self.needsConnectionRecovery || self.configuredMode != mode ||
-                 (mode == .builtIn && !self.vpn.isConnected))) {
+                (suspend || self.needsConnectionRecovery || self.configuredMode != mode)) {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             try Task.checkCancellation()
@@ -203,7 +202,11 @@ final class DeviceInstallationManager: ObservableObject {
 
     private func prepare(_ mode: DeviceConnectionMode) async throws {
         if let setupFailure { throw setupFailure }
-        if configuredMode == mode, mode == .manual || vpn.isConnected { return }
+        // VPN status can change when cellular returns even while established
+        // native streams keep working. Preserve that session for later apps,
+        // just as Manual Setup does. An actual install error requests recovery
+        // after active leases drain; status alone must not discard the tunnel.
+        if configuredMode == mode { return }
         phase = .connecting
         do {
             await HeartbeatManager.shared.resetInstallationConnection()

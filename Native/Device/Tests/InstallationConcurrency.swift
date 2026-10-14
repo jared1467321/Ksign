@@ -48,6 +48,45 @@ extension ConnectionRecoveryTests {
         manager.releaseWorkflow(workflow)
         await settle()
 
+        // Leaving airplane mode may change the VPN's reported status while
+        // established native streams still work. Later apps must use the same
+        // prepared session, including after the previous uploads have drained.
+        for status in [NEVPNStatus.reasserting, .connecting, .disconnected] {
+            let (transitionManager, tunnel, _) = fixture()
+            transitionManager.retainWorkflow(workflow)
+            InstallationProxy.holdInstalls = true
+            let flowing = launch(transitionManager, "flowing")
+            try await waitUntil("Start transfer before network transition") {
+                InstallationProxy.pending["flowing"] != nil
+            }
+            let stopsBeforeTransition = tunnel.connection.stops
+            tunnel.connection.status = status
+            let next = launch(transitionManager, "next")
+            try await waitUntil("Admit later app on the established session") {
+                InstallationProxy.pending["next"] != nil
+            }
+            expect(HeartbeatManager.shared.attempts.count == 1,
+                   "VPN status alone must not replace the established native connection")
+            finish("flowing")
+            finish("next")
+            try await flowing.value
+            try await next.value
+            let afterDrain = launch(transitionManager, "afterDrain")
+            try await waitUntil("Keep the prepared session between uploads") {
+                InstallationProxy.pending["afterDrain"] != nil
+            }
+            expect(HeartbeatManager.shared.attempts.count == 1,
+                   "An idle gap within a workflow must not repeat the handshake")
+            expect(tunnel.connection.stops == stopsBeforeTransition && tunnel.connection.starts == 0,
+                   "Do not restart the local VPN solely because its status changed")
+            expect(DevicePairingService.shared.calls == 0,
+                   "A network transition must not request replacement pairing")
+            finish("afterDrain")
+            try await afterDrain.value
+            transitionManager.releaseWorkflow(workflow)
+            await settle()
+        }
+
         (manager, _, _) = fixture()
         manager.retainWorkflow(workflow)
         InstallationProxy.holdInstalls = true
@@ -150,6 +189,6 @@ extension ConnectionRecoveryTests {
         try await original.value
         manager.releaseWorkflow(workflow)
         await settle()
-        print("Passed 6 native installation concurrency scenarios")
+        print("Passed 9 native installation concurrency scenarios")
     }
 }

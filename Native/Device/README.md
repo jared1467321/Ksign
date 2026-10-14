@@ -44,6 +44,9 @@ to verify invalidation and the cached build path without Xcode or Rust.
   concurrently, share one native tunnel and handshake across the workflow, and
   report progress per app. Each app has separate upload and installation clients;
   only opening those clients is serialized, while uploads and installs overlap.
+  A change in the VPN's reported status alone does not replace the prepared
+  native connection during a workflow. Later apps keep using that connection;
+  an actual installation error requests recovery after active installs drain.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
 - For both iDevice and Server installs, pause the install drawer to stop new
