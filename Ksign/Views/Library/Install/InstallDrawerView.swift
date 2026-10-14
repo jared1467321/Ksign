@@ -207,6 +207,8 @@ struct InstallDrawerSheet: View {
 			.padding(.bottom, 14)
 
 			ScrollView {
+				VPNReconnectBannerView()
+					.padding(.horizontal, 20)
 				DeviceConnectionSetupView()
 					.padding(.horizontal, 20)
 					.padding(.bottom, 12)

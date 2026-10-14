@@ -36,6 +36,7 @@ struct FeatherApp: App {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     DownloadHeaderView(downloadManager: downloadManager)
                         .transition(.move(edge: .top).combined(with: .opacity))
+                    VPNReconnectBannerView()
                     VariedTabbarView()
                         .environment(\.managedObjectContext, storage.context)
                         .onOpenURL(perform: _handleURL)

@@ -64,32 +64,49 @@ service operated by Ksign is required for direct installation.
 
 1. In Apple's Shortcuts app, create a shortcut named **Restore Tailscale** and
    add Tailscale's **Connect** action. Run it once to check that it connects and
-   resolve any first-run permissions. Optionally add **Open App → Ksign** as
-   the final action to return to Ksign after reconnecting.
+   resolve any first-run permissions. In the shortcut's details, enable
+   **Show in Share Sheet** and allow **Text** input. The shortcut can ignore
+   that input. Remove any **Open App** actions to keep execution inside Ksign.
 2. In Ksign, open **Settings → Installation → iDevice → Built-in Connection**
    and enable **Reconnect VPN after installation**. Allow notifications for
    the background completion reminder. Enter a different shortcut name if
    needed; other VPNs can use the same feature through their own shortcuts.
-3. Use **Test Reconnect Shortcut** while no installation is running.
+3. Leave **Reconnect method → Share Sheet** selected, then use **Test Share
+   Sheet** while no installation is running. Scroll down in the system share
+   sheet and select **Restore Tailscale**. The name in Ksign is a reminder;
+   iOS requires you to select the actual shortcut yourself.
 
 When all device operations and workflows finish, Ksign stops the local VPN it
-started and waits for disconnection before opening Shortcuts. Failed or
-cancelled work also restores the VPN once cleanup finishes. Setup checks use
-the same handoff. A VPN Ksign adopted without starting stays untouched and
-does not trigger reconnection. Manual Setup does not trigger reconnection.
+started and waits for disconnection before presenting the share sheet over
+the current screen, including the install drawer. Select your shortcut to
+reconnect without switching to the Shortcuts app. Failed or cancelled work
+also offers reconnection once cleanup finishes. Setup checks use the same
+handoff. A VPN Ksign adopted without starting stays untouched and does not
+trigger reconnection. Manual Setup does not trigger reconnection.
 
 If Ksign finishes in the background, it saves a pending request and sends a
-notification. Tap it to open Ksign and run the shortcut. If notifications are
-unavailable, return to Installation settings and tap **Reconnect VPN**.
+notification. Tap it to open Ksign and show the share sheet. If you dismiss
+the sheet or notifications are unavailable, tap the **Reconnect VPN** reminder
+in Ksign, the install drawer, or Installation settings to bring it back.
 Returning to the app alone does not run the shortcut. Starting new device work
-invalidates the previous request, including its notification, so an old tap
-cannot interrupt the next installation. Paused workflows retain their device
-connection until the workflow ends.
+invalidates the previous request, including its notification, and dismisses
+its share sheet, so an old request cannot launch another handoff during the
+next installation. Dismissing the reminder leaves the setting enabled for
+future workflows. Paused workflows retain their device connection until the
+workflow ends.
 
-This feature is off by default and briefly opens Shortcuts in the foreground.
-It cannot silently control another app's VPN or confirm the shortcut connected
-successfully; Shortcuts reports missing shortcuts or action failures. If the
-local VPN has not disconnected within 20 seconds, Ksign skips the handoff.
+Share Sheet is the default method, including for previously enabled installs
+with no saved method. The feature itself remains off until enabled. To retain
+the earlier automatic behavior, select **Open Shortcuts Automatically**; this
+briefly opens Shortcuts, and you can add **Open App → Ksign** as the shortcut's
+last action to return. That method uses **Test Reconnect Shortcut** for testing.
+
+Ksign cannot silently control another app's VPN or confirm the shortcut
+connected successfully; Shortcuts reports action failures. Completing a share
+activity acknowledges the handoff without verifying the VPN. If your shortcut
+is missing from the share sheet, check **Show in Share Sheet** and its accepted
+input types. Actions that explicitly open an app still switch to that app.
+If the local VPN has not disconnected within 20 seconds, Ksign skips the handoff.
 Force quitting or replacing Ksign during self-update can prevent completion
 cleanup from running and still requires a manual reconnect.
 
@@ -101,6 +118,9 @@ The manual build runs these regression checks before building the IPA.
 The checks include foreground/background shortcut handoff, pending requests
 across relaunch, URL encoding, notification permission failure, stale taps,
 new work racing with cleanup, and waiting for the actual VPN disconnection.
+They also cover share sheet completion/cancellation, failed presentation,
+background notification activation, dismissing sheets for new work, stale
+sheet callbacks, and releasing installation cleanup before user selection.
 
 The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and
@@ -114,6 +134,10 @@ foreground completion, background/locked-screen notification taps, bulk
 completion, cancellation, and starting a new queue before tapping an old
 notification. The Linux checks use platform doubles and do not verify iOS
 Shortcuts execution or notification delivery.
+Also verify selecting the Text-accepting reconnect shortcut inside the share
+sheet, presenting it over the install drawer, dismiss/retry, and the iPad
+popover anchor. Remove any Open App actions when checking execution inside
+Ksign. The UIKit share sheet requires an Xcode build and real device validation.
 
 ## Source attribution
 

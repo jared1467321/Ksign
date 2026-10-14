@@ -35,6 +35,7 @@ struct DeviceConnectionSettingsView: View {
 private struct VPNReconnectSettingsView: View {
     @AppStorage(VPNReconnectCoordinator.enabledKey) private var enabled = false
     @AppStorage(VPNReconnectCoordinator.shortcutNameKey) private var shortcutName = VPNReconnectCoordinator.defaultShortcutName
+    @AppStorage(VPNReconnectCoordinator.presentationKey) private var presentation = VPNReconnectPresentation.shareSheet.rawValue
     @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @ObservedObject private var manager = DeviceInstallationManager.shared
 
@@ -42,10 +43,15 @@ private struct VPNReconnectSettingsView: View {
         Section {
             Toggle("Reconnect VPN after installation", isOn: $enabled)
             if enabled {
+                Picker("Reconnect method", selection: $presentation) {
+                    ForEach(VPNReconnectPresentation.allCases) { method in
+                        Text(method.title).tag(method.rawValue)
+                    }
+                }
                 TextField("Shortcut name", text: $shortcutName)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Button("Test Reconnect Shortcut") {
+                Button(presentation == VPNReconnectPresentation.shareSheet.rawValue ? "Test Share Sheet" : "Test Reconnect Shortcut") {
                     Task { await manager.testVPNReconnectShortcut() }
                 }
                 .disabled(!manager.canReconnectVPN || InstallSession.shared.isActive ||
@@ -61,7 +67,12 @@ private struct VPNReconnectSettingsView: View {
         } header: {
             Text("Restore your VPN")
         } footer: {
-            Text("In Shortcuts, create a shortcut named Restore Tailscale with Tailscale's Connect action, or enter the name of your own VPN shortcut here. Ksign runs it after all device work ends and its local VPN disconnects. This briefly opens Shortcuts. If Ksign finishes in the background, tap the reconnect notification. You can add Open App → Ksign as the shortcut's last action to return here.")
+            Text("Create a shortcut named Restore Tailscale with Tailscale's Connect action, or enter your own shortcut name. Ksign offers reconnection after all device work ends and its local VPN disconnects. If Ksign finishes in the background, tap the reconnect notification.")
+            if presentation == VPNReconnectPresentation.shareSheet.rawValue {
+                Text("In your shortcut's details, enable Show in Share Sheet and allow Text input. Select the shortcut from Ksign's share sheet to reconnect. Remove any Open App actions to stay in Ksign. If you dismiss the sheet, tap the Reconnect VPN reminder to bring it back.")
+            } else {
+                Text("This method opens Shortcuts automatically. You can add Open App → Ksign as the shortcut's last action to return here.")
+            }
         }
         .onChange(of: enabled) { enabled in
             if enabled { Task { await reconnect.requestNotificationPermission() } }

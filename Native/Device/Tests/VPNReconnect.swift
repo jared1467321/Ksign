@@ -9,6 +9,10 @@ import Foundation
     var heldNotification: CheckedContinuation<Bool, Never>?
     var holdNotification = false
     var removals = 0
+    var shareSheets: [String] = []
+    var shareCompletions: [@MainActor (Bool) -> Void] = []
+    var canPresentShareSheet = true
+    var shareDismissals = 0
 
     func coordinator(defaults: UserDefaults) -> VPNReconnectCoordinator {
         VPNReconnectCoordinator(defaults: defaults, isForeground: { self.foreground },
@@ -19,7 +23,13 @@ import Foundation
                     return await withCheckedContinuation { self.heldNotification = $0 }
                 }
                 return self.canNotify
-            }, removeNotification: { _ in self.removals += 1 })
+            }, removeNotification: { _ in self.removals += 1 },
+            presentShareSheet: { name, completion in
+                guard self.canPresentShareSheet else { return false }
+                self.shareSheets.append(name)
+                self.shareCompletions.append(completion)
+                return true
+            }, dismissShareSheet: { self.shareDismissals += 1 })
     }
 }
 
@@ -35,6 +45,7 @@ extension ConnectionRecoveryTests {
         await reconnect.deviceWorkFinished(restoreVPN: true)
         expect(environment.opens.isEmpty, "Reconnect is opt-in")
         defaults.set(true, forKey: VPNReconnectCoordinator.enabledKey)
+        defaults.set(VPNReconnectPresentation.automatic.rawValue, forKey: VPNReconnectCoordinator.presentationKey)
         defaults.set("Restore & Tailscale ? # / 😀", forKey: VPNReconnectCoordinator.shortcutNameKey)
         reconnect.beginDeviceWork()
         await reconnect.deviceWorkFinished(restoreVPN: false)
@@ -112,9 +123,59 @@ extension ConnectionRecoveryTests {
         environment.holdNotification = false
         await reconnect.deviceWorkFinished(restoreVPN: false)
 
+        // Share sheet is the default, including for existing enabled installs
+        // that have not explicitly selected the automatic URL handoff.
+        defaults.removeObject(forKey: VPNReconnectCoordinator.presentationKey)
+        expect(reconnect.presentation == .shareSheet, "Default to reconnection inside Ksign")
+        environment.foreground = true
+        let beforeShare = environment.opens.count
+        await reconnect.deviceWorkFinished(restoreVPN: true)
+        expect(environment.opens.count == beforeShare && environment.shareSheets.count == 1,
+               "Foreground share mode presents a sheet without opening Shortcuts")
+        expect(environment.shareSheets.last == "Restore Tailscale", "Remind the user which shortcut to select")
+        await reconnect.runPendingShortcut()
+        expect(environment.shareSheets.count == 1, "Repeated taps must not stack share sheets")
+        environment.shareCompletions.last!(false)
+        expect(reconnect.pendingShortcutName != nil && reconnect.notice?.contains("Show in Share Sheet") == true,
+               "Cancelling keeps a reminder and explains missing shortcuts")
+        await reconnect.runPendingShortcut()
+        environment.shareCompletions.last!(true)
+        expect(reconnect.pendingShortcutName == nil, "Completed sharing consumes the handoff without claiming VPN status")
+
+        await reconnect.deviceWorkFinished(restoreVPN: true)
+        let staleShareCompletion = environment.shareCompletions.last!
+        reconnect.beginDeviceWork()
+        expect(environment.shareDismissals == 1, "New work dismisses a pending share sheet")
+        await reconnect.deviceWorkFinished(restoreVPN: true)
+        staleShareCompletion(true)
+        expect(reconnect.pendingShortcutName != nil, "An old sheet callback must not consume a newer request")
+        reconnect.disable()
+        expect(environment.shareDismissals == 2, "Disabling reconnect dismisses the current sheet")
+
+        environment.canPresentShareSheet = false
+        await reconnect.testShortcut()
+        expect(reconnect.pendingShortcutName != nil && reconnect.notice?.contains("Could not show") == true,
+               "Presentation failure keeps the request available for retry")
+        environment.canPresentShareSheet = true
+        await reconnect.runPendingShortcut()
+        environment.shareCompletions.last!(true)
+
+        environment.foreground = false
+        let beforeBackgroundShare = environment.shareSheets.count
+        await reconnect.deviceWorkFinished(restoreVPN: true)
+        expect(environment.shareSheets.count == beforeBackgroundShare, "Background completion never presents a share sheet")
+        let backgroundShareID = environment.notifications.last!.1
+        await reconnect.notificationTapped(id: backgroundShareID)
+        environment.foreground = true
+        await reconnect.appBecameActive()
+        expect(environment.shareSheets.count == beforeBackgroundShare + 1 && environment.opens.count == beforeShare,
+               "A background notification opens the share sheet on activation without opening Shortcuts")
+        environment.shareCompletions.last!(true)
+
         // Exercise the actual manager and tunnel, with asynchronous VPN stop.
         let (_, tunnel, fixtureDefaults) = fixture()
         fixtureDefaults.set(true, forKey: VPNReconnectCoordinator.enabledKey)
+        fixtureDefaults.set(VPNReconnectPresentation.automatic.rawValue, forKey: VPNReconnectCoordinator.presentationKey)
         environment.foreground = true
         tunnel.connection.status = .disconnected
         let vpn = LocalDeviceVPN(extensionIdentifier: { "test.ksign.tunnel" })
@@ -163,6 +224,18 @@ extension ConnectionRecoveryTests {
         manager.releaseWorkflow(workflow)
         try await waitUntil("New workflow should restore once it finishes") { environment.opens.count == beforeCompletion + 2 }
         await settle()
+
+        fixtureDefaults.set(VPNReconnectPresentation.shareSheet.rawValue, forKey: VPNReconnectCoordinator.presentationKey)
+        let beforeManagedShare = environment.shareSheets.count
+        try await manager.install(at: URL(fileURLWithPath: "/share-workflow.ipa"),
+            viewModel: InstallerStatusViewModel(), suspend: false, mode: .builtIn)
+        try await waitUntil("Manager should present the share sheet after cleanup") {
+            environment.shareSheets.count == beforeManagedShare + 1
+        }
+        await settle()
+        expect(manager.canReconnectVPN, "Cleanup must finish while the share sheet is still awaiting user selection")
+        expect(environment.opens.count == beforeCompletion + 2, "Share mode must not invoke the Shortcuts URL")
+        environment.shareCompletions.last!(true)
 
         // Failure/cancellation may already stop the tunnel before final cleanup.
         let (_, cancelledTunnel, _) = fixture()
