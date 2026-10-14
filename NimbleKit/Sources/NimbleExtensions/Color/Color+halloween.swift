@@ -649,6 +649,21 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         self._selectedThemeID = Published(initialValue: initialThemeID)
     }
 
+    /// Refresh the active profile after importing app preferences from a backup.
+    public func reloadFromDefaults() {
+        previewThemeID = nil
+        previewRole = nil
+        previewElementID = nil
+        previewValue = nil
+        previewRevision &+= 1
+        customThemes = defaults.data(forKey: Self.profilesKey)
+            .flatMap { try? JSONDecoder().decode([NBThemeProfile].self, from: $0) }?
+            .filter { !$0.isBuiltIn } ?? []
+        let stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.halloweenID
+        selectedThemeID = stored == NBThemeProfile.halloweenID || customThemes.contains(where: { $0.id == stored })
+            ? stored : NBThemeProfile.halloweenID
+    }
+
     public func profile(id: String) -> NBThemeProfile? {
         if id == NBThemeProfile.halloweenID { return .halloween }
         return customThemes.first { $0.id == id }

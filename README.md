@@ -20,6 +20,28 @@ You can also join Ksign Discord [here](https://discord.gg/sfbZfQzVdQ) for better
 ## Download
 Go to [Releases](https://github.com/Nyasami/Ksign-public/releases) and download the newest ipa from there.
 
+## Backup before reinstalling
+
+In **Settings → Backup & Restore**, enter a backup password and choose
+**Create Backup**. Save the `.asignbackup` file to iCloud Drive or another
+location outside ASign. Files saved inside ASign are removed when the app is
+deleted. You can choose the saved file and **Unlock Backup** to check your
+password without restoring anything.
+
+After installing a fresh copy, open **Backup & Restore**, choose that file,
+unlock it with the same password, and select **Restore Backup**. The backup
+includes certificate files, provisioning profiles, saved certificate passwords
+and nicknames, the selected certificate, custom themes and their selected
+profile, app settings, portable signing options, and source subscriptions.
+Certificates and sources merge with the new installation; saved themes and
+settings are applied immediately.
+
+Backups use AES-GCM encryption with a password-derived key. The password is
+not stored in the backup and cannot be recovered. Imported/signed app
+libraries, archives, tweak files, container bookmarks, pending operations,
+and device pairing are not included. Add tweak files and pair the device
+again if needed after reinstalling.
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=nyasami%2Fksign&type=date&legend=top-left">

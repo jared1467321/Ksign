@@ -76,6 +76,9 @@ jobs:
       - name: Verify device connection recovery
         run: python3 .github/scripts/test_device_connection.py
 
+      - name: Verify settings backup and restore
+        run: python3 .github/scripts/test_backup.py
+
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays, tests and documentation
       # must not force both native targets to rebuild.

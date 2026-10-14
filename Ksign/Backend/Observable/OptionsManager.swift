@@ -25,6 +25,12 @@ class OptionsManager: ObservableObject {
 		}
 	}
 	
+	/// Refreshes the shared options after a backup restore.
+	func reloadFromDefaults() {
+		options = UserDefaults.standard.data(forKey: _key)
+			.flatMap { try? JSONDecoder().decode(Options.self, from: $0) } ?? .defaultOptions
+	}
+
 	/// Saves options
 	func saveOptions() {
 		if let encoded = try? JSONEncoder().encode(options) {
