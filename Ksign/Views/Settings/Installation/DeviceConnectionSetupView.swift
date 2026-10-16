@@ -1,5 +1,6 @@
 import SwiftUI
 import NimbleViews
+import IDeviceSwift
 
 struct DeviceConnectionSettingsView: View {
     @ObservedObject private var manager = DeviceInstallationManager.shared
@@ -14,6 +15,7 @@ struct DeviceConnectionSettingsView: View {
         } footer: {
             Text("Built-in Connection manages a local VPN inside Ksign. Creating a pairing on this device requires iOS 27 or later and approval in Settings. The VPN requires a compatible signing profile and may replace another active VPN.")
         }
+        DeviceUploadSettingsView()
         if manager.mode == .manual {
             TunnelView()
         } else {
@@ -28,6 +30,39 @@ struct DeviceConnectionSettingsView: View {
                 Text("The next built-in installation will ask you to pair again. To remove trust from iOS too, use Developer settings.")
             }
             VPNReconnectSettingsView()
+        }
+    }
+}
+
+private struct DeviceUploadSettingsView: View {
+    @AppStorage(IDeviceUploadSettings.chunkSizeKey) private var chunkSizeMB = 1
+    @AppStorage(IDeviceUploadSettings.lastUploadKey) private var lastUpload = Data()
+
+    private var selection: Binding<Int> {
+        Binding(get: { IDeviceUploadSettings.chunkSizesMB.contains(chunkSizeMB) ? chunkSizeMB : 1 },
+                set: { chunkSizeMB = $0 })
+    }
+
+    var body: some View {
+        Section {
+            Picker("Upload chunk size", selection: selection) {
+                ForEach(IDeviceUploadSettings.chunkSizesMB, id: \.self) { size in
+                    Text(size == 1 ? "1 MB (Default)" : "\(size) MB").tag(size)
+                }
+            }
+            .pickerStyle(.menu)
+            if let metrics = try? JSONDecoder().decode(IDeviceUploadMetrics.self, from: lastUpload) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Latest completed upload")
+                    Text(metrics.summary)
+                        .font(.footnote.monospacedDigit())
+                        .nbThemeForeground(.textSecondary)
+                }
+            }
+        } header: {
+            Text("Upload performance")
+        } footer: {
+            Text("Applies to the next iDevice upload. Larger chunks use more memory and may improve speed. Compare the same app at different sizes; upload timing excludes connection setup and iOS installation. MB uses 1,048,576 bytes.")
         }
     }
 }

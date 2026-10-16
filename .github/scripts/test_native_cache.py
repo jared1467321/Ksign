@@ -115,5 +115,25 @@ class NativeCacheTests(unittest.TestCase):
         self.assertIn("Using cached Ksign iDevice framework", log.getvalue())
 
 
+class AFCUploadPatchTests(unittest.TestCase):
+    def test_writes_allow_larger_packets_without_changing_reads(self):
+        source = """const MAX_TRANSFER: u64 = 1024 * 1024;
+for chunk in chunk_number(n, MAX_TRANSFER as usize) { read(chunk); }
+for chunk in bytes.chunks(MAX_TRANSFER as usize) { write(chunk); }
+"""
+        patched = native.patch_afc_uploads(source)
+        self.assertIn("bytes.chunks(16 * 1024 * 1024)", patched)
+        self.assertIn("chunk_number(n, MAX_TRANSFER as usize)", patched)
+        self.assertIn("const MAX_TRANSFER: u64 = 1024 * 1024;", patched)
+        self.assertEqual(native.patch_afc_uploads(patched), patched)
+
+    def test_unknown_or_ambiguous_source_is_rejected(self):
+        for source in ("", "for chunk in bytes.chunks(MAX_TRANSFER as usize) {" * 2,
+                       "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling" * 2):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(RuntimeError, "AFC write loop"):
+                    native.patch_afc_uploads(source)
+
+
 if __name__ == "__main__":
     unittest.main()

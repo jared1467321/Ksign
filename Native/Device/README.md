@@ -44,6 +44,18 @@ to verify invalidation and the cached build path without Xcode or Rust.
   concurrently, share one native tunnel and handshake across the workflow, and
   report progress per app. Each app has separate upload and installation clients;
   only opening those clients is serialized, while uploads and installs overlap.
+- In **Settings → Installation → iDevice → Upload performance**, choose an
+  upload chunk size of 1, 2, 4, 8, or 16 MB. The default remains 1 MB. Each
+  attempt snapshots the selection; changing it does not affect active uploads.
+  The native AFC write ceiling is 16 MB so larger selections are transmitted
+  as larger packets rather than split into 1 MB writes. Reads retain their
+  upstream limit. Larger chunks increase per-upload memory use and the amount
+  of work before cancellation can be checked again.
+  Settings retains the latest completed upload's duration, average MB/s, and
+  actual chunk size. Per-app results are also available by holding an app in
+  the install drawer. Timing includes reading/sending the IPA and closing its
+  staging file, and excludes setup and iOS installation. Units use 1,048,576
+  bytes per MB. Compare the same IPA with the same number of concurrent jobs.
   A change in the VPN's reported status alone does not replace the prepared
   native connection during a workflow. Later apps keep using that connection;
   a connection error requests recovery after active installs drain. An app

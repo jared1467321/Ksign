@@ -20,5 +20,8 @@
   ],
   "Sources/IDeviceSwift/IDeviceSwiftError.swift": [
     "511b194a6df0efb38acfb684a82499659ab377d688fc24d508e90457e71bd505"
+  ],
+  "Sources/IDeviceSwift/InstallationProxy/InstallerStatusViewModel.swift": [
+    "46d82fb079ccb402c05353dc5e1d02a356704ebba58418e9562da0ff397bf543"
   ]
 }

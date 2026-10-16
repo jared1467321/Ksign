@@ -96,6 +96,7 @@ def transform(inputs):
 
     for name, destination in {
         "InstallationProxy.swift": "InstallationProxy/InstallationProxy.swift",
+        "InstallerStatusViewModel.swift": "InstallationProxy/InstallerStatusViewModel.swift",
         "RSDConnection.swift": "Heartbeat/RSDConnection.swift",
         "IDeviceInstallationWorker.swift": "InstallationProxy/IDeviceInstallationWorker.swift",
     }.items():

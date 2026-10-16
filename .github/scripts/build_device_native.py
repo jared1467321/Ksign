@@ -35,6 +35,21 @@ def build_fingerprint():
                           subprocess.check_output(["rustc", f"+{toolchain}", "--version"])).hexdigest()
 
 
+def patch_afc_uploads(source):
+    """Let each Swift write choose its packet size, bounded to 16 MiB.
+
+    Keep upstream's 1 MiB read limit. The Swift uploader still defaults to
+    1 MiB and snapshots its selected size once per attempt.
+    """
+    original = "for chunk in bytes.chunks(MAX_TRANSFER as usize) {"
+    replacement = "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling"
+    if source.count(original) == 1 and replacement not in source:
+        return source.replace(original, replacement, 1)
+    if source.count(replacement) == 1 and original not in source:
+        return source
+    raise RuntimeError("Unrecognized upstream AFC write loop")
+
+
 def prepare(archive=None):
     spec = json.loads((CONFIG / "source.json").read_text())
     WORK.mkdir(parents=True, exist_ok=True)
@@ -59,6 +74,8 @@ def prepare(archive=None):
                 tar.extract(member, source, filter="data")
         marker.write_text(spec["revision"])
     shutil.copy2(CONFIG / "ksign_pairing.rs", source / "ffi/src/ksign_pairing.rs")
+    afc = source / "idevice/src/services/afc/inner_file.rs"
+    afc.write_text(patch_afc_uploads(afc.read_text()))
     lib = source / "ffi/src/lib.rs"
     text = lib.read_text()
     declaration = '\n#[cfg(feature = "remote_pairing")]\npub mod ksign_pairing;\n'

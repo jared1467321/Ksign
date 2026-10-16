@@ -14,6 +14,7 @@ public final class InstallerStatusViewModel {
     var status: Status = .sendingPayload
     var packageProgress = 0.0
     var uploadProgress = 0.0
+    var uploadMetrics: IDeviceUploadMetrics?
     var installProgress = 0.0
 }
 final class UIApplication {
@@ -61,6 +62,20 @@ final class NativeCalls {
     private var clientsCreated = 0
     private var clientsFreed = 0
     private var nextInstallationError: IdeviceFfiError?
+    private var writeCounts: [Int] = []
+
+    func recordWrite(_ count: Int) {
+        condition.lock()
+        writeCounts.append(count)
+        condition.unlock()
+    }
+    func takeWriteCounts() -> [Int] {
+        condition.lock()
+        defer { condition.unlock() }
+        let counts = writeCounts
+        writeCounts.removeAll()
+        return counts
+    }
 
     func failNextInstallation(code: Int32, subCode: Int32) {
         condition.lock()
@@ -221,6 +236,7 @@ func afc_file_open(_ client: OpaquePointer?, _ path: String, _ mode: Int,
     file = NativeCalls.shared.open(client!); return nil
 }
 func afc_file_write(_ file: OpaquePointer?, _ data: UnsafePointer<UInt8>, _ count: Int) -> UnsafeMutablePointer<IdeviceFfiError>? {
+    NativeCalls.shared.recordWrite(count)
     NativeCalls.shared.write(file!); return nil
 }
 func afc_file_close(_ file: OpaquePointer?) -> UnsafeMutablePointer<IdeviceFfiError>? {
@@ -242,6 +258,15 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
 
 @main struct SharedRSDConnectionTests {
     static func main() async throws {
+        let defaults = UserDefaults.standard
+        let previousChunkSize = defaults.object(forKey: IDeviceUploadSettings.chunkSizeKey)
+        let previousUpload = defaults.object(forKey: IDeviceUploadSettings.lastUploadKey)
+        defer {
+            defaults.set(previousChunkSize, forKey: IDeviceUploadSettings.chunkSizeKey)
+            defaults.set(previousUpload, forKey: IDeviceUploadSettings.lastUploadKey)
+        }
+        defaults.removeObject(forKey: IDeviceUploadSettings.chunkSizeKey)
+        precondition(IDeviceUploadSettings.chunkSizeMB() == 1)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -253,12 +278,14 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         var attempts: [Task<Void, Error>] = []
         for index in 0..<3 {
             let ipa = directory.appendingPathComponent("app\(index).ipa")
-            try Data(repeating: UInt8(index), count: 1024).write(to: ipa)
+            try Data(repeating: UInt8(index), count: 2 * 1024 * 1024 + 17).write(to: ipa)
             attempts.append(Task.detached {
                 try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa)
             })
         }
         NativeCalls.shared.waitForUploads(3)
+        // An in-flight upload keeps its snapshot even if Settings changes.
+        defaults.set(16, forKey: IDeviceUploadSettings.chunkSizeKey)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(0)
         // Resetting the cache must not release a tunnel still leased by clients.
@@ -268,6 +295,10 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         for attempt in attempts { try await attempt.value }
         NativeCalls.shared.expectCleanClients()
         NativeCalls.shared.expectFreed(1)
+        precondition(NativeCalls.shared.takeWriteCounts().sorted() ==
+                     [17, 17, 17] + Array(repeating: 1024 * 1024, count: 6),
+                     "Changing Settings must not change the size of active uploads")
+        defaults.set(1, forKey: IDeviceUploadSettings.chunkSizeKey)
 
         // Exercise classification through the production native error handler,
         // including a socket failure returned by the installation call itself.
@@ -286,10 +317,34 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         }
         try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa)
         NativeCalls.shared.expectCleanClients(14, tunnelCount: 2)
+        _ = NativeCalls.shared.takeWriteCounts()
+        let megabyte = 1024 * 1024
+        for savedSize in [1, 2, 4, 8, 16, 0, 3, 128] {
+            defaults.set(savedSize, forKey: IDeviceUploadSettings.chunkSizeKey)
+            let size = IDeviceUploadSettings.chunkSizesMB.contains(savedSize) ? savedSize : 1
+            let chunkBytes = size * megabyte
+            let byteCount = chunkBytes * 2 + 123
+            try Data(repeating: 42, count: byteCount).write(to: ipa)
+            let model = InstallerStatusViewModel()
+            try await InstallationProxy(viewModel: model).install(at: ipa)
+            precondition(NativeCalls.shared.takeWriteCounts() == [chunkBytes, chunkBytes, 123],
+                         "Selected size must reach the native API, including the final partial chunk")
+            await MainActor.run {
+                guard let metrics = model.uploadMetrics else {
+                    preconditionFailure("Completed upload must report metrics")
+                }
+                precondition(metrics.bytes == UInt64(byteCount) && metrics.chunkSizeMB == size)
+                precondition(metrics.duration > 0 && metrics.averageMBPerSecond.isFinite)
+                let persisted = try! JSONDecoder().decode(IDeviceUploadMetrics.self,
+                    from: defaults.data(forKey: IDeviceUploadSettings.lastUploadKey)!)
+                precondition(persisted.bytes == metrics.bytes && persisted.chunkSizeMB == size)
+            }
+        }
+        NativeCalls.shared.expectCleanClients(30, tunnelCount: 2)
         NativeCalls.shared.expectFreed(1)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(2)
         HeartbeatManager.configurePairingPath(nil)
-        print("Passed shared native tunnel, overlapping uploads, installer error classification and lease cleanup")
+        print("Passed shared native tunnel, overlapping uploads, chunk sizes, upload metrics, installer error classification and lease cleanup")
     }
 }

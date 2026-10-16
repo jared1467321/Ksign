@@ -163,7 +163,13 @@ struct InstallPreviewView: View {
 	
 	@ViewBuilder
 	private func _status() -> some View {
-		Label(viewModel.statusLabel, systemImage: viewModel.statusImage)
+		VStack(alignment: .leading, spacing: 4) {
+			Label(viewModel.statusLabel, systemImage: viewModel.statusImage)
+			if let metrics = viewModel.uploadMetrics {
+				Text("Upload: \(metrics.summary)")
+					.font(.footnote.monospacedDigit())
+			}
+		}
             .nbThemeForeground(.text)
 			.padding()
 			.labelStyle(.titleAndIcon)

@@ -69,6 +69,9 @@ struct BulkInstallProgressView: View {
 			// reason the pill label is: both String and LocalizedStringKey
 			// offer it, and Section's init is overloaded on exactly that.
 			Section(job.app.name ?? String.localized("Unknown App")) {
+                if let metrics = job.viewModel.uploadMetrics {
+                    Text("Upload: \(metrics.summary)")
+                }
 				Button {
 					InstallSession.shared.retry(job)
 				} label: {
