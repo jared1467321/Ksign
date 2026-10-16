@@ -50,6 +50,12 @@ class NativeCacheTests(unittest.TestCase):
         self.version_probe = patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_effective_rust_flags_invalidate_the_key(self):
+        with patch.dict(native.os.environ, {}, clear=True):
+            before = native.build_fingerprint()
+        with patch.dict(native.os.environ, {"RUSTFLAGS": "-C debuginfo=1"}, clear=True):
+            self.assertNotEqual(native.build_fingerprint(), before)
+
     def test_unrelated_edits_keep_the_cache_key(self):
         before = native.build_fingerprint()
         for relative in ("README.md", "Tests/VPNReconnect.swift", "InstallationProxy.swift"):
@@ -114,25 +120,78 @@ class NativeCacheTests(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("Using cached Ksign iDevice framework", log.getvalue())
 
+    def test_both_apple_targets_receive_hardware_aes_flags(self):
+        source = self.root / "source"
+        (source / "ffi").mkdir(parents=True)
+        (source / "ffi/idevice.h").write_text("// header\n")
+        native.WORK.mkdir()
 
-class AFCUploadPatchTests(unittest.TestCase):
-    def test_writes_allow_larger_packets_without_changing_reads(self):
+        probe = self.version_probe.side_effect
+        # Keep the original version probe outside the replacement mock.
+        def build_probe(command, **kwargs):
+            return "/test/sdk\n" if command[:2] == ["xcrun", "--sdk"] else probe(command)
+
+        with patch("sys.argv", [str(SCRIPT)]), \
+                patch.object(native, "prepare", return_value=source), \
+                patch.object(native.subprocess, "check_output", side_effect=build_probe), \
+                patch.object(native, "run") as run:
+            native.main()
+        builds = [call for call in run.call_args_list if call.args[0] == "cargo"]
+        self.assertEqual(len(builds), 2)
+        for call, target in zip(builds, ["aarch64-apple-ios", "aarch64-apple-ios-sim"]):
+            self.assertIn(target, call.args)
+            self.assertIn("--cfg\x1faes_armv8", call.kwargs["env"]["CARGO_ENCODED_RUSTFLAGS"])
+
+
+class HardwareAESTests(unittest.TestCase):
+    def test_enables_arm_backend_without_changing_input_environment(self):
+        original = {"OTHER": "value"}
+        result = native.hardware_aes_environment(original)
+        self.assertEqual(result["CARGO_ENCODED_RUSTFLAGS"], "--cfg\x1faes_armv8")
+        self.assertEqual(result["OTHER"], "value")
+        self.assertEqual(original, {"OTHER": "value"})
+
+    def test_preserves_quoted_rustflags(self):
+        result = native.hardware_aes_environment({"RUSTFLAGS": '-C "link-arg=path with spaces"'})
+        self.assertEqual(result["CARGO_ENCODED_RUSTFLAGS"].split("\x1f"),
+                         ["-C", "link-arg=path with spaces", "--cfg", "aes_armv8"])
+
+    def test_encoded_flags_take_precedence_including_empty_flags(self):
+        for encoded in ("", "-C\x1fdebuginfo=1"):
+            with self.subTest(encoded=encoded):
+                result = native.hardware_aes_environment({
+                    "CARGO_ENCODED_RUSTFLAGS": encoded, "RUSTFLAGS": "ignored",
+                })
+                expected = (encoded + "\x1f" if encoded else "") + "--cfg\x1faes_armv8"
+                self.assertEqual(result["CARGO_ENCODED_RUSTFLAGS"], expected)
+
+    def test_force_software_build_cannot_silently_disable_acceleration(self):
+        for flags in ("--cfg aes_force_soft", "--cfg=aes_force_soft"):
+            with self.subTest(flags=flags):
+                with self.assertRaisesRegex(RuntimeError, "aes_force_soft"):
+                    native.hardware_aes_environment({"RUSTFLAGS": flags})
+
+
+class AFCUploadLimitTests(unittest.TestCase):
+    def test_fresh_sources_keep_upstream_limits(self):
         source = """const MAX_TRANSFER: u64 = 1024 * 1024;
 for chunk in chunk_number(n, MAX_TRANSFER as usize) { read(chunk); }
 for chunk in bytes.chunks(MAX_TRANSFER as usize) { write(chunk); }
 """
-        patched = native.patch_afc_uploads(source)
-        self.assertIn("bytes.chunks(16 * 1024 * 1024)", patched)
-        self.assertIn("chunk_number(n, MAX_TRANSFER as usize)", patched)
-        self.assertIn("const MAX_TRANSFER: u64 = 1024 * 1024;", patched)
-        self.assertEqual(native.patch_afc_uploads(patched), patched)
+        self.assertEqual(native.restore_afc_upload_limit(source), source)
+
+    def test_cached_trial_patch_is_removed_idempotently(self):
+        source = "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling\n}"
+        restored = native.restore_afc_upload_limit(source)
+        self.assertEqual(restored, "for chunk in bytes.chunks(MAX_TRANSFER as usize) {\n}")
+        self.assertEqual(native.restore_afc_upload_limit(restored), restored)
 
     def test_unknown_or_ambiguous_source_is_rejected(self):
         for source in ("", "for chunk in bytes.chunks(MAX_TRANSFER as usize) {" * 2,
                        "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling" * 2):
             with self.subTest(source=source):
                 with self.assertRaisesRegex(RuntimeError, "AFC write loop"):
-                    native.patch_afc_uploads(source)
+                    native.restore_afc_upload_limit(source)
 
 
 if __name__ == "__main__":

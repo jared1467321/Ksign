@@ -25,6 +25,16 @@ later builds reuse it. Selecting **Ignore caches and build from scratch**
 still bypasses all caches. Run `python3 .github/scripts/test_native_cache.py`
 to verify invalidation and the cached build path without Xcode or Rust.
 
+The native builder enables `aes` 0.8.4's ARMv8 backend with `--cfg aes_armv8`
+for both Apple ARM64 targets. The pinned `cpufeatures` recognizes AES support
+on Apple ARM64; the AES crate calls its hardware intrinsics through
+feature-qualified functions. Existing Rust flags are preserved, and effective
+flags participate in the cache fingerprint. This forces a rebuild of libraries
+from before acceleration was enabled. The compiler optimization level and TLS
+cipher suites remain unchanged so the next device comparison isolates AES
+acceleration. The builder also restores upstream's AFC write limit in cached
+source trees from the chunk-size experiment.
+
 ## Requirements and workflow
 
 - Ksign and its embedded tunnel must be signed with provisioning profiles that
@@ -44,18 +54,6 @@ to verify invalidation and the cached build path without Xcode or Rust.
   concurrently, share one native tunnel and handshake across the workflow, and
   report progress per app. Each app has separate upload and installation clients;
   only opening those clients is serialized, while uploads and installs overlap.
-- In **Settings → Installation → iDevice → Upload performance**, choose an
-  upload chunk size of 1, 2, 4, 8, or 16 MB. The default remains 1 MB. Each
-  attempt snapshots the selection; changing it does not affect active uploads.
-  The native AFC write ceiling is 16 MB so larger selections are transmitted
-  as larger packets rather than split into 1 MB writes. Reads retain their
-  upstream limit. Larger chunks increase per-upload memory use and the amount
-  of work before cancellation can be checked again.
-  Settings retains the latest completed upload's duration, average MB/s, and
-  actual chunk size. Per-app results are also available by holding an app in
-  the install drawer. Timing includes reading/sending the IPA and closing its
-  staging file, and excludes setup and iOS installation. Units use 1,048,576
-  bytes per MB. Compare the same IPA with the same number of concurrent jobs.
   A change in the VPN's reported status alone does not replace the prepared
   native connection during a workflow. Later apps keep using that connection;
   a connection error requests recovery after active installs drain. An app
@@ -63,6 +61,14 @@ to verify invalidation and the cached build path without Xcode or Rust.
   fails individually without replacing the shared connection for later apps.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
+- Uploads use bounded 1 MiB chunks. The experimental chunk-size picker has
+  been removed; previously saved sizes no longer affect uploads. **Settings →
+  Installation → iDevice → Upload performance** retains the latest completed
+  upload's duration and average MB/s. Per-app results are also available by
+  holding an app in the install drawer. Timing includes reading/sending the
+  IPA and closing its staging file, and excludes setup and iOS installation.
+  Units use 1,048,576 bytes per MB. Compare the same IPA with the same number
+  of concurrent jobs. Results saved by the experimental build remain readable.
 - For both iDevice and Server installs, pause the install drawer to stop new
   work and let current work finish. Then choose **Cancel Task & Select Installed**
   to cancel the remaining queue and select successfully installed entries in

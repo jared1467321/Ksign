@@ -3,29 +3,17 @@ import Combine
 import UIKit
 import IDevice
 
-public enum IDeviceUploadSettings {
-    public static let chunkSizeKey = "Ksign.deviceUploadChunkSizeMB"
-    public static let lastUploadKey = "Ksign.lastDeviceUpload"
-    public static let chunkSizesMB = [1, 2, 4, 8, 16]
-
-    public static func chunkSizeMB(defaults: UserDefaults = .standard) -> Int {
-        let saved = defaults.integer(forKey: chunkSizeKey)
-        return chunkSizesMB.contains(saved) ? saved : 1
-    }
-}
-
 public struct IDeviceUploadMetrics: Codable {
+    public static let storageKey = "Ksign.lastDeviceUpload"
     public let bytes: UInt64
     public let duration: TimeInterval
-    public let chunkSizeMB: Int
 
     public var averageMBPerSecond: Double {
         duration > 0 ? Double(bytes) / (1024 * 1024) / duration : 0
     }
 
     public var summary: String {
-        String(format: "%.1f s · %.1f MB/s · %d MB chunks",
-               duration, averageMBPerSecond, chunkSizeMB)
+        String(format: "%.1f s · %.1f MB/s", duration, averageMBPerSecond)
     }
 }
 
@@ -49,13 +37,12 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     public func install(at url: URL, suspend: Bool = false,
                         isCurrent: @escaping () -> Bool = { true }) async throws {
         self.isCurrent = isCurrent
-        let chunkSizeMB = IDeviceUploadSettings.chunkSizeMB()
         update { $0.uploadMetrics = nil }
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await IDeviceInstallationWorker.performInstallation { [self] in
                 try cancellation.check()
-                try installSynchronously(at: url, suspend: suspend, chunkSizeMB: chunkSizeMB)
+                try installSynchronously(at: url, suspend: suspend)
             }
             try cancellation.check()
             await MainActor.run {
@@ -87,7 +74,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         throw IDeviceSwiftError(error)
     }
 
-    private func installSynchronously(at url: URL, suspend: Bool, chunkSizeMB: Int) throws {
+    private func installSynchronously(at url: URL, suspend: Bool) throws {
         let heartbeat = HeartbeatManager.shared
         guard FileManager.default.fileExists(atPath: HeartbeatManager.pairingFile()) else {
             throw IDeviceSwiftError(message: "Pair this device in Installation settings before installing.")
@@ -133,11 +120,10 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         guard byteCount > 0 else { throw IDeviceSwiftError(message: "The IPA is empty.") }
         update { $0.packageProgress = 1; $0.status = .sendingPayload }
         let startedAt = ProcessInfo.processInfo.systemUptime
-        let chunkSize = UInt64(chunkSizeMB * 1024 * 1024)
         var offset: UInt64 = 0
         while offset < byteCount {
             try checkCancellation()
-            let size = Int(min(chunkSize, byteCount - offset))
+            let size = Int(min(1024 * 1024, byteCount - offset))
             let written = try autoreleasepool { () throws -> Int in
                 guard let data = try input.read(upToCount: size), !data.isEmpty else {
                     throw IDeviceSwiftError(message: "The IPA ended before its upload completed.")
@@ -158,11 +144,11 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         // Include the final AFC close acknowledgment, but exclude connection
         // setup and the subsequent iOS installation/verification phase.
         let metrics = IDeviceUploadMetrics(bytes: byteCount,
-            duration: ProcessInfo.processInfo.systemUptime - startedAt, chunkSizeMB: chunkSizeMB)
+            duration: ProcessInfo.processInfo.systemUptime - startedAt)
         update {
             $0.uploadMetrics = metrics
             if let encoded = try? JSONEncoder().encode(metrics) {
-                UserDefaults.standard.set(encoded, forKey: IDeviceUploadSettings.lastUploadKey)
+                UserDefaults.standard.set(encoded, forKey: IDeviceUploadMetrics.storageKey)
             }
         }
         if let connection {

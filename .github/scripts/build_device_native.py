@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -25,27 +26,44 @@ def run(*args, cwd=None, env=None):
     subprocess.run(args, cwd=cwd, env=env, check=True)
 
 
+def hardware_aes_environment(environ):
+    """Enable aes 0.8's ARMv8 backend for our two Apple ARM64 targets.
+
+    cpufeatures 0.2.17 recognizes AES on Apple ARM64. The backend uses
+    target-feature-qualified intrinsics; no global CPU feature override is
+    needed. Preserve inherited Rust flags, including Cargo's encoded form.
+    """
+    env = dict(environ)
+    if "CARGO_ENCODED_RUSTFLAGS" in env:
+        encoded = env["CARGO_ENCODED_RUSTFLAGS"]
+        flags = encoded.split("\x1f") if encoded else []
+    else:
+        flags = shlex.split(env.get("RUSTFLAGS", ""))
+    if "aes_force_soft" in flags or "--cfg=aes_force_soft" in flags:
+        raise RuntimeError("aes_force_soft conflicts with Ksign's hardware AES build")
+    flags.extend(["--cfg", "aes_armv8"])
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+    return env
+
+
 def build_fingerprint():
     """Use the same native inputs for the CI cache and the local build stamp."""
     toolchain = json.loads((CONFIG / "source.json").read_text())["rust_toolchain"]
     return hashlib.sha256((CONFIG / "source.json").read_bytes() +
                           (CONFIG / "ksign_pairing.rs").read_bytes() +
                           Path(__file__).read_bytes() +
+                          hardware_aes_environment(os.environ)["CARGO_ENCODED_RUSTFLAGS"].encode() +
                           subprocess.check_output(["xcodebuild", "-version"]) +
                           subprocess.check_output(["rustc", f"+{toolchain}", "--version"])).hexdigest()
 
 
-def patch_afc_uploads(source):
-    """Let each Swift write choose its packet size, bounded to 16 MiB.
-
-    Keep upstream's 1 MiB read limit. The Swift uploader still defaults to
-    1 MiB and snapshots its selected size once per attempt.
-    """
+def restore_afc_upload_limit(source):
+    """Restore upstream's 1 MiB writes in caches from the chunk-size trial."""
     original = "for chunk in bytes.chunks(MAX_TRANSFER as usize) {"
-    replacement = "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling"
-    if source.count(original) == 1 and replacement not in source:
-        return source.replace(original, replacement, 1)
-    if source.count(replacement) == 1 and original not in source:
+    trial = "for chunk in bytes.chunks(16 * 1024 * 1024) { // Ksign upload ceiling"
+    if source.count(trial) == 1 and original not in source:
+        return source.replace(trial, original, 1)
+    if source.count(original) == 1 and trial not in source:
         return source
     raise RuntimeError("Unrecognized upstream AFC write loop")
 
@@ -75,7 +93,7 @@ def prepare(archive=None):
         marker.write_text(spec["revision"])
     shutil.copy2(CONFIG / "ksign_pairing.rs", source / "ffi/src/ksign_pairing.rs")
     afc = source / "idevice/src/services/afc/inner_file.rs"
-    afc.write_text(patch_afc_uploads(afc.read_text()))
+    afc.write_text(restore_afc_upload_limit(afc.read_text()))
     lib = source / "ffi/src/lib.rs"
     text = lib.read_text()
     declaration = '\n#[cfg(feature = "remote_pairing")]\npub mod ksign_pairing;\n'
@@ -122,7 +140,7 @@ def main():
     targets = [("aarch64-apple-ios", "iphoneos"), ("aarch64-apple-ios-sim", "iphonesimulator")]
     run("rustup", "target", "add", "--toolchain", toolchain, *(target for target, _ in targets))
     for target, sdk in targets:
-        env = os.environ.copy()
+        env = hardware_aes_environment(os.environ)
         sdk_path = subprocess.check_output(["xcrun", "--sdk", sdk, "--show-sdk-path"], text=True).strip()
         env["BINDGEN_EXTRA_CLANG_ARGS"] = f"--sysroot={sdk_path}"
         env["IPHONEOS_DEPLOYMENT_TARGET"] = "16.0"

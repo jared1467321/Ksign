@@ -259,14 +259,20 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
 @main struct SharedRSDConnectionTests {
     static func main() async throws {
         let defaults = UserDefaults.standard
-        let previousChunkSize = defaults.object(forKey: IDeviceUploadSettings.chunkSizeKey)
-        let previousUpload = defaults.object(forKey: IDeviceUploadSettings.lastUploadKey)
+        let retiredChunkSizeKey = "Ksign.deviceUploadChunkSizeMB"
+        let previousChunkSize = defaults.object(forKey: retiredChunkSizeKey)
+        let previousUpload = defaults.object(forKey: IDeviceUploadMetrics.storageKey)
         defer {
-            defaults.set(previousChunkSize, forKey: IDeviceUploadSettings.chunkSizeKey)
-            defaults.set(previousUpload, forKey: IDeviceUploadSettings.lastUploadKey)
+            defaults.set(previousChunkSize, forKey: retiredChunkSizeKey)
+            defaults.set(previousUpload, forKey: IDeviceUploadMetrics.storageKey)
         }
-        defaults.removeObject(forKey: IDeviceUploadSettings.chunkSizeKey)
-        precondition(IDeviceUploadSettings.chunkSizeMB() == 1)
+        // Old installations may have saved 16 MB. Uploads must ignore that
+        // retired preference and use the fixed, bounded 1 MiB write size.
+        defaults.set(16, forKey: retiredChunkSizeKey)
+        let oldResult = Data(#"{"bytes":1048576,"duration":1.0,"chunkSizeMB":16}"#.utf8)
+        let decoded = try JSONDecoder().decode(IDeviceUploadMetrics.self, from: oldResult)
+        precondition(decoded.bytes == 1048576 && decoded.averageMBPerSecond == 1)
+        precondition(!decoded.summary.contains("chunks"), "Old results should display without chunk controls")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -284,8 +290,6 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
             })
         }
         NativeCalls.shared.waitForUploads(3)
-        // An in-flight upload keeps its snapshot even if Settings changes.
-        defaults.set(16, forKey: IDeviceUploadSettings.chunkSizeKey)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(0)
         // Resetting the cache must not release a tunnel still leased by clients.
@@ -297,8 +301,7 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         NativeCalls.shared.expectFreed(1)
         precondition(NativeCalls.shared.takeWriteCounts().sorted() ==
                      [17, 17, 17] + Array(repeating: 1024 * 1024, count: 6),
-                     "Changing Settings must not change the size of active uploads")
-        defaults.set(1, forKey: IDeviceUploadSettings.chunkSizeKey)
+                     "Uploads must use 1 MiB chunks even when the retired setting is 16 MB")
 
         // Exercise classification through the production native error handler,
         // including a socket failure returned by the installation call itself.
@@ -318,33 +321,28 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa)
         NativeCalls.shared.expectCleanClients(14, tunnelCount: 2)
         _ = NativeCalls.shared.takeWriteCounts()
-        let megabyte = 1024 * 1024
-        for savedSize in [1, 2, 4, 8, 16, 0, 3, 128] {
-            defaults.set(savedSize, forKey: IDeviceUploadSettings.chunkSizeKey)
-            let size = IDeviceUploadSettings.chunkSizesMB.contains(savedSize) ? savedSize : 1
-            let chunkBytes = size * megabyte
-            let byteCount = chunkBytes * 2 + 123
-            try Data(repeating: 42, count: byteCount).write(to: ipa)
-            let model = InstallerStatusViewModel()
-            try await InstallationProxy(viewModel: model).install(at: ipa)
-            precondition(NativeCalls.shared.takeWriteCounts() == [chunkBytes, chunkBytes, 123],
-                         "Selected size must reach the native API, including the final partial chunk")
-            await MainActor.run {
-                guard let metrics = model.uploadMetrics else {
-                    preconditionFailure("Completed upload must report metrics")
-                }
-                precondition(metrics.bytes == UInt64(byteCount) && metrics.chunkSizeMB == size)
-                precondition(metrics.duration > 0 && metrics.averageMBPerSecond.isFinite)
-                let persisted = try! JSONDecoder().decode(IDeviceUploadMetrics.self,
-                    from: defaults.data(forKey: IDeviceUploadSettings.lastUploadKey)!)
-                precondition(persisted.bytes == metrics.bytes && persisted.chunkSizeMB == size)
+        let chunkBytes = 1024 * 1024
+        let byteCount = chunkBytes * 2 + 123
+        try Data(repeating: 42, count: byteCount).write(to: ipa)
+        let model = InstallerStatusViewModel()
+        try await InstallationProxy(viewModel: model).install(at: ipa)
+        precondition(NativeCalls.shared.takeWriteCounts() == [chunkBytes, chunkBytes, 123],
+                     "Upload must preserve the final partial chunk")
+        await MainActor.run {
+            guard let metrics = model.uploadMetrics else {
+                preconditionFailure("Completed upload must report metrics")
             }
+            precondition(metrics.bytes == UInt64(byteCount))
+            precondition(metrics.duration > 0 && metrics.averageMBPerSecond.isFinite)
+            let persisted = try! JSONDecoder().decode(IDeviceUploadMetrics.self,
+                from: defaults.data(forKey: IDeviceUploadMetrics.storageKey)!)
+            precondition(persisted.bytes == metrics.bytes && persisted.duration == metrics.duration)
         }
-        NativeCalls.shared.expectCleanClients(30, tunnelCount: 2)
+        NativeCalls.shared.expectCleanClients(16, tunnelCount: 2)
         NativeCalls.shared.expectFreed(1)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(2)
         HeartbeatManager.configurePairingPath(nil)
-        print("Passed shared native tunnel, overlapping uploads, chunk sizes, upload metrics, installer error classification and lease cleanup")
+        print("Passed shared native tunnel, overlapping uploads, fixed upload size, upload metrics, installer error classification and lease cleanup")
     }
 }
