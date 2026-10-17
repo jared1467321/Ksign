@@ -194,7 +194,7 @@ struct LibraryView: View {
 				.padding(.horizontal)
 				.padding(.vertical, 8)
 				
-				NBListAdaptable {
+				NBListAdaptable(rendersAurora: false) {
 					if _selectedTab == 0 {
 						NBSection(
 							.localized("Downloaded Apps"),

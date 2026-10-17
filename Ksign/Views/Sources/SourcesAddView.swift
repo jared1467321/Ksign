@@ -59,7 +59,7 @@ struct SourcesAddView: View {
 				}
 				.nbThemeRow()
 			}
-			.nbThemeCanvas()
+			.nbThemeCanvas(rendersAurora: false)
 			.toolbar {
 				NBToolbarButton(role: .cancel)
 				

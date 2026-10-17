@@ -14,6 +14,7 @@ public struct NBThemeSurface<S: Shape>: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.nbThemeUsesGlassSheet) private var glassSheet
     @State private var paneID = UUID()
 
     private let color: NBThemeColor
@@ -94,11 +95,17 @@ public struct NBThemeSurface<S: Shape>: View {
                 .clipShape(shape)
                 .opacity(color.alpha)
                 .background {
-                    GeometryReader { proxy in
-                        let rect = proxy.frame(in: .global)
-                        Color.clear.preference(key: NBGlassPanePreferenceKey.self,
-                                               value: rect.width > 140 && rect.height > 64
-                                               ? [paneID: NBGlassPaneFrame(rect: rect)] : [:])
+                    // Only in-screen panes feed the sky's refraction pass.
+                    // Drawer surfaces and the separate navigation hosting
+                    // controller have no consumer for these preferences.
+                    if #available(iOS 17.0, tvOS 17.0, *),
+                       auroraBackground && !glassSheet && finish == .standard {
+                        GeometryReader { proxy in
+                            let rect = proxy.frame(in: .global)
+                            Color.clear.preference(key: NBGlassPanePreferenceKey.self,
+                                                   value: rect.width > 140 && rect.height > 64
+                                                   ? [paneID: NBGlassPaneFrame(rect: rect)] : [:])
+                        }
                     }
                 }
             } else {

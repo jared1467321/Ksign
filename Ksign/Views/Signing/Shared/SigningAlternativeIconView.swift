@@ -35,7 +35,7 @@ struct SigningAlternativeIconView: View {
 				}
 				.nbThemeRow()
 			}
-			.nbThemeCanvas()
+			.nbThemeCanvas(rendersAurora: false)
 			.onAppear(perform: _loadAlternateIcons)
 			.toolbar {
 				if isModifing {

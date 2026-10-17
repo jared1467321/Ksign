@@ -70,7 +70,7 @@ struct BulkSigningView: View {
 				}
 				.nbThemeRow()
 			}
-			.nbThemeCanvas()
+			.nbThemeCanvas(rendersAurora: false)
 			.safeAreaInset(edge: .bottom) {
 				Button {
 					_start()

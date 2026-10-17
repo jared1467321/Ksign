@@ -8,6 +8,11 @@ private final class AuroraSession: ObservableObject {
     @Published var identity = AuroraIdentityGenerator.next()
     @Published var accumulatedTime: TimeInterval = 0
     @Published var activeStart: Date? = Date()
+    private var starfields = NBAuroraStarfieldCache()
+
+    func starfield(stream: UInt64, count: Int) -> NBAuroraStarfield {
+        starfields.field(stream: stream, seed: identity.starfieldSeed(stream: stream), count: count)
+    }
 
     func setActive(_ active: Bool) {
         if active, activeStart == nil {
@@ -112,12 +117,13 @@ struct NBThemeBackdrop: View {
     @StateObject private var session = AuroraSession.shared
     @StateObject private var performance = AuroraPerformanceController()
     @State private var viewport: AuroraViewport?
+    @State private var isVisible = false
 
     let base: NBThemeColor
     var panes: [CGRect] = []
 
     private var enabled: Bool { auroraBackground && !reduceTransparency && contrast != .increased }
-    private var animating: Bool { enabled && !reduceMotion && scenePhase == .active }
+    private var animating: Bool { isVisible && enabled && !reduceMotion && scenePhase == .active }
 
     var body: some View {
         GeometryReader { proxy in
@@ -146,8 +152,11 @@ struct NBThemeBackdrop: View {
         .background(AuroraViewportReader { viewport = $0 })
         .accessibilityHidden(true)
         .allowsHitTesting(false)
-        .onAppear { updateMonitoring() }
-        .onDisappear { performance.stop() }
+        .onAppear { isVisible = true }
+        .onDisappear {
+            isVisible = false
+            performance.stop()
+        }
         .onChange(of: animating) { _ in updateMonitoring() }
     }
 
@@ -190,18 +199,19 @@ struct NBThemeBackdrop: View {
                     .float2(Float(second.minX), Float(second.minY)),
                     .float2(Float(second.width), Float(second.height)), .float(Float(18 * scale)),
                     .float(Float(scale))
-                ), maxSampleOffset: CGSize(width: 32 * scale, height: 32 * scale))
+                ), maxSampleOffset: CGSize(width: 32 * scale, height: 32 * scale),
+                   isEnabled: !rects.isEmpty)
                 .scaleEffect(1 / scale, anchor: .topLeading)
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
                 .clipped()
 
             ZStack {
-                Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0xA11CE5EED),
-                          count: 54, tint: Color(red: 1, green: 0.824, blue: 0.451),
+                Starfield(field: session.starfield(stream: 0xA11CE5EED, count: 54),
+                          time: time, tint: Color(red: 1, green: 0.824, blue: 0.451),
                           speedScale: 0.74, sizeScale: 0.82)
                     .opacity(scheme == .dark ? 0.43 : 0.35)
-                Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0x57EE1F1E1D),
-                          count: 26, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
+                Starfield(field: session.starfield(stream: 0x57EE1F1E1D, count: 26),
+                          time: time, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
                           speedScale: 0.40, sizeScale: 0.94)
                     .opacity(scheme == .dark ? 0.20 : 0.18)
             }
@@ -461,80 +471,17 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
 
 
 private struct Starfield: View {
-    private struct Generator {
-        var state: UInt64
-
-        mutating func unit() -> Double {
-            state &+= 0x9E3779B97F4A7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-            z ^= z >> 31
-
-            // Use the upper 53 bits so every generated Double maps cleanly to
-            // the mantissa without introducing modulo bias.
-            return Double(z >> 11) * (1.0 / 9_007_199_254_740_992.0)
-        }
-
-        mutating func value(in range: ClosedRange<Double>) -> Double {
-            range.lowerBound + unit() * (range.upperBound - range.lowerBound)
-        }
-    }
-
-    private struct Mote {
-        let startX: CGFloat
-        let startY: CGFloat
-        let velocityX: Double
-        let velocityY: Double
-        let sway: CGFloat
-        let swayRate: Double
-        let radius: CGFloat
-        let phase: Double
-        let twinkleRate: Double
-        let peak: Double
-    }
-
-    private let motes: [Mote]
-    private let time: TimeInterval
-    private let tint: Color
-    private let speedScale: Double
-    private let sizeScale: CGFloat
-
-    init(
-        time: TimeInterval,
-        seed: UInt64,
-        count: Int = 34,
-        tint: Color = .white,
-        speedScale: Double = 1.0,
-        sizeScale: CGFloat = 1.0
-    ) {
-        self.time = time
-        self.tint = tint
-        self.speedScale = speedScale
-        self.sizeScale = sizeScale
-
-        var generator = Generator(state: seed)
-        self.motes = (0..<count).map { _ in
-            Mote(
-                startX: CGFloat(generator.value(in: 0...1)),
-                startY: CGFloat(generator.value(in: 0...1)),
-                velocityX: generator.value(in: -0.012...0.012),
-                velocityY: generator.value(in: -0.009...0.017),
-                sway: CGFloat(generator.value(in: 0.003...0.022)),
-                swayRate: generator.value(in: 0.18...0.82),
-                radius: CGFloat(generator.value(in: 0.68...2.20)),
-                phase: generator.value(in: 0...(2 * .pi)),
-                twinkleRate: generator.value(in: 0.42...2.10),
-                peak: generator.value(in: 0.25...0.90)
-            )
-        }
-    }
+    let field: NBAuroraStarfield
+    let time: TimeInterval
+    let tint: Color
+    let speedScale: Double
+    let sizeScale: CGFloat
 
     var body: some View {
         Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
             let elapsed = time * speedScale
 
-            for mote in motes {
+            for mote in field.motes {
                 let xProgress = Double(mote.startX)
                     + elapsed * mote.velocityX
                     + Double(mote.sway) * sin(elapsed * mote.swayRate + mote.phase)

@@ -40,6 +40,15 @@ def test_navigation_layers(directory, compiler):
     subprocess.run([str(executable)], check=True, timeout=30)
 
 
+def test_aurora_work(directory, compiler):
+    source = ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraStarfield.swift"
+    tests = ROOT / "Native/Theme/AuroraWork.swift"
+    executable = directory / "AuroraWork"
+    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
+                    str(directory / "modules"), str(source), str(tests), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)
+
+
 def main():
     compiler = shutil.which("swiftc")
     if not compiler:
@@ -64,6 +73,7 @@ def main():
         subprocess.run([str(executable)], check=True, timeout=30)
         test_aurora_colors(directory)
         test_navigation_layers(directory, compiler)
+        test_aurora_work(directory, compiler)
 
 
 if __name__ == "__main__":

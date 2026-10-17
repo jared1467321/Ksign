@@ -31,7 +31,7 @@ struct SourcesView: View {
 	// MARK: Body
 	var body: some View {
 		NBNavigationView(.localized("Sources")) {
-			NBListAdaptable {
+			NBListAdaptable(rendersAurora: false) {
 				Section {
 					NavigationLink {
 						SourceAppsView(object: Array(_sources), viewModel: viewModel)

@@ -76,7 +76,7 @@ struct SigningView: View {
 				}
 				.nbThemeRow()
 			}
-			.nbThemeCanvas()
+			.nbThemeCanvas(rendersAurora: false)
 			.disabled(_isSigning)
 			.safeAreaInset(edge: .bottom) {
 				if _isSigning {

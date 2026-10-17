@@ -588,15 +588,18 @@ public extension View {
     /// are hidden so the role really paints the visible pixels; the target is
     /// exact-editable, and unannotated primary/secondary list text plus row
     /// separators follow the theme as well.
+    /// Set rendersAurora to false only when another canvas in this screen
+    /// already paints the sky. Solid backgrounds and iOS 16 keep their backing.
     func nbThemeCanvas(
         _ role: NBThemeRole = .background,
         elementID explicitElementID: String? = nil,
+        rendersAurora: Bool = true,
         fileID: StaticString = #fileID,
         line: UInt = #line,
         column: UInt = #column
     ) -> some View {
         let elementID = explicitElementID ?? nbThemeSourceID("canvas", fileID, line, column)
-        return modifier(NBThemeCanvasModifier(role: role, elementID: elementID))
+        return modifier(NBThemeCanvasModifier(role: role, elementID: elementID, rendersAurora: rendersAurora))
     }
 }
 
@@ -988,6 +991,15 @@ private struct NBThemeCanvasModifier: ViewModifier {
     let role: NBThemeRole
     let elementID: String
 
+    let rendersAurora: Bool
+
+    private var reusesAurora: Bool {
+        if #available(iOS 17.0, tvOS 17.0, *) {
+            return !rendersAurora && auroraBackground && !reduceTransparency && contrast != .increased
+        }
+        return false
+    }
+
     func body(content: Content) -> some View {
         let _ = themes.previewRevision
         let primary = themes.activeColor(for: .text).color
@@ -1001,13 +1013,17 @@ private struct NBThemeCanvasModifier: ViewModifier {
             // Glass drawers explicitly replace their presentation backing and
             // clear their canvases to reveal the presenting screen instead.
             .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
-                panes = frames.values.map(\.rect)
+                guard rendersAurora && !glassSheet && role == .background else { return }
+                let nextPanes = frames.values.map(\.rect)
                     .sorted { lhs, rhs in
                         let a = lhs.width * lhs.height
                         let b = rhs.width * rhs.height
-                        return a == b ? lhs.minY < rhs.minY : a > b
+                        if a != b { return a > b }
+                        if lhs.minY != rhs.minY { return lhs.minY < rhs.minY }
+                        return lhs.minX < rhs.minX
                     }
                     .prefix(2).map { $0 }
+                if nextPanes != panes { panes = nextPanes }
             }
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .foregroundStyle(primary, secondary)
@@ -1020,7 +1036,13 @@ private struct NBThemeCanvasModifier: ViewModifier {
                     // extent, rather than the smaller content rectangle.
                     Group {
                         if role == .background {
-                            NBThemeBackdrop(base: resolved, panes: panes)
+                            if reusesAurora {
+                                // The navigation canvas covers the same window
+                                // coordinates, including the title/search area.
+                                Color.clear
+                            } else {
+                                NBThemeBackdrop(base: resolved, panes: panes)
+                            }
                         } else {
                             resolved.color
                         }

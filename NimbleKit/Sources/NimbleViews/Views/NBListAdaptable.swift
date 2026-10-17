@@ -13,8 +13,10 @@ public struct NBListAdaptable<Content>: View where Content: View {
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 	
 	private var _content: Content
+	private let rendersAurora: Bool
 	
-	public init(@ViewBuilder content: () -> Content) {
+	public init(rendersAurora: Bool = true, @ViewBuilder content: () -> Content) {
+		self.rendersAurora = rendersAurora
 		self._content = content()
 	}
 	
@@ -26,12 +28,12 @@ public struct NBListAdaptable<Content>: View where Content: View {
 						.nbThemeRow()
 				}
 				.listStyle(.insetGrouped)
-				.nbThemeCanvas()
+				.nbThemeCanvas(rendersAurora: rendersAurora)
 			} else {
 				NBGrid {
 					_content
 				}
-				.nbThemeCanvas()
+				.nbThemeCanvas(rendersAurora: rendersAurora)
 			}
 		}
 	}

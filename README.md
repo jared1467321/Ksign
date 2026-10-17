@@ -38,6 +38,10 @@ iOS 16 uses a static gradient instead of the Metal aurora. Reduce Motion freezes
 the sky, and Reduce Transparency or Increase Contrast uses solid backgrounds
 and surfaces. Animation pauses when the app leaves the foreground, and rendering
 resolution adjusts to system load.
+Nested lists reuse their navigation screen's sky, and particle layouts are
+cached across frames and screens. Pane refraction runs only when panes exist;
+off-screen backdrops pause their animation. These optimizations retain the same
+Aurora animation and glass finishes.
 
 Duplicate Aurora Glass to edit its Light and Dark palettes independently.
 Existing custom profiles retain their saved colors, and Halloween remains

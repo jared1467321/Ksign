@@ -38,7 +38,7 @@ struct DylibsView: View {
                     .nbThemeRow()
                 }
                 .listStyle(.plain)
-                .nbThemeCanvas()
+                .nbThemeCanvas(rendersAurora: false)
                 if hiddenDylibCount > 0 {
                     Text(verbatim: .localized("%lld required system dylibs not shown", arguments: hiddenDylibCount))
                         .font(.footnote)

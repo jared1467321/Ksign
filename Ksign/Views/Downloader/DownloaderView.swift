@@ -185,7 +185,7 @@ struct DownloaderView: View {
                 .nbThemeRow()
             }
             .listStyle(.insetGrouped)
-            .nbThemeCanvas()
+            .nbThemeCanvas(rendersAurora: false)
             .nbThemeOverlay {
                 if cryptCheckRunning {
                     ProgressView("Running Crypt Check…")
