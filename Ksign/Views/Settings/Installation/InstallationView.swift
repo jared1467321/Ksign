@@ -12,33 +12,52 @@ import NimbleViews
 // MARK: - View
 struct InstallationView: View {
     @AppStorage("Feather.installationMethod") private var _installationMethod: Int = 0
-
-    private let _installationMethods: [String] = [
-        .localized("Server"),
-        .localized("idevice")
-    ]
+    @ObservedObject private var manager = DeviceInstallationManager.shared
+    @ObservedObject private var session = InstallSession.shared
     
     // MARK: Body
     var body: some View {
-        NBList(.localized("Installation")) {
-            Section {
-                Picker(.localized("Installation Type"), systemImage: "arrow.down.app", selection: $_installationMethod) {
-                    ForEach(_installationMethods.indices, id: \.description) { index in
-                        Text(_installationMethods[index]).tag(index)
+        Group {
+            if _installationMethod == 1 {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        methodPicker
+                            .padding(18)
+                            .nbThemeBackground(.elevated, in: RoundedRectangle(cornerRadius: 22))
+                        DeviceConnectionSettingsView()
                     }
+                    .padding(20)
+                    .frame(maxWidth: 680)
+                    .frame(maxWidth: .infinity)
                 }
-            } footer: {
-                Text("Server uses a local web server to install apps. iDevice installs directly through this device's installation service, with progress for each app. Choose Built-in Connection to let Ksign manage pairing and its local VPN.")
-                .nbThemeForeground(.textSecondary)
-            }
-            
-            if _installationMethod == 0 {
-                ServerView()
-            } else if _installationMethod == 1 {
-                DeviceConnectionSettingsView()
+            } else {
+                NBList(.localized("Installation")) {
+                    Section { methodPicker }
+                    ServerView()
+                }
             }
         }
-        .animation(.default, value: _installationMethod)
+        .nbThemeCanvas()
+        .navigationTitle(.localized("Installation"))
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var methodPicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Install apps with", systemImage: "arrow.down.app")
+                .font(.subheadline.weight(.semibold))
+            Picker("Installation method", selection: $_installationMethod) {
+                Text("Server").tag(0)
+                Text("Native · iDevice").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .disabled(manager.isBusy || session.isActive)
+            Text(_installationMethod == 0
+                 ? "Install through a local web server."
+                 : "Install directly on this device, with progress for every app.")
+                .font(.caption)
+                .nbThemeForeground(.textSecondary)
+        }
     }
 }
 
