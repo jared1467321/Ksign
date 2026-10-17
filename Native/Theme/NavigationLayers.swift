@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 // UIKit hierarchy doubles exercise the production pane installation method.
 // They model view ordering/parentage and constraints, not glass rendering.
