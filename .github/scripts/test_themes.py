@@ -23,6 +23,23 @@ def test_aurora_colors(directory):
     subprocess.run([str(executable)], check=True, timeout=30)
 
 
+def test_navigation_layers(directory, compiler):
+    bridge = (ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBThemeNavigationBridge.swift").read_text()
+    start = bridge.index("    private func updateBar(")
+    opening = bridge.index("{", start)
+    end, depth = opening + 1, 1
+    while depth:
+        depth += (bridge[end] == "{") - (bridge[end] == "}")
+        end += 1
+    tests = (ROOT / "Native/Theme/NavigationLayers.swift").read_text()
+    source = directory / "NavigationLayers.swift"
+    source.write_text(tests.replace("// PRODUCTION_UPDATE_BAR", bridge[start:end]))
+    executable = directory / "NavigationLayers"
+    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
+                    str(directory / "modules"), str(source), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)
+
+
 def main():
     compiler = shutil.which("swiftc")
     if not compiler:
@@ -46,6 +63,7 @@ def main():
                         str(directory / "modules"), str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
         test_aurora_colors(directory)
+        test_navigation_layers(directory, compiler)
 
 
 if __name__ == "__main__":

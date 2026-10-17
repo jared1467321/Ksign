@@ -47,7 +47,7 @@ struct FeatherApp: App {
                 }
             }
 			.nbThemeTint(.accent)
-            .nbThemeCanvas()
+            .nbThemeBackground(.background, ignoresSafeAreaEdges: .all)
             .background(ThemeAppearanceObserver())
             .preferredColorScheme(userInterfaceStyle == 1 ? .light : userInterfaceStyle == 2 ? .dark : nil)
 			.animation(.smooth, value: downloadManager.manualDownloads.description)

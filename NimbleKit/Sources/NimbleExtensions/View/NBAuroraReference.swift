@@ -42,6 +42,65 @@ struct NBGlassPanePreferenceKey: PreferenceKey {
     }
 }
 
+private struct AuroraViewport: Equatable {
+    let size: CGSize
+    let origin: CGPoint
+}
+
+/// Read-only geometry: each hosting container paints its own sky, but samples
+/// the same window coordinates so nested lists and headers join continuously.
+private struct AuroraViewportReader: UIViewRepresentable {
+    let onChange: (AuroraViewport) -> Void
+
+    func makeUIView(context: Context) -> AuroraViewportView {
+        AuroraViewportView(frame: .zero)
+    }
+
+    func updateUIView(_ view: AuroraViewportView, context: Context) {
+        view.onChange = onChange
+        view.scheduleReport()
+    }
+}
+
+private final class AuroraViewportView: UIView {
+    var onChange: ((AuroraViewport) -> Void)?
+    private var pending = false
+    private var lastReported: AuroraViewport?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        scheduleReport()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scheduleReport()
+    }
+
+    func scheduleReport() {
+        guard !pending else { return }
+        pending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pending = false
+            guard let window = self.window, self.bounds.width > 0, self.bounds.height > 0 else { return }
+            let viewport = AuroraViewport(size: window.bounds.size,
+                                          origin: self.convert(self.bounds.origin, to: window))
+            guard viewport != self.lastReported else { return }
+            self.lastReported = viewport
+            self.onChange?(viewport)
+        }
+    }
+}
+
 /// Render the sky separately from foreground content so optics never bend text.
 struct NBThemeBackdrop: View {
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
@@ -52,6 +111,7 @@ struct NBThemeBackdrop: View {
     @Environment(\.colorSchemeContrast) private var contrast
     @StateObject private var session = AuroraSession.shared
     @StateObject private var performance = AuroraPerformanceController()
+    @State private var viewport: AuroraViewport?
 
     let base: NBThemeColor
     var panes: [CGRect] = []
@@ -83,6 +143,7 @@ struct NBThemeBackdrop: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
+        .background(AuroraViewportReader { viewport = $0 })
         .accessibilityHidden(true)
         .allowsHitTesting(false)
         .onAppear { updateMonitoring() }
@@ -101,6 +162,7 @@ struct NBThemeBackdrop: View {
     @available(iOS 17.0, tvOS 17.0, *)
     private func sky(size: CGSize, origin: CGPoint, time: TimeInterval) -> some View {
         let scale = performance.renderScale
+        let scene = viewport ?? AuroraViewport(size: size, origin: .zero)
         let renderSize = CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
         let words = session.identity.shaderWords
         let rects = panes.prefix(2).map {
@@ -114,12 +176,13 @@ struct NBThemeBackdrop: View {
                 .fill(Color.black)
                 .frame(width: renderSize.width, height: renderSize.height)
                 .colorEffect(ShaderLibrary.bundle(.module).auroraBorealis(
-                    .float2(Float(renderSize.width), Float(renderSize.height)),
+                    .float2(Float(max(1, scene.size.width * scale)), Float(max(1, scene.size.height * scale))),
                     .float(Float(time)),
                     .float4(words[0], words[1], words[2], words[3]),
                     .float4(words[4], words[5], words[6], words[7]),
                     .float(1.34), .image(AuroraNoiseCache.image),
-                    .float(scheme == .light ? 1 : 0)
+                    .float(scheme == .light ? 1 : 0),
+                    .float2(Float(scene.origin.x * scale), Float(scene.origin.y * scale))
                 ))
                 .layerEffect(ShaderLibrary.bundle(.module).auroraPaneOptics(
                     .float2(Float(first.minX), Float(first.minY)),
@@ -132,14 +195,20 @@ struct NBThemeBackdrop: View {
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
                 .clipped()
 
-            Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0xA11CE5EED),
-                      count: 54, tint: Color(red: 1, green: 0.824, blue: 0.451),
-                      speedScale: 0.74, sizeScale: 0.82)
-                .opacity(scheme == .dark ? 0.43 : 0.35)
-            Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0x57EE1F1E1D),
-                      count: 26, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
-                      speedScale: 0.40, sizeScale: 0.94)
-                .opacity(scheme == .dark ? 0.20 : 0.18)
+            ZStack {
+                Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0xA11CE5EED),
+                          count: 54, tint: Color(red: 1, green: 0.824, blue: 0.451),
+                          speedScale: 0.74, sizeScale: 0.82)
+                    .opacity(scheme == .dark ? 0.43 : 0.35)
+                Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0x57EE1F1E1D),
+                          count: 26, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
+                          speedScale: 0.40, sizeScale: 0.94)
+                    .opacity(scheme == .dark ? 0.20 : 0.18)
+            }
+            .frame(width: scene.size.width, height: scene.size.height)
+            .offset(x: -scene.origin.x, y: -scene.origin.y)
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            .clipped()
         }
     }
 }

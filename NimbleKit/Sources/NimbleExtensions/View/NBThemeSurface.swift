@@ -1,5 +1,10 @@
 import SwiftUI
 
+public enum NBThemeSurfaceFinish {
+    case standard
+    case navigation
+}
+
 /// Clear glass ported from Tally's isolated glass layer. Reflections and rims
 /// affect only the backing surface; foreground text stays sharp and opaque.
 public struct NBThemeSurface<S: Shape>: View {
@@ -14,19 +19,24 @@ public struct NBThemeSurface<S: Shape>: View {
     private let shape: S
     private let supportsGloss: Bool
     private let tintStrength: Double
+    private let finish: NBThemeSurfaceFinish
 
-    public init(_ color: NBThemeColor, in shape: S, supportsGloss: Bool = true, tintStrength: Double = 0.10) {
+    public init(_ color: NBThemeColor, in shape: S, supportsGloss: Bool = true,
+                tintStrength: Double = 0.10, finish: NBThemeSurfaceFinish = .standard) {
         self.color = color
         self.shape = shape
         self.supportsGloss = supportsGloss
         self.tintStrength = tintStrength
+        self.finish = finish
     }
 
     private var enabled: Bool {
         glossySurfaces && supportsGloss && !reduceTransparency && contrast != .increased
     }
 
-    private var shine: Double { scheme == .light ? 0.45 : 1 }
+    private var shine: Double {
+        (scheme == .light ? 0.45 : 1) * (finish == .navigation ? 0.45 : 1)
+    }
     private var surfaceTint: Double {
         auroraBackground && tintStrength <= 0.10 ? 0.025 : tintStrength
     }
@@ -89,10 +99,12 @@ public struct NBThemeSurface<S: Shape>: View {
                 .glassEffect(.clear, in: shape)
                 .mask {
                     ZStack {
-                        shape.fill(.white.opacity(scheme == .light ? 0.16 : 0.28))
-                        shape.stroke(.white, lineWidth: 20)
-                        shape.stroke(.white.opacity(0.92), lineWidth: 48)
-                            .blur(radius: 4.5)
+                        shape.fill(.white.opacity(finish == .navigation ? 0.12 : scheme == .light ? 0.16 : 0.28))
+                        shape.stroke(.white.opacity(finish == .navigation ? 0.35 : 1),
+                                     lineWidth: finish == .navigation ? 8 : 20)
+                        shape.stroke(.white.opacity(finish == .navigation ? 0.20 : 0.92),
+                                     lineWidth: finish == .navigation ? 16 : 48)
+                            .blur(radius: finish == .navigation ? 2 : 4.5)
                     }
                     .compositingGroup()
                     .clipShape(shape)

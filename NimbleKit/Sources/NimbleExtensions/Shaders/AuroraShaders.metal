@@ -823,10 +823,11 @@ static float3 auroraLightAppearance(float3 sky) {
     float4 seedB,
     float intensity,
     texture2d<half> noiseTexture,
-    float lightMode
+    float lightMode,
+    float2 viewportOrigin
 ) {
     float2 safeSize = max(size, float2(1.0));
-    float2 uv = position / safeSize;
+    float2 uv = (position + viewportOrigin) / safeSize;
     float3 sky = auroraSceneColor(uv, time, seedA, seedB, intensity, noiseTexture);
     // Both appearances share exactly the same sky, curtains and timing.
     float3 darkSky = sky * 0.76;

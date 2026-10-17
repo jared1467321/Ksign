@@ -41,8 +41,8 @@ enum HalloweenAppearance {
     private static func _navigationAppearance() -> UINavigationBarAppearance {
         let appearance = UINavigationBarAppearance()
         if usesGlossySurfaces && usesAurora {
-            // NBThemeNavigationBridge supplies the clear glass card. Leaving
-            // UIKit's blur here would hide the sky with an opaque grey plate.
+            // The glass pane is below the navigation bar. UIKit keeps the
+            // title and its own glass toolbar buttons in the foreground.
             appearance.configureWithTransparentBackground()
         } else if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
@@ -164,7 +164,6 @@ enum HalloweenAppearance {
         field.tintColor = NBHalloween.uiColor(.searchTint)
 
         let searchBar = UISearchBar.appearance()
-        searchBar.setSearchFieldBackgroundImage(usesGlossySurfaces && usesAurora ? UIImage() : nil, for: .normal)
         searchBar.tintColor = NBHalloween.uiColor(.searchTint)
         searchBar.searchTextField.attributedPlaceholder = NSAttributedString(
             string: "",
@@ -181,12 +180,7 @@ enum HalloweenAppearance {
 
     private static func _configure(_ control: UISegmentedControl) {
         control.selectedSegmentTintColor = NBHalloween.uiColor(.segmentSelectedBackground)
-        let clearGlass = usesGlossySurfaces && usesAurora
-        control.backgroundColor = clearGlass ? .clear : NBHalloween.uiColor(.segmentBackground)
-        control.setBackgroundImage(clearGlass ? UIImage() : nil, for: .normal, barMetrics: .default)
-        control.setBackgroundImage(clearGlass ? _segmentSelectionImage() : nil, for: .selected, barMetrics: .default)
-        control.setDividerImage(clearGlass ? UIImage() : nil,
-                                forLeftSegmentState: .normal, rightSegmentState: .normal, barMetrics: .default)
+        control.backgroundColor = NBHalloween.uiColor(.segmentBackground)
         control.setTitleTextAttributes(
             [.foregroundColor: NBHalloween.uiColor(.segmentText)],
             for: .normal
@@ -199,14 +193,6 @@ enum HalloweenAppearance {
 
     private static func _segmentedControls() {
         _configure(UISegmentedControl.appearance())
-    }
-
-    private static func _segmentSelectionImage() -> UIImage {
-        let bounds = CGRect(x: 0, y: 0, width: 32, height: 32)
-        return UIGraphicsImageRenderer(size: bounds.size).image { _ in
-            NBHalloween.uiColor(.segmentSelectedBackground).setFill()
-            UIBezierPath(roundedRect: bounds, cornerRadius: 16).fill()
-        }.resizableImage(withCapInsets: UIEdgeInsets(top: 15, left: 15, bottom: 15, right: 15))
     }
 
     // MARK: - Bar buttons
@@ -279,7 +265,6 @@ enum HalloweenAppearance {
 
         case let searchBar as UISearchBar:
             searchBar.tintColor = NBHalloween.uiColor(.searchTint)
-            searchBar.setSearchFieldBackgroundImage(usesGlossySurfaces && usesAurora ? UIImage() : nil, for: .normal)
 
         case let control as UISegmentedControl:
             _configure(control)
