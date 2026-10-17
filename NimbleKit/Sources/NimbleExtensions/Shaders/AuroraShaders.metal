@@ -795,18 +795,32 @@ static float3 auroraSceneColor(
 }
 
 static float3 auroraLightAppearance(float3 sky) {
-    // Lift lightness while retaining the original hue and saturation. Mixing
-    // the finished sky with white flattens the curtains into a grey/pastel wash.
+    // Keep the sky's contrast and strengthen its curtains instead of giving
+    // every pixel the same high lightness. Only the darkest colors receive a
+    // luminance lift, so ink stays readable without a full-screen white veil.
     float peak = max(sky.r, max(sky.g, sky.b));
     float floorValue = min(sky.r, min(sky.g, sky.b));
     float chroma = peak - floorValue;
     float originalLightness = (peak + floorValue) * 0.5;
     float originalSaturation = chroma / max(1.0 - abs(2.0 * originalLightness - 1.0), 0.001);
-    float lightness = mix(0.74, 0.86, clamp(originalLightness * 1.5, 0.0, 1.0));
-    float saturation = clamp(originalSaturation, 0.0, 1.0);
+    float lightness = 0.42 + 0.38 * sqrt(clamp(originalLightness, 0.0, 1.0));
+    float saturation = chroma > 0.001 ? clamp(max(0.65, originalSaturation * 1.25), 0.0, 1.0) : 0.0;
     float lightChroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
     float3 hue = chroma > 0.001 ? (sky - floorValue) / chroma : float3(0.5);
-    return clamp(hue * lightChroma + (lightness - lightChroma * 0.5), 0.0, 1.0);
+    float3 light = clamp(hue * lightChroma + (lightness - lightChroma * 0.5), 0.0, 1.0);
+    float red = light.r <= 0.04045 ? light.r / 12.92 : pow((light.r + 0.055) / 1.055, 2.4);
+    float green = light.g <= 0.04045 ? light.g / 12.92 : pow((light.g + 0.055) / 1.055, 2.4);
+    float blue = light.b <= 0.04045 ? light.b / 12.92 : pow((light.b + 0.055) / 1.055, 2.4);
+    float luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    float lift = clamp((0.28 - luminance) / max(1.0 - luminance, 0.001), 0.0, 1.0);
+    red = red * (1.0 - lift) + lift;
+    green = green * (1.0 - lift) + lift;
+    blue = blue * (1.0 - lift) + lift;
+    return float3(
+        red <= 0.0031308 ? red * 12.92 : 1.055 * pow(red, 1.0 / 2.4) - 0.055,
+        green <= 0.0031308 ? green * 12.92 : 1.055 * pow(green, 1.0 / 2.4) - 0.055,
+        blue <= 0.0031308 ? blue * 12.92 : 1.055 * pow(blue, 1.0 / 2.4) - 0.055
+    );
 }
 
 // The wide master identity is split into exact 16-bit words before crossing the

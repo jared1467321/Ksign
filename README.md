@@ -25,8 +25,9 @@ Go to [Releases](https://github.com/Nyasami/Ksign-public/releases) and download 
 In **Settings → Appearance**, choose **System**, **Light**, or **Dark**.
 The **Aurora Glass** theme combines the animated aurora and starfield from
 Job Tracker with clear glass surfaces, including the title and search areas.
-Light mode retains saturated aurora colors with brighter lightness and dark
-text; dark mode uses the original night sky and frost-colored text.
+Both modes share the same clear glass finish, aurora shapes, and motion.
+Light mode uses brighter, saturated aurora colors and dark text; dark mode uses
+deeper aurora colors and frost-colored text.
 Use **Shuffle Aurora** for a new sky, or turn off **Aurora Background** or
 **Liquid Glass Surfaces** independently.
 

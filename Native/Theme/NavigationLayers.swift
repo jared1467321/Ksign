@@ -11,7 +11,7 @@ class UIView {
     weak var superview: UIView?
     var isHidden = false
     var translatesAutoresizingMaskIntoConstraints = true
-    let frame: CGRect
+    var frame: CGRect
     init(frame: CGRect = .zero) { self.frame = frame }
     lazy var leadingAnchor = Anchor(owner: self, edge: "leading")
     lazy var trailingAnchor = Anchor(owner: self, edge: "trailing")
@@ -35,7 +35,9 @@ final class Anchor {
     unowned let owner: UIView
     let edge: String
     init(owner: UIView, edge: String) { self.owner = owner; self.edge = edge }
-    func constraint(equalTo other: Anchor) -> NSLayoutConstraint { NSLayoutConstraint(self, other) }
+    func constraint(equalTo other: Anchor, constant: CGFloat = 0) -> NSLayoutConstraint {
+        NSLayoutConstraint(self, other, constant: constant)
+    }
 }
 
 @MainActor
@@ -43,8 +45,24 @@ final class NSLayoutConstraint {
     static var active: [NSLayoutConstraint] = []
     let first: Anchor
     let second: Anchor
-    init(_ first: Anchor, _ second: Anchor) { self.first = first; self.second = second }
-    static func activate(_ constraints: [NSLayoutConstraint]) { active += constraints }
+    let constant: CGFloat
+    init(_ first: Anchor, _ second: Anchor, constant: CGFloat) {
+        self.first = first; self.second = second; self.constant = constant
+    }
+    static func activate(_ constraints: [NSLayoutConstraint]) {
+        active += constraints
+        for constraint in constraints {
+            let owner = constraint.first.owner
+            let target = constraint.second.owner.frame
+            switch constraint.first.edge {
+            case "leading": owner.frame.origin.x = target.minX + constraint.constant
+            case "trailing": owner.frame.size.width = target.maxX + constraint.constant - owner.frame.minX
+            case "top": owner.frame.origin.y = target.minY + constraint.constant
+            case "bottom": owner.frame.size.height = target.maxY + constraint.constant - owner.frame.minY
+            default: fatalError("Unexpected anchor")
+            }
+        }
+    }
 }
 
 @MainActor
@@ -81,6 +99,8 @@ enum NavigationLayerTests {
         let pane = container.subviews[0]
         assert(container.subviews[1] === bar, "Navigation controls must remain ABOVE the glass card")
         assert(pane.superview === container && pane.superview !== bar)
+        assert(pane.frame.minY <= bar.frame.minY - 8 && pane.frame.maxY >= bar.frame.maxY + 8,
+               "The card must enclose the toolbar row, rather than start below the buttons")
         assert(bar.subviews.count == 3 && bar.subviews[0] === title && bar.subviews[1] === edit && bar.subviews[2] === plus,
                "Installing the pane must not reparent or cover native controls")
         assert(NSLayoutConstraint.active.count == 4)
@@ -97,6 +117,17 @@ enum NavigationLayerTests {
         let detached = UINavigationBar()
         probe.apply(to: detached)
         assert(detached.subviews.isEmpty)
-        print("Navigation layer tests passed: pane below title/buttons, stable parentage, layout ownership, no duplicates and glass toggle.")
+        probe.showGlass = true
+        let inline = UINavigationBar(frame: CGRect(x: 0, y: 59, width: 393, height: 44))
+        container.addSubview(inline)
+        probe.apply(to: inline)
+        let inlinePane = container.subviews[2]
+        let visibleCard = inlinePane.frame.insetBy(dx: 12, dy: 0)
+        let leftButton = CGRect(x: 20, y: 59, width: 56, height: 44)
+        let rightButton = CGRect(x: 329, y: 59, width: 44, height: 44)
+        assert(visibleCard.contains(leftButton) && visibleCard.contains(rightButton),
+               "Inline navigation buttons must fit inside the visible card")
+        assert(visibleCard.minY <= leftButton.minY - 8 && visibleCard.maxY >= leftButton.maxY + 8)
+        print("Navigation layer tests passed: pane below controls, padded large/inline cards, stable layout, no duplicates and glass toggle.")
     }
 }

@@ -80,8 +80,8 @@ final class NavigationBackdropProbe: UIView {
             NSLayoutConstraint.activate([
                 panel.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
                 panel.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-                panel.topAnchor.constraint(equalTo: bar.topAnchor),
-                panel.bottomAnchor.constraint(equalTo: bar.bottomAnchor)
+                panel.topAnchor.constraint(equalTo: bar.topAnchor, constant: -8),
+                panel.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8)
             ])
         }
         panel.isHidden = !showGlass
@@ -105,7 +105,7 @@ private final class NavigationGlassPanelView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        host.view.frame = bounds.insetBy(dx: 12, dy: 4)
+        host.view.frame = bounds.insetBy(dx: 12, dy: 0)
     }
 }
 

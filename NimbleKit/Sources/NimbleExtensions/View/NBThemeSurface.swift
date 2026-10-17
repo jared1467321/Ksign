@@ -35,7 +35,7 @@ public struct NBThemeSurface<S: Shape>: View {
     }
 
     private var shine: Double {
-        (scheme == .light ? 0.45 : 1) * (finish == .navigation ? 0.45 : 1)
+        finish == .navigation ? 0.45 : 1
     }
     private var surfaceTint: Double {
         auroraBackground && tintStrength <= 0.10 ? 0.025 : tintStrength
@@ -46,6 +46,10 @@ public struct NBThemeSurface<S: Shape>: View {
             if enabled {
                 ZStack {
                     nativeGlass
+                        // Keep the same clear optical finish in both aurora
+                        // appearances. Only the backing material receives this
+                        // environment; foreground labels retain their theme.
+                        .environment(\.colorScheme, auroraBackground ? .dark : scheme)
                     shape.fill(Color(.sRGB, red: color.red, green: color.green, blue: color.blue).opacity(surfaceTint))
                     shape.fill(LinearGradient(
                         stops: [
@@ -99,7 +103,7 @@ public struct NBThemeSurface<S: Shape>: View {
                 .glassEffect(.clear, in: shape)
                 .mask {
                     ZStack {
-                        shape.fill(.white.opacity(finish == .navigation ? 0.12 : scheme == .light ? 0.16 : 0.28))
+                        shape.fill(.white.opacity(finish == .navigation ? 0.12 : 0.28))
                         shape.stroke(.white.opacity(finish == .navigation ? 0.35 : 1),
                                      lineWidth: finish == .navigation ? 8 : 20)
                         shape.stroke(.white.opacity(finish == .navigation ? 0.20 : 0.92),
@@ -111,7 +115,7 @@ public struct NBThemeSurface<S: Shape>: View {
                 }
         } else {
             shape.fill(.ultraThinMaterial)
-                .opacity(scheme == .dark ? 0.48 : 0.35)
+                .opacity(auroraBackground || scheme == .dark ? 0.48 : 0.35)
         }
     }
 }

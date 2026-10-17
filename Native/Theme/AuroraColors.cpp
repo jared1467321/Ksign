@@ -17,6 +17,8 @@ struct float3 {
 using std::min;
 using std::max;
 using std::abs;
+using std::pow;
+using std::sqrt;
 float clamp(float v, float a, float b) { return min(b, max(a, v)); }
 float3 clamp(float3 v, float a, float b) {
     return float3(clamp(v.r,a,b), clamp(v.g,a,b), clamp(v.b,a,b));
@@ -36,12 +38,19 @@ float saturation(float3 v) {
 
 int main() {
     float minimumContrast = 100;
+    float totalLight = 0, totalDark = 0, totalChroma = 0;
     // Representative low-intensity saturated curtains must keep their color,
     // instead of being compressed to a near-white background.
     for (auto source : {float3(0.1f,0.005f,0.005f), float3(0.005f,0.1f,0.005f), float3(0.005f,0.005f,0.1f)}) {
         auto light=auroraLightAppearance(source);
         assert(max(light.r,max(light.g,light.b))-min(light.r,min(light.g,light.b)) > 0.40f);
-        assert(abs(saturation(light)-saturation(source)) < 0.001f);
+        assert(saturation(light) > 0.4f);
+    }
+    // The reference sky contains many muted colors. Preserving their original
+    // saturation at a high lightness turned the whole light sky into pastels.
+    for (auto source : {float3(0.08f,0.07f,0.06f), float3(0.06f,0.07f,0.08f), float3(0.03f,0.04f,0.03f)}) {
+        auto light=auroraLightAppearance(source);
+        assert(max(light.r,max(light.g,light.b))-min(light.r,min(light.g,light.b)) > 0.35f);
     }
     const float3 primary(24/255.0f,32/255.0f,52/255.0f);
     const float3 secondary(26/255.0f,35/255.0f,53/255.0f);
@@ -50,13 +59,17 @@ int main() {
         auto light=auroraLightAppearance(source);
         assert(std::isfinite(light.r) && std::isfinite(light.g) && std::isfinite(light.b));
         assert(min(light.r,min(light.g,light.b)) >= 0 && max(light.r,max(light.g,light.b)) <= 1);
-        assert(luminance(light) > luminance(source*0.76f));
+        totalLight += luminance(light);
+        totalDark += luminance(source*0.76f);
+        totalChroma += max(light.r,max(light.g,light.b))-min(light.r,min(light.g,light.b));
         for (auto ink : {primary, secondary}) {
             float contrast=(luminance(light)+0.05f)/(luminance(ink)+0.05f);
             minimumContrast=min(minimumContrast,contrast);
             assert(contrast >= 4.5f);
         }
     }
+    assert(totalLight > totalDark);
+    assert(totalChroma / 9261 > 0.30f && "Light mode must keep substantial color separation");
     std::cout << "Aurora colors passed: saturated curtains, brighter Light sky, finite RGB and text contrast across 9261 samples (minimum "
-              << minimumContrast << ").\n";
+              << minimumContrast << ", mean channel separation " << totalChroma / 9261 << ").\n";
 }
