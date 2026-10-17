@@ -215,7 +215,8 @@ final class ThemeReportBridge {
 
         webView.backgroundColor = themes.activeColor(for: .reportBackground).uiColor
         webView.scrollView.backgroundColor = themes.activeColor(for: .reportBackground).uiColor
-        webView.evaluateJavaScript("(function(){\n\(statements)\n})();", completionHandler: nil)
+        let scheme = themes.isDark ? "dark" : "light"
+        webView.evaluateJavaScript("(function(){\n\(statements)\ndocument.documentElement.style.colorScheme = '\(scheme)';\n})();", completionHandler: nil)
     }
 
     /// Generated reports are standalone HTML files. Keep their persisted CSS
@@ -226,6 +227,14 @@ final class ThemeReportBridge {
         for url in urls {
             var html = try String(contentsOf: url, encoding: .utf8)
             var changed = false
+
+            let scheme = NBThemeManager.shared.isDark ? "dark" : "light"
+            let updatedScheme = html.replacingOccurrences(of: "color-scheme: dark;", with: "color-scheme: \(scheme);")
+                .replacingOccurrences(of: "color-scheme: light;", with: "color-scheme: \(scheme);")
+            if updatedScheme != html {
+                html = updatedScheme
+                changed = true
+            }
 
             for variable in Self.variables {
                 let escapedName = NSRegularExpression.escapedPattern(for: variable.cssName)

@@ -14,6 +14,7 @@ struct AppearanceView: View {
     @AppStorage("Feather.userInterfaceStyle") private var _userInterfaceStyle: Int = UIUserInterfaceStyle.unspecified.rawValue
     @AppStorage("Feather.storeCellAppearance") private var _storeCellAppearance: Int = 1
     @AppStorage("Feather.glossySurfaces") private var _glossySurfaces = true
+    @AppStorage("Feather.auroraBackground") private var _auroraBackground = true
 
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var showDeleteConfirmation = false
@@ -26,18 +27,24 @@ struct AppearanceView: View {
 
     var body: some View {
         NBList(.localized("Appearance")) {
-            Section(footer: Text(.localized("Ksign is dark-only."))) {
+            Section(footer: Text(.localized("Follow your device or choose Light or Dark. Aurora Glass includes a palette for each appearance."))) {
                 Picker(.localized("Appearance"), selection: $_userInterfaceStyle) {
                     ForEach(UIUserInterfaceStyle.allCases.sorted(by: { $0.rawValue < $1.rawValue }), id: \.rawValue) { style in
                         Text(style.label).tag(style.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
-                .disabled(true)
             }
 
-            Section(footer: Text(.localized("Adds translucent color, soft reflections, and luminous edges to cards and controls. Reduce Transparency uses solid fills."))) {
-                Toggle(.localized("Glossy Surfaces"), isOn: $_glossySurfaces)
+            Section(footer: Text(.localized("The aurora and clear glass adapt to Light and Dark. Reduce Motion freezes the sky; Reduce Transparency and Increase Contrast use solid surfaces."))) {
+                Toggle(.localized("Aurora Background"), isOn: $_auroraBackground)
+                Toggle(.localized("Liquid Glass Surfaces"), isOn: $_glossySurfaces)
+                Button {
+                    NBAurora.randomize()
+                } label: {
+                    Label(.localized("Shuffle Aurora"), systemImage: "sparkles")
+                }
+                .disabled(!_auroraBackground)
             }
 
             NBSection(.localized("Theme Profiles")) {
@@ -50,7 +57,7 @@ struct AppearanceView: View {
                 _themePreview(themeManager.activeTheme)
 
                 if themeManager.isActiveThemeBuiltIn {
-                    Text(.localized("Halloween is the built-in default. Duplicate it or create a theme to customize every color role."))
+                    Text(.localized("Aurora Glass and Halloween are built-in themes. Duplicate either to customize its colors."))
                         .font(.footnote)
                         .nbThemeForeground(.textSecondary)
                 } else {
@@ -89,7 +96,7 @@ struct AppearanceView: View {
                     }
                 }
             } footer: {
-                Text(.localized("Theme profiles are stored on this device. The Halloween profile always remains available as the factory default."))
+                Text(.localized("Theme profiles are stored on this device. Aurora Glass and Halloween always remain available. Copies of adaptive themes keep separate Light and Dark colors; older custom profiles keep their original colors."))
             }
             // Keep profile mutations out of the temporary editing session.
             .allowsHitTesting(!themeManager.isColorPreviewActive)
@@ -103,11 +110,6 @@ struct AppearanceView: View {
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
-            }
-        }
-        .onChange(of: _userInterfaceStyle) { value in
-            if let style = UIUserInterfaceStyle(rawValue: value) {
-                UIApplication.topViewController()?.view.window?.overrideUserInterfaceStyle = style
             }
         }
         .confirmationDialog(
@@ -219,6 +221,16 @@ private struct ThemeProfileEditorView: View {
                     .textInputAutocapitalization(.words)
                     .onSubmit(_saveName)
                     .onChange(of: name) { _ in _saveName() }
+            }
+
+            if theme.lightColors != nil {
+                Section {
+                    Label(themeManager.isDark ? String.localized("Editing Dark Colors") : String.localized("Editing Light Colors"),
+                          systemImage: themeManager.isDark ? "moon.fill" : "sun.max.fill")
+                    Text(.localized("Switch the app's appearance to edit the other palette. Color edits apply only to the current appearance."))
+                        .font(.footnote)
+                        .nbThemeForeground(.textSecondary)
+                }
             }
 
             if searchText.isEmpty {

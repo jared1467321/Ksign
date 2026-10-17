@@ -23,23 +23,15 @@ public struct NBListAdaptable<Content>: View where Content: View {
 			if horizontalSizeClass == .compact {
 				List {
 					_content
-						// Deliberately clear rather than `elevated`: a plain
-						// list has no inset cards to separate, so tinted rows
-						// would fuse into one slab of grey edge to edge. Clear
-						// lets the near-black read through and leaves the
-						// cells' own styling to do the separating.
-						.listRowBackground(Color.clear)
+						.nbThemeRow()
 				}
-				.listStyle(.plain)
-				// See NBList: sets both hierarchy levels so descendant
-				// `.foregroundStyle(.secondary)` picks up the green-grey,
-				// while also making the actual scroll canvas exact-editable.
+				.listStyle(.insetGrouped)
 				.nbThemeCanvas()
 			} else {
 				NBGrid {
 					_content
 				}
-				.nbThemeBackground(.background, ignoresSafeAreaEdges: .all)
+				.nbThemeCanvas()
 			}
 		}
 	}

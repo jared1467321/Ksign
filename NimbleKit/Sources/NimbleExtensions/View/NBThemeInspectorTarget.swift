@@ -625,7 +625,7 @@ public struct NBThemePaint: View {
     public var body: some View {
         let semantic = nbThemeSemanticColor(themes, role, opacity)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
-        NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface)
+        NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface, tintStrength: role.glassTintStrength)
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,
@@ -819,7 +819,7 @@ private struct NBThemeBackgroundModifier: ViewModifier {
         content
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .background {
-                NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface)
+                NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface, tintStrength: role.glassTintStrength)
                     .modifier(NBThemeInspectorTargetModifier(
                         role: role,
                         elementID: elementID,
@@ -847,7 +847,7 @@ private struct NBThemeShapedBackgroundModifier<S: Shape>: ViewModifier {
         content
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .background {
-                NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface)
+                NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface, tintStrength: role.glassTintStrength)
             }
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
@@ -976,10 +976,19 @@ private struct NBThemeRowModifier: ViewModifier {
     }
 }
 
+private struct NBThemeCanvasPreferenceKey: PreferenceKey {
+    static let defaultValue: Set<UUID> = []
+    static func reduce(value: inout Set<UUID>, nextValue: () -> Set<UUID>) {
+        value.formUnion(nextValue())
+    }
+}
+
 private struct NBThemeCanvasModifier: ViewModifier {
     @ObservedObject private var themes = NBThemeManager.shared
     @Environment(\.nbPaintAncestry) private var ancestors
     @State private var ownerID = UUID()
+    @State private var hasChildCanvas = false
+    @State private var panes: [CGRect] = []
     let role: NBThemeRole
     let elementID: String
 
@@ -992,6 +1001,20 @@ private struct NBThemeCanvasModifier: ViewModifier {
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, 1)
 
         content
+            // Nested wrappers register their canvas with the outer wrapper.
+            // Only the innermost visible screen renders an animated sky.
+            .onPreferenceChange(NBThemeCanvasPreferenceKey.self) { children in
+                hasChildCanvas = !children.isEmpty
+            }
+            .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
+                panes = frames.values.map(\.rect)
+                    .sorted { lhs, rhs in
+                        let a = lhs.width * lhs.height
+                        let b = rhs.width * rhs.height
+                        return a == b ? lhs.minY < rhs.minY : a > b
+                    }
+                    .prefix(2).map { $0 }
+            }
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .foregroundStyle(primary, secondary)
             .listRowSeparatorTint(separator)
@@ -999,7 +1022,13 @@ private struct NBThemeCanvasModifier: ViewModifier {
             .background {
                 // Register the paint's bounds, including its safe-area extent,
                 // rather than the smaller content rectangle above it.
-                resolved.color
+                Group {
+                    if role == .background && !hasChildCanvas {
+                        NBThemeBackdrop(base: resolved, panes: panes)
+                    } else {
+                        resolved.color
+                    }
+                }
                     .modifier(NBThemeInspectorTargetModifier(
                         role: role,
                         elementID: elementID,
@@ -1008,6 +1037,7 @@ private struct NBThemeCanvasModifier: ViewModifier {
                     ))
                     .ignoresSafeArea()
             }
+            .preference(key: NBThemeCanvasPreferenceKey.self, value: [ownerID])
     }
 }
 
@@ -1022,7 +1052,7 @@ private struct NBThemeFilledShape<S: Shape>: View {
         let _ = themes.previewRevision
         let semantic = nbThemeSemanticColor(themes, role, opacity)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
-        NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface)
+        NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface, tintStrength: role.glassTintStrength)
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,

@@ -21,6 +21,8 @@ struct FeatherApp: App {
 	@StateObject var downloadManager = DownloadManager.shared
 	@StateObject var themeManager = NBThemeManager.shared
     @AppStorage("Feather.glossySurfaces") private var glossySurfaces = true
+    @AppStorage("Feather.auroraBackground") private var auroraBackground = true
+    @AppStorage("Feather.userInterfaceStyle") private var userInterfaceStyle = 0
     @StateObject var extractManager = ExtractManager.shared
 	@StateObject var logsManager = LogsManager.shared
 	let storage = Storage.shared
@@ -46,6 +48,8 @@ struct FeatherApp: App {
             }
 			.nbThemeTint(.accent)
             .nbThemeCanvas()
+            .background(ThemeAppearanceObserver())
+            .preferredColorScheme(userInterfaceStyle == 1 ? .light : userInterfaceStyle == 2 ? .dark : nil)
 			.animation(.smooth, value: downloadManager.manualDownloads.description)
             .animation(.smooth, value: extractManager.extractItems.description)
 			.onReceive(themeManager.objectWillChange) { _ in
@@ -64,11 +68,15 @@ struct FeatherApp: App {
 				}
 			}
 			.onAppear {
+				NBAurora.setActive(scenePhase == .active)
 				HalloweenAppearance.apply(refreshExistingViews: true)
 				if logsManager.isCapturing { logsManager.startCapture() }
 				Task { await VPNReconnectCoordinator.shared.appBecameActive() }
 			}
             .onChange(of: glossySurfaces) { _ in
+                HalloweenAppearance.apply(refreshExistingViews: true)
+            }
+            .onChange(of: auroraBackground) { _ in
                 HalloweenAppearance.apply(refreshExistingViews: true)
             }
             .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.reduceTransparencyStatusDidChangeNotification)) { _ in
@@ -78,6 +86,7 @@ struct FeatherApp: App {
                 HalloweenAppearance.apply(refreshExistingViews: true)
             }
 			.onChange(of: scenePhase) { phase in
+				NBAurora.setActive(phase == .active)
 				if phase == .active {
 					Task { await VPNReconnectCoordinator.shared.appBecameActive() }
 				}
@@ -115,6 +124,19 @@ struct FeatherApp: App {
 		}
 	}
 	
+}
+
+/// Reads the effective window appearance, including changes while following
+/// the system. The manager resolves matching colors for SwiftUI and UIKit.
+private struct ThemeAppearanceObserver: View {
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { NBThemeManager.shared.setColorScheme(scheme) }
+            .onChange(of: scheme) { NBThemeManager.shared.setColorScheme($0) }
+    }
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {

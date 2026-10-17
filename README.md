@@ -20,6 +20,26 @@ You can also join Ksign Discord [here](https://discord.gg/sfbZfQzVdQ) for better
 ## Download
 Go to [Releases](https://github.com/Nyasami/Ksign-public/releases) and download the newest ipa from there.
 
+## Appearance
+
+In **Settings → Appearance**, choose **System**, **Light**, or **Dark**.
+The **Aurora Glass** theme combines the animated aurora and starfield from
+Job Tracker with clear glass surfaces. Light mode uses a pearl-colored sky and
+dark text; dark mode uses the original night sky and frost-colored text.
+Use **Shuffle Aurora** for a new sky, or turn off **Aurora Background** or
+**Liquid Glass Surfaces** independently.
+
+Native Liquid Glass requires iOS 26. Earlier versions use translucent material;
+iOS 16 uses a static gradient instead of the Metal aurora. Reduce Motion freezes
+the sky, and Reduce Transparency or Increase Contrast uses solid backgrounds
+and surfaces. Animation pauses when the app leaves the foreground, and rendering
+resolution adjusts to system load.
+
+Duplicate Aurora Glass to edit its Light and Dark palettes independently.
+Existing custom profiles retain their saved colors, and Halloween remains
+available. The old built-in default switches to Aurora Glass once on upgrade;
+an existing custom selection stays selected.
+
 ## Backup before reinstalling
 
 In **Settings → Backup & Restore**, enter a backup password and choose

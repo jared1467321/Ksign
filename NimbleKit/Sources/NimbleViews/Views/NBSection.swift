@@ -65,7 +65,6 @@ where 	Content: View,
                     Spacer()
                     
 					if let _headerTextSecondary {
-                        if #available(iOS 26.0, *) {
                             Text(_headerTextSecondary)
                                 .font(.caption)
                                 .nbThemeForeground(.heading)
@@ -75,18 +74,6 @@ where 	Content: View,
                                 .nbThemeBackground(.headingFill)
                                 .nbThemeClipShape(Capsule())
 								.nbThemeInspectorTarget(.headingFill)
-                                .glassEffect()
-                        } else {
-                            Text(_headerTextSecondary)
-                                .font(.caption)
-                                .nbThemeForeground(.heading)
-                                .contentTransition(.numericText())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4.4)
-                                .nbThemeBackground(.headingFill)
-                                .nbThemeClipShape(Capsule())
-								.nbThemeInspectorTarget(.headingFill)
-                        }
 					}
 				}
 				.offset(y: 2)

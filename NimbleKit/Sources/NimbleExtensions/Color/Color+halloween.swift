@@ -313,6 +313,7 @@ public enum NBThemeRole: String, CaseIterable, Codable, Hashable, Identifiable, 
 
 public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
     public static let halloweenID = "builtin.halloween"
+    public static let liquidGlassID = "builtin.liquidGlass"
 
     public var id: String
     public var name: String
@@ -321,21 +322,27 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
     /// profiles decode with an empty dictionary, so the v1 theme store remains
     /// backwards compatible.
     public var elementOverrides: [String: NBThemeColor]
+    public var lightColors: [String: NBThemeColor]?
+    public var lightElementOverrides: [String: NBThemeColor]?
 
     public init(
         id: String = UUID().uuidString,
         name: String,
         colors: [String: NBThemeColor],
-        elementOverrides: [String: NBThemeColor] = [:]
+        elementOverrides: [String: NBThemeColor] = [:],
+        lightColors: [String: NBThemeColor]? = nil,
+        lightElementOverrides: [String: NBThemeColor]? = nil
     ) {
         self.id = id
         self.name = name
         self.colors = colors
         self.elementOverrides = elementOverrides
+        self.lightColors = lightColors
+        self.lightElementOverrides = lightElementOverrides
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, colors, elementOverrides
+        case id, name, colors, elementOverrides, lightColors, lightElementOverrides
     }
 
     public init(from decoder: Decoder) throws {
@@ -344,6 +351,8 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
         name = try container.decode(String.self, forKey: .name)
         colors = try container.decode([String: NBThemeColor].self, forKey: .colors)
         elementOverrides = try container.decodeIfPresent([String: NBThemeColor].self, forKey: .elementOverrides) ?? [:]
+        lightColors = try container.decodeIfPresent([String: NBThemeColor].self, forKey: .lightColors)
+        lightElementOverrides = try container.decodeIfPresent([String: NBThemeColor].self, forKey: .lightElementOverrides)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -354,9 +363,21 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
         if !elementOverrides.isEmpty {
             try container.encode(elementOverrides, forKey: .elementOverrides)
         }
+        try container.encodeIfPresent(lightColors, forKey: .lightColors)
+        try container.encodeIfPresent(lightElementOverrides, forKey: .lightElementOverrides)
     }
 
-    public var isBuiltIn: Bool { id == Self.halloweenID }
+    public var isBuiltIn: Bool { id == Self.halloweenID || id == Self.liquidGlassID }
+
+    /// Old custom profiles keep their exact colors. Adaptive profiles carry
+    /// independent palettes and local edits for each appearance.
+    public func resolved(isDark: Bool) -> NBThemeProfile {
+        guard !isDark, let lightColors else { return self }
+        var result = self
+        result.colors = lightColors
+        result.elementOverrides = lightElementOverrides ?? [:]
+        return result
+    }
 
     public func color(for role: NBThemeRole) -> NBThemeColor {
         if let color = colors[role.rawValue] { return color }
@@ -490,7 +511,8 @@ public struct NBThemeProfile: Codable, Hashable, Identifiable, Sendable {
         set(.reportDropdown, rgb(0x16, 0x16, 0x23, 0.96))
         set(.reportShadow, rgb(0x00, 0x00, 0x00, 0.50))
 
-        return NBThemeProfile(id: Self.halloweenID, name: "Halloween", colors: values)
+        return NBThemeProfile(id: Self.halloweenID, name: "Halloween", colors: values,
+                              lightColors: Self.glassPalette(isDark: false))
     }()
 }
 
@@ -501,9 +523,18 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
     private static let profilesKey = "Ksign.themeProfiles.v1"
     private static let selectedProfileKey = "Ksign.selectedThemeProfile.v1"
+    private static let auroraIntroducedKey = "Ksign.auroraGlassIntroduced.v1"
 
     @Published public private(set) var customThemes: [NBThemeProfile]
     @Published public private(set) var selectedThemeID: String
+    @Published public private(set) var isDark = true
+
+    public func setColorScheme(_ scheme: ColorScheme) {
+        let dark = scheme == .dark
+        guard isDark != dark else { return }
+        if let previewThemeID { cancelColorPreview(in: previewThemeID) }
+        isDark = dark
+    }
 
     // A live editor may temporarily override one role without touching the
     // persisted profile. The revision publishes redraws to the app and its
@@ -517,11 +548,11 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
     private let defaults: UserDefaults
 
     public var allThemes: [NBThemeProfile] {
-        [NBThemeProfile.halloween] + customThemes
+        [NBThemeProfile.liquidGlass, .halloween] + customThemes
     }
 
     public var activeTheme: NBThemeProfile {
-        profile(id: selectedThemeID) ?? .halloween
+        profile(id: selectedThemeID) ?? .liquidGlass.resolved(isDark: isDark)
     }
 
     public var isActiveThemeBuiltIn: Bool {
@@ -576,8 +607,7 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         in themeID: String
     ) {
         guard themeID == selectedThemeID,
-              themeID != NBThemeProfile.halloweenID,
-              let profile = profile(id: themeID) else { return }
+              let profile = profile(id: themeID), !profile.isBuiltIn else { return }
 
         let semanticDefault = initialColor ?? profile.color(for: role)
         let original = elementID.flatMap { profile.elementOverride(for: $0) } ?? semanticDefault
@@ -623,7 +653,7 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
         let loadedThemes: [NBThemeProfile]
@@ -634,12 +664,19 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
             loadedThemes = []
         }
 
-        let stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.halloweenID
+        var stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.liquidGlassID
+        // Introduce the new default once. A saved custom selection is retained,
+        // and Halloween remains selectable after this migration.
+        if !defaults.bool(forKey: Self.auroraIntroducedKey) {
+            if stored == NBThemeProfile.halloweenID { stored = NBThemeProfile.liquidGlassID }
+            defaults.set(stored, forKey: Self.selectedProfileKey)
+            defaults.set(true, forKey: Self.auroraIntroducedKey)
+        }
         let initialThemeID: String
-        if stored == NBThemeProfile.halloweenID || loadedThemes.contains(where: { $0.id == stored }) {
+        if stored == NBThemeProfile.halloweenID || stored == NBThemeProfile.liquidGlassID || loadedThemes.contains(where: { $0.id == stored }) {
             initialThemeID = stored
         } else {
-            initialThemeID = NBThemeProfile.halloweenID
+            initialThemeID = NBThemeProfile.liquidGlassID
         }
 
         // Initialize the @Published backing storage directly so Swift 6 does not
@@ -659,19 +696,27 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         customThemes = defaults.data(forKey: Self.profilesKey)
             .flatMap { try? JSONDecoder().decode([NBThemeProfile].self, from: $0) }?
             .filter { !$0.isBuiltIn } ?? []
-        let stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.halloweenID
-        selectedThemeID = stored == NBThemeProfile.halloweenID || customThemes.contains(where: { $0.id == stored })
-            ? stored : NBThemeProfile.halloweenID
+        let stored = defaults.string(forKey: Self.selectedProfileKey) ?? NBThemeProfile.liquidGlassID
+        selectedThemeID = stored == NBThemeProfile.halloweenID || stored == NBThemeProfile.liquidGlassID || customThemes.contains(where: { $0.id == stored })
+            ? stored : NBThemeProfile.liquidGlassID
     }
 
     public func profile(id: String) -> NBThemeProfile? {
+        storedProfile(id: id)?.resolved(isDark: isDark)
+    }
+
+    private func storedProfile(id: String) -> NBThemeProfile? {
         if id == NBThemeProfile.halloweenID { return .halloween }
+        if id == NBThemeProfile.liquidGlassID { return .liquidGlass }
         return customThemes.first { $0.id == id }
     }
 
     @discardableResult
     public func createTheme(name: String, copying source: NBThemeProfile? = nil) -> NBThemeProfile {
-        let base = source ?? activeTheme
+        // A resolved light profile contains its light colors in `colors`.
+        // Duplicate the stored profile so the original dark palette survives.
+        let base = source.flatMap { storedProfile(id: $0.id) } ?? source
+            ?? storedProfile(id: selectedThemeID) ?? .liquidGlass
         if let previewThemeID, let previewRole {
             endColorPreview(for: previewRole, in: previewThemeID, save: false)
         }
@@ -680,7 +725,9 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         let theme = NBThemeProfile(
             name: finalName,
             colors: base.colors,
-            elementOverrides: base.elementOverrides
+            elementOverrides: base.elementOverrides,
+            lightColors: base.lightColors,
+            lightElementOverrides: base.lightElementOverrides
         )
         customThemes.append(theme)
         selectedThemeID = theme.id
@@ -727,8 +774,12 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
               let index = customThemes.firstIndex(where: { $0.id == themeID }) else { return }
 
         var theme = customThemes[index]
-        guard theme.color(for: role) != color else { return }
-        theme.setColor(color, for: role)
+        guard theme.resolved(isDark: isDark).color(for: role) != color else { return }
+        if !isDark, theme.lightColors != nil {
+            theme.lightColors?[role.rawValue] = color
+        } else {
+            theme.setColor(color, for: role)
+        }
         customThemes[index] = theme
         persist()
     }
@@ -742,9 +793,13 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         let id = themeID ?? selectedThemeID
         guard id != NBThemeProfile.halloweenID,
               let index = customThemes.firstIndex(where: { $0.id == id }),
-              customThemes[index].elementOverride(for: elementID) != nil else { return }
+              customThemes[index].resolved(isDark: isDark).elementOverride(for: elementID) != nil else { return }
         var theme = customThemes[index]
-        theme.setElementOverride(nil, for: elementID)
+        if !isDark, theme.lightColors != nil {
+            theme.lightElementOverrides?.removeValue(forKey: elementID)
+        } else {
+            theme.setElementOverride(nil, for: elementID)
+        }
         customThemes[index] = theme
         persist()
     }
@@ -761,8 +816,13 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         // Save Element always pins a local exception, even when its RGB equals
         // the current role. Only Use Theme Color Instead reconnects the role.
         let stored: NBThemeColor? = color
-        guard theme.elementOverride(for: elementID) != stored else { return }
-        theme.setElementOverride(stored, for: elementID)
+        guard theme.resolved(isDark: isDark).elementOverride(for: elementID) != stored else { return }
+        if !isDark, theme.lightColors != nil {
+            if theme.lightElementOverrides == nil { theme.lightElementOverrides = [:] }
+            theme.lightElementOverrides?[elementID] = stored
+        } else {
+            theme.setElementOverride(stored, for: elementID)
+        }
         customThemes[index] = theme
         persist()
     }
@@ -780,7 +840,9 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
 
         var theme = customThemes[index]
         theme.colors = NBThemeProfile.halloween.colors
+        theme.lightColors = NBThemeProfile.halloween.lightColors
         theme.elementOverrides.removeAll()
+        theme.lightElementOverrides = nil
         customThemes[index] = theme
         persist()
     }
@@ -796,7 +858,7 @@ public final class NBThemeManager: ObservableObject, @unchecked Sendable {
         }
         customThemes.removeAll { $0.id == id }
         if selectedThemeID == id {
-            selectedThemeID = NBThemeProfile.halloweenID
+            selectedThemeID = NBThemeProfile.liquidGlassID
         }
         persist()
     }

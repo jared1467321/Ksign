@@ -9,6 +9,15 @@ import UIKit
 import NimbleExtensions
 
 enum HalloweenAppearance {
+    private static var usesAurora: Bool {
+        (UserDefaults.standard.object(forKey: "Feather.auroraBackground") as? Bool ?? true)
+            && !UIAccessibility.isReduceTransparencyEnabled
+            && !UIAccessibility.isDarkerSystemColorsEnabled
+    }
+
+    private static var blurStyle: UIBlurEffect.Style {
+        NBThemeManager.shared.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight
+    }
     private static var usesGlossySurfaces: Bool {
         (UserDefaults.standard.object(forKey: "Feather.glossySurfaces") as? Bool ?? true)
             && !UIAccessibility.isReduceTransparencyEnabled
@@ -33,9 +42,9 @@ enum HalloweenAppearance {
         let appearance = UINavigationBarAppearance()
         if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
-            appearance.backgroundEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+            appearance.backgroundEffect = UIBlurEffect(style: blurStyle)
             let color = NBHalloween.uiColor(.navigationBackground)
-            appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * 0.82)
+            appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * (usesAurora ? 0.10 : 0.48))
         } else {
             appearance.configureWithOpaqueBackground()
             appearance.backgroundColor = NBHalloween.uiColor(.navigationBackground)
@@ -66,9 +75,9 @@ enum HalloweenAppearance {
         let appearance = UITabBarAppearance()
         if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
-            appearance.backgroundEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+            appearance.backgroundEffect = UIBlurEffect(style: blurStyle)
             let color = NBHalloween.uiColor(.tabBackground)
-            appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * 0.82)
+            appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * (usesAurora ? 0.10 : 0.48))
         } else {
             appearance.configureWithOpaqueBackground()
             appearance.backgroundColor = NBHalloween.uiColor(.tabBackground)

@@ -251,6 +251,8 @@ extension SourceAppsTableRepresentableView { class Coordinator: NSObject, UITabl
             SourceAppsThemeHost(coordinator: self) {
                 SourceAppsCellView(source: entry.source, app: entry.app)
                     .nbThemeForeground(.text)
+                    .padding(12)
+                    .nbThemeBackground(.elevated, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
         cell.backgroundConfiguration = UIBackgroundConfiguration.clear()

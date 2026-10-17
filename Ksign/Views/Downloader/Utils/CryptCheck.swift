@@ -941,7 +941,7 @@ enum CryptCheckAnalyzer {
         <title>cryptcheck report — \(escapeHTML(now))</title>
         <style>
           :root {
-            color-scheme: dark;
+            color-scheme: \(NBThemeManager.shared.isDark ? "dark" : "light");
             --bg:\(theme.color(for: .reportBackground).cssRGBA);
             --card:\(theme.color(for: .reportCard).cssRGBA);
             --border:\(theme.color(for: .reportBorder).cssRGBA);

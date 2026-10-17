@@ -21,7 +21,8 @@ let package = Package(
 		),
 		.target(
 			name: "NimbleExtensions",
-			dependencies: ["NBThemePicking"]
+			dependencies: ["NBThemePicking"],
+            resources: [.process("Shaders")]
 		),
         .target(name: "NBThemePicking"),
 		.target(name: "NimbleJSON",

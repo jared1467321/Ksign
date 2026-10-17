@@ -14,7 +14,7 @@ extension UIUserInterfaceStyle: @retroactive CaseIterable {
 	
 	var label: String {
 		switch self {
-		case .unspecified: .localized("Default")
+		case .unspecified: .localized("System")
 		case .dark: .localized("Dark")
 		case .light: .localized("Light")
 		@unknown default: .localized("Unknown")
