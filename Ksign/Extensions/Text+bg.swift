@@ -19,17 +19,8 @@ extension Text {
 
 struct style: ViewModifier {
     func body(content: Content) -> some View {
-        // The glass variant was dropped on purpose. `glassEffect()` samples
-        // what's behind it, and behind it is near-black, so the pill rendered
-        // as the same neutral grey as stock iOS — one of the surfaces that kept
-        // reading as untouched chrome. A flat accent wash is duller than glass
-        // but it's actually the theme's colour.
-        //
-        // iOS 26 can tint glass via `.glassEffect(.regular.tint(_:))` if you
-        // want the material back; it's left out here so the build doesn't hinge
-        // on an API this project hasn't compiled against yet.
         content
-            .nbThemeBackground(.accent, opacity: 0.16)
+            .nbThemeBackground(.accent, opacity: 0.16, in: Capsule())
             .nbThemeOverlay(
                 Capsule().nbThemeStroke(.accent, opacity: 0.35, lineWidth: 1)
             )

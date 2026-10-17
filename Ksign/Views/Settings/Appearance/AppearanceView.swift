@@ -13,6 +13,7 @@ import NimbleExtensions
 struct AppearanceView: View {
     @AppStorage("Feather.userInterfaceStyle") private var _userInterfaceStyle: Int = UIUserInterfaceStyle.unspecified.rawValue
     @AppStorage("Feather.storeCellAppearance") private var _storeCellAppearance: Int = 1
+    @AppStorage("Feather.glossySurfaces") private var _glossySurfaces = true
 
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var showDeleteConfirmation = false
@@ -33,6 +34,10 @@ struct AppearanceView: View {
                 }
                 .pickerStyle(.segmented)
                 .disabled(true)
+            }
+
+            Section(footer: Text(.localized("Adds translucent color, soft reflections, and luminous edges to cards and controls. Reduce Transparency uses solid fills."))) {
+                Toggle(.localized("Glossy Surfaces"), isOn: $_glossySurfaces)
             }
 
             NBSection(.localized("Theme Profiles")) {
@@ -157,8 +162,7 @@ struct AppearanceView: View {
                     [NBThemeRole.accent, .secondaryAccent, .tertiaryAccent, .success, .danger],
                     id: \.self
                 ) { role in
-                    Circle()
-                        .fill(theme.color(for: role).color)
+                    NBThemeSurface(theme.color(for: role), in: Circle())
                         .frame(width: 19, height: 19)
                         .nbThemeOverlay {
                             Circle().nbThemeStroke(.imageBorder, lineWidth: 0.5)

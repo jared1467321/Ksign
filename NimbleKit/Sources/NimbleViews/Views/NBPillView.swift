@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 import NimbleExtensions
 
 public struct NBPillView: View {
@@ -65,7 +66,7 @@ public struct NBPillView: View {
             if let themeRole {
                 shape.nbThemeFill(themeRole, opacity: 0.1)
             } else {
-                shape.fill(color.opacity(0.1))
+                NBThemeSurface(NBThemeColor(uiColor: UIColor(color.opacity(0.1))), in: shape)
             }
         }
 	}

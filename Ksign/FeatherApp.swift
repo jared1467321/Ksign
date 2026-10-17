@@ -20,6 +20,7 @@ struct FeatherApp: App {
 	let heartbeat = HeartbeatManager.shared
 	@StateObject var downloadManager = DownloadManager.shared
 	@StateObject var themeManager = NBThemeManager.shared
+    @AppStorage("Feather.glossySurfaces") private var glossySurfaces = true
     @StateObject var extractManager = ExtractManager.shared
 	@StateObject var logsManager = LogsManager.shared
 	let storage = Storage.shared
@@ -67,6 +68,15 @@ struct FeatherApp: App {
 				if logsManager.isCapturing { logsManager.startCapture() }
 				Task { await VPNReconnectCoordinator.shared.appBecameActive() }
 			}
+            .onChange(of: glossySurfaces) { _ in
+                HalloweenAppearance.apply(refreshExistingViews: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.reduceTransparencyStatusDidChangeNotification)) { _ in
+                HalloweenAppearance.apply(refreshExistingViews: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.darkerSystemColorsStatusDidChangeNotification)) { _ in
+                HalloweenAppearance.apply(refreshExistingViews: true)
+            }
 			.onChange(of: scenePhase) { phase in
 				if phase == .active {
 					Task { await VPNReconnectCoordinator.shared.appBecameActive() }

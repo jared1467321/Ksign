@@ -625,7 +625,7 @@ public struct NBThemePaint: View {
     public var body: some View {
         let semantic = nbThemeSemanticColor(themes, role, opacity)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
-        resolved.color
+        NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface)
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,
@@ -819,7 +819,7 @@ private struct NBThemeBackgroundModifier: ViewModifier {
         content
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .background {
-                resolved.color
+                NBThemeSurface(resolved, in: Rectangle(), supportsGloss: role.supportsGlossySurface)
                     .modifier(NBThemeInspectorTargetModifier(
                         role: role,
                         elementID: elementID,
@@ -846,7 +846,9 @@ private struct NBThemeShapedBackgroundModifier<S: Shape>: ViewModifier {
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
         content
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
-            .background(resolved.color, in: shape)
+            .background {
+                NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface)
+            }
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,
@@ -1020,8 +1022,7 @@ private struct NBThemeFilledShape<S: Shape>: View {
         let _ = themes.previewRevision
         let semantic = nbThemeSemanticColor(themes, role, opacity)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
-        shape
-            .fill(resolved.color)
+        NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface)
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,
