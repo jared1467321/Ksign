@@ -8,8 +8,21 @@
 #include <iostream>
 #include <vector>
 
+// Mirror libc++'s global math exports on Linux too, so this name collision
+// cannot pass local checks and then fail on the macOS build runner again.
+using std::floor;
+using std::abs;
+using std::sin;
+using std::cos;
+using std::exp;
+using std::sqrt;
+using std::pow;
+
 // Clang vectors execute the actual Metal arithmetic on macOS/Linux. The only
 // doubles are the texture/layer interfaces; both shaders see identical input.
+// Keep the adapters out of the global namespace: libc++ on macOS exposes
+// scalar math overloads there through using declarations in its math headers.
+namespace AuroraTest {
 using uint = uint32_t;
 using half = float;
 using float2 = float __attribute__((ext_vector_type(2)));
@@ -119,7 +132,7 @@ void equal(float4 a, float4 b) {
     }
 }
 
-int main(int argc, char **argv) {
+int run(int argc, char **argv) {
     assert(argc==2);
     // Exercise the zero-envelope bounds independently at the hot-core
     // thresholds as well as across randomized fold/ribbon combinations.
@@ -196,4 +209,8 @@ int main(int argc, char **argv) {
     std::cout << "Aurora differential tests passed: " << identities*count << " exact identity values, " << pixels
               << " identical Light/Dark sky pixels and 216000 identical optics pixels.\n"
               << "Noise texture reads: " << beforeNoise << " -> " << afterNoise << "; optics reads: " << beforeOptics << " -> " << afterOptics << ".\n";
+    return 0;
 }
+} // namespace AuroraTest
+
+int main(int argc, char **argv) { return AuroraTest::run(argc, argv); }
