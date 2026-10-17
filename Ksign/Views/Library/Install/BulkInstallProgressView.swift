@@ -47,7 +47,8 @@ struct BulkInstallProgressView: View {
 			InstallProgressView(
 				app: job.app,
 				viewModel: job.viewModel,
-				activity: _activity
+				activity: _activity,
+				animatesIcon: _activity == .active
 			)
 
 			if job.phase == .failed {

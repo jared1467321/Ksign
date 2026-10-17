@@ -11,6 +11,7 @@ import NimbleExtensions
 
 struct InstallProgressView: View {
 	@State private var _isPulsing = false
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	
 	var app: AppInfoPresentable
 	@ObservedObject var viewModel: InstallerStatusViewModel
@@ -31,16 +32,21 @@ struct InstallProgressView: View {
 	// Defaults to `.none` so the single-install view — one app, nothing to
 	// tell apart — is unchanged.
 	var activity: Activity = .none
+	var animatesIcon = true
+
+	private var _shouldPulse: Bool { animatesIcon && !reduceMotion }
 	
 	var body: some View {
 		VStack(spacing: 12) {
 			_appIcon()
 				.scaleEffect(_isPulsing ? 0.85 : 0.81)
 				.animation(
-					.easeInOut(duration: 1.0).repeatForever(autoreverses: true),
+					_shouldPulse ? .easeInOut(duration: 1.0).repeatForever(autoreverses: true) : .default,
 					value: _isPulsing
 				)
-				.onAppear { _isPulsing = true }
+				.onAppear { _isPulsing = _shouldPulse }
+				.onChange(of: _shouldPulse) { _isPulsing = $0 }
+				.onDisappear { _isPulsing = false }
 				// Outside the scale effect on purpose: the dot holds still
 				// while the icon breathes, and it's outside the pie mask so
 				// it can't be clipped by the progress fill.
@@ -62,48 +68,46 @@ struct InstallProgressView: View {
 	// the app, and it's also the tint, so a green dot on a green-tinted grid
 	// is the one thing here that shouldn't blend in. Orange and purple are the
 	// two colours on this screen that aren't the accent.
+	@ViewBuilder
 	private var _activityDot: some View {
-		let dot: NBThemeRole = activity == .upcoming ? .tertiaryAccent : .warning
-		return ZStack {
-			// Soft halo that breathes in and out behind the dot.
-			Circle()
-				.nbThemeFill(dot)
-				.frame(width: 13, height: 13)
-				.blur(radius: 3.5)
-				.scaleEffect(_isPulsing ? 2.0 : 1.2)
-				.nbThemeOpacity(_isPulsing ? 0.85 : 0.3)
-                .nbThemePaintLayer(0)
-				.animation(
-					.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-					value: _isPulsing
-				)
+		if activity != .none {
+			let dot: NBThemeRole = activity == .upcoming ? .tertiaryAccent : .warning
+			ZStack {
+				// Only active installs pulse; queued rows have no glow layer.
+				Circle()
+					.nbThemeFill(dot)
+					.frame(width: 13, height: 13)
+					.blur(radius: 3.5)
+					.scaleEffect(_isPulsing ? 2.0 : 1.2)
+					.nbThemeOpacity(_isPulsing ? 0.85 : 0.3)
+					.nbThemePaintLayer(0)
+					.animation(
+						_shouldPulse ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
+						value: _isPulsing
+					)
 
-			Circle()
-				.nbThemeFill(dot)
-				.nbThemeOverlay(
-					Circle().nbThemeStrokeBorder(.overlayText, opacity: 0.9, lineWidth: 1)
-				)
-				.frame(width: 13, height: 13)
-				.nbThemeShadow(dot, opacity: 0.9, radius: 4)
-                .nbThemePaintLayer(1)
+				Circle()
+					.nbThemeFill(dot)
+					.nbThemeOverlay(
+						Circle().nbThemeStrokeBorder(.overlayText, opacity: 0.9, lineWidth: 1)
+					)
+					.frame(width: 13, height: 13)
+					.nbThemeShadow(dot, opacity: 0.9, radius: 4)
+					.nbThemePaintLayer(1)
+			}
+			.nbThemePaintGroup()
+			// Crossfade the purple -> orange handover.
+			.animation(.easeInOut(duration: 0.2), value: activity)
+			// Keep the dot on the edge of the scaled icon artwork.
+			.offset(x: -5, y: 5)
 		}
-        .nbThemePaintGroup()
-			.nbThemeOpacity(activity == .none ? 0 : 1)
-		.scaleEffect(activity == .none ? 0.5 : 1)
-		// Covers the purple -> orange handover as well as the fade in, so a
-		// job joining the live manifest crossfades rather than snapping.
-		.animation(.easeInOut(duration: 0.2), value: activity)
-		// The icon is drawn at ~0.83 scale inside a 54pt box, so the box's
-		// true corner sits well clear of the artwork. Nudged back in to
-		// land on the edge of the circle instead of floating off it.
-		.offset(x: -5, y: 5)
 	}
 	
 	@ViewBuilder
 	private func _appIcon() -> some View {
 		ZStack {
 			FRAppIconView(app: app)
-				.nbThemeOpacity(_isPulsing ? 0.2 : 0.2)
+				.nbThemeOpacity(0.2)
 				.frame(width: 54, height: 54)
 
 			

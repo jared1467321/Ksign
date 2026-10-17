@@ -217,6 +217,7 @@ struct InstallDrawerSheet: View {
 					jobs: session.jobs,
 					originalCount: session.totalCount
 				)
+				.equatable()
 				.padding(.bottom, 20)
 			}
 		}
