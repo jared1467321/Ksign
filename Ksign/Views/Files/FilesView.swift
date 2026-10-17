@@ -205,7 +205,7 @@ struct FilesView: View {
             }
             .nbThemeRow()
         }
-        .listStyle(.plain)
+        .listStyle(.insetGrouped)
         .nbThemeCanvas()
         .environment(\.editMode, $viewModel.isEditMode)
         .navigationDestination(isPresented: Binding(

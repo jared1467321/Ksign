@@ -4,6 +4,7 @@ import SwiftUI
 /// affect only the backing surface; foreground text stays sharp and opaque.
 public struct NBThemeSurface<S: Shape>: View {
     @AppStorage("Feather.glossySurfaces") private var glossySurfaces = true
+    @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.colorScheme) private var scheme
@@ -25,27 +26,32 @@ public struct NBThemeSurface<S: Shape>: View {
         glossySurfaces && supportsGloss && !reduceTransparency && contrast != .increased
     }
 
+    private var shine: Double { scheme == .light ? 0.45 : 1 }
+    private var surfaceTint: Double {
+        auroraBackground && tintStrength <= 0.10 ? 0.025 : tintStrength
+    }
+
     public var body: some View {
         Group {
             if enabled {
                 ZStack {
                     nativeGlass
-                    shape.fill(Color(.sRGB, red: color.red, green: color.green, blue: color.blue).opacity(tintStrength))
+                    shape.fill(Color(.sRGB, red: color.red, green: color.green, blue: color.blue).opacity(surfaceTint))
                     shape.fill(LinearGradient(
                         stops: [
-                            .init(color: .white.opacity(0.105), location: 0),
-                            .init(color: .white.opacity(0.032), location: 0.22),
+                            .init(color: .white.opacity(0.105 * shine), location: 0),
+                            .init(color: .white.opacity(0.032 * shine), location: 0.22),
                             .init(color: .clear, location: 0.52)
                         ], startPoint: .topLeading, endPoint: .bottomTrailing
                     ))
-                    shape.fill(RadialGradient(colors: [.white.opacity(0.165), .white.opacity(0.04), .clear],
+                    shape.fill(RadialGradient(colors: [.white.opacity(0.165 * shine), .white.opacity(0.04 * shine), .clear],
                                               center: .topLeading, startRadius: 0, endRadius: 245))
                     shape.fill(LinearGradient(
                         stops: [
                             .init(color: .clear, location: 0),
-                            .init(color: .white.opacity(0.015), location: 0.34),
-                            .init(color: .white.opacity(0.145), location: 0.47),
-                            .init(color: .white.opacity(0.04), location: 0.54),
+                            .init(color: .white.opacity(0.015 * shine), location: 0.34),
+                            .init(color: .white.opacity(0.145 * shine), location: 0.47),
+                            .init(color: .white.opacity(0.04 * shine), location: 0.54),
                             .init(color: .clear, location: 0.67)
                         ], startPoint: .topLeading, endPoint: .bottomTrailing
                     ))
@@ -83,7 +89,7 @@ public struct NBThemeSurface<S: Shape>: View {
                 .glassEffect(.clear, in: shape)
                 .mask {
                     ZStack {
-                        shape.fill(.white.opacity(0.28))
+                        shape.fill(.white.opacity(scheme == .light ? 0.16 : 0.28))
                         shape.stroke(.white, lineWidth: 20)
                         shape.stroke(.white.opacity(0.92), lineWidth: 48)
                             .blur(radius: 4.5)
@@ -93,7 +99,7 @@ public struct NBThemeSurface<S: Shape>: View {
                 }
         } else {
             shape.fill(.ultraThinMaterial)
-                .opacity(scheme == .dark ? 0.48 : 0.65)
+                .opacity(scheme == .dark ? 0.48 : 0.35)
         }
     }
 }

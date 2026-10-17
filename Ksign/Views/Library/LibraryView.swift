@@ -189,6 +189,8 @@ struct LibraryView: View {
 					Text(.localized("Signed Apps")).tag(1)
 				}
 				.pickerStyle(SegmentedPickerStyle())
+				.padding(6)
+                .nbThemeBackground(.controlFill, in: Capsule())
 				.padding(.horizontal)
 				.padding(.vertical, 8)
 				

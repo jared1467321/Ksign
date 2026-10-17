@@ -184,7 +184,7 @@ struct DownloaderView: View {
                 }
                 .nbThemeRow()
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
             .nbThemeCanvas()
             .nbThemeOverlay {
                 if cryptCheckRunning {

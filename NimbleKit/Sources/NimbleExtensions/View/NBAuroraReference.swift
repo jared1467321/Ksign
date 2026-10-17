@@ -74,7 +74,7 @@ struct NBThemeBackdrop: View {
                         // start in iOS 17 and Liquid Glass starts in iOS 26.
                         LinearGradient(colors: scheme == .dark
                                        ? [Color(red: 0.13, green: 0.06, blue: 0.20), .black, Color(red: 0.05, green: 0.24, blue: 0.18)]
-                                       : [Color(red: 0.89, green: 0.84, blue: 0.98), .white, Color(red: 0.83, green: 0.95, blue: 0.89)],
+                                       : [Color(red: 0.69, green: 0.44, blue: 0.98), Color(red: 0.98, green: 0.72, blue: 0.38), Color(red: 0.38, green: 0.91, blue: 0.69)],
                                        startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
                 } else {
@@ -135,11 +135,11 @@ struct NBThemeBackdrop: View {
             Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0xA11CE5EED),
                       count: 54, tint: Color(red: 1, green: 0.824, blue: 0.451),
                       speedScale: 0.74, sizeScale: 0.82)
-                .opacity(scheme == .dark ? 0.43 : 0.18)
+                .opacity(scheme == .dark ? 0.43 : 0.35)
             Starfield(time: time, seed: session.identity.starfieldSeed(stream: 0x57EE1F1E1D),
                       count: 26, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
                       speedScale: 0.40, sizeScale: 0.94)
-                .opacity(scheme == .dark ? 0.20 : 0.12)
+                .opacity(scheme == .dark ? 0.20 : 0.18)
         }
     }
 }

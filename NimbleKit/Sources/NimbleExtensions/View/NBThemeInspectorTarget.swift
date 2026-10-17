@@ -976,18 +976,25 @@ private struct NBThemeRowModifier: ViewModifier {
     }
 }
 
-private struct NBThemeCanvasPreferenceKey: PreferenceKey {
-    static let defaultValue: Set<UUID> = []
-    static func reduce(value: inout Set<UUID>, nextValue: () -> Set<UUID>) {
-        value.formUnion(nextValue())
+private struct NBThemeHasCanvasKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var nbThemeHasCanvas: Bool {
+        get { self[NBThemeHasCanvasKey.self] }
+        set { self[NBThemeHasCanvasKey.self] = newValue }
     }
 }
 
 private struct NBThemeCanvasModifier: ViewModifier {
     @ObservedObject private var themes = NBThemeManager.shared
     @Environment(\.nbPaintAncestry) private var ancestors
+    @Environment(\.nbThemeHasCanvas) private var hasAncestorCanvas
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @State private var ownerID = UUID()
-    @State private var hasChildCanvas = false
     @State private var panes: [CGRect] = []
     let role: NBThemeRole
     let elementID: String
@@ -1001,12 +1008,10 @@ private struct NBThemeCanvasModifier: ViewModifier {
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, 1)
 
         content
-            // Nested wrappers register their canvas with the outer wrapper.
-            // Only the innermost visible screen renders an animated sky.
-            .onPreferenceChange(NBThemeCanvasPreferenceKey.self) { children in
-                hasChildCanvas = !children.isEmpty
-            }
+            // Keep a single sky at the outside of the screen, spanning the
+            // navigation/status areas as well as the scrolling content.
             .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
+                guard !hasAncestorCanvas else { return }
                 panes = frames.values.map(\.rect)
                     .sorted { lhs, rhs in
                         let a = lhs.width * lhs.height
@@ -1016,6 +1021,7 @@ private struct NBThemeCanvasModifier: ViewModifier {
                     .prefix(2).map { $0 }
             }
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
+            .environment(\.nbThemeHasCanvas, true)
             .foregroundStyle(primary, secondary)
             .listRowSeparatorTint(separator)
             .scrollContentBackground(.hidden)
@@ -1023,8 +1029,12 @@ private struct NBThemeCanvasModifier: ViewModifier {
                 // Register the paint's bounds, including its safe-area extent,
                 // rather than the smaller content rectangle above it.
                 Group {
-                    if role == .background && !hasChildCanvas {
-                        NBThemeBackdrop(base: resolved, panes: panes)
+                    if role == .background {
+                        if hasAncestorCanvas && auroraBackground && !reduceTransparency && contrast != .increased {
+                            Color.clear
+                        } else {
+                            NBThemeBackdrop(base: resolved, panes: panes)
+                        }
                     } else {
                         resolved.color
                     }
@@ -1037,7 +1047,45 @@ private struct NBThemeCanvasModifier: ViewModifier {
                     ))
                     .ignoresSafeArea()
             }
-            .preference(key: NBThemeCanvasPreferenceKey.self, value: [ownerID])
+            .background(NBThemeNavigationBridge())
+            .modifier(NBThemeScrollEdgeModifier(
+                hidden: auroraBackground && !reduceTransparency && contrast != .increased
+            ))
+            .modifier(NBThemePresentationBackgroundModifier(
+                clear: auroraBackground && !reduceTransparency && contrast != .increased,
+                fallback: resolved.color
+            ))
+    }
+}
+
+private struct NBThemeScrollEdgeModifier: ViewModifier {
+    let hidden: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, tvOS 26.0, *) {
+            content.scrollEdgeEffectHidden(hidden, for: .top)
+        } else {
+            content
+        }
+    }
+}
+
+private struct NBThemePresentationBackgroundModifier: ViewModifier {
+    let clear: Bool
+    let fallback: Color
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(iOS)
+        if #available(iOS 16.4, *) {
+            content.presentationBackground(clear ? Color.clear : fallback)
+        } else {
+            content
+        }
+#else
+        content
+#endif
     }
 }
 

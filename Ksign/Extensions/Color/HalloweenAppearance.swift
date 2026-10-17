@@ -40,7 +40,11 @@ enum HalloweenAppearance {
 
     private static func _navigationAppearance() -> UINavigationBarAppearance {
         let appearance = UINavigationBarAppearance()
-        if usesGlossySurfaces {
+        if usesGlossySurfaces && usesAurora {
+            // NBThemeNavigationBridge supplies the clear glass card. Leaving
+            // UIKit's blur here would hide the sky with an opaque grey plate.
+            appearance.configureWithTransparentBackground()
+        } else if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
             appearance.backgroundEffect = UIBlurEffect(style: blurStyle)
             let color = NBHalloween.uiColor(.navigationBackground)
@@ -155,11 +159,12 @@ enum HalloweenAppearance {
 
     private static func _searchFields() {
         let field = UISearchTextField.appearance()
-        field.backgroundColor = NBHalloween.uiColor(.searchBackground)
+        field.backgroundColor = _searchBackgroundColor
         field.textColor = NBHalloween.uiColor(.searchText)
         field.tintColor = NBHalloween.uiColor(.searchTint)
 
         let searchBar = UISearchBar.appearance()
+        searchBar.setSearchFieldBackgroundImage(usesGlossySurfaces && usesAurora ? UIImage() : nil, for: .normal)
         searchBar.tintColor = NBHalloween.uiColor(.searchTint)
         searchBar.searchTextField.attributedPlaceholder = NSAttributedString(
             string: "",
@@ -169,9 +174,19 @@ enum HalloweenAppearance {
 
     // MARK: - Segmented controls
 
+    private static var _searchBackgroundColor: UIColor {
+        let color = NBHalloween.uiColor(.searchBackground)
+        return usesGlossySurfaces && usesAurora ? color.withAlphaComponent(0.06) : color
+    }
+
     private static func _configure(_ control: UISegmentedControl) {
         control.selectedSegmentTintColor = NBHalloween.uiColor(.segmentSelectedBackground)
-        control.backgroundColor = NBHalloween.uiColor(.segmentBackground)
+        let clearGlass = usesGlossySurfaces && usesAurora
+        control.backgroundColor = clearGlass ? .clear : NBHalloween.uiColor(.segmentBackground)
+        control.setBackgroundImage(clearGlass ? UIImage() : nil, for: .normal, barMetrics: .default)
+        control.setBackgroundImage(clearGlass ? _segmentSelectionImage() : nil, for: .selected, barMetrics: .default)
+        control.setDividerImage(clearGlass ? UIImage() : nil,
+                                forLeftSegmentState: .normal, rightSegmentState: .normal, barMetrics: .default)
         control.setTitleTextAttributes(
             [.foregroundColor: NBHalloween.uiColor(.segmentText)],
             for: .normal
@@ -184,6 +199,14 @@ enum HalloweenAppearance {
 
     private static func _segmentedControls() {
         _configure(UISegmentedControl.appearance())
+    }
+
+    private static func _segmentSelectionImage() -> UIImage {
+        let bounds = CGRect(x: 0, y: 0, width: 32, height: 32)
+        return UIGraphicsImageRenderer(size: bounds.size).image { _ in
+            NBHalloween.uiColor(.segmentSelectedBackground).setFill()
+            UIBezierPath(roundedRect: bounds, cornerRadius: 16).fill()
+        }.resizableImage(withCapInsets: UIEdgeInsets(top: 15, left: 15, bottom: 15, right: 15))
     }
 
     // MARK: - Bar buttons
@@ -246,7 +269,7 @@ enum HalloweenAppearance {
             _configureTabItems(bar)
 
         case let field as UISearchTextField:
-            field.backgroundColor = NBHalloween.uiColor(.searchBackground)
+            field.backgroundColor = _searchBackgroundColor
             field.textColor = NBHalloween.uiColor(.searchText)
             field.tintColor = NBHalloween.uiColor(.searchTint)
             field.attributedPlaceholder = NSAttributedString(
@@ -256,6 +279,7 @@ enum HalloweenAppearance {
 
         case let searchBar as UISearchBar:
             searchBar.tintColor = NBHalloween.uiColor(.searchTint)
+            searchBar.setSearchFieldBackgroundImage(usesGlossySurfaces && usesAurora ? UIImage() : nil, for: .normal)
 
         case let control as UISegmentedControl:
             _configure(control)

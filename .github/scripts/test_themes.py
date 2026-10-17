@@ -8,6 +8,21 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_aurora_colors(directory):
+    compiler = shutil.which("clang++") or shutil.which("c++")
+    if not compiler:
+        raise SystemExit("a C++ compiler is required for the aurora color tests")
+    shader = (ROOT / "NimbleKit/Sources/NimbleExtensions/Shaders/AuroraShaders.metal").read_text()
+    start = shader.index("static float3 auroraLightAppearance(")
+    end = shader.index("\n}\n", start) + 2
+    test = (ROOT / "Native/Theme/AuroraColors.cpp").read_text()
+    source = directory / "AuroraColors.cpp"
+    source.write_text(test.replace("// PRODUCTION_LIGHT_APPEARANCE", shader[start:end]))
+    executable = directory / "AuroraColors"
+    subprocess.run([compiler, "-std=c++17", str(source), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)
+
+
 def main():
     compiler = shutil.which("swiftc")
     if not compiler:
@@ -30,6 +45,7 @@ def main():
         subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
                         str(directory / "modules"), str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
+        test_aurora_colors(directory)
 
 
 if __name__ == "__main__":

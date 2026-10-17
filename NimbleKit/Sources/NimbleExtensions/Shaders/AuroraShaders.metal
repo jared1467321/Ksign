@@ -794,6 +794,21 @@ static float3 auroraSceneColor(
     return color;
 }
 
+static float3 auroraLightAppearance(float3 sky) {
+    // Lift lightness while retaining the original hue and saturation. Mixing
+    // the finished sky with white flattens the curtains into a grey/pastel wash.
+    float peak = max(sky.r, max(sky.g, sky.b));
+    float floorValue = min(sky.r, min(sky.g, sky.b));
+    float chroma = peak - floorValue;
+    float originalLightness = (peak + floorValue) * 0.5;
+    float originalSaturation = chroma / max(1.0 - abs(2.0 * originalLightness - 1.0), 0.001);
+    float lightness = mix(0.74, 0.86, clamp(originalLightness * 1.5, 0.0, 1.0));
+    float saturation = clamp(originalSaturation, 0.0, 1.0);
+    float lightChroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
+    float3 hue = chroma > 0.001 ? (sky - floorValue) / chroma : float3(0.5);
+    return clamp(hue * lightChroma + (lightness - lightChroma * 0.5), 0.0, 1.0);
+}
+
 // The wide master identity is split into exact 16-bit words before crossing the
 // SwiftUI shader boundary. Metal reconstructs and hashes all 128 bits into
 // independent streams, while every animated noise coordinate still uses only
@@ -813,10 +828,9 @@ static float3 auroraSceneColor(
     float2 safeSize = max(size, float2(1.0));
     float2 uv = position / safeSize;
     float3 sky = auroraSceneColor(uv, time, seedA, seedB, intensity, noiseTexture);
-    // Preserve the original curtains and color identity in both appearances.
-    // A pearl base makes the light version bright enough for dark foregrounds.
+    // Both appearances share exactly the same sky, curtains and timing.
     float3 darkSky = sky * 0.76;
-    float3 lightSky = mix(float3(0.94, 0.95, 0.98), sky, 0.24);
+    float3 lightSky = auroraLightAppearance(sky);
     return half4(half3(mix(darkSky, lightSky, lightMode)), half(1.0));
 }
 

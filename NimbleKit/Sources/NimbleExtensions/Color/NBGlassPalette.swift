@@ -43,7 +43,7 @@ extension NBThemeProfile {
             case .text, .searchText, .navigationText, .reportText:
                 color = pair(0xF0F5FF, 0x182034)
             case .textSecondary, .searchPlaceholder, .segmentText, .tabUnselected, .reportDim:
-                color = pair(0xB8B9CD, 0x4E5870)
+                color = pair(0xB8B9CD, 0x1A2335)
             case .textTertiary, .disabledText, .expired:
                 color = pair(0x9397AB, 0x626C80)
             case .onAccent:
@@ -51,13 +51,13 @@ extension NBThemeProfile {
             case .overlayText, .segmentSelectedText, .reportSelectedText:
                 color = hex(0xFFFFFF)
             case .accent, .navigationTint, .searchTint, .tabSelected, .barButtonTint, .reportAccent:
-                color = pair(0xFFD273, 0x785000)
+                color = pair(0xFFD273, 0x332100)
             case .secondaryAccent, .warning, .reportWarning:
                 color = pair(0xF5A623, 0x805100)
             case .tertiaryAccent, .title, .navigationTitle, .reportPurple:
-                color = pair(0xC7B8E0, 0x65408B)
+                color = pair(0xC7B8E0, 0x48215D)
             case .heading:
-                color = pair(0xD9D9E8, 0x343D55)
+                color = pair(0xD9D9E8, 0x26324B)
             case .selection, .segmentSelectedBackground:
                 color = pair(0x665485, 0x715494)
             case .headingFill:
