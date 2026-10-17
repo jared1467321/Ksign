@@ -173,7 +173,6 @@ struct NBThemeBackdrop: View {
         let scale = performance.renderScale
         let scene = viewport ?? AuroraViewport(size: size, origin: .zero)
         let renderSize = CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
-        let words = session.identity.shaderWords
         let rects = panes.prefix(2).map {
             CGRect(x: ($0.minX - origin.x) * scale, y: ($0.minY - origin.y) * scale,
                    width: $0.width * scale, height: $0.height * scale)
@@ -187,8 +186,7 @@ struct NBThemeBackdrop: View {
                 .colorEffect(ShaderLibrary.bundle(.module).auroraBorealis(
                     .float2(Float(max(1, scene.size.width * scale)), Float(max(1, scene.size.height * scale))),
                     .float(Float(time)),
-                    .float4(words[0], words[1], words[2], words[3]),
-                    .float4(words[4], words[5], words[6], words[7]),
+                    .floatArray(session.identity.shaderIdentity.values),
                     .float(1.34), .image(AuroraNoiseCache.image),
                     .float(scheme == .light ? 1 : 0),
                     .float2(Float(scene.origin.x * scale), Float(scene.origin.y * scale))
@@ -226,21 +224,12 @@ struct NBThemeBackdrop: View {
 private struct AuroraIdentity: Equatable, Sendable {
     let high: UInt64
     let low: UInt64
+    let shaderIdentity: NBAuroraShaderIdentity
 
-    // SwiftUI's shader API exposes float vectors rather than integer vectors.
-    // Splitting each UInt64 into exact UInt16-sized Float values carries all 128
-    // identity bits into Metal without losing low bits to Float precision.
-    var shaderWords: [Float] {
-        [
-            Float(low & 0xFFFF),
-            Float((low >> 16) & 0xFFFF),
-            Float((low >> 32) & 0xFFFF),
-            Float((low >> 48) & 0xFFFF),
-            Float(high & 0xFFFF),
-            Float((high >> 16) & 0xFFFF),
-            Float((high >> 32) & 0xFFFF),
-            Float((high >> 48) & 0xFFFF)
-        ]
+    init(high: UInt64, low: UInt64) {
+        self.high = high
+        self.low = low
+        shaderIdentity = NBAuroraShaderIdentity(high: high, low: low)
     }
 
     func starfieldSeed(stream: UInt64) -> UInt64 {

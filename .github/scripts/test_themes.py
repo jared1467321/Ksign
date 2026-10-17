@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,6 +50,34 @@ def test_aurora_work(directory, compiler):
     subprocess.run([str(executable)], check=True, timeout=30)
 
 
+def test_aurora_rendering(directory, compiler):
+    view = ROOT / "NimbleKit/Sources/NimbleExtensions/View"
+    identity = directory / "AuroraIdentity"
+    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
+                    str(directory / "modules"), str(view / "NBAuroraShaderIdentity.swift"),
+                    str(ROOT / "Native/Theme/AuroraIdentity.swift"), "-o", str(identity)], check=True)
+    arguments = directory / "identity-arguments.txt"
+    with arguments.open("w") as output:
+        subprocess.run([str(identity)], stdout=output, check=True, timeout=30)
+
+    def shader_source(path):
+        source = path.read_text()
+        source = re.sub(r"^#include[^\n]*", "", source, flags=re.MULTILINE)
+        # Metal's unsuffixed floating literals are Float, unlike C++'s Double.
+        source = re.sub(r"(?<![\w.])(\d+\.\d*(?:[eE][+-]?\d+)?)(?![\w.])", r"\1f", source)
+        return source.replace("using namespace metal;", "").replace("[[ stitchable ]]", "")
+
+    reference = shader_source(ROOT / "Native/Theme/AuroraShaderReference.metal")
+    production = shader_source(ROOT / "NimbleKit/Sources/NimbleExtensions/Shaders/AuroraShaders.metal")
+    source = (ROOT / "Native/Theme/AuroraRendering.cpp").read_text()
+    source = source.replace("// REFERENCE_SHADER", reference).replace("// PRODUCTION_SHADER", production)
+    path = directory / "AuroraRendering.cpp"
+    path.write_text(source)
+    executable = directory / "AuroraRendering"
+    subprocess.run(["clang++", "-std=c++17", "-O2", "-ffp-contract=off", str(path), "-o", str(executable)], check=True)
+    subprocess.run([str(executable), str(arguments)], check=True, timeout=60)
+
+
 def main():
     compiler = shutil.which("swiftc")
     if not compiler:
@@ -74,6 +103,7 @@ def main():
         test_aurora_colors(directory)
         test_navigation_layers(directory, compiler)
         test_aurora_work(directory, compiler)
+        test_aurora_rendering(directory, compiler)
 
 
 if __name__ == "__main__":

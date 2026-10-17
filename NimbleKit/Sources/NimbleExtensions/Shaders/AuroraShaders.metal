@@ -73,54 +73,38 @@ static float3 auroraScreen(float3 base, float3 light) {
     return 1.0 - (1.0 - base) * (1.0 - clamp(light, 0.0, 1.0));
 }
 
-// The 128-bit Swift identity arrives as eight exact UInt16-sized Float values.
-// Reassemble those chunks into four UInt32 words before hashing so no identity
-// bits are lost to floating-point precision on the SwiftUI -> Metal boundary.
-static uint4 auroraMasterWords(float4 seedA, float4 seedB) {
-    return uint4(
-        uint(seedA.x) | (uint(seedA.y) << 16),
-        uint(seedA.z) | (uint(seedA.w) << 16),
-        uint(seedB.x) | (uint(seedB.y) << 16),
-        uint(seedB.z) | (uint(seedB.w) << 16)
-    );
+// Fixed composition values are hashed once per sky on the CPU using the
+// original UInt32 algorithm. Every call uses a constant stream, so this index
+// resolves to a constant load instead of five avalanche hashes per pixel.
+static uint auroraIdentityIndex(uint stream) {
+    if (stream >= 0x1000u) {
+        return 7u + ((stream - 0x1000u) >> 5) * 4u + (stream & 3u);
+    }
+    if (stream >= 0x0100u && stream <= 0x0105u) {
+        return stream - 0x0100u;
+    }
+    if (stream == 0x0200u) { return 6u; }
+    if (stream == 0x0300u) { return 31u; }
+    if (stream >= 0x0310u && stream <= 0x0312u) { return 32u + stream - 0x0310u; }
+    if (stream >= 0x0320u && stream <= 0x0324u) { return 35u + stream - 0x0320u; }
+    return 40u; // exposure (0x0400)
 }
 
-static uint auroraAvalanche32(uint value) {
-    value ^= value >> 16;
-    value *= 0x7FEB352Du;
-    value ^= value >> 15;
-    value *= 0x846CA68Bu;
-    value ^= value >> 16;
-    return value;
+static float auroraMasterRandom(device const float *identityValues, uint stream) {
+    return identityValues[auroraIdentityIndex(stream)];
 }
 
-static uint auroraMasterHash(float4 seedA, float4 seedB, uint stream) {
-    uint4 words = auroraMasterWords(seedA, seedB);
-    uint h = auroraAvalanche32(0x9E3779B9u ^ (stream * 0x85EBCA6Bu));
-    h = auroraAvalanche32(h ^ words.x);
-    h = auroraAvalanche32(h ^ words.y ^ 0xC2B2AE35u);
-    h = auroraAvalanche32(h ^ words.z ^ 0x27D4EB2Fu);
-    h = auroraAvalanche32(h ^ words.w ^ 0x165667B1u);
-    return h;
+static float auroraStreamSeed(device const float *identityValues, uint stream) {
+    return 1.0 + auroraMasterRandom(identityValues, stream) * 4095.0;
 }
 
-static float auroraMasterRandom(float4 seedA, float4 seedB, uint stream) {
-    // The top 24 hash bits map exactly into Float's useful random mantissa.
-    return float(auroraMasterHash(seedA, seedB, stream) >> 8)
-        * (1.0 / 16777216.0);
-}
-
-static float auroraStreamSeed(float4 seedA, float4 seedB, uint stream) {
-    return 1.0 + auroraMasterRandom(seedA, seedB, stream) * 4095.0;
-}
-
-static float4 auroraCurtainSeedPack(float4 seedA, float4 seedB, uint index) {
+static float4 auroraCurtainSeedPack(device const float *identityValues, uint index) {
     uint base = 0x1000u + index * 0x20u;
     return float4(
-        auroraStreamSeed(seedA, seedB, base + 0u),  // geometry
-        auroraStreamSeed(seedA, seedB, base + 1u),  // internal detail
-        auroraStreamSeed(seedA, seedB, base + 2u),  // palette
-        auroraStreamSeed(seedA, seedB, base + 3u)   // motion
+        auroraStreamSeed(identityValues, base + 0u),  // geometry
+        auroraStreamSeed(identityValues, base + 1u),  // internal detail
+        auroraStreamSeed(identityValues, base + 2u),  // palette
+        auroraStreamSeed(identityValues, base + 3u)   // motion
     );
 }
 
@@ -337,10 +321,20 @@ static float4 auroraCurtain(
     );
     float envelope = topGate * bottomGate;
 
-    float horizontalFoldScale = mix(1.15, 2.55, auroraRandom(detailSeed, 54.1));
-    float verticalFoldScale = mix(1.35, 3.10, auroraRandom(detailSeed, 55.7));
     float pathShear = mix(-0.70, 0.70, auroraRandom(detailSeed, 57.3));
     float bentX = uv.x + signedDepth * pathShear;
+    float2 brightnessOffset = auroraOffset2(motionSeed, 97.1, 76.0);
+    float brightnessField = auroraFBM(float2(
+        bentX * mix(0.72, 1.55, auroraRandom(motionSeed, 97.7))
+            - time * speed * mix(1.3, 3.6, auroraRandom(motionSeed, 99.3))
+            + brightnessOffset.x,
+        time * auroraSignedRandom(motionSeed, 100.9, 0.018, 0.052)
+            + brightnessOffset.y
+    ), noiseTexture);
+    float brightnessWave = smoothstep(0.26, 0.82, brightnessField);
+
+    float horizontalFoldScale = mix(1.15, 2.55, auroraRandom(detailSeed, 54.1));
+    float verticalFoldScale = mix(1.35, 3.10, auroraRandom(detailSeed, 55.7));
 
     float2 foldOffset = auroraOffset2(detailSeed, 57.9, 84.0);
     float2 foldPoint = float2(
@@ -358,65 +352,71 @@ static float4 auroraCurtain(
             mix(0.55, 1.30, auroraRandom(detailSeed, 63.3))
         )
     , noiseTexture);
-    float2 detailedOffset = auroraOffset2(detailSeed, 64.1, 88.0);
-    float detailedFold = auroraFBM4(float2(
-        bentX * mix(2.8, 5.6, auroraRandom(detailSeed, 64.9))
-            + warp.x * mix(1.7, 3.4, auroraRandom(detailSeed, 66.1))
-            + time * speed * mix(3.2, 7.2, auroraRandom(detailSeed, 67.7))
-            + detailedOffset.x,
-        signedDepth * mix(1.55, 3.45, auroraRandom(detailSeed, 69.3))
-            + warp.y * mix(1.10, 2.45, auroraRandom(detailSeed, 70.9))
-            + detailedOffset.y
-    ), noiseTexture);
-    float2 secondaryOffset = auroraOffset2(detailSeed, 71.3, 88.0);
-    float secondaryFold = auroraFBM4(float2(
-        bentX * mix(4.1, 8.2, auroraRandom(detailSeed, 72.1))
-            + warp.x * mix(2.2, 4.4, auroraRandom(detailSeed, 73.7))
-            - time * speed * mix(2.4, 5.4, auroraRandom(detailSeed, 75.3))
-            + secondaryOffset.x,
-        signedDepth * mix(1.10, 2.65, auroraRandom(detailSeed, 76.9))
-            + warp.y * mix(1.10, 2.35, auroraRandom(detailSeed, 78.1))
-            + secondaryOffset.y
-    ), noiseTexture);
-
     float broadBody = smoothstep(0.16, 0.80, broadFold);
-    float foldedBody = smoothstep(0.28, 0.76, detailedFold)
-        * (0.54 + 0.46 * smoothstep(0.26, 0.74, secondaryFold));
+    float foldedBody = 0.0;
+    float ribbonFold = 0.0;
+    // With a zero envelope these folds cannot affect opacity. Their palette
+    // input is at most 0.46 + 0.22 = 0.68, so a brighter wave also makes them
+    // irrelevant to color. Keep every octave when either output needs detail.
+    if (envelope != 0.0 || brightnessWave < 0.68) {
+        float2 detailedOffset = auroraOffset2(detailSeed, 64.1, 88.0);
+        float detailedFold = auroraFBM4(float2(
+            bentX * mix(2.8, 5.6, auroraRandom(detailSeed, 64.9))
+                + warp.x * mix(1.7, 3.4, auroraRandom(detailSeed, 66.1))
+                + time * speed * mix(3.2, 7.2, auroraRandom(detailSeed, 67.7))
+                + detailedOffset.x,
+            signedDepth * mix(1.55, 3.45, auroraRandom(detailSeed, 69.3))
+                + warp.y * mix(1.10, 2.45, auroraRandom(detailSeed, 70.9))
+                + detailedOffset.y
+        ), noiseTexture);
+        float primaryBody = smoothstep(0.28, 0.76, detailedFold);
+        // Outside the body, detail only changes the palette's hot core above
+        // 0.56. Bound the remaining inputs before sampling their noise fields.
+        float paletteLimit = max(brightnessWave, 0.56);
+        if (envelope != 0.0 || primaryBody * 0.46 + 0.22 > paletteLimit) {
+            float2 secondaryOffset = auroraOffset2(detailSeed, 71.3, 88.0);
+            float secondaryFold = auroraFBM4(float2(
+                bentX * mix(4.1, 8.2, auroraRandom(detailSeed, 72.1))
+                    + warp.x * mix(2.2, 4.4, auroraRandom(detailSeed, 73.7))
+                    - time * speed * mix(2.4, 5.4, auroraRandom(detailSeed, 75.3))
+                    + secondaryOffset.x,
+                signedDepth * mix(1.10, 2.65, auroraRandom(detailSeed, 76.9))
+                    + warp.y * mix(1.10, 2.35, auroraRandom(detailSeed, 78.1))
+                    + secondaryOffset.y
+            ), noiseTexture);
 
-    float2 ribbonOffset = auroraOffset2(detailSeed, 79.1, 92.0);
-    float ribbonNoise = auroraFBM4(float2(
-        bentX * mix(3.3, 6.4, auroraRandom(detailSeed, 79.7))
-            + warp.x * mix(2.2, 4.2, auroraRandom(detailSeed, 81.3))
-            + time * speed * mix(3.4, 6.5, auroraRandom(detailSeed, 82.9))
-            + ribbonOffset.x,
-        signedDepth * mix(1.35, 2.85, auroraRandom(detailSeed, 84.1))
-            + warp.y * mix(1.25, 2.55, auroraRandom(detailSeed, 85.7))
-            - time * speed * mix(0.20, 0.85, auroraRandom(detailSeed, 87.3))
-            + ribbonOffset.y
-    ), noiseTexture);
-    float2 ribbonOffset2 = auroraOffset2(detailSeed, 88.1, 92.0);
-    float ribbonNoise2 = auroraFBM4(float2(
-        bentX * mix(5.0, 9.2, auroraRandom(detailSeed, 88.9))
-            + warp.x * mix(2.7, 5.0, auroraRandom(detailSeed, 90.1))
-            - time * speed * mix(2.4, 5.0, auroraRandom(detailSeed, 91.7))
-            + ribbonOffset2.x,
-        signedDepth * mix(1.05, 2.55, auroraRandom(detailSeed, 93.3))
-            + warp.y * mix(1.45, 2.85, auroraRandom(detailSeed, 94.9))
-            + time * speed * mix(0.15, 0.55, auroraRandom(detailSeed, 96.1))
-            + ribbonOffset2.y
-    ), noiseTexture);
-    float ribbonFold = smoothstep(0.25, 0.76, ribbonNoise)
-        * (0.65 + 0.35 * smoothstep(0.25, 0.73, ribbonNoise2));
+            foldedBody = primaryBody
+                * (0.54 + 0.46 * smoothstep(0.26, 0.74, secondaryFold));
 
-    float2 brightnessOffset = auroraOffset2(motionSeed, 97.1, 76.0);
-    float brightnessField = auroraFBM(float2(
-        bentX * mix(0.72, 1.55, auroraRandom(motionSeed, 97.7))
-            - time * speed * mix(1.3, 3.6, auroraRandom(motionSeed, 99.3))
-            + brightnessOffset.x,
-        time * auroraSignedRandom(motionSeed, 100.9, 0.018, 0.052)
-            + brightnessOffset.y
-    ), noiseTexture);
-    float brightnessWave = smoothstep(0.26, 0.82, brightnessField);
+            if (envelope != 0.0 || foldedBody * 0.46 + 0.22 > paletteLimit) {
+                float2 ribbonOffset = auroraOffset2(detailSeed, 79.1, 92.0);
+                float ribbonNoise = auroraFBM4(float2(
+                    bentX * mix(3.3, 6.4, auroraRandom(detailSeed, 79.7))
+                        + warp.x * mix(2.2, 4.2, auroraRandom(detailSeed, 81.3))
+                        + time * speed * mix(3.4, 6.5, auroraRandom(detailSeed, 82.9))
+                        + ribbonOffset.x,
+                    signedDepth * mix(1.35, 2.85, auroraRandom(detailSeed, 84.1))
+                        + warp.y * mix(1.25, 2.55, auroraRandom(detailSeed, 85.7))
+                        - time * speed * mix(0.20, 0.85, auroraRandom(detailSeed, 87.3))
+                        + ribbonOffset.y
+                ), noiseTexture);
+                float2 ribbonOffset2 = auroraOffset2(detailSeed, 88.1, 92.0);
+                float ribbonNoise2 = auroraFBM4(float2(
+                    bentX * mix(5.0, 9.2, auroraRandom(detailSeed, 88.9))
+                        + warp.x * mix(2.7, 5.0, auroraRandom(detailSeed, 90.1))
+                        - time * speed * mix(2.4, 5.0, auroraRandom(detailSeed, 91.7))
+                        + ribbonOffset2.x,
+                    signedDepth * mix(1.05, 2.55, auroraRandom(detailSeed, 93.3))
+                        + warp.y * mix(1.45, 2.85, auroraRandom(detailSeed, 94.9))
+                        + time * speed * mix(0.15, 0.55, auroraRandom(detailSeed, 96.1))
+                        + ribbonOffset2.y
+                ), noiseTexture);
+                ribbonFold = smoothstep(0.25, 0.76, ribbonNoise)
+                    * (0.65 + 0.35 * smoothstep(0.25, 0.73, ribbonNoise2));
+            }
+        }
+    }
+
     float breathing = 0.75 + 0.25 * sin(
         time * (0.64 + speedMagnitude * mix(2.2, 5.2, auroraRandom(motionSeed, 102.1)))
             + auroraPhase(motionSeed, 102.9)
@@ -554,6 +554,19 @@ static float4 auroraCorona(
     float safeRadius = max(radius, 0.0001);
     float2 radialDirection = delta / safeRadius;
 
+    float radialFade = exp(-radius * mix(3.2, 5.8, auroraRandom(seed, 116.3)))
+        * smoothstep(0.015, 0.055, radius)
+        * (1.0 - smoothstep(0.30, 0.68, radius));
+    float verticalDirection = auroraRandom(seed, 117.9) < 0.82 ? 1.0 : -1.0;
+    float downwardBias = verticalDirection > 0.0
+        ? smoothstep(-0.10, 0.16, delta.y)
+        : 1.0 - smoothstep(-0.16, 0.10, delta.y);
+    // Outside these exact gates the corona contributes zero light. Avoid
+    // angular and color noise entirely rather than shading an invisible ray.
+    if (radialFade == 0.0 || downwardBias == 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
     // Sampling raw atan2 angles creates a hard -pi/+pi seam. Most of the time
     // it is hidden, but when a moving ray crosses that seam its path can appear
     // to jump and the attached color changes with it. Sampling noise around a
@@ -574,14 +587,8 @@ static float4 auroraCorona(
     float angularTexture = auroraFBM4(angularPoint, noiseTexture);
 
     float broadRays = smoothstep(0.48, 0.88, angularTexture);
-    float radialFade = exp(-radius * mix(3.2, 5.8, auroraRandom(seed, 116.3)))
-        * smoothstep(0.015, 0.055, radius)
-        * (1.0 - smoothstep(0.30, 0.68, radius));
-    float verticalDirection = auroraRandom(seed, 117.9) < 0.82 ? 1.0 : -1.0;
-    float downwardBias = verticalDirection > 0.0
-        ? smoothstep(-0.10, 0.16, delta.y)
-        : 1.0 - smoothstep(-0.16, 0.10, delta.y);
     float brightness = broadRays * radialFade * downwardBias;
+    if (brightness == 0.0) { return float4(0.0, 0.0, 0.0, 0.0); }
 
     // The color field uses the same seam-free circular mapping. It has its own
     // gentle rotation and radial scale, preserving the randomized multicolor
@@ -611,8 +618,7 @@ static float4 auroraCorona(
 static float3 auroraSceneColor(
     float2 uv,
     float time,
-    float4 seedA,
-    float4 seedB,
+    device const float *identityValues,
     float intensity,
     texture2d<half> noiseTexture
 ) {
@@ -621,34 +627,34 @@ static float3 auroraSceneColor(
     // values: 2-6 curtains, mirrored/non-mirrored layouts, vertical placement,
     // common tilt, depth, exposure, and zero/one/two corona structures.
     uint curtainCount = 2u + uint(floor(
-        auroraMasterRandom(seedA, seedB, 0x0100u) * 5.0
+        auroraMasterRandom(identityValues, 0x0100u) * 5.0
     ));
     float globalYShift = mix(
         -0.075,
         0.075,
-        auroraMasterRandom(seedA, seedB, 0x0101u)
+        auroraMasterRandom(identityValues, 0x0101u)
     );
     float globalTiltBias = mix(
         -0.105,
         0.105,
-        auroraMasterRandom(seedA, seedB, 0x0102u)
+        auroraMasterRandom(identityValues, 0x0102u)
     );
     float globalDepthScale = mix(
         0.78,
         1.28,
-        auroraMasterRandom(seedA, seedB, 0x0103u)
+        auroraMasterRandom(identityValues, 0x0103u)
     );
     float globalStrengthScale = mix(
         0.84,
         1.14,
-        auroraMasterRandom(seedA, seedB, 0x0104u)
+        auroraMasterRandom(identityValues, 0x0104u)
     );
-    bool mirrorComposition = auroraMasterRandom(seedA, seedB, 0x0105u) < 0.5;
+    bool mirrorComposition = auroraMasterRandom(identityValues, 0x0105u) < 0.5;
     float2 sceneUV = float2(mirrorComposition ? 1.0 - uv.x : uv.x, uv.y);
 
     // The sky gets a fully independent stream rather than sharing the geometry
     // seed of the curtains.
-    float skySeed = auroraStreamSeed(seedA, seedB, 0x0200u);
+    float skySeed = auroraStreamSeed(identityValues, 0x0200u);
     float vertical = clamp(uv.y, 0.0, 1.0);
     float skyHue = auroraRandom(skySeed, 127.7);
     float3 topSky = auroraHSV(skyHue, 0.72, 0.024);
@@ -670,7 +676,7 @@ static float3 auroraSceneColor(
     // Every curtain receives four independently hashed sub-seeds: geometry,
     // fold/detail structure, palette, and motion. The first two layers are
     // always present; the master identity decides whether layers 3-6 exist.
-    float4 seeds1 = auroraCurtainSeedPack(seedA, seedB, 0u);
+    float4 seeds1 = auroraCurtainSeedPack(identityValues, 0u);
     color = auroraCompositeCurtain(
         color, sceneUV, time, seeds1,
         -0.04, 0.56, -0.58, 0.58, 0.24, 0.48, 0.050, 0.125,
@@ -679,7 +685,7 @@ static float3 auroraSceneColor(
         globalStrengthScale, noiseTexture
     );
 
-    float4 seeds2 = auroraCurtainSeedPack(seedA, seedB, 1u);
+    float4 seeds2 = auroraCurtainSeedPack(identityValues, 1u);
     color = auroraCompositeCurtain(
         color, sceneUV, time, seeds2,
         0.08, 0.70, -0.58, 0.58, 0.24, 0.50, 0.052, 0.135,
@@ -689,7 +695,7 @@ static float3 auroraSceneColor(
     );
 
     if (curtainCount >= 3u) {
-        float4 seeds3 = auroraCurtainSeedPack(seedA, seedB, 2u);
+        float4 seeds3 = auroraCurtainSeedPack(identityValues, 2u);
         color = auroraCompositeCurtain(
             color, sceneUV, time, seeds3,
             0.20, 0.82, -0.58, 0.58, 0.22, 0.48, 0.055, 0.145,
@@ -700,7 +706,7 @@ static float3 auroraSceneColor(
     }
 
     if (curtainCount >= 4u) {
-        float4 seeds4 = auroraCurtainSeedPack(seedA, seedB, 3u);
+        float4 seeds4 = auroraCurtainSeedPack(identityValues, 3u);
         color = auroraCompositeCurtain(
             color, sceneUV, time, seeds4,
             0.34, 0.92, -0.56, 0.56, 0.20, 0.44, 0.058, 0.155,
@@ -711,7 +717,7 @@ static float3 auroraSceneColor(
     }
 
     if (curtainCount >= 5u) {
-        float4 seeds5 = auroraCurtainSeedPack(seedA, seedB, 4u);
+        float4 seeds5 = auroraCurtainSeedPack(identityValues, 4u);
         color = auroraCompositeCurtain(
             color, sceneUV, time, seeds5,
             -0.02, 0.86, -0.72, 0.72, 0.18, 0.46, 0.060, 0.165,
@@ -722,7 +728,7 @@ static float3 auroraSceneColor(
     }
 
     if (curtainCount >= 6u) {
-        float4 seeds6 = auroraCurtainSeedPack(seedA, seedB, 5u);
+        float4 seeds6 = auroraCurtainSeedPack(identityValues, 5u);
         color = auroraCompositeCurtain(
             color, sceneUV, time, seeds6,
             0.02, 0.96, -0.78, 0.78, 0.16, 0.42, 0.062, 0.175,
@@ -734,12 +740,12 @@ static float3 auroraSceneColor(
 
     // Corona topology is independently selected. Some scenes have none, most
     // have one, and a minority retain the richer two-corona structure.
-    float coronaRoll = auroraMasterRandom(seedA, seedB, 0x0300u);
+    float coronaRoll = auroraMasterRandom(identityValues, 0x0300u);
     uint coronaCount = coronaRoll < 0.14 ? 0u : (coronaRoll < 0.72 ? 1u : 2u);
 
     if (coronaCount >= 1u) {
-        float coronaGeometryA = auroraStreamSeed(seedA, seedB, 0x0310u);
-        float coronaColorA = auroraStreamSeed(seedA, seedB, 0x0311u);
+        float coronaGeometryA = auroraStreamSeed(identityValues, 0x0310u);
+        float coronaColorA = auroraStreamSeed(identityValues, 0x0311u);
         float4 coronaA = auroraCorona(
             sceneUV,
             time,
@@ -750,26 +756,26 @@ static float3 auroraSceneColor(
         color = auroraScreen(
             color,
             coronaA.rgb * coronaA.a * intensity
-                * mix(0.72, 1.52, auroraMasterRandom(seedA, seedB, 0x0312u))
+                * mix(0.72, 1.52, auroraMasterRandom(identityValues, 0x0312u))
         );
     }
 
     if (coronaCount >= 2u) {
-        float coronaGeometryB = auroraStreamSeed(seedA, seedB, 0x0320u);
-        float coronaColorB = auroraStreamSeed(seedA, seedB, 0x0321u);
+        float coronaGeometryB = auroraStreamSeed(identityValues, 0x0320u);
+        float coronaColorB = auroraStreamSeed(identityValues, 0x0321u);
         float4 coronaB = auroraCorona(
             float2(
                 1.0 - sceneUV.x,
                 sceneUV.y * mix(
                     0.90,
                     1.12,
-                    auroraMasterRandom(seedA, seedB, 0x0322u)
+                    auroraMasterRandom(identityValues, 0x0322u)
                 )
             ),
             time * mix(
                 0.72,
                 1.18,
-                auroraMasterRandom(seedA, seedB, 0x0323u)
+                auroraMasterRandom(identityValues, 0x0323u)
             ),
             coronaGeometryB,
             coronaColorB,
@@ -778,14 +784,14 @@ static float3 auroraSceneColor(
         color = auroraScreen(
             color,
             coronaB.rgb * coronaB.a * intensity
-                * mix(0.42, 1.22, auroraMasterRandom(seedA, seedB, 0x0324u))
+                * mix(0.42, 1.22, auroraMasterRandom(identityValues, 0x0324u))
         );
     }
 
     float exposure = mix(
         0.92,
         1.08,
-        auroraMasterRandom(seedA, seedB, 0x0400u)
+        auroraMasterRandom(identityValues, 0x0400u)
     );
     color *= exposure;
     color = color / (1.0 + color * 0.17);
@@ -823,28 +829,30 @@ static float3 auroraLightAppearance(float3 sky) {
     );
 }
 
-// The wide master identity is split into exact 16-bit words before crossing the
-// SwiftUI shader boundary. Metal reconstructs and hashes all 128 bits into
-// independent streams, while every animated noise coordinate still uses only
-// compact bounded offsets. That preserves smooth sub-frame motion without
-// sacrificing the enlarged procedural identity space.
+// The same 128-bit identity now arrives as cached hash results. Floating-point
+// scene and motion formulas still run here unchanged, preserving the sky while
+// avoiding identity reconstruction and hashing in every fragment.
 [[ stitchable ]] half4 auroraBorealis(
     float2 position,
     half4 sourceColor,
     float2 size,
     float time,
-    float4 seedA,
-    float4 seedB,
+    device const float *identityValues,
+    int identityValueCount,
     float intensity,
     texture2d<half> noiseTexture,
     float lightMode,
     float2 viewportOrigin
 ) {
+    if (identityValueCount != 41) { return sourceColor; }
     float2 safeSize = max(size, float2(1.0));
     float2 uv = (position + viewportOrigin) / safeSize;
-    float3 sky = auroraSceneColor(uv, time, seedA, seedB, intensity, noiseTexture);
+    float3 sky = auroraSceneColor(uv, time, identityValues, intensity, noiseTexture);
     // Both appearances share exactly the same sky, curtains and timing.
     float3 darkSky = sky * 0.76;
+    // Dark mode never uses the light conversion (six channel power functions).
+    // Preserve the existing mix for Light and any future intermediate mode.
+    if (lightMode == 0.0) { return half4(half3(darkSky), half(1.0)); }
     float3 lightSky = auroraLightAppearance(sky);
     return half4(half3(mix(darkSky, lightSky, lightMode)), half(1.0));
 }
@@ -909,331 +917,168 @@ static float2 auroraRoundedPaneNormal(
     float ledgerRadius,
     float pointScale
 ) {
-    float counterDistance = auroraRoundedPaneSDF(
+    float2 paneOrigin = counterOrigin;
+    float2 paneSize = counterSize;
+    float paneRadius = counterRadius;
+    float paneDistance = auroraRoundedPaneSDF(position, paneOrigin, paneSize, paneRadius);
+    // The first pane wins overlaps, exactly as before. Only test the second
+    // pane when needed, then run the same optical filter for either pane.
+    if (!(paneDistance <= 0.0)) {
+        paneOrigin = ledgerOrigin;
+        paneSize = ledgerSize;
+        paneRadius = ledgerRadius;
+        paneDistance = auroraRoundedPaneSDF(position, paneOrigin, paneSize, paneRadius);
+        if (!(paneDistance <= 0.0)) { return layer.sample(position); }
+    }
+
+    float scale = max(pointScale, 0.05);
+    float insideDistance = max(-paneDistance, 0.0);
+    float2 outwardNormal = auroraRoundedPaneNormal(
         position,
-        counterOrigin,
-        counterSize,
-        counterRadius
-    );
-    float ledgerDistance = auroraRoundedPaneSDF(
-        position,
-        ledgerOrigin,
-        ledgerSize,
-        ledgerRadius
+        paneOrigin,
+        paneSize,
+        paneRadius
     );
 
-    bool insideCounter = counterDistance <= 0.0;
-    bool insideLedger = ledgerDistance <= 0.0;
+    // Keep the broad, fluid bend from the natural-glass pass, then add a
+    // concentrated outer lens.  The two-stage field preserves recognizable
+    // source detail through most of the pane while making the last 20–30
+    // points visibly redirect light as it crosses the curved perimeter.
+    float cornerFactor = smoothstep(
+        0.16,
+        0.90,
+        2.0 * min(abs(outwardNormal.x), abs(outwardNormal.y))
+    );
 
-    if (insideCounter) {
-        float scale = max(pointScale, 0.05);
-        float insideDistance = max(-counterDistance, 0.0);
-        float2 outwardNormal = auroraRoundedPaneNormal(
-            position,
-            counterOrigin,
-            counterSize,
-            counterRadius
-        );
+    float shoulderWidth = mix(74.0, 90.0, cornerFactor) * scale;
+    float broadShoulder = 1.0 - smoothstep(
+        0.0,
+        shoulderWidth,
+        insideDistance
+    );
+    broadShoulder = pow(clamp(broadShoulder, 0.0, 1.0), 1.08);
 
-        // Keep the broad, fluid bend from the natural-glass pass, then add a
-        // concentrated outer lens.  The two-stage field preserves recognizable
-        // source detail through most of the pane while making the last 20–30
-        // points visibly redirect light as it crosses the curved perimeter.
-        float cornerFactor = smoothstep(
-            0.16,
-            0.90,
-            2.0 * min(abs(outwardNormal.x), abs(outwardNormal.y))
-        );
+    float edgeCoreWidth = mix(23.0, 30.0, cornerFactor) * scale;
+    float edgeCore = 1.0 - smoothstep(
+        0.0,
+        edgeCoreWidth,
+        insideDistance
+    );
+    edgeCore = pow(clamp(edgeCore, 0.0, 1.0), 1.42);
 
-        float shoulderWidth = mix(74.0, 90.0, cornerFactor) * scale;
-        float broadShoulder = 1.0 - smoothstep(
-            0.0,
-            shoulderWidth,
-            insideDistance
-        );
-        broadShoulder = pow(clamp(broadShoulder, 0.0, 1.0), 1.08);
+    // Corners receive more geometric reach, not more brightness.  At the
+    // physical rim the straight edges displace about 26 points and the
+    // corners about 30, then the effect falls rapidly into the broad bend.
+    float broadReach = mix(18.5, 20.5, cornerFactor) * scale;
+    float coreReach = mix(7.0, 9.5, cornerFactor) * scale;
+    float refractionOffset =
+        broadReach * broadShoulder
+        + coreReach * edgeCore;
+    float2 refractedPosition =
+        position + outwardNormal * refractionOffset;
 
-        float edgeCoreWidth = mix(23.0, 30.0, cornerFactor) * scale;
-        float edgeCore = 1.0 - smoothstep(
-            0.0,
-            edgeCoreWidth,
-            insideDistance
-        );
-        edgeCore = pow(clamp(edgeCore, 0.0, 1.0), 1.42);
+    // Preserve detail: center sampling now carries most of the result and
+    // the neighboring samples only remove aliasing at the displaced seam.
+    float opticalSoftness = mix(0.36, 0.54, cornerFactor) * scale;
+    half4 refractedCenter = layer.sample(refractedPosition);
+    half4 refractedInner = layer.sample(
+        refractedPosition - outwardNormal * opticalSoftness
+    );
+    half4 refractedOuter = layer.sample(
+        refractedPosition + outwardNormal * opticalSoftness
+    );
 
-        // Corners receive more geometric reach, not more brightness.  At the
-        // physical rim the straight edges displace about 26 points and the
-        // corners about 30, then the effect falls rapidly into the broad bend.
-        float broadReach = mix(18.5, 20.5, cornerFactor) * scale;
-        float coreReach = mix(7.0, 9.5, cornerFactor) * scale;
-        float refractionOffset =
-            broadReach * broadShoulder
-            + coreReach * edgeCore;
-        float2 refractedPosition =
-            position + outwardNormal * refractionOffset;
+    float3 filteredRefraction =
+        float3(refractedCenter.rgb) * 0.82
+        + float3(refractedInner.rgb) * 0.09
+        + float3(refractedOuter.rgb) * 0.09;
 
-        // Preserve detail: center sampling now carries most of the result and
-        // the neighboring samples only remove aliasing at the displaced seam.
-        float opticalSoftness = mix(0.36, 0.54, cornerFactor) * scale;
-        half4 refractedCenter = layer.sample(refractedPosition);
-        half4 refractedInner = layer.sample(
-            refractedPosition - outwardNormal * opticalSoftness
-        );
-        half4 refractedOuter = layer.sample(
-            refractedPosition + outwardNormal * opticalSoftness
-        );
-
-        float3 filteredRefraction =
-            float3(refractedCenter.rgb) * 0.82
-            + float3(refractedInner.rgb) * 0.09
-            + float3(refractedOuter.rgb) * 0.09;
-
-        // Keep chromatic dispersion sub-point and confined to the strongest
-        // curvature.  It enriches the edge without becoming an RGB fringe.
-        float chromaReach = mix(0.30, 0.48, cornerFactor)
-            * scale
-            * pow(edgeCore, 1.75);
+    // Keep chromatic dispersion sub-point and confined to the strongest
+    // curvature.  It enriches the edge without becoming an RGB fringe.
+    float chromaReach = mix(0.30, 0.48, cornerFactor)
+        * scale
+        * pow(edgeCore, 1.75);
+    float3 refractedColor = filteredRefraction;
+    if (edgeCore != 0.0) {
         half4 chromaRed = layer.sample(
             refractedPosition + outwardNormal * chromaReach
         );
         half4 chromaBlue = layer.sample(
             refractedPosition - outwardNormal * chromaReach
         );
-        float3 refractedColor = float3(
-            float(chromaRed.r),
-            filteredRefraction.g,
-            float(chromaBlue.b)
-        );
         refractedColor = mix(
             filteredRefraction,
-            refractedColor,
+            float3(float(chromaRed.r), filteredRefraction.g, float(chromaBlue.b)),
             0.30 * pow(edgeCore, 1.35)
         );
+    }
 
-        // The reversed fold is intentionally shorter and less readable than
-        // the previous pass.  It remains as a physical cue at the rim, while
-        // the refraction—not mirrored text—does the visual work.
-        float mirrorWidth = mix(7.5, 10.5, cornerFactor) * scale;
-        float mirrorMask = 1.0 - smoothstep(
-            0.0,
-            mirrorWidth,
-            insideDistance
-        );
-        mirrorMask = pow(clamp(mirrorMask, 0.0, 1.0), 1.62);
+    // The reversed fold is intentionally shorter and less readable than
+    // the previous pass.  It remains as a physical cue at the rim, while
+    // the refraction—not mirrored text—does the visual work.
+    float mirrorWidth = mix(7.5, 10.5, cornerFactor) * scale;
+    float mirrorMask = 1.0 - smoothstep(
+        0.0,
+        mirrorWidth,
+        insideDistance
+    );
+    mirrorMask = pow(clamp(mirrorMask, 0.0, 1.0), 1.62);
 
-        if (mirrorMask <= 0.0001) {
-            return half4(
-                half3(clamp(refractedColor, 0.0, 1.0)),
-                half(1.0)
-            );
-        }
-
-        float mirrorOffset =
-            2.0 * min(insideDistance, mirrorWidth)
-            + 2.0 * scale;
-        float2 reflectedPosition =
-            position + outwardNormal * mirrorOffset;
-        half4 reflected = layer.sample(reflectedPosition);
-        float3 reflectedColor = float3(reflected.rgb);
-
-        float reflectionBand = exp(-pow(
-            (insideDistance - 2.8 * scale) / max(2.25 * scale, 0.001),
-            2.0
-        ));
-        float reflectionMix = clamp(
-            mirrorMask * 0.12 + reflectionBand * 0.035,
-            0.0,
-            0.16
-        );
-        float3 opticalColor = mix(
-            refractedColor,
-            reflectedColor,
-            reflectionMix
-        );
-
-        // Highlights remain source-driven.  Corner strength is already carried
-        // by the displacement field, so no corner brightness multiplier is used.
-        float reflectedLuma = dot(
-            reflectedColor,
-            float3(0.2126, 0.7152, 0.0722)
-        );
-        float sourceResponse = mix(
-            0.28,
-            1.0,
-            smoothstep(0.10, 0.78, reflectedLuma)
-        );
-        float caustic = (
-            reflectionBand * 0.090 + mirrorMask * 0.014
-        ) * sourceResponse;
-        opticalColor = 1.0
-            - (1.0 - opticalColor)
-            * (1.0 - reflectedColor * caustic);
-
-        float edgeDensity = pow(mirrorMask, 2.2)
-            * (1.0 - smoothstep(0.06, 0.58, reflectedLuma))
-            * 0.028;
-        opticalColor *= 1.0 - edgeDensity;
-
+    if (mirrorMask <= 0.0001) {
         return half4(
-            half3(clamp(opticalColor, 0.0, 1.0)),
+            half3(clamp(refractedColor, 0.0, 1.0)),
             half(1.0)
         );
     }
 
-    if (insideLedger) {
-        float scale = max(pointScale, 0.05);
-        float insideDistance = max(-ledgerDistance, 0.0);
-        float2 outwardNormal = auroraRoundedPaneNormal(
-            position,
-            ledgerOrigin,
-            ledgerSize,
-            ledgerRadius
-        );
+    float mirrorOffset =
+        2.0 * min(insideDistance, mirrorWidth)
+        + 2.0 * scale;
+    float2 reflectedPosition =
+        position + outwardNormal * mirrorOffset;
+    half4 reflected = layer.sample(reflectedPosition);
+    float3 reflectedColor = float3(reflected.rgb);
 
-        // Keep the broad, fluid bend from the natural-glass pass, then add a
-        // concentrated outer lens.  The two-stage field preserves recognizable
-        // source detail through most of the pane while making the last 20–30
-        // points visibly redirect light as it crosses the curved perimeter.
-        float cornerFactor = smoothstep(
-            0.16,
-            0.90,
-            2.0 * min(abs(outwardNormal.x), abs(outwardNormal.y))
-        );
+    float reflectionBand = exp(-pow(
+        (insideDistance - 2.8 * scale) / max(2.25 * scale, 0.001),
+        2.0
+    ));
+    float reflectionMix = clamp(
+        mirrorMask * 0.12 + reflectionBand * 0.035,
+        0.0,
+        0.16
+    );
+    float3 opticalColor = mix(
+        refractedColor,
+        reflectedColor,
+        reflectionMix
+    );
 
-        float shoulderWidth = mix(74.0, 90.0, cornerFactor) * scale;
-        float broadShoulder = 1.0 - smoothstep(
-            0.0,
-            shoulderWidth,
-            insideDistance
-        );
-        broadShoulder = pow(clamp(broadShoulder, 0.0, 1.0), 1.08);
+    // Highlights remain source-driven.  Corner strength is already carried
+    // by the displacement field, so no corner brightness multiplier is used.
+    float reflectedLuma = dot(
+        reflectedColor,
+        float3(0.2126, 0.7152, 0.0722)
+    );
+    float sourceResponse = mix(
+        0.28,
+        1.0,
+        smoothstep(0.10, 0.78, reflectedLuma)
+    );
+    float caustic = (
+        reflectionBand * 0.090 + mirrorMask * 0.014
+    ) * sourceResponse;
+    opticalColor = 1.0
+        - (1.0 - opticalColor)
+        * (1.0 - reflectedColor * caustic);
 
-        float edgeCoreWidth = mix(23.0, 30.0, cornerFactor) * scale;
-        float edgeCore = 1.0 - smoothstep(
-            0.0,
-            edgeCoreWidth,
-            insideDistance
-        );
-        edgeCore = pow(clamp(edgeCore, 0.0, 1.0), 1.42);
+    float edgeDensity = pow(mirrorMask, 2.2)
+        * (1.0 - smoothstep(0.06, 0.58, reflectedLuma))
+        * 0.028;
+    opticalColor *= 1.0 - edgeDensity;
 
-        // Corners receive more geometric reach, not more brightness.  At the
-        // physical rim the straight edges displace about 26 points and the
-        // corners about 30, then the effect falls rapidly into the broad bend.
-        float broadReach = mix(18.5, 20.5, cornerFactor) * scale;
-        float coreReach = mix(7.0, 9.5, cornerFactor) * scale;
-        float refractionOffset =
-            broadReach * broadShoulder
-            + coreReach * edgeCore;
-        float2 refractedPosition =
-            position + outwardNormal * refractionOffset;
-
-        // Preserve detail: center sampling now carries most of the result and
-        // the neighboring samples only remove aliasing at the displaced seam.
-        float opticalSoftness = mix(0.36, 0.54, cornerFactor) * scale;
-        half4 refractedCenter = layer.sample(refractedPosition);
-        half4 refractedInner = layer.sample(
-            refractedPosition - outwardNormal * opticalSoftness
-        );
-        half4 refractedOuter = layer.sample(
-            refractedPosition + outwardNormal * opticalSoftness
-        );
-
-        float3 filteredRefraction =
-            float3(refractedCenter.rgb) * 0.82
-            + float3(refractedInner.rgb) * 0.09
-            + float3(refractedOuter.rgb) * 0.09;
-
-        // Keep chromatic dispersion sub-point and confined to the strongest
-        // curvature.  It enriches the edge without becoming an RGB fringe.
-        float chromaReach = mix(0.30, 0.48, cornerFactor)
-            * scale
-            * pow(edgeCore, 1.75);
-        half4 chromaRed = layer.sample(
-            refractedPosition + outwardNormal * chromaReach
-        );
-        half4 chromaBlue = layer.sample(
-            refractedPosition - outwardNormal * chromaReach
-        );
-        float3 refractedColor = float3(
-            float(chromaRed.r),
-            filteredRefraction.g,
-            float(chromaBlue.b)
-        );
-        refractedColor = mix(
-            filteredRefraction,
-            refractedColor,
-            0.30 * pow(edgeCore, 1.35)
-        );
-
-        // The reversed fold is intentionally shorter and less readable than
-        // the previous pass.  It remains as a physical cue at the rim, while
-        // the refraction—not mirrored text—does the visual work.
-        float mirrorWidth = mix(7.5, 10.5, cornerFactor) * scale;
-        float mirrorMask = 1.0 - smoothstep(
-            0.0,
-            mirrorWidth,
-            insideDistance
-        );
-        mirrorMask = pow(clamp(mirrorMask, 0.0, 1.0), 1.62);
-
-        if (mirrorMask <= 0.0001) {
-            return half4(
-                half3(clamp(refractedColor, 0.0, 1.0)),
-                half(1.0)
-            );
-        }
-
-        float mirrorOffset =
-            2.0 * min(insideDistance, mirrorWidth)
-            + 2.0 * scale;
-        float2 reflectedPosition =
-            position + outwardNormal * mirrorOffset;
-        half4 reflected = layer.sample(reflectedPosition);
-        float3 reflectedColor = float3(reflected.rgb);
-
-        float reflectionBand = exp(-pow(
-            (insideDistance - 2.8 * scale) / max(2.25 * scale, 0.001),
-            2.0
-        ));
-        float reflectionMix = clamp(
-            mirrorMask * 0.12 + reflectionBand * 0.035,
-            0.0,
-            0.16
-        );
-        float3 opticalColor = mix(
-            refractedColor,
-            reflectedColor,
-            reflectionMix
-        );
-
-        // Highlights remain source-driven.  Corner strength is already carried
-        // by the displacement field, so no corner brightness multiplier is used.
-        float reflectedLuma = dot(
-            reflectedColor,
-            float3(0.2126, 0.7152, 0.0722)
-        );
-        float sourceResponse = mix(
-            0.28,
-            1.0,
-            smoothstep(0.10, 0.78, reflectedLuma)
-        );
-        float caustic = (
-            reflectionBand * 0.090 + mirrorMask * 0.014
-        ) * sourceResponse;
-        opticalColor = 1.0
-            - (1.0 - opticalColor)
-            * (1.0 - reflectedColor * caustic);
-
-        float edgeDensity = pow(mirrorMask, 2.2)
-            * (1.0 - smoothstep(0.06, 0.58, reflectedLuma))
-            * 0.028;
-        opticalColor *= 1.0 - edgeDensity;
-
-        return half4(
-            half3(clamp(opticalColor, 0.0, 1.0)),
-            half(1.0)
-        );
-    }
-
-    return layer.sample(position);
+    return half4(
+        half3(clamp(opticalColor, 0.0, 1.0)),
+        half(1.0)
+    );
 }
