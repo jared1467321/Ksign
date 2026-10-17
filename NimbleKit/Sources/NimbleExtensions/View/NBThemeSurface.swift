@@ -3,6 +3,7 @@ import SwiftUI
 public enum NBThemeSurfaceFinish {
     case standard
     case navigation
+    case sheet
 }
 
 /// Clear glass ported from Tally's isolated glass layer. Reflections and rims
@@ -35,10 +36,21 @@ public struct NBThemeSurface<S: Shape>: View {
     }
 
     private var shine: Double {
-        finish == .navigation ? 0.45 : 1
+        finish == .sheet ? 0.10 : finish == .navigation ? 0.45 : 1
+    }
+    private var rimShine: Double {
+        finish == .sheet ? 0.35 : 1
     }
     private var surfaceTint: Double {
-        auroraBackground && tintStrength <= 0.10 ? 0.025 : tintStrength
+        auroraBackground && tintStrength <= 0.10 ? min(tintStrength, 0.025) : tintStrength
+    }
+    private var optics: (center: Double, rim: Double, rimWidth: CGFloat,
+                         transition: Double, transitionWidth: CGFloat, blur: CGFloat) {
+        switch finish {
+        case .standard: return (0.28, 1, 20, 0.92, 48, 4.5)
+        case .navigation: return (0.12, 0.35, 8, 0.20, 16, 2)
+        case .sheet: return (0.025, 0.25, 2, 0.10, 8, 2)
+        }
     }
 
     public var body: some View {
@@ -70,11 +82,11 @@ public struct NBThemeSurface<S: Shape>: View {
                         ], startPoint: .topLeading, endPoint: .bottomTrailing
                     ))
                     shape.stroke(LinearGradient(
-                        colors: [.white.opacity(0.44), .white.opacity(0.08), .white.opacity(0.21)],
+                        colors: [.white.opacity(0.44 * rimShine), .white.opacity(0.08 * rimShine), .white.opacity(0.21 * rimShine)],
                         startPoint: .topLeading, endPoint: .bottomTrailing
                     ), lineWidth: 1.15)
                     shape.stroke(LinearGradient(
-                        colors: [.white.opacity(0.205), .clear, .white.opacity(0.07)],
+                        colors: [.white.opacity(0.205 * rimShine), .clear, .white.opacity(0.07 * rimShine)],
                         startPoint: .top, endPoint: .bottomTrailing
                     ), lineWidth: 0.65)
                     .padding(1.5)
@@ -103,19 +115,17 @@ public struct NBThemeSurface<S: Shape>: View {
                 .glassEffect(.clear, in: shape)
                 .mask {
                     ZStack {
-                        shape.fill(.white.opacity(finish == .navigation ? 0.12 : 0.28))
-                        shape.stroke(.white.opacity(finish == .navigation ? 0.35 : 1),
-                                     lineWidth: finish == .navigation ? 8 : 20)
-                        shape.stroke(.white.opacity(finish == .navigation ? 0.20 : 0.92),
-                                     lineWidth: finish == .navigation ? 16 : 48)
-                            .blur(radius: finish == .navigation ? 2 : 4.5)
+                        shape.fill(.white.opacity(optics.center))
+                        shape.stroke(.white.opacity(optics.rim), lineWidth: optics.rimWidth)
+                        shape.stroke(.white.opacity(optics.transition), lineWidth: optics.transitionWidth)
+                            .blur(radius: optics.blur)
                     }
                     .compositingGroup()
                     .clipShape(shape)
                 }
         } else {
             shape.fill(.ultraThinMaterial)
-                .opacity(auroraBackground || scheme == .dark ? 0.48 : 0.35)
+                .opacity(finish == .sheet ? 0.12 : auroraBackground || scheme == .dark ? 0.48 : 0.35)
         }
     }
 }

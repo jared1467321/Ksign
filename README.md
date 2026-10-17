@@ -28,6 +28,8 @@ Job Tracker with clear glass surfaces, including the title and search areas.
 Both modes share the same clear glass finish, aurora shapes, and motion.
 Light mode uses brighter, saturated aurora colors and dark text; dark mode uses
 deeper aurora colors and frost-colored text.
+The IPA Vault and install drawers use nearly transparent glass sheets over the
+presenting screen's aurora instead of drawing another sky.
 Use **Shuffle Aurora** for a new sky, or turn off **Aurora Background** or
 **Liquid Glass Surfaces** independently.
 

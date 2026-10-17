@@ -41,6 +41,7 @@ struct InstallDrawerView: View {
 		.animation(.easeInOut(duration: 0.25), value: session.isDrawerAvailable)
 		.sheet(isPresented: $session.isDrawerPresented) {
 			InstallDrawerSheet()
+				.nbThemeGlassSheet()
 				.presentationDetents([.medium, .large])
 				.presentationDragIndicator(.visible)
 		}

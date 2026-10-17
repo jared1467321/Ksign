@@ -61,6 +61,7 @@ struct IPAVaultDrawerView: View {
             session.minimize()
         }) {
             IPAVaultView(downloadManager: session.downloadManager)
+                .nbThemeGlassSheet()
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }

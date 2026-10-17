@@ -979,6 +979,7 @@ private struct NBThemeRowModifier: ViewModifier {
 private struct NBThemeCanvasModifier: ViewModifier {
     @ObservedObject private var themes = NBThemeManager.shared
     @Environment(\.nbPaintAncestry) private var ancestors
+    @Environment(\.nbThemeUsesGlassSheet) private var glassSheet
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
@@ -996,9 +997,9 @@ private struct NBThemeCanvasModifier: ViewModifier {
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, 1)
 
         content
-            // Each visible screen owns its backing inside its navigation
-            // container. An environment flag cannot prove an ancestor sky is
-            // visible through another UIKit hosting controller.
+            // Normal screens own their sky inside the navigation container.
+            // Glass drawers explicitly replace their presentation backing and
+            // clear their canvases to reveal the presenting screen instead.
             .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
                 panes = frames.values.map(\.rect)
                     .sorted { lhs, rhs in
@@ -1012,16 +1013,18 @@ private struct NBThemeCanvasModifier: ViewModifier {
             .foregroundStyle(primary, secondary)
             .listRowSeparatorTint(separator)
             .scrollContentBackground(.hidden)
+            .modifier(NBThemeSheetNavigationBackgroundModifier(clear: glassSheet))
             .background {
-                // Register the paint's bounds, including its safe-area extent,
-                // rather than the smaller content rectangle above it.
-                Group {
-                    if role == .background {
-                        NBThemeBackdrop(base: resolved, panes: panes)
-                    } else {
-                        resolved.color
+                if !glassSheet {
+                    // Register the paint's bounds, including its safe-area
+                    // extent, rather than the smaller content rectangle.
+                    Group {
+                        if role == .background {
+                            NBThemeBackdrop(base: resolved, panes: panes)
+                        } else {
+                            resolved.color
+                        }
                     }
-                }
                     .modifier(NBThemeInspectorTargetModifier(
                         role: role,
                         elementID: elementID,
@@ -1029,6 +1032,7 @@ private struct NBThemeCanvasModifier: ViewModifier {
                         kind: .canvas, alpha: resolved.alpha, scopeID: ownerID
                     ))
                     .ignoresSafeArea()
+                }
             }
             .modifier(NBThemeScrollEdgeModifier(
                 hidden: auroraBackground && !reduceTransparency && contrast != .increased
