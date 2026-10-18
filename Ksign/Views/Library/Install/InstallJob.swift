@@ -814,16 +814,10 @@ final class InstallJob: ObservableObject, Identifiable {
 		if method == 1 {
 			InstallQueueCoordinator.shared.beginDeviceWork(jobID)
 			viewModel.uploadObserver = { [weak self] event in
-				// Finished must always retire telemetry, even after cancellation.
-				if case .finished(let success) = event {
-					NativeInstallUploadTelemetry.shared.record(event, for: jobID)
-					if success {
-						Task { @MainActor [weak self] in
-							self?._didFinishDeviceUpload(attempt)
-						}
+				if case .finished(success: true) = event {
+					Task { @MainActor [weak self] in
+						self?._didFinishDeviceUpload(attempt)
 					}
-				} else if attempt.isCurrent {
-					NativeInstallUploadTelemetry.shared.record(event, for: jobID)
 				}
 			}
 		}
@@ -1122,6 +1116,7 @@ private final class InstallAdmissionCancellation: @unchecked Sendable {
 @MainActor
 final class InstallQueueCoordinator {
 	static let shared = InstallQueueCoordinator()
+	static let nativeUploadLimit = 5
 
 	private struct _AdmissionObservation {
 		let id: UUID
@@ -1139,8 +1134,8 @@ final class InstallQueueCoordinator {
 		let availableBytes: UInt64
 	}
 
-	// Server admission ceiling, or the native bootstrap memory-budget divisor.
-	// Native upload concurrency itself comes from the throughput tuner.
+	// Configured admission ceiling and memory-budget divisor. Native uploads
+	// additionally enforce their fixed five-upload ceiling below.
 	private var _configuredMaxConcurrent = 3
 
 	// Kernel pressure is the emergency brake. It never rewrites the configured
@@ -1183,8 +1178,7 @@ final class InstallQueueCoordinator {
 	private var _deviceWorkers: Set<UUID> = []
 	private var _deferredReleases: Set<UUID> = []
 	private var _isPaused = false
-	private var _nativeTuner: NativeInstallConcurrencyTuner?
-	private var _nativeSampledAt: TimeInterval = 0
+	private var _isNativeInstall = false
 	private var _nativeMemoryRetryAt: TimeInterval = 0
 	private struct Waiter {
 		let jobID: UUID
@@ -1209,11 +1203,11 @@ final class InstallQueueCoordinator {
 
 	private var _usesAdaptiveMemoryAdmission: Bool {
 		// The ordinary install path is intentionally capped at 3 already. The
-		// adaptive ramp covers server batch builds and every native upload trial.
-		_nativeTuner != nil || _configuredMaxConcurrent > 3
+		// memory ramp covers server batch builds and native upload preparation.
+		_isNativeInstall || _configuredMaxConcurrent > 3
 	}
 
-	private var _admissionCeiling: Int { _nativeTuner?.limit ?? _configuredMaxConcurrent }
+	private var _admissionCeiling: Int { _isNativeInstall ? Self.nativeUploadLimit : _configuredMaxConcurrent }
 
 	private var _effectiveMaxConcurrent: Int {
 		guard let pressureLimit = _memoryPressureLimit else {
@@ -1222,26 +1216,10 @@ final class InstallQueueCoordinator {
 		return min(_admissionCeiling, pressureLimit)
 	}
 
-	func setNativeAdaptiveConcurrency(_ enabled: Bool) {
-		_nativeTuner = enabled ? NativeInstallConcurrencyTuner() : nil
-		_nativeSampledAt = 0
+	func setNativeInstallMode(_ enabled: Bool) {
+		_isNativeInstall = enabled
 		_nativeMemoryRetryAt = 0
 		_resetAdaptiveLearning()
-	}
-
-	private func _sampleNativeThroughput() {
-		guard _nativeTuner != nil else { return }
-		let now = ProcessInfo.processInfo.systemUptime
-		guard now - _nativeSampledAt >= _sampleInterval else { return }
-		_nativeSampledAt = now
-		let snapshot = NativeInstallUploadTelemetry.shared.snapshot()
-		let previous = _admissionCeiling
-		_nativeTuner?.update(now: now, bytes: snapshot.bytes, activeJobs: _holders.count,
-			queuedJobs: _waiters.count, uploadingCount: snapshot.uploadingCount, paused: _isPaused)
-		if _admissionCeiling != previous {
-			let mbps = (_nativeTuner?.lastMeasuredBytesPerSecond ?? 0) / 1_048_576
-			Logger.misc.info("Native upload admission \(previous) -> \(self._admissionCeiling); aggregate=\(mbps) MB/s")
-		}
 	}
 
 	func setMaxConcurrent(_ n: Int) {
@@ -1257,7 +1235,6 @@ final class InstallQueueCoordinator {
 	// completion untouched.
 	func setPaused(_ paused: Bool) {
 		_isPaused = paused
-		_nativeTuner?.suspend()
 		_wakeAdmissionSampling()
 	}
 
@@ -1296,7 +1273,7 @@ final class InstallQueueCoordinator {
 	private func _startAdmissionSampling() {
 		guard _admissionTask == nil else {
 			if !_isPaused, _holders.count < _effectiveMaxConcurrent,
-			   _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt {
+			   !_isNativeInstall || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt {
 				_wakeAdmissionSampling()
 			}
 			return
@@ -1333,7 +1310,6 @@ final class InstallQueueCoordinator {
 
 	private func _admitWaitingJobs() {
 		_reclaimOrphans()
-		_sampleNativeThroughput()
 		guard !_isPaused else { return }
 		for token in _waiterOrder {
 			guard let waiter = _waiters[token] else { continue }
@@ -1342,11 +1318,11 @@ final class InstallQueueCoordinator {
 				continue
 			}
 			guard _holders.count < _effectiveMaxConcurrent else { break }
-			guard _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt else { break }
+			guard !_isNativeInstall || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt else { break }
 			// Preserve the existing native selection/self-update eligibility rules.
 			guard waiter.mayStart() else { continue }
 			guard !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: waiter.jobID) else {
-				if _nativeTuner != nil {
+				if _isNativeInstall {
 					_nativeMemoryRetryAt = ProcessInfo.processInfo.systemUptime + _sampleInterval
 				}
 				break
@@ -1355,7 +1331,7 @@ final class InstallQueueCoordinator {
 			ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 			if _usesAdaptiveMemoryAdmission {
 				_beginAdmissionObservation(for: waiter.jobID)
-				if _nativeTuner != nil {
+				if _isNativeInstall {
 					_nativeMemoryRetryAt = ProcessInfo.processInfo.systemUptime + _sampleInterval
 				}
 			}
@@ -1379,7 +1355,6 @@ final class InstallQueueCoordinator {
 
 	func endDeviceWork(_ id: UUID) {
 		_deviceWorkers.remove(id)
-		NativeInstallUploadTelemetry.shared.remove(id)
 		if _deferredReleases.remove(id) != nil { release(id) }
 		_wakeAdmissionSampling()
 	}
@@ -1404,7 +1379,7 @@ final class InstallQueueCoordinator {
 		guard _holders.remove(id) != nil else { return }
 		_nativeMemoryRetryAt = 0
 		// Refill freed upload slots immediately, without waiting for the next
-		// memory/throughput sample or waking every queued task.
+		// memory sample or waking every queued task.
 		_wakeAdmissionSampling()
 		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 

@@ -152,38 +152,40 @@ final class NativeWorkerBarrier {
         precondition(!cancelledResult && queue.activeCount == 0)
         queue.setPaused(false)
 
-        // Exercise adaptive mode through the actual coordinator, including the
-        // memory observation ramp and its initial two-upload target.
-        queue.setNativeAdaptiveConcurrency(true)
-        queue.setMaxConcurrent(2)
-        let adaptiveA = UUID(), adaptiveB = UUID(), adaptiveC = UUID()
-        InstallSession.shared.jobs = [.init(id: adaptiveA), .init(id: adaptiveB), .init(id: adaptiveC)]
-        let acquiredA = await queue.acquire(for: adaptiveA)
-        precondition(acquiredA)
-        queue.beginDeviceWork(adaptiveA)
-        let acquiredB = await queue.acquire(for: adaptiveB)
-        precondition(acquiredB)
-        queue.beginDeviceWork(adaptiveB)
-        var thirdAdmitted = false
-        let third = Task { @MainActor in
-            let acquired = await queue.acquire(for: adaptiveC)
-            thirdAdmitted = acquired
+        // Native mode enforces five even if another caller configures a larger
+        // ceiling. Keep the real memory observation ramp in this test.
+        queue.setNativeInstallMode(true)
+        queue.setMaxConcurrent(20)
+        let nativeIDs = (0..<6).map { _ in UUID() }
+        InstallSession.shared.jobs = nativeIDs.map { .init(id: $0) }
+        for id in nativeIDs.prefix(5) {
+            let acquired = await queue.acquire(for: id)
+            precondition(acquired)
+            queue.beginDeviceWork(id)
+        }
+        var sixthAdmitted = false
+        let sixth = Task { @MainActor in
+            let acquired = await queue.acquire(for: nativeIDs[5])
+            sixthAdmitted = acquired
             return acquired
         }
         try await Task.sleep(nanoseconds: 250_000_000)
-        precondition(queue.activeCount == 2 && !thirdAdmitted,
-                     "Adaptive uploads must respect their current target before throughput evidence exists")
-        queue.finishDeviceUpload(adaptiveA)
-        let acquiredC = await third.value
-        precondition(acquiredC && queue.activeCount == 2 && queue.hasDeviceWorkInProgress,
-                     "Adaptive admission must refill upload capacity independently of iOS installation")
-        queue.endDeviceWork(adaptiveA)
-        queue.endDeviceWork(adaptiveB)
-        queue.release(adaptiveB)
-        queue.release(adaptiveC)
+        precondition(queue.activeCount == 5 && !sixthAdmitted,
+                     "A sixth native upload must wait while five upload slots are occupied")
+        queue.finishDeviceUpload(nativeIDs[0])
+        let acquiredSixth = await sixth.value
+        precondition(acquiredSixth && queue.activeCount == 5 && queue.hasDeviceWorkInProgress,
+                     "A finished upload must free capacity while iOS installation remains alive")
+        queue.endDeviceWork(nativeIDs[0])
+        precondition(queue.activeCount == 5,
+                     "Old install cleanup must not release the next upload's slot")
+        for id in nativeIDs.dropFirst() {
+            queue.endDeviceWork(id)
+            queue.release(id)
+        }
         precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
-        queue.setNativeAdaptiveConcurrency(false)
+        queue.setNativeInstallMode(false)
         queue.setMaxConcurrent(3)
-        print("Passed native queue cleanup and orphan-reclamation scenarios")
+        print("Passed fixed five-upload ceiling, upload handoff, native queue cleanup and orphan-reclamation scenarios")
     }
 }

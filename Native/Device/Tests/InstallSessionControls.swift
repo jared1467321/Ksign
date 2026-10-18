@@ -78,11 +78,14 @@ final class BulkInstallLiveActivityReporter {
 }
 @MainActor final class InstallQueueCoordinator {
     static let shared = InstallQueueCoordinator()
+    static let nativeUploadLimit = 5
     var activeCount = 0
     var hasDeviceWorkInProgress = false
     var isPaused = false
-    func setMaxConcurrent(_ count: Int) {}
-    func setNativeAdaptiveConcurrency(_ enabled: Bool) {}
+    var maxConcurrent = 3
+    var isNativeInstall = false
+    func setMaxConcurrent(_ count: Int) { maxConcurrent = count }
+    func setNativeInstallMode(_ enabled: Bool) { isNativeInstall = enabled }
     func finishDeviceUpload(_ id: UUID) { activeCount -= 1 }
     func setPaused(_ paused: Bool) { isPaused = paused }
 }
@@ -184,6 +187,9 @@ extension InstallSession {
             defaults.set(method, forKey: "Feather.installationMethod")
             defaults.set(server, forKey: "Feather.serverMethod")
             session.start(apps: (0..<4).map { TestApp(uuid: "app\($0)") })
+            precondition(InstallQueueCoordinator.shared.isNativeInstall == (method == 1))
+            precondition(InstallQueueCoordinator.shared.maxConcurrent == (method == 1 || server == 0 ? 5 : 3),
+                         "Native and local server batches must use five slots; external server remains at three")
             let jobs = session.jobs
             jobs[0].begin()
             jobs[1].begin()

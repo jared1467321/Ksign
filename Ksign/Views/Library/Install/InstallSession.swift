@@ -146,8 +146,8 @@ final class InstallSession: ObservableObject {
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
-		// into one and runs the group concurrently. Device uploads tune their own
-		// admission; external server installs retain their limit.
+		// into one and runs the group concurrently. Native uploads have a fixed
+		// ceiling of five; external server installs retain their limit.
 		if jobs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.reset()
 			installedAppIDs.removeAll()
@@ -175,10 +175,8 @@ final class InstallSession: ObservableObject {
 			// while the pool fills, so a 100-app manifest is still built a few at a
 			// time — and a stuck install can't wedge the queue, because it isn't
 			// holding a slot.
-			// Native uploads start at two and tune from useful aggregate throughput;
-			// the configured value is only their bootstrap memory-budget divisor.
-			InstallQueueCoordinator.shared.setNativeAdaptiveConcurrency(isDeviceInstall)
-			InstallQueueCoordinator.shared.setMaxConcurrent(isDeviceInstall ? 2 : (_willBatch ? _batchBuildConcurrency : 3))
+			InstallQueueCoordinator.shared.setNativeInstallMode(isDeviceInstall)
+			InstallQueueCoordinator.shared.setMaxConcurrent(isDeviceInstall ? InstallQueueCoordinator.nativeUploadLimit : (_willBatch ? _batchBuildConcurrency : 3))
 		}
 		isFinished = false
 
@@ -497,7 +495,7 @@ final class InstallSession: ObservableObject {
 		_willBatch = false
 		_activeHostInstaller?.shutDown()
 		_activeHostInstaller = nil
-		InstallQueueCoordinator.shared.setNativeAdaptiveConcurrency(false)
+		InstallQueueCoordinator.shared.setNativeInstallMode(false)
 		InstallQueueCoordinator.shared.setMaxConcurrent(3)
 
 		// Leave the result available until the user selects installed apps or
