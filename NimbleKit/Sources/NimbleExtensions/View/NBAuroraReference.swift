@@ -129,11 +129,7 @@ struct NBThemeBackdrop: View {
             Group {
                 if enabled {
                     if #available(iOS 17.0, tvOS 17.0, *) {
-                        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animating)) { timeline in
-                            let elapsed = reduceMotion ? 1.8 : session.accumulatedTime
-                                + (session.activeStart.map { max(0, timeline.date.timeIntervalSince($0)) } ?? 0)
-                            sky(size: proxy.size, origin: proxy.frame(in: .global).origin, time: elapsed)
-                        }
+                        sky(size: proxy.size, origin: proxy.frame(in: .global).origin)
                     } else {
                         // The app retains iOS 16 support; native shader effects
                         // start in iOS 17 and Liquid Glass starts in iOS 26.
@@ -146,7 +142,11 @@ struct NBThemeBackdrop: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
-        .background(AuroraViewportReader { viewport = $0 })
+        .background {
+            if enabled {
+                AuroraViewportReader { viewport = $0 }
+            }
+        }
         .accessibilityHidden(true)
         .allowsHitTesting(false)
         .onAppear { isVisible = true }
@@ -166,7 +166,7 @@ struct NBThemeBackdrop: View {
     }
 
     @available(iOS 17.0, tvOS 17.0, *)
-    private func sky(size: CGSize, origin: CGPoint, time: TimeInterval) -> some View {
+    private func sky(size: CGSize, origin: CGPoint) -> some View {
         let scale = performance.renderScale
         let scene = viewport ?? AuroraViewport(size: size, origin: .zero)
         let renderSize = CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
@@ -176,43 +176,62 @@ struct NBThemeBackdrop: View {
         }
         let first = rects.first ?? .zero
         let second = rects.dropFirst().first ?? .zero
-        return ZStack {
-            Rectangle()
-                .fill(Color.black)
-                .frame(width: renderSize.width, height: renderSize.height)
-                .colorEffect(ShaderLibrary.bundle(.module).auroraBorealis(
-                    .float2(Float(max(1, scene.size.width * scale)), Float(max(1, scene.size.height * scale))),
-                    .float(Float(time)),
-                    .floatArray(session.identity.shaderIdentity.values),
-                    .float(1.34), .image(AuroraNoiseCache.image),
-                    .float2(Float(scene.origin.x * scale), Float(scene.origin.y * scale))
-                ))
-                .layerEffect(ShaderLibrary.bundle(.module).auroraPaneOptics(
-                    .float2(Float(first.minX), Float(first.minY)),
-                    .float2(Float(first.width), Float(first.height)), .float(Float(18 * scale)),
-                    .float2(Float(second.minX), Float(second.minY)),
-                    .float2(Float(second.width), Float(second.height)), .float(Float(18 * scale)),
-                    .float(Float(scale))
-                ), maxSampleOffset: CGSize(width: 32 * scale, height: 32 * scale),
-                   isEnabled: !rects.isEmpty)
-                .scaleEffect(1 / scale, anchor: .topLeading)
+        // These inputs change with layout, quality or identity, not with the
+        // animation clock. Keep their allocations out of the 30 Hz closure.
+        let borealis = ShaderLibrary.bundle(.module).auroraBorealis
+        let sceneSizeArgument = Shader.Argument.float2(
+            Float(max(1, scene.size.width * scale)), Float(max(1, scene.size.height * scale))
+        )
+        let sceneOriginArgument = Shader.Argument.float2(
+            Float(scene.origin.x * scale), Float(scene.origin.y * scale)
+        )
+        let identityArgument = Shader.Argument.floatArray(session.identity.shaderIdentity.values)
+        let noiseArgument = Shader.Argument.image(AuroraNoiseCache.image)
+        let sampleOffset = CGSize(width: 32 * scale, height: 32 * scale)
+        let hasPanes = !rects.isEmpty
+        let optics = ShaderLibrary.bundle(.module).auroraPaneOptics(
+            .float2(Float(first.minX), Float(first.minY)),
+            .float2(Float(first.width), Float(first.height)), .float(Float(18 * scale)),
+            .float2(Float(second.minX), Float(second.minY)),
+            .float2(Float(second.width), Float(second.height)), .float(Float(18 * scale)),
+            .float(Float(scale))
+        )
+        let gold = session.starfield(stream: 0xA11CE5EED, count: 54)
+        let blue = session.starfield(stream: 0x57EE1F1E1D, count: 26)
+        return TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animating)) { timeline in
+            let time = reduceMotion ? 1.8 : session.accumulatedTime
+                + (session.activeStart.map { max(0, timeline.date.timeIntervalSince($0)) } ?? 0)
+            ZStack {
+                Rectangle()
+                    .fill(Color.black)
+                    .frame(width: renderSize.width, height: renderSize.height)
+                    .colorEffect(borealis(
+                        sceneSizeArgument,
+                        .float(Float(time)),
+                        identityArgument,
+                        .float(1.34), noiseArgument,
+                        sceneOriginArgument
+                    ))
+                    .layerEffect(optics, maxSampleOffset: sampleOffset, isEnabled: hasPanes)
+                    .scaleEffect(1 / scale, anchor: .topLeading)
+                    .frame(width: size.width, height: size.height, alignment: .topLeading)
+                    .clipped()
+
+                ZStack {
+                    Starfield(field: gold,
+                              time: time, tint: Color(red: 1, green: 0.824, blue: 0.451),
+                              speedScale: 0.74, sizeScale: 0.82)
+                        .opacity(0.43)
+                    Starfield(field: blue,
+                              time: time, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
+                              speedScale: 0.40, sizeScale: 0.94)
+                        .opacity(0.20)
+                }
+                .frame(width: scene.size.width, height: scene.size.height)
+                .offset(x: -scene.origin.x, y: -scene.origin.y)
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
                 .clipped()
-
-            ZStack {
-                Starfield(field: session.starfield(stream: 0xA11CE5EED, count: 54),
-                          time: time, tint: Color(red: 1, green: 0.824, blue: 0.451),
-                          speedScale: 0.74, sizeScale: 0.82)
-                    .opacity(0.43)
-                Starfield(field: session.starfield(stream: 0x57EE1F1E1D, count: 26),
-                          time: time, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
-                          speedScale: 0.40, sizeScale: 0.94)
-                    .opacity(0.20)
             }
-            .frame(width: scene.size.width, height: scene.size.height)
-            .offset(x: -scene.origin.x, y: -scene.origin.y)
-            .frame(width: size.width, height: size.height, alignment: .topLeading)
-            .clipped()
         }
     }
 }
@@ -355,7 +374,8 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
     func start() {
         guard displayLink == nil else { return }
 
-        let link = CADisplayLink(target: self, selector: #selector(displayLinkFired(_:)))
+        let target = AuroraDisplayLinkTarget(owner: self)
+        let link = CADisplayLink(target: target, selector: #selector(AuroraDisplayLinkTarget.fire(_:)))
         if #available(iOS 15.0, *) {
             link.preferredFrameRateRange = CAFrameRateRange(
                 minimum: 24,
@@ -377,8 +397,7 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
         resetSampling()
     }
 
-    @objc
-    private func displayLinkFired(_ link: CADisplayLink) {
+    fileprivate func displayLinkFired(_ link: CADisplayLink) {
         guard let start = sampleStart else {
             sampleStart = link.timestamp
             deliveredFrames = 0
@@ -452,6 +471,26 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
         stableWindows = 0
     }
 
+}
+
+
+/// CADisplayLink retains its target. A weak hop lets a discarded backdrop
+/// release its controller even if SwiftUI does not deliver onDisappear.
+@MainActor
+private final class AuroraDisplayLinkTarget: NSObject {
+    weak var owner: AuroraPerformanceController?
+
+    init(owner: AuroraPerformanceController) {
+        self.owner = owner
+    }
+
+    @objc func fire(_ link: CADisplayLink) {
+        guard let owner else {
+            link.invalidate()
+            return
+        }
+        owner.displayLinkFired(link)
+    }
 }
 
 

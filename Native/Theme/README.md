@@ -19,12 +19,26 @@ The differential tests compare the production shader directly with the original:
   the sampled identities cover every curtain count and corona count.
 - 216,000 exact optics pixels across five render scales and overlapping/absent panes.
 - Particle cache reuse, original particle parameters, shuffle invalidation and release.
+- Bounded pane selection against the previous full sort across 1,026 layouts,
+  including equal-area/equal-origin ties.
+- Display-link ownership, orphan cleanup, stop/restart and the existing adaptive
+  quality ramp and system-pressure caps, using UIKit interface doubles.
 
 The fixed corpus still uses fewer texture samples: 17,335,296 → 15,375,692 noise
 reads and 570,606 → 433,136 optics reads. These are test-harness operation counts,
 not measurements of device power or frame time. Cached identity uniforms, cached
 noise, cached particle layouts, the 30 Hz clock, adaptive resolution, and inactive
 animation suspension remain in production.
+
+Layout-dependent shader arguments, pane optics and particle lookups are prepared
+outside the timeline callback. Only time-dependent rendering runs at 30 Hz;
+layout, identity and render-scale changes rebuild the captured inputs. Pane
+selection scans row geometry once and retains at most two candidates rather than
+mapping and sorting every pane. Display links use a weak target and invalidate
+themselves on the next callback if their backdrop controller has been released.
+Disabled Aurora backdrops do not install a viewport observer. These changes
+reduce temporary allocations and retention risk; device memory and frame-time
+improvements have not been measured by this test harness.
 
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities; text follows the selected theme.

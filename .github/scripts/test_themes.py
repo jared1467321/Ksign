@@ -14,7 +14,27 @@ def test_aurora_work(directory, compiler):
     tests = ROOT / "Native/Theme/AuroraWork.swift"
     executable = directory / "AuroraWork"
     subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
-                    str(directory / "modules"), str(source), str(tests), "-o", str(executable)], check=True)
+                    str(directory / "modules"), str(source),
+                    str(source.with_name("NBGlassPaneSelection.swift")),
+                    str(tests), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)
+
+
+def test_aurora_lifetime(directory, compiler):
+    source = (ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraReference.swift").read_text()
+    start = source.index("@MainActor\nprivate final class AuroraPerformanceController")
+    end = source.index("private struct Starfield: View", start)
+    controller = source[start:end]
+    # Linux lacks Objective-C selectors and UIKit's thermal/power properties.
+    controller = controller.replace("@objc ", "")
+    controller = controller.replace("#selector(AuroraDisplayLinkTarget.fire(_:))", '"fire"')
+    controller = controller.replace("ProcessInfo.processInfo", "AuroraTestProcessInfo.processInfo")
+    tests = (ROOT / "Native/Theme/AuroraLifetime.swift").read_text()
+    path = directory / "AuroraLifetime.swift"
+    path.write_text(tests.replace("// PRODUCTION_CONTROLLER", controller))
+    executable = directory / "AuroraLifetime"
+    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
+                    str(directory / "modules"), str(path), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True, timeout=30)
 
 
@@ -69,6 +89,7 @@ def main():
                         str(directory / "modules"), str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
         test_aurora_work(directory, compiler)
+        test_aurora_lifetime(directory, compiler)
         test_aurora_rendering(directory, compiler)
 
 

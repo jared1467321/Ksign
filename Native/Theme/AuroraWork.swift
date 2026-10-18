@@ -3,6 +3,7 @@ import Foundation
 @main
 enum AuroraWorkTests {
     static func main() {
+        paneSelection()
         var cache = NBAuroraStarfieldCache()
         let gold = cache.field(stream: 1, seed: 42, count: 54)
         let blue = cache.field(stream: 2, seed: 100, count: 26)
@@ -50,5 +51,37 @@ enum AuroraWorkTests {
         _ = cache.field(stream: 3, seed: 2, count: 1)
         assert(retired == nil, "Shuffling must not retain old particle generations")
         print("Aurora work tests passed: layout reuse, reference appearance, shuffle/count invalidation and generation release.")
+    }
+
+    static func paneSelection() {
+        // Compare against the previous full sort, including equal areas and
+        // equal origins. Stable ties must keep the same pane priority.
+        func original(_ rects: [CGRect]) -> [CGRect] {
+            Array(rects.sorted { lhs, rhs in
+                let a = lhs.width * lhs.height, b = rhs.width * rhs.height
+                if a != b { return a > b }
+                if lhs.minY != rhs.minY { return lhs.minY < rhs.minY }
+                return lhs.minX < rhs.minX
+            }.prefix(2))
+        }
+        var rects: [CGRect] = []
+        assert(NBGlassPaneSelection.largest(rects).isEmpty)
+        var state: UInt64 = 42
+        for count in 0..<512 {
+            state = state &* 6364136223846793005 &+ 1
+            let width = CGFloat((state >> 32) % 20 + 1)
+            let rect = CGRect(x: CGFloat(count % 7), y: CGFloat(count % 11),
+                              width: width, height: CGFloat(count % 17 + 1))
+            rects.append(rect)
+            assert(NBGlassPaneSelection.largest(rects.lazy.map { $0 }) == original(rects))
+            let reversed = Array(rects.reversed())
+            assert(NBGlassPaneSelection.largest(reversed) == original(reversed))
+        }
+        // Same ordering keys, different dimensions: keep the first arrival.
+        let tied = [CGRect(x: 1, y: 2, width: 200, height: 100),
+                    CGRect(x: 1, y: 2, width: 100, height: 200),
+                    CGRect(x: 1, y: 2, width: 400, height: 50)]
+        assert(NBGlassPaneSelection.largest(tied) == Array(tied.prefix(2)))
+        print("Glass pane selection matches the original sort across 1,026 layouts, including stable ties.")
     }
 }

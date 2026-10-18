@@ -1014,15 +1014,7 @@ private struct NBThemeCanvasModifier: ViewModifier {
             // clear their canvases to reveal the presenting screen instead.
             .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
                 guard rendersAurora && !glassSheet && role == .background else { return }
-                let nextPanes = frames.values.map(\.rect)
-                    .sorted { lhs, rhs in
-                        let a = lhs.width * lhs.height
-                        let b = rhs.width * rhs.height
-                        if a != b { return a > b }
-                        if lhs.minY != rhs.minY { return lhs.minY < rhs.minY }
-                        return lhs.minX < rhs.minX
-                    }
-                    .prefix(2).map { $0 }
+                let nextPanes = NBGlassPaneSelection.largest(frames.values.lazy.map(\.rect))
                 if nextPanes != panes { panes = nextPanes }
             }
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
