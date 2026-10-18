@@ -88,6 +88,47 @@ final class NativeWorkerBarrier {
         precondition(overlapped.0 && overlapped.1, "Native worker attempts must execute concurrently")
 
         let queue = InstallQueueCoordinator.shared
+
+        // Native mode uses the real adaptive memory guard even at one. The
+        // initial estimate must leave space for the app's existing footprint,
+        // or one job plus its reserve incorrectly requires the entire budget.
+        queue.setNativeInstallMode(true)
+        queue.setMaxConcurrent(1)
+        let serialIDs = (0..<2).map { _ in UUID() }
+        InstallSession.shared.jobs = serialIDs.map { .init(id: $0) }
+        var serialFirstStarted = false
+        let serialFirst = Task { @MainActor in
+            let acquired = await queue.acquire(for: serialIDs[0])
+            serialFirstStarted = acquired
+            return acquired
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(serialFirstStarted && queue.activeCount == 1,
+                     "Native concurrency one must admit its first app with available memory")
+        let serialFirstResult = await serialFirst.value
+        precondition(serialFirstResult)
+        queue.beginDeviceWork(serialIDs[0])
+        var serialSecondStarted = false
+        let serialSecond = Task { @MainActor in
+            let acquired = await queue.acquire(for: serialIDs[1])
+            serialSecondStarted = acquired
+            return acquired
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        precondition(queue.activeCount == 1 && !serialSecondStarted)
+        queue.release(serialIDs[0])
+        try await Task.sleep(nanoseconds: 150_000_000)
+        precondition(queue.activeCount == 1 && !serialSecondStarted,
+                     "Serial native installs must wait for the previous worker's cleanup")
+        queue.endDeviceWork(serialIDs[0])
+        let serialSecondResult = await serialSecond.value
+        precondition(serialSecondResult && queue.activeCount == 1)
+        queue.beginDeviceWork(serialIDs[1])
+        queue.endDeviceWork(serialIDs[1])
+        queue.release(serialIDs[1])
+        precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
+        queue.setNativeInstallMode(false)
+
         queue.setMaxConcurrent(1)
         let first = UUID(), second = UUID()
         InstallSession.shared.jobs = [.init(id: first), .init(id: second)]
@@ -292,13 +333,30 @@ final class NativeWorkerBarrier {
         queue.endDeviceWork(limitedIDs[0])
         let acquiredThird = await third.value
         precondition(acquiredThird && queue.activeCount == 2)
-        for id in limitedIDs.dropFirst() {
-            queue.endDeviceWork(id)
-            queue.release(id)
+        // Reducing a running native queue to one must drain naturally and
+        // continue serially, rather than getting stuck on the bootstrap guard.
+        queue.setMaxConcurrent(1)
+        let serialNextID = UUID()
+        InstallSession.shared.jobs.append(.init(id: serialNextID))
+        var serialNextStarted = false
+        let serialNext = Task { @MainActor in
+            let acquired = await queue.acquire(for: serialNextID)
+            serialNextStarted = acquired
+            return acquired
         }
+        queue.endDeviceWork(limitedIDs[1])
+        queue.release(limitedIDs[1])
+        try await Task.sleep(nanoseconds: 150_000_000)
+        precondition(queue.activeCount == 1 && !serialNextStarted,
+                     "A live limit of one must wait until the current app finishes")
+        queue.release(limitedIDs[2])
+        let serialNextResult = await serialNext.value
+        precondition(serialNextResult && queue.activeCount == 1,
+                     "A queue lowered to one must continue admitting apps serially")
+        queue.release(serialNextID)
         precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
         queue.setNativeInstallMode(false)
         queue.setMaxConcurrent(3)
-        print("Passed configurable shared install ceiling, terminal/cleanup ordering, native queue cleanup and orphan-reclamation scenarios")
+        print("Passed native concurrency one startup/serial handoff/live reduction, configurable shared install ceiling, terminal/cleanup ordering, native queue cleanup and orphan-reclamation scenarios")
     }
 }

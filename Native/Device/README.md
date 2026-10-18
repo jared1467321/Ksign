@@ -179,6 +179,8 @@ upload and installation clients, and checks lease cleanup after a cache reset.
 The queue checks verify the default five-app shared ceiling, lower and higher
 configured limits, live decreases/increases, number-field validation, preference
 bounds, pause/cancellation and both terminal-status/cleanup orderings.
+Native concurrency one is checked for initial admission, serial handoff and
+live reduction from a higher limit with a nonzero existing memory footprint.
 Capacity stays occupied until the install and its native worker
 finish. Upload checks verify that final progress cannot be overwritten by a
 delayed UI sample.

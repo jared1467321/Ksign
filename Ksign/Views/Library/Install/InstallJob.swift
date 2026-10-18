@@ -1634,10 +1634,18 @@ final class InstallQueueCoordinator {
 		}
 
 		// Bootstrap without assuming device RAM: before the first build teaches us
-		// its cost, divide the process's *measured current budget* into the desired
-		// concurrency plus one reserve share. The estimate disappears as soon as
-		// real observations are available.
-		return Double(snapshot.budgetBytes) / Double(_configuredMaxConcurrent + 1)
+		// its cost, divide the process's measured current budget into build and
+		// reserve shares while leaving room for its existing footprint. The estimate
+		// disappears as soon as real observations are available.
+		return _provisionalBudgetShare(snapshot: snapshot)
+	}
+
+	private func _provisionalBudgetShare(snapshot: _ProcessMemorySnapshot) -> Double {
+		// At concurrency one, two shares make build + reserve equal the entire
+		// budget (available memory + existing footprint), so admission can never
+		// succeed. Keep at least three shares, as with concurrency two.
+		let shares = max(3, _configuredMaxConcurrent + 1)
+		return Double(snapshot.budgetBytes) / Double(shares)
 	}
 
 	private func _dynamicReserveBytes(
@@ -1647,7 +1655,7 @@ final class InstallQueueCoordinator {
 		// Always retain at least one equal-share slice of the current process
 		// budget. After learning begins, also reserve one whole observed next-build
 		// cost. Recent headroom volatility can enlarge the reserve further.
-		let budgetShare = Double(snapshot.budgetBytes) / Double(_configuredMaxConcurrent + 1)
+		let budgetShare = _provisionalBudgetShare(snapshot: snapshot)
 		let volatility = _recentHeadroomVolatilityBytes()
 		return max(budgetShare, estimatedCostBytes, volatility)
 	}
