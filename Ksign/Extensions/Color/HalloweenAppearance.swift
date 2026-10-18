@@ -16,7 +16,17 @@ enum HalloweenAppearance {
     }
 
     private static var blurStyle: UIBlurEffect.Style {
-        NBThemeManager.shared.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight
+        usesAurora || NBThemeManager.shared.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight
+    }
+
+    // Aurora uses the original shared surface palette. Foreground attributes
+    // below continue to resolve from the selected text appearance.
+    private static func _surfaceColor(_ role: NBThemeRole) -> UIColor {
+        let themes = NBThemeManager.shared
+        if usesAurora, let profile = themes.allThemes.first(where: { $0.id == themes.selectedThemeID }) {
+            return profile.color(for: role).uiColor
+        }
+        return themes.activeColor(for: role).uiColor
     }
     private static var usesGlossySurfaces: Bool {
         (UserDefaults.standard.object(forKey: "Feather.glossySurfaces") as? Bool ?? true)
@@ -41,13 +51,13 @@ enum HalloweenAppearance {
     private static func _navigationAppearance() -> UINavigationBarAppearance {
         let appearance = UINavigationBarAppearance()
         if usesGlossySurfaces && usesAurora {
-            // The glass pane is below the navigation bar. UIKit keeps the
-            // title and its own glass toolbar buttons in the foreground.
+            // The title owns its glass background. UIKit keeps its toolbar
+            // buttons above the shared Aurora canvas.
             appearance.configureWithTransparentBackground()
         } else if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
             appearance.backgroundEffect = UIBlurEffect(style: blurStyle)
-            let color = NBHalloween.uiColor(.navigationBackground)
+            let color = _surfaceColor(.navigationBackground)
             appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * (usesAurora ? 0.10 : 0.48))
         } else {
             appearance.configureWithOpaqueBackground()
@@ -80,7 +90,7 @@ enum HalloweenAppearance {
         if usesGlossySurfaces {
             appearance.configureWithDefaultBackground()
             appearance.backgroundEffect = UIBlurEffect(style: blurStyle)
-            let color = NBHalloween.uiColor(.tabBackground)
+            let color = _surfaceColor(.tabBackground)
             appearance.backgroundColor = color.withAlphaComponent(color.cgColor.alpha * (usesAurora ? 0.10 : 0.48))
         } else {
             appearance.configureWithOpaqueBackground()
@@ -174,13 +184,13 @@ enum HalloweenAppearance {
     // MARK: - Segmented controls
 
     private static var _searchBackgroundColor: UIColor {
-        let color = NBHalloween.uiColor(.searchBackground)
+        let color = _surfaceColor(.searchBackground)
         return usesGlossySurfaces && usesAurora ? color.withAlphaComponent(0.06) : color
     }
 
     private static func _configure(_ control: UISegmentedControl) {
-        control.selectedSegmentTintColor = NBHalloween.uiColor(.segmentSelectedBackground)
-        control.backgroundColor = NBHalloween.uiColor(.segmentBackground)
+        control.selectedSegmentTintColor = _surfaceColor(.segmentSelectedBackground)
+        control.backgroundColor = _surfaceColor(.segmentBackground)
         control.setTitleTextAttributes(
             [.foregroundColor: NBHalloween.uiColor(.segmentText)],
             for: .normal

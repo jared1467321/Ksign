@@ -109,7 +109,6 @@ private final class AuroraViewportView: UIView {
 /// Render the sky separately from foreground content so optics never bend text.
 struct NBThemeBackdrop: View {
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
-    @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -138,9 +137,7 @@ struct NBThemeBackdrop: View {
                     } else {
                         // The app retains iOS 16 support; native shader effects
                         // start in iOS 17 and Liquid Glass starts in iOS 26.
-                        LinearGradient(colors: scheme == .dark
-                                       ? [Color(red: 0.13, green: 0.06, blue: 0.20), .black, Color(red: 0.05, green: 0.24, blue: 0.18)]
-                                       : [Color(red: 0.69, green: 0.44, blue: 0.98), Color(red: 0.98, green: 0.72, blue: 0.38), Color(red: 0.38, green: 0.91, blue: 0.69)],
+                        LinearGradient(colors: [Color(red: 0.13, green: 0.06, blue: 0.20), .black, Color(red: 0.05, green: 0.24, blue: 0.18)],
                                        startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
                 } else {
@@ -188,7 +185,6 @@ struct NBThemeBackdrop: View {
                     .float(Float(time)),
                     .floatArray(session.identity.shaderIdentity.values),
                     .float(1.34), .image(AuroraNoiseCache.image),
-                    .float(scheme == .light ? 1 : 0),
                     .float2(Float(scene.origin.x * scale), Float(scene.origin.y * scale))
                 ))
                 .layerEffect(ShaderLibrary.bundle(.module).auroraPaneOptics(
@@ -207,11 +203,11 @@ struct NBThemeBackdrop: View {
                 Starfield(field: session.starfield(stream: 0xA11CE5EED, count: 54),
                           time: time, tint: Color(red: 1, green: 0.824, blue: 0.451),
                           speedScale: 0.74, sizeScale: 0.82)
-                    .opacity(scheme == .dark ? 0.43 : 0.35)
+                    .opacity(0.43)
                 Starfield(field: session.starfield(stream: 0x57EE1F1E1D, count: 26),
                           time: time, tint: Color(red: 0.627, green: 0.784, blue: 0.980),
                           speedScale: 0.40, sizeScale: 0.94)
-                    .opacity(scheme == .dark ? 0.20 : 0.18)
+                    .opacity(0.20)
             }
             .frame(width: scene.size.width, height: scene.size.height)
             .offset(x: -scene.origin.x, y: -scene.origin.y)

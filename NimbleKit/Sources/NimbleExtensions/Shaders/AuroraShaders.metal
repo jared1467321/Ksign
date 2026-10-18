@@ -800,15 +800,6 @@ static float3 auroraSceneColor(
     return color;
 }
 
-static float3 auroraLightAppearance(float3 sky) {
-    // Apply one smooth exposure lift to the existing RGB scene. Keeping the
-    // same scale for every channel preserves hue, curtain boundaries and
-    // relative detail, including muted colors and nearly neutral sky pixels.
-    // The daylight floor keeps dark labels readable without a saturation
-    // threshold or a luminance-dependent white veil over the curtains.
-    return clamp(sky, 0.0, 1.0) * 0.40 + 0.56;
-}
-
 // The same 128-bit identity now arrives as cached hash results. Floating-point
 // scene and motion formulas still run here unchanged, preserving the sky while
 // avoiding identity reconstruction and hashing in every fragment.
@@ -821,19 +812,15 @@ static float3 auroraLightAppearance(float3 sky) {
     int identityValueCount,
     float intensity,
     texture2d<half> noiseTexture,
-    float lightMode,
     float2 viewportOrigin
 ) {
     if (identityValueCount != 41) { return sourceColor; }
     float2 safeSize = max(size, float2(1.0));
     float2 uv = (position + viewportOrigin) / safeSize;
     float3 sky = auroraSceneColor(uv, time, identityValues, intensity, noiseTexture);
-    // Both appearances share exactly the same sky, curtains and timing.
-    float3 darkSky = sky * 0.76;
-    // Night retains its original exposure; day changes only the color tones.
-    if (lightMode == 0.0) { return half4(half3(darkSky), half(1.0)); }
-    float3 lightSky = auroraLightAppearance(sky);
-    return half4(half3(mix(darkSky, lightSky, lightMode)), half(1.0));
+    // Match the source project's colors directly. Appearance is a foreground
+    // concern: no daylight lift, night dimming, or mode-specific palette.
+    return half4(half3(sky), half(1.0));
 }
 
 // MARK: - Single-pass glass optics

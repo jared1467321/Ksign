@@ -9,38 +9,6 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_aurora_colors(directory):
-    compiler = shutil.which("clang++") or shutil.which("c++")
-    if not compiler:
-        raise SystemExit("a C++ compiler is required for the aurora color tests")
-    shader = (ROOT / "NimbleKit/Sources/NimbleExtensions/Shaders/AuroraShaders.metal").read_text()
-    start = shader.index("static float3 auroraLightAppearance(")
-    end = shader.index("\n}\n", start) + 2
-    test = (ROOT / "Native/Theme/AuroraColors.cpp").read_text()
-    source = directory / "AuroraColors.cpp"
-    source.write_text(test.replace("// PRODUCTION_LIGHT_APPEARANCE", shader[start:end]))
-    executable = directory / "AuroraColors"
-    subprocess.run([compiler, "-std=c++17", str(source), "-o", str(executable)], check=True)
-    subprocess.run([str(executable)], check=True, timeout=30)
-
-
-def test_navigation_layers(directory, compiler):
-    bridge = (ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBThemeNavigationBridge.swift").read_text()
-    start = bridge.index("    private func updateBar(")
-    opening = bridge.index("{", start)
-    end, depth = opening + 1, 1
-    while depth:
-        depth += (bridge[end] == "{") - (bridge[end] == "}")
-        end += 1
-    tests = (ROOT / "Native/Theme/NavigationLayers.swift").read_text()
-    source = directory / "NavigationLayers.swift"
-    source.write_text(tests.replace("// PRODUCTION_UPDATE_BAR", bridge[start:end]))
-    executable = directory / "NavigationLayers"
-    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
-                    str(directory / "modules"), str(source), "-o", str(executable)], check=True)
-    subprocess.run([str(executable)], check=True, timeout=30)
-
-
 def test_aurora_work(directory, compiler):
     source = ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraStarfield.swift"
     tests = ROOT / "Native/Theme/AuroraWork.swift"
@@ -100,8 +68,6 @@ def main():
         subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
                         str(directory / "modules"), str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
-        test_aurora_colors(directory)
-        test_navigation_layers(directory, compiler)
         test_aurora_work(directory, compiler)
         test_aurora_rendering(directory, compiler)
 

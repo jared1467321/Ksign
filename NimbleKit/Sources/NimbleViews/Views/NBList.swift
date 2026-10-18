@@ -66,7 +66,6 @@ public struct NBList<Content>: View where Content: View {
 		// system colour rather than a hierarchical level, so those call sites
 		// still opt out and have to be converted individually.
 		.nbThemeCanvas()
-		.navigationTitle(_title)
-		.navigationBarTitleDisplayMode(_mode)
+		.nbThemeNavigationTitle(_title, displayMode: _mode)
 	}
 }

@@ -1059,7 +1059,6 @@ private struct NBThemeCanvasModifier: ViewModifier {
             .modifier(NBThemeScrollEdgeModifier(
                 hidden: auroraBackground && !reduceTransparency && contrast != .increased
             ))
-            .background(NBThemeNavigationBridge())
     }
 }
 

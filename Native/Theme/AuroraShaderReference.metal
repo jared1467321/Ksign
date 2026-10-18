@@ -1,6 +1,6 @@
-// Frozen shader from commit 06fe2e8, before GPU work elimination.
-// Test-only reference; the application never compiles or loads this copy.
-// Aurora and pane optics ported from the supplied Tallyapp-Beautiful reference.
+// Frozen from Tallyapp-Beautiful.zip / MinerTally/AuroraShaders.metal.
+// Source SHA-256: 9e6c57a95ffcf96d3231df43fc906375ee167040d1a0d2c7372e303ca0d8e9c8
+// Test-only original; the application compiles only its optimized shader.
 #include <metal_stdlib>
 #include <SwiftUI/SwiftUI_Metal.h>
 
@@ -796,35 +796,6 @@ static float3 auroraSceneColor(
     return color;
 }
 
-static float3 auroraLightAppearance(float3 sky) {
-    // Keep the sky's contrast and strengthen its curtains instead of giving
-    // every pixel the same high lightness. Only the darkest colors receive a
-    // luminance lift, so ink stays readable without a full-screen white veil.
-    float peak = max(sky.r, max(sky.g, sky.b));
-    float floorValue = min(sky.r, min(sky.g, sky.b));
-    float chroma = peak - floorValue;
-    float originalLightness = (peak + floorValue) * 0.5;
-    float originalSaturation = chroma / max(1.0 - abs(2.0 * originalLightness - 1.0), 0.001);
-    float lightness = 0.42 + 0.38 * sqrt(clamp(originalLightness, 0.0, 1.0));
-    float saturation = chroma > 0.001 ? clamp(max(0.65, originalSaturation * 1.25), 0.0, 1.0) : 0.0;
-    float lightChroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
-    float3 hue = chroma > 0.001 ? (sky - floorValue) / chroma : float3(0.5);
-    float3 light = clamp(hue * lightChroma + (lightness - lightChroma * 0.5), 0.0, 1.0);
-    float red = light.r <= 0.04045 ? light.r / 12.92 : pow((light.r + 0.055) / 1.055, 2.4);
-    float green = light.g <= 0.04045 ? light.g / 12.92 : pow((light.g + 0.055) / 1.055, 2.4);
-    float blue = light.b <= 0.04045 ? light.b / 12.92 : pow((light.b + 0.055) / 1.055, 2.4);
-    float luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
-    float lift = clamp((0.28 - luminance) / max(1.0 - luminance, 0.001), 0.0, 1.0);
-    red = red * (1.0 - lift) + lift;
-    green = green * (1.0 - lift) + lift;
-    blue = blue * (1.0 - lift) + lift;
-    return float3(
-        red <= 0.0031308 ? red * 12.92 : 1.055 * pow(red, 1.0 / 2.4) - 0.055,
-        green <= 0.0031308 ? green * 12.92 : 1.055 * pow(green, 1.0 / 2.4) - 0.055,
-        blue <= 0.0031308 ? blue * 12.92 : 1.055 * pow(blue, 1.0 / 2.4) - 0.055
-    );
-}
-
 // The wide master identity is split into exact 16-bit words before crossing the
 // SwiftUI shader boundary. Metal reconstructs and hashes all 128 bits into
 // independent streams, while every animated noise coordinate still uses only
@@ -838,17 +809,14 @@ static float3 auroraLightAppearance(float3 sky) {
     float4 seedA,
     float4 seedB,
     float intensity,
-    texture2d<half> noiseTexture,
-    float lightMode,
-    float2 viewportOrigin
+    texture2d<half> noiseTexture
 ) {
     float2 safeSize = max(size, float2(1.0));
-    float2 uv = (position + viewportOrigin) / safeSize;
-    float3 sky = auroraSceneColor(uv, time, seedA, seedB, intensity, noiseTexture);
-    // Both appearances share exactly the same sky, curtains and timing.
-    float3 darkSky = sky * 0.76;
-    float3 lightSky = auroraLightAppearance(sky);
-    return half4(half3(mix(darkSky, lightSky, lightMode)), half(1.0));
+    float2 uv = position / safeSize;
+    return half4(
+        half3(auroraSceneColor(uv, time, seedA, seedB, intensity, noiseTexture)),
+        half(1.0)
+    );
 }
 
 // MARK: - Single-pass glass optics

@@ -27,8 +27,7 @@ public struct NBNavigationView<Content>: View where Content: View {
 		NavigationStack {
 			_content
 				.nbThemeCanvas()
-                .navigationTitle(_title)
-				.navigationBarTitleDisplayMode(_mode)
+                .nbThemeNavigationTitle(_title, displayMode: _mode)
 		}
 	}
 }
