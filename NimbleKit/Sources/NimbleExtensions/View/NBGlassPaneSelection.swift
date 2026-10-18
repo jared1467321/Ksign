@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 /// The optics shader consumes only two panes. Select them without allocating
 /// and sorting a copy of every row's geometry during scrolling.
