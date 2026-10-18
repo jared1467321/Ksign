@@ -61,22 +61,23 @@ source trees from the chunk-size experiment.
   fails individually without replacing the shared connection for later apps.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
-- Native upload admission starts at two transfers and tunes from aggregate
-  useful upload bytes per second, rather than retaining a fixed five-app limit.
-  It tests additional uploads when they improve total throughput, drains to a
-  lower count when they hurt or offer no gain, and periodically rechecks as
-  conditions change. Trials use sustained transfer windows, exclude connection
-  setup and iOS installation, and remain subject to measured memory headroom
-  and kernel pressure. Reductions never interrupt a transfer already running.
-  Once an IPA upload and its AFC close finish successfully, its upload slot
-  becomes available to the next queued app while iOS handles installation.
-  Installation workers, tunnel leases, pause/drain checks, duplicate-bundle
-  reservations and Ksign's exclusive self-update remain tracked independently.
+- Native installs share one limit across packaging, uploading, iOS installation
+  and cleanup. The default is five active apps. **Settings → Installation →
+  Native · iDevice → Installation limit** lets you choose from one to 100 for
+  built-in and manual connections. The install drawer also has a number field
+  and up/down arrows to adjust the same saved limit live. Lowering it lets all
+  active apps finish; new apps wait until the active count falls below the
+  limit. Raising it wakes waiting work without overriding Pause. Completing an
+  upload does not free capacity: the next queued app waits until an installation
+  and its native cleanup finish. Memory headroom and kernel pressure may temporarily
+  admit fewer apps, but never exceed the chosen limit. Duplicate-bundle
+  reservations, pause/drain checks and Ksign's exclusive self-update remain
+  enforced.
   Numeric drawer progress is coalesced to at most five deliveries per second
   per attempt, with immediate final values at phase boundaries and completion.
   Waiting apps suspend on one shared admission sampler instead of each polling
-  the main actor. Upload completion and pause/resume wake that sampler directly;
-  the timer remains for memory/throughput measurements and eligibility changes.
+  the main actor. Installation cleanup and pause/resume wake that sampler
+  directly; the timer remains for memory measurements and eligibility changes.
   Foreground session notifications are emitted only when progress, counters or
   control state change, while all drawer positions retain the same behavior.
   Queued drawer apps retain static artwork and a stored waiting count; header
@@ -175,10 +176,12 @@ The manual build runs these regression checks before building the IPA.
 The shared-tunnel check runs the production proxy against native FFI doubles,
 holds three uploads open concurrently, verifies one tunnel is used for all
 upload and installation clients, and checks lease cleanup after a cache reset.
-The upload checks also simulate scaling beyond five transfers, a saturated or
-regressing link, changed conditions, and paused/memory-blocked admission. They
-verify that final progress cannot be overwritten by a delayed UI sample and
-that the next upload can start while an earlier installation worker stays alive.
+The queue checks verify the default five-app shared ceiling, lower and higher
+configured limits, live decreases/increases, number-field validation, preference
+bounds, pause/cancellation and both terminal-status/cleanup orderings.
+Capacity stays occupied until the install and its native worker
+finish. Upload checks verify that final progress cannot be overwritten by a
+delayed UI sample.
 The checks include foreground/background shortcut handoff, pending requests
 across relaunch, URL encoding, notification permission failure, stale taps,
 new work racing with cleanup, and waiting for the actual VPN disconnection.

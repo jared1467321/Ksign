@@ -71,6 +71,16 @@ final class NativeWorkerBarrier {
 
 @main struct InstallQueueLifetimeTests {
     @MainActor static func main() async throws {
+        precondition(NativeInstallLimit.normalized(0) == 5)
+        precondition(NativeInstallLimit.normalized(-1) == 1)
+        precondition(NativeInstallLimit.normalized(2) == 2)
+        precondition(NativeInstallLimit.normalized(100) == 100)
+        precondition(NativeInstallLimit.normalized(101) == 100)
+        precondition(NativeInstallLimit.enteredValue("") == nil)
+        precondition(NativeInstallLimit.enteredValue("invalid") == nil)
+        precondition(NativeInstallLimit.enteredValue(" 12 ") == 12)
+        precondition(NativeInstallLimit.enteredValue("0") == 1)
+        precondition(NativeInstallLimit.enteredValue("101") == 100)
         let barrier = NativeWorkerBarrier()
         async let workerA = IDeviceInstallationWorker.performInstallation { barrier.join() }
         async let workerB = IDeviceInstallationWorker.performInstallation { barrier.join() }
@@ -116,8 +126,8 @@ final class NativeWorkerBarrier {
         queue.release(second)
         precondition(queue.activeCount == 0)
 
-        // Upload admission is separate from iOS's installation lifetime. The
-        // first worker remains alive while its successor acquires upload space.
+        // Upload and iOS installation share one slot. A terminal UI callback
+        // must still wait for the native worker's cleanup before admitting more.
         let uploading = UUID(), nextUpload = UUID()
         InstallSession.shared.jobs = [.init(id: uploading), .init(id: nextUpload)]
         let uploadSlot = await queue.acquire(for: uploading)
@@ -125,22 +135,26 @@ final class NativeWorkerBarrier {
         queue.beginDeviceWork(uploading)
         let readsBeforeWaiting = InstallSession.shared.jobListReads
         var eligibilityChecks = 0
+        var nextStarted = false
         let next = Task { @MainActor in
-            await queue.acquire(for: nextUpload) {
+            let acquired = await queue.acquire(for: nextUpload) {
                 eligibilityChecks += 1
                 return true
             }
+            nextStarted = acquired
+            return acquired
         }
         try await Task.sleep(nanoseconds: 250_000_000)
         precondition(eligibilityChecks == 0 && InstallSession.shared.jobListReads == readsBeforeWaiting,
                      "Full native upload slots must not repeatedly scan the queued app list")
-        queue.finishDeviceUpload(uploading)
-        precondition(queue.hasDeviceWorkInProgress,
-                     "A free upload slot must not hide a live native installation worker")
+        queue.release(uploading)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 1 && queue.hasDeviceWorkInProgress && !nextStarted,
+                     "Terminal delivery cannot free capacity before native cleanup")
+        queue.endDeviceWork(uploading)
         let acquiredNext = await next.value
         precondition(acquiredNext && queue.activeCount == 1,
-                     "The next upload must start while iOS still installs the prior app")
-        queue.endDeviceWork(uploading)
+                     "The next app must start once the prior installation and cleanup finish")
         precondition(queue.activeCount == 1 && !queue.hasDeviceWorkInProgress,
                      "Finishing an old installation must not release its successor's upload slot")
         queue.release(nextUpload)
@@ -154,10 +168,10 @@ final class NativeWorkerBarrier {
         precondition(!cancelledResult && queue.activeCount == 0)
         queue.setPaused(false)
 
-        // Native mode enforces five even if another caller configures a larger
-        // ceiling. Keep the real memory observation ramp in this test.
+        // Native mode enforces five across upload and iOS installation. Keep
+        // the real memory observation ramp in this test.
         queue.setNativeInstallMode(true)
-        queue.setMaxConcurrent(20)
+        queue.setMaxConcurrent(NativeInstallLimit.defaultValue)
         let nativeIDs = (0..<6).map { _ in UUID() }
         InstallSession.shared.jobs = nativeIDs.map { .init(id: $0) }
         for id in nativeIDs.prefix(5) {
@@ -173,12 +187,17 @@ final class NativeWorkerBarrier {
         }
         try await Task.sleep(nanoseconds: 250_000_000)
         precondition(queue.activeCount == 5 && !sixthAdmitted,
-                     "A sixth native upload must wait while five upload slots are occupied")
-        queue.finishDeviceUpload(nativeIDs[0])
+                     "A sixth native app must wait while five installations are active")
+        // Worker cleanup can arrive before terminal UI delivery. Both must
+        // finish before a shared slot can be reused.
+        queue.endDeviceWork(nativeIDs[0])
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 5 && !sixthAdmitted,
+                     "Native worker completion must still await terminal UI release")
+        queue.release(nativeIDs[0])
         let acquiredSixth = await sixth.value
         precondition(acquiredSixth && queue.activeCount == 5 && queue.hasDeviceWorkInProgress,
-                     "A finished upload must free capacity while iOS installation remains alive")
-        queue.endDeviceWork(nativeIDs[0])
+                     "A completed installation must admit the next app within the shared limit")
         precondition(queue.activeCount == 5,
                      "Old install cleanup must not release the next upload's slot")
         for id in nativeIDs.dropFirst() {
@@ -186,8 +205,100 @@ final class NativeWorkerBarrier {
             queue.release(id)
         }
         precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
+
+        // Higher settings must permit more than five simultaneous apps while
+        // preserving shared slots throughout each native worker's lifetime.
+        queue.setMaxConcurrent(6)
+        let higherLimitIDs = (0..<6).map { _ in UUID() }
+        InstallSession.shared.jobs = higherLimitIDs.map { .init(id: $0) }
+        for id in higherLimitIDs {
+            let acquired = await queue.acquire(for: id)
+            precondition(acquired)
+            queue.beginDeviceWork(id)
+        }
+        precondition(queue.activeCount == 6,
+                     "The configured limit must allow more than five active apps")
+
+        let extraIDs = (0..<2).map { _ in UUID() }
+        InstallSession.shared.jobs += extraIDs.map { .init(id: $0) }
+        var afterLoweringStarted = false
+        let afterLowering = Task { @MainActor in
+            let acquired = await queue.acquire(for: extraIDs[0])
+            afterLoweringStarted = acquired
+            return acquired
+        }
+        queue.setMaxConcurrent(2)
+        precondition(queue.activeCount == 6,
+                     "Lowering the setpoint must leave every active app running")
+        for id in higherLimitIDs.prefix(4) {
+            queue.endDeviceWork(id)
+            queue.release(id)
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 2 && !afterLoweringStarted,
+                     "No new app may start when the active count equals the lowered limit")
+        // Even above the new limit, active workers retain their shared slots.
+        queue.release(higherLimitIDs[4])
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 2 && !afterLoweringStarted)
+        queue.endDeviceWork(higherLimitIDs[4])
+        let admittedAfterLowering = await afterLowering.value
+        precondition(admittedAfterLowering && queue.activeCount == 2,
+                     "Resume admissions only after the active count falls below the setpoint")
+
+        var afterRaisingStarted = false
+        let afterRaising = Task { @MainActor in
+            let acquired = await queue.acquire(for: extraIDs[1])
+            afterRaisingStarted = acquired
+            return acquired
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        precondition(!afterRaisingStarted)
+        queue.setPaused(true)
+        queue.setMaxConcurrent(3)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        precondition(queue.activeCount == 2 && !afterRaisingStarted,
+                     "Raising the setpoint must not override pause")
+        queue.setPaused(false)
+        let admittedAfterRaising = await afterRaising.value
+        precondition(admittedAfterRaising && queue.activeCount == 3,
+                     "A raised setpoint must admit waiting work without another completion")
+        queue.endDeviceWork(higherLimitIDs[5])
+        queue.release(higherLimitIDs[5])
+        for id in extraIDs { queue.release(id) }
+        precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
+
+        // A lower user-selected limit must cap the entire native lifecycle too.
+        queue.setMaxConcurrent(2)
+        let limitedIDs = (0..<3).map { _ in UUID() }
+        InstallSession.shared.jobs = limitedIDs.map { .init(id: $0) }
+        for id in limitedIDs.prefix(2) {
+            let acquired = await queue.acquire(for: id)
+            precondition(acquired)
+            queue.beginDeviceWork(id)
+        }
+        var thirdStarted = false
+        let third = Task { @MainActor in
+            let acquired = await queue.acquire(for: limitedIDs[2])
+            thirdStarted = acquired
+            return acquired
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 2 && !thirdStarted)
+        queue.release(limitedIDs[0])
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 2 && !thirdStarted,
+                     "The configured limit must include terminal apps still cleaning up")
+        queue.endDeviceWork(limitedIDs[0])
+        let acquiredThird = await third.value
+        precondition(acquiredThird && queue.activeCount == 2)
+        for id in limitedIDs.dropFirst() {
+            queue.endDeviceWork(id)
+            queue.release(id)
+        }
+        precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
         queue.setNativeInstallMode(false)
         queue.setMaxConcurrent(3)
-        print("Passed fixed five-upload ceiling, upload handoff, native queue cleanup and orphan-reclamation scenarios")
+        print("Passed configurable shared install ceiling, terminal/cleanup ordering, native queue cleanup and orphan-reclamation scenarios")
     }
 }

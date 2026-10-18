@@ -821,13 +821,6 @@ final class InstallJob: ObservableObject, Identifiable {
 		_packagingAttempt = attempt
 		if method == 1 {
 			InstallQueueCoordinator.shared.beginDeviceWork(jobID)
-			viewModel.uploadObserver = { [weak self] event in
-				if case .finished(success: true) = event {
-					Task { @MainActor [weak self] in
-						self?._didFinishDeviceUpload(attempt)
-					}
-				}
-			}
 		}
 
 		_packagingTask = Task.detached { [weak self] in
@@ -936,14 +929,6 @@ final class InstallJob: ObservableObject, Identifiable {
 				if self == nil { InstallQueueCoordinator.shared.release(jobID) }
 			}
 		}
-	}
-
-	private func _didFinishDeviceUpload(_ attempt: PackagingAttempt) {
-		guard _packagingAttempt?.id == attempt.id, attempt.isCurrent, _holdsSlot else { return }
-		// iOS continues installing on its native worker. Only the upload admission
-		// slot is returned; pause/drain and self-update still await installation.
-		_holdsSlot = false
-		InstallQueueCoordinator.shared.finishDeviceUpload(id)
 	}
 
 	private func _packagingFinished(_ attempt: PackagingAttempt, error: Error?) {
@@ -1111,6 +1096,30 @@ private final class InstallAdmissionCancellation: @unchecked Sendable {
 	}
 }
 
+enum NativeInstallLimit {
+	static let preferenceKey = "Feather.nativeInstallLimit"
+	static let defaultValue = 5
+	static let allowedValues = 1...100
+
+	static func clamped(_ value: Int) -> Int {
+		min(allowedValues.upperBound, max(allowedValues.lowerBound, value))
+	}
+
+	static func normalized(_ value: Int) -> Int {
+		// Missing preferences read as zero; existing installations retain five.
+		value == 0 ? defaultValue : clamped(value)
+	}
+
+	static func enteredValue(_ text: String) -> Int? {
+		guard let value = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+		return clamped(value)
+	}
+
+	static var savedValue: Int {
+		normalized(UserDefaults.standard.integer(forKey: preferenceKey))
+	}
+}
+
 // Limits how many installs run at once. Each job acquires a slot before
 // starting and releases it when it finishes (or gives up), so a large batch
 // installs a few at a time instead of all at once.
@@ -1124,7 +1133,6 @@ private final class InstallAdmissionCancellation: @unchecked Sendable {
 @MainActor
 final class InstallQueueCoordinator {
 	static let shared = InstallQueueCoordinator()
-	static let nativeUploadLimit = 5
 
 	private struct _AdmissionObservation {
 		let id: UUID
@@ -1142,8 +1150,8 @@ final class InstallQueueCoordinator {
 		let availableBytes: UInt64
 	}
 
-	// Configured admission ceiling and memory-budget divisor. Native uploads
-	// additionally enforce their fixed five-upload ceiling below.
+	// Configured admission ceiling and memory-budget divisor. Native installs
+	// share this ceiling across upload, installation and cleanup, up to 100.
 	private var _configuredMaxConcurrent = 3
 
 	// Kernel pressure is the emergency brake. It never rewrites the configured
@@ -1215,7 +1223,9 @@ final class InstallQueueCoordinator {
 		_isNativeInstall || _configuredMaxConcurrent > 3
 	}
 
-	private var _admissionCeiling: Int { _isNativeInstall ? Self.nativeUploadLimit : _configuredMaxConcurrent }
+	private var _admissionCeiling: Int {
+		_isNativeInstall ? min(NativeInstallLimit.allowedValues.upperBound, _configuredMaxConcurrent) : _configuredMaxConcurrent
+	}
 
 	private var _effectiveMaxConcurrent: Int {
 		guard let pressureLimit = _memoryPressureLimit else {
@@ -1236,6 +1246,8 @@ final class InstallQueueCoordinator {
 
 		_configuredMaxConcurrent = newValue
 		_resetAdaptiveLearning()
+		_nativeMemoryRetryAt = 0
+		_wakeAdmissionSampling()
 	}
 
 	// Pausing works by simply declining to hand out slots. Jobs already holding
@@ -1367,14 +1379,8 @@ final class InstallQueueCoordinator {
 		_wakeAdmissionSampling()
 	}
 
-	// Successful AFC close frees upload capacity without cancelling the native
-	// install or forgetting its worker/lease. Cancellation before that point must
-	// still wait for native cleanup before a deferred release can take effect.
-	func finishDeviceUpload(_ id: UUID) {
-		_deferredReleases.remove(id)
-		_releaseHolder(id)
-	}
-
+	// A native app owns one shared slot through packaging, upload, installation
+	// and cleanup. Upload completion alone never admits another queued app.
 	func release(_ id: UUID) {
 		if _deviceWorkers.contains(id) {
 			_deferredReleases.insert(id)
@@ -1386,7 +1392,7 @@ final class InstallQueueCoordinator {
 	private func _releaseHolder(_ id: UUID) {
 		guard _holders.remove(id) != nil else { return }
 		_nativeMemoryRetryAt = 0
-		// Refill freed upload slots immediately, without waiting for the next
+		// Refill freed install slots immediately, without waiting for the next
 		// memory sample or waking every queued task.
 		_wakeAdmissionSampling()
 		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)

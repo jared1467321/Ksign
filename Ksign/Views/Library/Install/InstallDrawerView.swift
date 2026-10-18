@@ -164,6 +164,10 @@ struct InstallDrawerSheet: View {
 					.font(.caption.monospacedDigit())
 					.nbThemeForeground(.textSecondary)
 
+				if session.usesNativeInstallLimit {
+					NativeInstallLimitControl()
+				}
+
 				if session.isPaused || _isSettled {
 					if session.hasWorkInProgress {
 						Text("Waiting for current work to finish…")
@@ -237,6 +241,75 @@ struct InstallDrawerSheet: View {
 		return session.isPaused
 			? .localized("Paused")
 			: .localized("Installing")
+	}
+}
+
+private struct NativeInstallLimitControl: View {
+	@ObservedObject private var session = InstallSession.shared
+	@State private var text = ""
+	@FocusState private var isEditing: Bool
+
+	var body: some View {
+		HStack(spacing: 10) {
+			Text("Active app limit")
+				.font(.caption)
+				.nbThemeForeground(.textSecondary)
+			Spacer(minLength: 0)
+			TextField("1–100", text: $text)
+				.keyboardType(.numberPad)
+				.multilineTextAlignment(.center)
+				.font(.subheadline.monospacedDigit())
+				.frame(width: 48)
+				.padding(.horizontal, 8)
+				.padding(.vertical, 8)
+				.nbThemeBackground(.controlFill, in: RoundedRectangle(cornerRadius: 8))
+				.focused($isEditing)
+				.accessibilityLabel("Maximum active apps")
+				.onSubmit { isEditing = false }
+			VStack(spacing: 0) {
+				Button { adjust(by: 1) } label: {
+					Image(systemName: "chevron.up")
+						.frame(width: 32, height: 22)
+						.contentShape(Rectangle())
+				}
+				.disabled(session.nativeInstallLimit >= NativeInstallLimit.allowedValues.upperBound)
+				.accessibilityLabel("Increase active app limit")
+				Button { adjust(by: -1) } label: {
+					Image(systemName: "chevron.down")
+						.frame(width: 32, height: 22)
+						.contentShape(Rectangle())
+				}
+				.disabled(session.nativeInstallLimit <= NativeInstallLimit.allowedValues.lowerBound)
+				.accessibilityLabel("Decrease active app limit")
+			}
+			.font(.caption.weight(.semibold))
+			.buttonStyle(.plain)
+			.nbThemeForeground(.accent)
+		}
+		.onAppear { text = String(session.nativeInstallLimit) }
+		.onChange(of: text) { value in
+			if let limit = NativeInstallLimit.enteredValue(value) {
+				session.setNativeInstallLimit(limit)
+				if value != String(limit) { text = String(limit) }
+			}
+		}
+		.onChange(of: session.nativeInstallLimit) { value in
+			if !isEditing { text = String(value) }
+		}
+		.onChange(of: isEditing) { editing in
+			if !editing { text = String(session.nativeInstallLimit) }
+		}
+		.toolbar {
+			ToolbarItemGroup(placement: .keyboard) {
+				Spacer()
+				Button("Done") { isEditing = false }
+			}
+		}
+	}
+
+	private func adjust(by delta: Int) {
+		session.setNativeInstallLimit(session.nativeInstallLimit + delta)
+		text = String(session.nativeInstallLimit)
 	}
 }
 

@@ -4,6 +4,7 @@ import NimbleExtensions
 import IDeviceSwift
 
 struct DeviceConnectionSettingsView: View {
+    @AppStorage(NativeInstallLimit.preferenceKey) private var activeAppLimit = NativeInstallLimit.defaultValue
     @ObservedObject private var manager = DeviceInstallationManager.shared
     @ObservedObject private var session = InstallSession.shared
     @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
@@ -29,6 +30,8 @@ struct DeviceConnectionSettingsView: View {
                 .disabled(controlsDisabled)
             }
             .connectionCard()
+
+            installLimit
 
             if manager.mode == .builtIn {
                 connectionOverview
@@ -112,6 +115,28 @@ struct DeviceConnectionSettingsView: View {
                 }
             }
         }
+    }
+
+    private var installLimit: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Installation limit").font(.subheadline.weight(.semibold))
+            Stepper(value: Binding(
+                get: { NativeInstallLimit.normalized(activeAppLimit) },
+                set: { session.setNativeInstallLimit($0) }
+            ), in: NativeInstallLimit.allowedValues) {
+                HStack {
+                    Text("Maximum active apps")
+                    Spacer()
+                    Text("\(NativeInstallLimit.normalized(activeAppLimit))")
+                        .monospacedDigit()
+                }
+            }
+            Text("Uploading and installing apps share this limit. Lowering it lets active apps finish before new apps start.")
+                .font(.caption)
+                .nbThemeForeground(.textSecondary)
+        }
+        .connectionCard()
+        .onChange(of: activeAppLimit) { session.setNativeInstallLimit($0) }
     }
 
     private var connectionOverview: some View {

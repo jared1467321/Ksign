@@ -95,7 +95,6 @@ final class BulkInstallLiveActivityReporter {
 }
 @MainActor final class InstallQueueCoordinator {
     static let shared = InstallQueueCoordinator()
-    static let nativeUploadLimit = 5
     var activeCount = 0
     var hasDeviceWorkInProgress = false
     var isPaused = false
@@ -103,7 +102,6 @@ final class BulkInstallLiveActivityReporter {
     var isNativeInstall = false
     func setMaxConcurrent(_ count: Int) { maxConcurrent = count }
     func setNativeInstallMode(_ enabled: Bool) { isNativeInstall = enabled }
-    func finishDeviceUpload(_ id: UUID) { activeCount -= 1 }
     func setPaused(_ paused: Bool) { isPaused = paused }
 }
 struct StatusEpoch { func cancel() {} }
@@ -160,7 +158,6 @@ final class PackagingAttempt {
     }
     // PRODUCTION_JOB_METHODS
     func deliver(_ status: InstallerStatusViewModel.InstallerStatus) { _handleStatus(status) }
-    func finishUpload(_ attempt: PackagingAttempt) { _didFinishDeviceUpload(attempt) }
 }
 enum EditMode { case active, inactive }
 @MainActor final class LibrarySelection {
@@ -188,7 +185,7 @@ extension InstallSession {
     @MainActor static func main() async throws {
         let session = InstallSession.shared
         let defaults = UserDefaults.standard
-        let original = ["Feather.installationMethod", "Feather.serverMethod", "Feather.batchGroupSize"]
+        let original = ["Feather.installationMethod", "Feather.serverMethod", "Feather.batchGroupSize", NativeInstallLimit.preferenceKey]
             .map { ($0, defaults.object(forKey: $0)) }
         defer {
             for (key, value) in original {
@@ -197,6 +194,7 @@ extension InstallSession {
             }
         }
         defaults.set(2, forKey: "Feather.batchGroupSize")
+        defaults.removeObject(forKey: NativeInstallLimit.preferenceKey)
 
         // Waiting apps are counted by events, never inspected by foreground
         // samples/header getters. Run the production phase observer as well as
@@ -266,6 +264,44 @@ extension InstallSession {
         session.sampleForegroundForTesting()
         precondition(session.waitingCount == 0 && !session.hasWorkInProgress)
         precondition(!session.containsJob(active.id))
+
+        // The drawer/settings share a persistent setpoint. Changes apply to
+        // the current native queue immediately, including while it is paused.
+        precondition(NativeInstallLimit.savedValue == 5)
+        defaults.set(2, forKey: NativeInstallLimit.preferenceKey)
+        session.start(apps: [TestApp(uuid: "limit-two")])
+        precondition(session.usesNativeInstallLimit && session.nativeInstallLimit == 2)
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 2)
+        session.setNativeInstallLimit(6)
+        precondition(session.nativeInstallLimit == 6 && NativeInstallLimit.savedValue == 6)
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 6)
+        session.togglePause()
+        session.setNativeInstallLimit(1)
+        precondition(session.isPaused && InstallQueueCoordinator.shared.isPaused)
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 1)
+        session.start(apps: [TestApp(uuid: "same-queue")])
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 1)
+        session.dismissAll()
+        precondition(!session.usesNativeInstallLimit)
+        session.start(apps: [TestApp(uuid: "next-queue")])
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 1)
+        session.dismissAll()
+        session.setNativeInstallLimit(101)
+        precondition(session.nativeInstallLimit == 100 && NativeInstallLimit.savedValue == 100)
+        session.start(apps: [TestApp(uuid: "limit-one-hundred")])
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 100)
+        session.dismissAll()
+
+        // The native setpoint must never change server admission limits.
+        defaults.set(0, forKey: "Feather.installationMethod")
+        defaults.set(1, forKey: "Feather.serverMethod")
+        session.start(apps: [TestApp(uuid: "server-limit")])
+        precondition(!session.usesNativeInstallLimit && InstallQueueCoordinator.shared.maxConcurrent == 3)
+        session.setNativeInstallLimit(0)
+        precondition(session.nativeInstallLimit == 1 && NativeInstallLimit.savedValue == 1)
+        precondition(InstallQueueCoordinator.shared.maxConcurrent == 3)
+        session.dismissAll()
+        defaults.removeObject(forKey: NativeInstallLimit.preferenceKey)
 
         // Same partial-batch workflow for native, local server, and external
         // server. Running jobs settle, queued jobs remain intact until cancel.
@@ -396,14 +432,10 @@ extension InstallSession {
         session.sampleForegroundForTesting()
         precondition(PublicationMetrics.count > beforeCountChange && session.aggregateProgress == 0,
                      "Queued-to-running changes must refresh counters even before progress advances")
-        let attempt = PackagingAttempt()
-        uploading._packagingAttempt = attempt
         InstallQueueCoordinator.shared.hasDeviceWorkInProgress = true
-        uploading.finishUpload(PackagingAttempt()) // old attempt cannot free this slot
-        precondition(uploading._holdsSlot)
-        uploading.finishUpload(attempt)
-        uploading.finishUpload(attempt) // duplicate callback
-        precondition(!uploading._holdsSlot && InstallQueueCoordinator.shared.activeCount == 0)
+        uploading.viewModel.overallProgress = 2.0 / 3.0 // packaging/upload finished
+        precondition(uploading._holdsSlot && InstallQueueCoordinator.shared.activeCount == 1,
+                     "A finished upload must retain its shared slot during iOS installation")
         precondition(uploading.phase == .running && uploading.hasWorkInProgress,
                      "Finishing upload must not complete or hide the installation")
         session.togglePause()

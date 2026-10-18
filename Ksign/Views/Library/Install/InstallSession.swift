@@ -30,6 +30,8 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var completedCount = 0
 	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
+	@Published private(set) var nativeInstallLimit = NativeInstallLimit.savedValue
+	private var _isNativeInstallSession = false
 
 	private struct ForegroundSnapshot: Equatable {
 		let progress: Double
@@ -143,6 +145,20 @@ final class InstallSession: ObservableObject {
 	var isActive: Bool { !jobs.isEmpty }
 	var isDrawerAvailable: Bool { isActive || isFinished }
 	func containsJob(_ id: UUID) -> Bool { _trackedJobs[id] != nil }
+	var usesNativeInstallLimit: Bool { _isNativeInstallSession }
+
+	func setNativeInstallLimit(_ value: Int) {
+		let limit = NativeInstallLimit.clamped(value)
+		if nativeInstallLimit != limit { nativeInstallLimit = limit }
+		if NativeInstallLimit.savedValue != limit {
+			UserDefaults.standard.set(limit, forKey: NativeInstallLimit.preferenceKey)
+		}
+		if _isNativeInstallSession {
+			// Changing the ceiling only gates new admissions. Existing holders
+			// continue through installation and cleanup even above the new limit.
+			InstallQueueCoordinator.shared.setMaxConcurrent(limit)
+		}
+	}
 
 	private func _trackJob(_ job: InstallJob) {
 		_trackedJobs[job.id] = job
@@ -206,9 +222,12 @@ final class InstallSession: ObservableObject {
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
-		// into one and runs the group concurrently. Native uploads have a fixed
-		// ceiling of five; external server installs retain their limit.
+		// into one and runs the group concurrently. Native apps share a configured
+		// limit across uploading and iOS installation; server limits stay separate.
 		if jobs.isEmpty {
+			_isNativeInstallSession = isDeviceInstall
+			let savedLimit = NativeInstallLimit.savedValue
+			if nativeInstallLimit != savedLimit { nativeInstallLimit = savedLimit }
 			BulkInstallLiveActivityReporter.shared.reset()
 			installedAppIDs.removeAll()
 			_completedJobIDs.removeAll()
@@ -236,7 +255,7 @@ final class InstallSession: ObservableObject {
 			// time — and a stuck install can't wedge the queue, because it isn't
 			// holding a slot.
 			InstallQueueCoordinator.shared.setNativeInstallMode(isDeviceInstall)
-			InstallQueueCoordinator.shared.setMaxConcurrent(isDeviceInstall ? InstallQueueCoordinator.nativeUploadLimit : (_willBatch ? _batchBuildConcurrency : 3))
+			InstallQueueCoordinator.shared.setMaxConcurrent(isDeviceInstall ? nativeInstallLimit : (_willBatch ? _batchBuildConcurrency : 3))
 		}
 		isFinished = false
 
@@ -560,6 +579,7 @@ final class InstallSession: ObservableObject {
 
 		// Back to defaults so the next batch starts clean.
 		_willBatch = false
+		_isNativeInstallSession = false
 		_activeHostInstaller?.shutDown()
 		_activeHostInstaller = nil
 		InstallQueueCoordinator.shared.setNativeInstallMode(false)

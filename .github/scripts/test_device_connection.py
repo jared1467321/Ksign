@@ -34,7 +34,6 @@ def session_controls_source():
         "var hasWorkInProgress: Bool",
         "var isInFlightGroupMember: Bool",
         "private func _handleStatus(",
-        "private func _didFinishDeviceUpload(",
     ))
     library_methods = "\n".join(swift_block(library, declaration) for declaration in (
         "private func _receiveInstalledSelection(",
@@ -55,7 +54,8 @@ def session_controls_source():
         tests = tests.replace(placeholder, swift_block(jobs, declaration).removeprefix("private "))
     tests = tests.replace("// PRODUCTION_LIBRARY_METHODS", library_methods)
     tests = tests.replace("// PRODUCTION_TAB_CHANGE", tab_body)
-    return tests + "\n" + swift_block(session, "@MainActor\nfinal class InstallSession:")
+    return "\n".join((tests, swift_block(jobs, "enum NativeInstallLimit {"),
+                      swift_block(session, "@MainActor\nfinal class InstallSession:")))
 
 
 def queue_lifetime_source(load=False):
@@ -85,6 +85,7 @@ def queue_lifetime_source(load=False):
                     "public enum IDeviceUploadEvent:"),
         snapshot,
         swift_block(jobs, "private final class InstallAdmissionCancellation:"),
+        swift_block(jobs, "enum NativeInstallLimit {"),
         coordinator,
     ))
 
