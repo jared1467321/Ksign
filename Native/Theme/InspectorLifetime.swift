@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 // UIKit/Combine doubles only. The registry, visibility calculation and anchor
 // lifecycle are extracted from production by test_themes.py.
