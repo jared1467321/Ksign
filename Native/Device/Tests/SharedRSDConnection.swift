@@ -13,9 +13,12 @@ public final class InstallerStatusViewModel {
     enum Status { case sendingPayload, installing, completed(Result<Void, Error>) }
     var status: Status = .sendingPayload
     var packageProgress = 0.0
-    var uploadProgress = 0.0
+    var uploadPublications = 0
+    var uploadProgress = 0.0 { didSet { uploadPublications += 1 } }
     var uploadMetrics: IDeviceUploadMetrics?
-    var installProgress = 0.0
+    var installPublications = 0
+    var installProgress = 0.0 { didSet { installPublications += 1 } }
+    var uploadObserver: ((IDeviceUploadEvent) -> Void)?
 }
 final class UIApplication {
     static let shared = UIApplication()
@@ -325,10 +328,16 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         let byteCount = chunkBytes * 2 + 123
         try Data(repeating: 42, count: byteCount).write(to: ipa)
         let model = InstallerStatusViewModel()
+        let uploadEvents = UploadEventRecorder()
+        model.uploadObserver = { uploadEvents.record($0) }
         try await InstallationProxy(viewModel: model).install(at: ipa)
         precondition(NativeCalls.shared.takeWriteCounts() == [chunkBytes, chunkBytes, 123],
                      "Upload must preserve the final partial chunk")
         await MainActor.run {
+            precondition(model.uploadProgress == 1 && model.installProgress == 1,
+                         "Completion must flush final numeric progress immediately")
+            precondition(model.uploadPublications < 3 && model.installPublications == 1,
+                         "Fast transfers must coalesce UI updates, not queue one per chunk")
             guard let metrics = model.uploadMetrics else {
                 preconditionFailure("Completed upload must report metrics")
             }
@@ -338,11 +347,46 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
                 from: defaults.data(forKey: IDeviceUploadMetrics.storageKey)!)
             precondition(persisted.bytes == metrics.bytes && persisted.duration == metrics.duration)
         }
+        uploadEvents.expectSuccessfulUpload(bytes: UInt64(byteCount))
+        let publications = await MainActor.run { (model.uploadPublications, model.installPublications) }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        await MainActor.run {
+            precondition(model.uploadPublications == publications.0 && model.installPublications == publications.1,
+                         "Delayed progress must not republish after terminal completion")
+        }
         NativeCalls.shared.expectCleanClients(16, tunnelCount: 2)
         NativeCalls.shared.expectFreed(1)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(2)
         HeartbeatManager.configurePairingPath(nil)
         print("Passed shared native tunnel, overlapping uploads, fixed upload size, upload metrics, installer error classification and lease cleanup")
+    }
+}
+
+final class UploadEventRecorder {
+    private let lock = NSLock()
+    private var started = false
+    private var bytes: UInt64 = 0
+    private var finished = false
+    func record(_ event: IDeviceUploadEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        switch event {
+        case .started:
+            precondition(!started)
+            started = true
+        case .advanced(let sent):
+            precondition(started && !finished && sent > bytes)
+            bytes = sent
+        case .finished(let success):
+            precondition(started && !finished && success)
+            finished = true
+        }
+    }
+    func expectSuccessfulUpload(bytes expected: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(started && finished && bytes == expected,
+                     "Worker telemetry must count useful bytes independently of UI progress")
     }
 }

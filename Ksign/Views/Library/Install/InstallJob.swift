@@ -811,7 +811,22 @@ final class InstallJob: ObservableObject, Identifiable {
 		_packagingAttempt?.cancel()
 		let attempt = PackagingAttempt()
 		_packagingAttempt = attempt
-		if method == 1 { InstallQueueCoordinator.shared.beginDeviceWork(jobID) }
+		if method == 1 {
+			InstallQueueCoordinator.shared.beginDeviceWork(jobID)
+			viewModel.uploadObserver = { [weak self] event in
+				// Finished must always retire telemetry, even after cancellation.
+				if case .finished(let success) = event {
+					NativeInstallUploadTelemetry.shared.record(event, for: jobID)
+					if success {
+						Task { @MainActor [weak self] in
+							self?._didFinishDeviceUpload(attempt)
+						}
+					}
+				} else if attempt.isCurrent {
+					NativeInstallUploadTelemetry.shared.record(event, for: jobID)
+				}
+			}
+		}
 
 		_packagingTask = Task.detached { [weak self] in
 			var handedOff = false
@@ -919,6 +934,14 @@ final class InstallJob: ObservableObject, Identifiable {
 				if self == nil { InstallQueueCoordinator.shared.release(jobID) }
 			}
 		}
+	}
+
+	private func _didFinishDeviceUpload(_ attempt: PackagingAttempt) {
+		guard _packagingAttempt?.id == attempt.id, attempt.isCurrent, _holdsSlot else { return }
+		// iOS continues installing on its native worker. Only the upload admission
+		// slot is returned; pause/drain and self-update still await installation.
+		_holdsSlot = false
+		InstallQueueCoordinator.shared.finishDeviceUpload(id)
 	}
 
 	private func _packagingFinished(_ attempt: PackagingAttempt, error: Error?) {
@@ -1101,9 +1124,8 @@ final class InstallQueueCoordinator {
 		let availableBytes: UInt64
 	}
 
-	// The session's requested concurrency. For batching this remains 5; adaptive
-	// memory control only decides how quickly/how far toward that ceiling it is
-	// safe to ramp at this moment.
+	// Server admission ceiling, or the native bootstrap memory-budget divisor.
+	// Native upload concurrency itself comes from the throughput tuner.
 	private var _configuredMaxConcurrent = 3
 
 	// Kernel pressure is the emergency brake. It never rewrites the configured
@@ -1146,25 +1168,53 @@ final class InstallQueueCoordinator {
 	private var _deviceWorkers: Set<UUID> = []
 	private var _deferredReleases: Set<UUID> = []
 	private var _isPaused = false
+	private var _nativeTuner: NativeInstallConcurrencyTuner?
+	private var _nativeSampledAt: TimeInterval = 0
+	private var _nativeMemoryRetryAt: TimeInterval = 0
+	private var _waiters: Set<UUID> = []
 
 	private init() {
 		_startMemoryPressureMonitoring()
 	}
 
 	var activeCount: Int { _holders.count }
+	var hasDeviceWorkInProgress: Bool { !_deviceWorkers.isEmpty }
 
 	private var _usesAdaptiveMemoryAdmission: Bool {
 		// The ordinary install path is intentionally capped at 3 already. The
-		// adaptive ramp covers server batch builds and native installs, where 5
-		// remains the desired ceiling when memory permits it.
-		_configuredMaxConcurrent > 3
+		// adaptive ramp covers server batch builds and every native upload trial.
+		_nativeTuner != nil || _configuredMaxConcurrent > 3
 	}
+
+	private var _admissionCeiling: Int { _nativeTuner?.limit ?? _configuredMaxConcurrent }
 
 	private var _effectiveMaxConcurrent: Int {
 		guard let pressureLimit = _memoryPressureLimit else {
-			return _configuredMaxConcurrent
+			return _admissionCeiling
 		}
-		return min(_configuredMaxConcurrent, pressureLimit)
+		return min(_admissionCeiling, pressureLimit)
+	}
+
+	func setNativeAdaptiveConcurrency(_ enabled: Bool) {
+		_nativeTuner = enabled ? NativeInstallConcurrencyTuner() : nil
+		_nativeSampledAt = 0
+		_nativeMemoryRetryAt = 0
+		_resetAdaptiveLearning()
+	}
+
+	private func _sampleNativeThroughput() {
+		guard _nativeTuner != nil else { return }
+		let now = ProcessInfo.processInfo.systemUptime
+		guard now - _nativeSampledAt >= _sampleInterval else { return }
+		_nativeSampledAt = now
+		let snapshot = NativeInstallUploadTelemetry.shared.snapshot()
+		let previous = _admissionCeiling
+		_nativeTuner?.update(now: now, bytes: snapshot.bytes, activeJobs: _holders.count,
+			queuedJobs: _waiters.count, uploadingCount: snapshot.uploadingCount, paused: _isPaused)
+		if _admissionCeiling != previous {
+			let mbps = (_nativeTuner?.lastMeasuredBytesPerSecond ?? 0) / 1_048_576
+			Logger.misc.info("Native upload admission \(previous) -> \(self._admissionCeiling); aggregate=\(mbps) MB/s")
+		}
 	}
 
 	func setMaxConcurrent(_ n: Int) {
@@ -1180,6 +1230,7 @@ final class InstallQueueCoordinator {
 	// completion untouched.
 	func setPaused(_ paused: Bool) {
 		_isPaused = paused
+		_nativeTuner?.suspend()
 	}
 
 	// Waits until a slot is free, then claims it for `id` and returns true.
@@ -1187,13 +1238,19 @@ final class InstallQueueCoordinator {
 	// runs on MainActor, check + admission + claim are atomic: waiting jobs cannot
 	// all sample the same headroom and stampede through together.
 	func acquire(for id: UUID, mayStart: () -> Bool = { true }) async -> Bool {
+		_waiters.insert(id)
+		defer { _waiters.remove(id) }
 		while true {
 			if Task.isCancelled { return false }
 
 			_reclaimOrphans()
+			_sampleNativeThroughput()
 
 			let effectiveMax = _effectiveMaxConcurrent
-			if !_isPaused, mayStart(), effectiveMax > 0, _holders.count < effectiveMax {
+			// Eligibility scans the session to preserve native selection order. No
+			// waiter needs that scan while every slot is already occupied.
+			let mayCheckNativeMemory = _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt
+			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax, mayCheckNativeMemory, mayStart() {
 				if !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: id) {
 					_holders.insert(id)
 					ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
@@ -1201,6 +1258,11 @@ final class InstallQueueCoordinator {
 						_beginAdmissionObservation(for: id)
 					}
 					return true
+				} else if _nativeTuner != nil {
+					// Memory headroom is shared by all native waiters. One failed
+					// check is sufficient for this sampling interval; don't make the
+					// rest scan the same selection and remeasure the same process.
+					_nativeMemoryRetryAt = ProcessInfo.processInfo.systemUptime + _sampleInterval
 				}
 			}
 
@@ -1224,7 +1286,16 @@ final class InstallQueueCoordinator {
 
 	func endDeviceWork(_ id: UUID) {
 		_deviceWorkers.remove(id)
+		NativeInstallUploadTelemetry.shared.remove(id)
 		if _deferredReleases.remove(id) != nil { release(id) }
+	}
+
+	// Successful AFC close frees upload capacity without cancelling the native
+	// install or forgetting its worker/lease. Cancellation before that point must
+	// still wait for native cleanup before a deferred release can take effect.
+	func finishDeviceUpload(_ id: UUID) {
+		_deferredReleases.remove(id)
+		_releaseHolder(id)
 	}
 
 	func release(_ id: UUID) {
@@ -1232,7 +1303,12 @@ final class InstallQueueCoordinator {
 			_deferredReleases.insert(id)
 			return
 		}
+		_releaseHolder(id)
+	}
+
+	private func _releaseHolder(_ id: UUID) {
 		guard _holders.remove(id) != nil else { return }
+		_nativeMemoryRetryAt = 0
 		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 
 		// Capture one last sample while the just-finished job's footprint is still
@@ -1334,7 +1410,7 @@ final class InstallQueueCoordinator {
 		if _lastAdaptiveState != state {
 			_lastAdaptiveState = state
 			Logger.misc.info(
-				"Adaptive archive admission -> \(activeAfter)/\(self._configuredMaxConcurrent); available=\(availableMB) MB, footprint=\(footprintMB) MB, budget=\(budgetMB) MB, estimatedNext=\(learnedMB) MB, reserve=\(reserveMB) MB"
+				"Adaptive archive admission -> \(activeAfter)/\(self._admissionCeiling); available=\(availableMB) MB, footprint=\(footprintMB) MB, budget=\(budgetMB) MB, estimatedNext=\(learnedMB) MB, reserve=\(reserveMB) MB"
 			)
 		}
 		return true
@@ -1541,11 +1617,11 @@ final class InstallQueueCoordinator {
 		let estimatedMB = _bytesToMB(estimatedCostBytes)
 		if let reserveBytes {
 			Logger.misc.notice(
-				"Adaptive archive hold at \(self._holders.count)/\(self._configuredMaxConcurrent): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB, reserve=\(self._bytesToMB(reserveBytes)) MB"
+				"Adaptive archive hold at \(self._holders.count)/\(self._admissionCeiling): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB, reserve=\(self._bytesToMB(reserveBytes)) MB"
 			)
 		} else {
 			Logger.misc.notice(
-				"Adaptive archive hold at \(self._holders.count)/\(self._configuredMaxConcurrent): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB"
+				"Adaptive archive hold at \(self._holders.count)/\(self._admissionCeiling): \(reason, privacy: .public); available=\(availableMB) MB, footprint=\(footprintMB) MB, estimatedNext=\(estimatedMB) MB"
 			)
 		}
 	}
@@ -1648,8 +1724,13 @@ final class InstallQueueCoordinator {
 	// can't ever be released by its owner, because its owner is gone — reclaim it
 	// on the next acquisition attempt instead of wedging the queue indefinitely.
 	private func _reclaimOrphans() {
+		// Native workers remain valid even after their rows disappear. If they
+		// account for every holder, there is nothing to reclaim and no reason for
+		// every queued app to rebuild the full session ID set on each poll.
+		let candidates = _holders.subtracting(_deviceWorkers)
+		guard !candidates.isEmpty else { return }
 		let live = Set(InstallSession.shared.jobs.map { $0.id })
-		let orphaned = _holders.subtracting(live).subtracting(_deviceWorkers)
+		let orphaned = candidates.subtracting(live)
 		guard !orphaned.isEmpty else { return }
 
 		_holders.subtract(orphaned)

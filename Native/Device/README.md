@@ -61,6 +61,19 @@ source trees from the chunk-size experiment.
   fails individually without replacing the shared connection for later apps.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
+- Native upload admission starts at two transfers and tunes from aggregate
+  useful upload bytes per second, rather than retaining a fixed five-app limit.
+  It tests additional uploads when they improve total throughput, drains to a
+  lower count when they hurt or offer no gain, and periodically rechecks as
+  conditions change. Trials use sustained transfer windows, exclude connection
+  setup and iOS installation, and remain subject to measured memory headroom
+  and kernel pressure. Reductions never interrupt a transfer already running.
+  Once an IPA upload and its AFC close finish successfully, its upload slot
+  becomes available to the next queued app while iOS handles installation.
+  Installation workers, tunnel leases, pause/drain checks, duplicate-bundle
+  reservations and Ksign's exclusive self-update remain tracked independently.
+  Numeric drawer progress is coalesced to at most five deliveries per second
+  per attempt, with immediate final values at phase boundaries and completion.
 - Uploads use bounded 1 MiB chunks. The experimental chunk-size picker has
   been removed; previously saved sizes no longer affect uploads. **Settings →
   Installation → iDevice → Upload performance** retains the latest completed
@@ -152,6 +165,10 @@ The manual build runs these regression checks before building the IPA.
 The shared-tunnel check runs the production proxy against native FFI doubles,
 holds three uploads open concurrently, verifies one tunnel is used for all
 upload and installation clients, and checks lease cleanup after a cache reset.
+The upload checks also simulate scaling beyond five transfers, a saturated or
+regressing link, changed conditions, and paused/memory-blocked admission. They
+verify that final progress cannot be overwritten by a delayed UI sample and
+that the next upload can start while an earlier installation worker stays alive.
 The checks include foreground/background shortcut handoff, pending requests
 across relaunch, URL encoding, notification permission failure, stale taps,
 new work racing with cleanup, and waiting for the actual VPN disconnection.

@@ -74,12 +74,19 @@ final class BulkInstallLiveActivityReporter {
 @MainActor final class InstallQueueCoordinator {
     static let shared = InstallQueueCoordinator()
     var activeCount = 0
+    var hasDeviceWorkInProgress = false
     var isPaused = false
     func setMaxConcurrent(_ count: Int) {}
+    func setNativeAdaptiveConcurrency(_ enabled: Bool) {}
+    func finishDeviceUpload(_ id: UUID) { activeCount -= 1 }
     func setPaused(_ paused: Bool) { isPaused = paused }
 }
 struct StatusEpoch { func cancel() {} }
-final class Attempt { func cancel() {} }
+final class PackagingAttempt {
+    let id = UUID()
+    var isCurrent = true
+    func cancel() { isCurrent = false }
+}
 @MainActor final class InstallJob {
     let id = UUID()
     let app: AppInfoPresentable
@@ -98,7 +105,7 @@ final class Attempt { func cancel() {} }
     var archiveCleanups = 0
     var _holdsSlot = false
     var _packagingTask: Task<Void, Never>?
-    var _packagingAttempt: Attempt?
+    var _packagingAttempt: PackagingAttempt?
     var _installTask: Task<Void, Never>?
     let _statusEpoch = StatusEpoch()
     let _serverMethod: Int
@@ -128,6 +135,7 @@ final class Attempt { func cancel() {} }
     }
     // PRODUCTION_JOB_METHODS
     func deliver(_ status: InstallerStatusViewModel.InstallerStatus) { _handleStatus(status) }
+    func finishUpload(_ attempt: PackagingAttempt) { _didFinishDeviceUpload(attempt) }
 }
 enum EditMode { case active, inactive }
 @MainActor final class LibrarySelection {
@@ -275,8 +283,35 @@ enum TestFailure: Error { case failed }
         precondition(session.installedSelectionRequest?.appIDs == ["finished"])
         session.consumeInstalledSelection(session.installedSelectionRequest!.id)
 
+        session.start(apps: [TestApp(uuid: "upload-finished")])
+        let uploading = session.jobs[0]
+        uploading.begin()
+        let attempt = PackagingAttempt()
+        uploading._packagingAttempt = attempt
+        InstallQueueCoordinator.shared.hasDeviceWorkInProgress = true
+        uploading.finishUpload(PackagingAttempt()) // old attempt cannot free this slot
+        precondition(uploading._holdsSlot)
+        uploading.finishUpload(attempt)
+        uploading.finishUpload(attempt) // duplicate callback
+        precondition(!uploading._holdsSlot && InstallQueueCoordinator.shared.activeCount == 0)
+        precondition(uploading.phase == .running && uploading.hasWorkInProgress,
+                     "Finishing upload must not complete or hide the installation")
+        session.togglePause()
+        precondition(!session.canCancelAndSelectInstalled)
+        uploading.deliver(.completed(.success(())))
+        precondition(!session.canCancelAndSelectInstalled,
+                     "Terminal status must still wait for native worker cleanup")
+        InstallQueueCoordinator.shared.hasDeviceWorkInProgress = false
+        session.cancelAndSelectInstalled()
+        precondition(session.installedSelectionRequest?.appIDs == ["upload-finished"])
+        session.consumeInstalledSelection(session.installedSelectionRequest!.id)
+
         session.start(apps: [TestApp(uuid: "never-started")])
         session.togglePause()
+        InstallQueueCoordinator.shared.hasDeviceWorkInProgress = true
+        precondition(!session.canCancelAndSelectInstalled,
+                     "An installation still cleaning up must block selection even with no upload slots occupied")
+        InstallQueueCoordinator.shared.hasDeviceWorkInProgress = false
         session.cancelAndSelectInstalled()
         precondition(session.installedSelectionRequest?.appIDs.isEmpty == true)
         precondition(!InstallQueueCoordinator.shared.isPaused && !session.isActive)

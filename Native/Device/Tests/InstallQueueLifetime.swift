@@ -1,5 +1,34 @@
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#else
+func autoreleasepool<T>(invoking body: () throws -> T) rethrows -> T { try body() }
+struct Logger {
+    init(subsystem: String, category: String) {}
+    func info(_ message: String) {}
+    func warning(_ message: String) {}
+    func notice(_ message: String) {}
+    func critical(_ message: String) {}
+}
+final class DispatchSourceMemoryPressure {
+    var data: DispatchSource.MemoryPressureEvent = []
+    func setEventHandler(handler: @escaping () -> Void) {}
+    func activate() {}
+}
+extension DispatchSource {
+    struct MemoryPressureEvent: OptionSet {
+        let rawValue: Int
+        static let normal = Self(rawValue: 1)
+        static let warning = Self(rawValue: 2)
+        static let critical = Self(rawValue: 4)
+        static let all: Self = [.normal, .warning, .critical]
+    }
+    static func makeMemoryPressureSource(eventMask: MemoryPressureEvent,
+                                         queue: DispatchQueue) -> DispatchSourceMemoryPressure {
+        DispatchSourceMemoryPressure()
+    }
+}
+#endif
 
 // Service doubles for the production coordinator. Memory admission and pressure
 // handling remain in the compiled source; these supply a stable memory sample.
@@ -14,7 +43,12 @@ final class ArchiveMemoryCoordinator {
 @MainActor final class InstallSession {
     struct Job { let id: UUID }
     static let shared = InstallSession()
-    var jobs: [Job] = []
+    private var storedJobs: [Job] = []
+    var jobListReads = 0
+    var jobs: [Job] {
+        get { jobListReads += 1; return storedJobs }
+        set { storedJobs = newValue }
+    }
 }
 
 final class NativeWorkerBarrier {
@@ -79,6 +113,77 @@ final class NativeWorkerBarrier {
         queue.release(second)
         queue.release(second)
         precondition(queue.activeCount == 0)
+
+        // Upload admission is separate from iOS's installation lifetime. The
+        // first worker remains alive while its successor acquires upload space.
+        let uploading = UUID(), nextUpload = UUID()
+        InstallSession.shared.jobs = [.init(id: uploading), .init(id: nextUpload)]
+        let uploadSlot = await queue.acquire(for: uploading)
+        precondition(uploadSlot)
+        queue.beginDeviceWork(uploading)
+        let readsBeforeWaiting = InstallSession.shared.jobListReads
+        var eligibilityChecks = 0
+        let next = Task { @MainActor in
+            await queue.acquire(for: nextUpload) {
+                eligibilityChecks += 1
+                return true
+            }
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(eligibilityChecks == 0 && InstallSession.shared.jobListReads == readsBeforeWaiting,
+                     "Full native upload slots must not repeatedly scan the queued app list")
+        queue.finishDeviceUpload(uploading)
+        precondition(queue.hasDeviceWorkInProgress,
+                     "A free upload slot must not hide a live native installation worker")
+        let acquiredNext = await next.value
+        precondition(acquiredNext && queue.activeCount == 1,
+                     "The next upload must start while iOS still installs the prior app")
+        queue.endDeviceWork(uploading)
+        precondition(queue.activeCount == 1 && !queue.hasDeviceWorkInProgress,
+                     "Finishing an old installation must not release its successor's upload slot")
+        queue.release(nextUpload)
+
+        // Cancellation of a waiter must not consume admission capacity.
+        queue.setPaused(true)
+        let cancelled = Task { @MainActor in await queue.acquire(for: nextUpload) }
+        await Task.yield()
+        cancelled.cancel()
+        let cancelledResult = await cancelled.value
+        precondition(!cancelledResult && queue.activeCount == 0)
+        queue.setPaused(false)
+
+        // Exercise adaptive mode through the actual coordinator, including the
+        // memory observation ramp and its initial two-upload target.
+        queue.setNativeAdaptiveConcurrency(true)
+        queue.setMaxConcurrent(2)
+        let adaptiveA = UUID(), adaptiveB = UUID(), adaptiveC = UUID()
+        InstallSession.shared.jobs = [.init(id: adaptiveA), .init(id: adaptiveB), .init(id: adaptiveC)]
+        let acquiredA = await queue.acquire(for: adaptiveA)
+        precondition(acquiredA)
+        queue.beginDeviceWork(adaptiveA)
+        let acquiredB = await queue.acquire(for: adaptiveB)
+        precondition(acquiredB)
+        queue.beginDeviceWork(adaptiveB)
+        var thirdAdmitted = false
+        let third = Task { @MainActor in
+            let acquired = await queue.acquire(for: adaptiveC)
+            thirdAdmitted = acquired
+            return acquired
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        precondition(queue.activeCount == 2 && !thirdAdmitted,
+                     "Adaptive uploads must respect their current target before throughput evidence exists")
+        queue.finishDeviceUpload(adaptiveA)
+        let acquiredC = await third.value
+        precondition(acquiredC && queue.activeCount == 2 && queue.hasDeviceWorkInProgress,
+                     "Adaptive admission must refill upload capacity independently of iOS installation")
+        queue.endDeviceWork(adaptiveA)
+        queue.endDeviceWork(adaptiveB)
+        queue.release(adaptiveB)
+        queue.release(adaptiveC)
+        precondition(queue.activeCount == 0 && !queue.hasDeviceWorkInProgress)
+        queue.setNativeAdaptiveConcurrency(false)
+        queue.setMaxConcurrent(3)
         print("Passed native queue cleanup and orphan-reclamation scenarios")
     }
 }

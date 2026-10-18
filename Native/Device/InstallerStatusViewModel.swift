@@ -25,6 +25,9 @@ public class InstallerStatusViewModel: ObservableObject {
 	@Published public var uploadMetrics: IDeviceUploadMetrics?
 	@Published public var packageProgress: Double = 0.0
 	@Published public var installProgress: Double = 0.0
+	// Set before launching an attempt; copied by its upload worker. Never
+	// publishes SwiftUI invalidations and never requires a main-queue hop.
+	public var uploadObserver: ((IDeviceUploadEvent) -> Void)?
 	
 	public var isIDevice: Bool
 	

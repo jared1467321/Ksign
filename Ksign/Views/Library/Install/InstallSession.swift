@@ -137,8 +137,8 @@ final class InstallSession: ObservableObject {
 
 		// Settle batching once per batch, at its start, so it can't change under
 		// jobs already in flight. Server + local collapses each group of prompts
-		// into one and runs the group concurrently. Device installs share the
-		// adaptive build ceiling; external server installs retain their limit.
+		// into one and runs the group concurrently. Device uploads tune their own
+		// admission; external server installs retain their limit.
 		if jobs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.reset()
 			installedAppIDs.removeAll()
@@ -166,7 +166,10 @@ final class InstallSession: ObservableObject {
 			// while the pool fills, so a 100-app manifest is still built a few at a
 			// time — and a stuck install can't wedge the queue, because it isn't
 			// holding a slot.
-			InstallQueueCoordinator.shared.setMaxConcurrent((_willBatch || isDeviceInstall) ? _batchBuildConcurrency : 3)
+			// Native uploads start at two and tune from useful aggregate throughput;
+			// the configured value is only their bootstrap memory-budget divisor.
+			InstallQueueCoordinator.shared.setNativeAdaptiveConcurrency(isDeviceInstall)
+			InstallQueueCoordinator.shared.setMaxConcurrent(isDeviceInstall ? 2 : (_willBatch ? _batchBuildConcurrency : 3))
 		}
 		isFinished = false
 
@@ -238,6 +241,7 @@ final class InstallSession: ObservableObject {
 		}
 		if job.isSelfUpdate {
 			return !jobs.contains(where: unfinished) && InstallQueueCoordinator.shared.activeCount == 0
+				&& !InstallQueueCoordinator.shared.hasDeviceWorkInProgress
 		}
 		if jobs.contains(where: { $0.isSelfUpdate && $0.phase == .running }) { return false }
 		return !jobs.prefix(index).contains { !$0.isSelfUpdate && $0.phase == .queued && unfinished($0) }
@@ -397,7 +401,8 @@ final class InstallSession: ObservableObject {
 	// Parked server packages are safe to discard. Builders, active manifests,
 	// solo installs, and native workers still cleaning up must drain first.
 	var hasWorkInProgress: Bool {
-		InstallQueueCoordinator.shared.activeCount > 0 || jobs.contains { $0.hasWorkInProgress }
+		InstallQueueCoordinator.shared.activeCount > 0 || InstallQueueCoordinator.shared.hasDeviceWorkInProgress
+			|| jobs.contains { $0.hasWorkInProgress }
 	}
 
 	var canCancelAndSelectInstalled: Bool {
@@ -484,6 +489,7 @@ final class InstallSession: ObservableObject {
 		_willBatch = false
 		_activeHostInstaller?.shutDown()
 		_activeHostInstaller = nil
+		InstallQueueCoordinator.shared.setNativeAdaptiveConcurrency(false)
 		InstallQueueCoordinator.shared.setMaxConcurrent(3)
 
 		// Leave the result available until the user selects installed apps or

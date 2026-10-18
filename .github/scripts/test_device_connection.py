@@ -34,6 +34,7 @@ def session_controls_source():
         "var hasWorkInProgress: Bool",
         "var isInFlightGroupMember: Bool",
         "private func _handleStatus(",
+        "private func _didFinishDeviceUpload(",
     ))
     library_methods = "\n".join(swift_block(library, declaration) for declaration in (
         "private func _receiveInstalledSelection(",
@@ -58,9 +59,18 @@ def queue_lifetime_source():
     snapshot_start = jobs.index("private struct _ProcessMemorySnapshot {")
     snapshot_end = jobs.index("\nprivate func _processPhysicalFootprintBytes()", snapshot_start)
     snapshot = jobs[snapshot_start:snapshot_end]
+    if sys.platform != "darwin":
+        # Linux logging uses String; the admission and memory-pressure handlers
+        # stay verbatim against the platform event/source doubles in the fixture.
+        coordinator = coordinator.replace(", privacy: .public", "")
+    tuning = (ROOT / "Ksign/Backend/Device/NativeInstallConcurrency.swift").read_text()
+    tuning = tuning.replace("import IDeviceSwift", "")
     return "\n".join((
         (ROOT / "Native/Device/Tests/InstallQueueLifetime.swift").read_text(),
         (ROOT / "Native/Device/IDeviceInstallationWorker.swift").read_text(),
+        swift_block((ROOT / "Native/Device/InstallationProxy.swift").read_text(),
+                    "public enum IDeviceUploadEvent:"),
+        tuning,
         snapshot,
         coordinator,
     ))
@@ -121,14 +131,22 @@ def main():
                         str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
 
-        # Compile the actual admission/cleanup coordinator separately from the
-        # app's UIKit-dependent job and session. OSLog and pressure sources are
-        # available on the macOS CI runner; connection tests also work on Linux.
-        if sys.platform == "darwin":
-            source.write_text(queue_lifetime_source())
-            subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
-                            str(source), "-o", str(executable)], check=True)
-            subprocess.run([str(executable)], check=True, timeout=30)
+        proxy = (ROOT / "Native/Device/InstallationProxy.swift").read_text()
+        tuning = (ROOT / "Ksign/Backend/Device/NativeInstallConcurrency.swift").read_text()
+        source.write_text("\n".join((
+            (ROOT / "Native/Device/Tests/NativeUploadTuning.swift").read_text(),
+            swift_block(proxy, "public enum IDeviceUploadEvent:"),
+            swift_block(proxy, "final class IDeviceInstallProgress"),
+            tuning.replace("import IDeviceSwift", ""),
+        )))
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        source.write_text(queue_lifetime_source())
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
 
 
 if __name__ == "__main__":
