@@ -39,19 +39,20 @@ float saturation(float3 v) {
 int main() {
     float minimumContrast = 100;
     float totalLight = 0, totalDark = 0, totalChroma = 0;
-    // Representative low-intensity saturated curtains must keep their color,
-    // instead of being compressed to a near-white background.
-    for (auto source : {float3(0.1f,0.005f,0.005f), float3(0.005f,0.1f,0.005f), float3(0.005f,0.005f,0.1f)}) {
+    // Bright and muted curtains keep the same channel relationships. A small
+    // color variation in the night sky must not become a neon edge by day.
+    for (auto source : {float3(1,0.05f,0.05f), float3(0.05f,1,0.05f), float3(0.05f,0.05f,1),
+                        float3(0.08f,0.07f,0.06f), float3(0.06f,0.07f,0.08f), float3(0.03f,0.04f,0.03f)}) {
         auto light=auroraLightAppearance(source);
-        assert(max(light.r,max(light.g,light.b))-min(light.r,min(light.g,light.b)) > 0.40f);
-        assert(saturation(light) > 0.4f);
+        assert(abs((light.r-light.g)-(source.r-source.g)*0.4f) < 0.000001f);
+        assert(abs((light.g-light.b)-(source.g-source.b)*0.4f) < 0.000001f);
     }
-    // The reference sky contains many muted colors. Preserving their original
-    // saturation at a high lightness turned the whole light sky into pastels.
-    for (auto source : {float3(0.08f,0.07f,0.06f), float3(0.06f,0.07f,0.08f), float3(0.03f,0.04f,0.03f)}) {
-        auto light=auroraLightAppearance(source);
-        assert(max(light.r,max(light.g,light.b))-min(light.r,min(light.g,light.b)) > 0.35f);
-    }
+    auto neutral=auroraLightAppearance(float3(0.08f));
+    assert(neutral.r == neutral.g && neutral.g == neutral.b);
+    // Crossing the old chroma threshold remains smooth, without abrupt bands.
+    auto below=auroraLightAppearance(float3(0.081f,0.08f,0.08f));
+    auto above=auroraLightAppearance(float3(0.08101f,0.08f,0.08f));
+    assert(abs(above.r-below.r) < 0.00001f && above.g == below.g && above.b == below.b);
     const float3 primary(24/255.0f,32/255.0f,52/255.0f);
     const float3 secondary(26/255.0f,35/255.0f,53/255.0f);
     for (int r=0;r<=20;r++) for (int g=0;g<=20;g++) for (int b=0;b<=20;b++) {
@@ -69,7 +70,7 @@ int main() {
         }
     }
     assert(totalLight > totalDark);
-    assert(totalChroma / 9261 > 0.30f && "Light mode must keep substantial color separation");
-    std::cout << "Aurora colors passed: saturated curtains, brighter Light sky, finite RGB and text contrast across 9261 samples (minimum "
+    assert(totalChroma / 9261 > 0.20f && "Light mode must retain the curtain colors");
+    std::cout << "Aurora colors passed: shared hues, smooth daylight tones, finite RGB and text contrast across 9261 samples (minimum "
               << minimumContrast << ", mean channel separation " << totalChroma / 9261 << ").\n";
 }

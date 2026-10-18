@@ -37,10 +37,10 @@ public struct NBThemeSurface<S: Shape>: View {
     }
 
     private var shine: Double {
-        finish == .sheet ? 0.10 : finish == .navigation ? 0.45 : 1
+        finish == .sheet ? 0.10 : finish == .navigation ? 0.25 : 0.30
     }
     private var rimShine: Double {
-        finish == .sheet ? 0.35 : 1
+        finish == .sheet ? 0.35 : 0.55
     }
     private var surfaceTint: Double {
         auroraBackground && tintStrength <= 0.10 ? min(tintStrength, 0.025) : tintStrength
@@ -48,8 +48,8 @@ public struct NBThemeSurface<S: Shape>: View {
     private var optics: (center: Double, rim: Double, rimWidth: CGFloat,
                          transition: Double, transitionWidth: CGFloat, blur: CGFloat) {
         switch finish {
-        case .standard: return (0.28, 1, 20, 0.92, 48, 4.5)
-        case .navigation: return (0.12, 0.35, 8, 0.20, 16, 2)
+        case .standard: return (0.04, 0.45, 6, 0.20, 14, 2)
+        case .navigation: return (0.04, 0.30, 4, 0.15, 10, 2)
         case .sheet: return (0.025, 0.25, 2, 0.10, 8, 2)
         }
     }
@@ -132,7 +132,7 @@ public struct NBThemeSurface<S: Shape>: View {
                 }
         } else {
             shape.fill(.ultraThinMaterial)
-                .opacity(finish == .sheet ? 0.12 : auroraBackground || scheme == .dark ? 0.48 : 0.35)
+                .opacity(finish == .sheet ? 0.12 : 0.20)
         }
     }
 }

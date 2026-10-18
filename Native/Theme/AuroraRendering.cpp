@@ -183,7 +183,11 @@ int run(int argc, char **argv) {
             for(int y=0;y<18;y++) for(int x=0;x<24;x++) {
                 float2 p=float2(x*17.13f,y*49.71f), size=float2(440,956);
                 for(float mode:{0.f,1.f}) {
-                    equal(Reference::auroraBorealis(p,half4(0,0,0,1),size,time,seedA,seedB,1.34f,originalTexture,mode,float2(0)),
+                    // Freeze scene geometry and night rendering against the
+                    // reference. Day uses a shared RGB lift on that same scene.
+                    auto scene = Reference::auroraSceneColor(p/size,time,seedA,seedB,1.34f,originalTexture);
+                    auto expected = half4(mix(scene*0.76f,clamp(scene,0.f,1.f)*0.40f+0.56f,mode),1.f);
+                    equal(expected,
                           Production::auroraBorealis(p,half4(0,0,0,1),size,time,values.data(),count,1.34f,optimizedTexture,mode,float2(0)));
                     ++pixels;
                 }
@@ -207,7 +211,7 @@ int run(int argc, char **argv) {
     assert(curtainTopologies==0x7c && coronaTopologies==7);
     assert(afterNoise<beforeNoise && afterOptics<beforeOptics);
     std::cout << "Aurora differential tests passed: " << identities*count << " exact identity values, " << pixels
-              << " identical Light/Dark sky pixels and 216000 identical optics pixels.\n"
+              << " shared-scene Light/Dark sky pixels and 216000 identical optics pixels.\n"
               << "Noise texture reads: " << beforeNoise << " -> " << afterNoise << "; optics reads: " << beforeOptics << " -> " << afterOptics << ".\n";
     return 0;
 }

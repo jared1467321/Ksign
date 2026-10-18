@@ -801,32 +801,12 @@ static float3 auroraSceneColor(
 }
 
 static float3 auroraLightAppearance(float3 sky) {
-    // Keep the sky's contrast and strengthen its curtains instead of giving
-    // every pixel the same high lightness. Only the darkest colors receive a
-    // luminance lift, so ink stays readable without a full-screen white veil.
-    float peak = max(sky.r, max(sky.g, sky.b));
-    float floorValue = min(sky.r, min(sky.g, sky.b));
-    float chroma = peak - floorValue;
-    float originalLightness = (peak + floorValue) * 0.5;
-    float originalSaturation = chroma / max(1.0 - abs(2.0 * originalLightness - 1.0), 0.001);
-    float lightness = 0.42 + 0.38 * sqrt(clamp(originalLightness, 0.0, 1.0));
-    float saturation = chroma > 0.001 ? clamp(max(0.65, originalSaturation * 1.25), 0.0, 1.0) : 0.0;
-    float lightChroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
-    float3 hue = chroma > 0.001 ? (sky - floorValue) / chroma : float3(0.5);
-    float3 light = clamp(hue * lightChroma + (lightness - lightChroma * 0.5), 0.0, 1.0);
-    float red = light.r <= 0.04045 ? light.r / 12.92 : pow((light.r + 0.055) / 1.055, 2.4);
-    float green = light.g <= 0.04045 ? light.g / 12.92 : pow((light.g + 0.055) / 1.055, 2.4);
-    float blue = light.b <= 0.04045 ? light.b / 12.92 : pow((light.b + 0.055) / 1.055, 2.4);
-    float luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
-    float lift = clamp((0.28 - luminance) / max(1.0 - luminance, 0.001), 0.0, 1.0);
-    red = red * (1.0 - lift) + lift;
-    green = green * (1.0 - lift) + lift;
-    blue = blue * (1.0 - lift) + lift;
-    return float3(
-        red <= 0.0031308 ? red * 12.92 : 1.055 * pow(red, 1.0 / 2.4) - 0.055,
-        green <= 0.0031308 ? green * 12.92 : 1.055 * pow(green, 1.0 / 2.4) - 0.055,
-        blue <= 0.0031308 ? blue * 12.92 : 1.055 * pow(blue, 1.0 / 2.4) - 0.055
-    );
+    // Apply one smooth exposure lift to the existing RGB scene. Keeping the
+    // same scale for every channel preserves hue, curtain boundaries and
+    // relative detail, including muted colors and nearly neutral sky pixels.
+    // The daylight floor keeps dark labels readable without a saturation
+    // threshold or a luminance-dependent white veil over the curtains.
+    return clamp(sky, 0.0, 1.0) * 0.40 + 0.56;
 }
 
 // The same 128-bit identity now arrives as cached hash results. Floating-point
@@ -850,8 +830,7 @@ static float3 auroraLightAppearance(float3 sky) {
     float3 sky = auroraSceneColor(uv, time, identityValues, intensity, noiseTexture);
     // Both appearances share exactly the same sky, curtains and timing.
     float3 darkSky = sky * 0.76;
-    // Dark mode never uses the light conversion (six channel power functions).
-    // Preserve the existing mix for Light and any future intermediate mode.
+    // Night retains its original exposure; day changes only the color tones.
     if (lightMode == 0.0) { return half4(half3(darkSky), half(1.0)); }
     float3 lightSky = auroraLightAppearance(sky);
     return half4(half3(mix(darkSky, lightSky, lightMode)), half(1.0));

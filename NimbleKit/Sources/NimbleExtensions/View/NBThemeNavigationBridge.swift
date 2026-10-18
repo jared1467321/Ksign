@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The large pane is a sibling BELOW the native navigation bar. Keeping it
+/// The title capsule is a sibling BELOW the native navigation bar. Keeping it
 /// outside the bar's render group leaves the title and glass buttons above it.
 struct NBThemeNavigationBridge: UIViewRepresentable {
     @ObservedObject private var themes = NBThemeManager.shared
@@ -67,6 +67,15 @@ final class NavigationBackdropProbe: UIView {
 
     private func updateBar(_ bar: UINavigationBar) {
         guard let container = bar.superview else { return }
+        let title = bar.topItem?.title ?? ""
+        let font = bar.titleTextAttributes?[.font] as? UIFont ?? UIFont.preferredFont(forTextStyle: .headline)
+        let titleSize = (title as NSString).size(withAttributes: [.font: font])
+        // Leave toolbar buttons on their own native glass. The title's pane
+        // stays inside the inline bar, clear of both the status bar and rows.
+        let width = min(ceil(titleSize.width) + 32, max(0, bar.bounds.width - 120))
+        let height = min(ceil(titleSize.height) + 12, max(0, bar.bounds.height - 4))
+        let horizontalInset = (bar.bounds.width - width) / 2
+        let verticalInset = (bar.bounds.height - height) / 2
         let panel: NavigationGlassPanelView
         if let existing = container.subviews.compactMap({ $0 as? NavigationGlassPanelView })
             .first(where: { $0.navigationBar === bar }) {
@@ -77,19 +86,27 @@ final class NavigationBackdropProbe: UIView {
             panel.navigationBar = bar
             panel.translatesAutoresizingMaskIntoConstraints = false
             container.insertSubview(panel, belowSubview: bar)
-            NSLayoutConstraint.activate([
+            panel.barConstraints = [
                 panel.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
                 panel.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-                panel.topAnchor.constraint(equalTo: bar.topAnchor, constant: -8),
-                panel.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8)
-            ])
+                panel.topAnchor.constraint(equalTo: bar.topAnchor),
+                panel.bottomAnchor.constraint(equalTo: bar.bottomAnchor)
+            ]
+            NSLayoutConstraint.activate(panel.barConstraints)
         }
-        panel.isHidden = !showGlass
+        for (constraint, inset) in zip(panel.barConstraints,
+                                       [horizontalInset, -horizontalInset, verticalInset, -verticalInset]) {
+            constraint.constant = inset
+        }
+        // Large titles retain their native layout; a centered capsule belongs
+        // only to inline titles, including Settings and its child screens.
+        panel.isHidden = !showGlass || title.isEmpty || width <= 0 || height <= 0 || bar.bounds.height > 64
     }
 }
 
 private final class NavigationGlassPanelView: UIView {
     weak var navigationBar: UINavigationBar?
+    var barConstraints: [NSLayoutConstraint] = []
     private let host = UIHostingController(rootView: NavigationGlassPanel())
 
     override init(frame: CGRect) {
@@ -105,7 +122,7 @@ private final class NavigationGlassPanelView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        host.view.frame = bounds.insetBy(dx: 12, dy: 0)
+        host.view.frame = bounds
     }
 }
 
@@ -114,7 +131,7 @@ private struct NavigationGlassPanel: View {
 
     var body: some View {
         NBThemeSurface(themes.activeColor(for: .navigationBackground),
-                       in: RoundedRectangle(cornerRadius: 28, style: .continuous),
+                       in: Capsule(),
                        tintStrength: 0.025, finish: .navigation)
             .environment(\.colorScheme, themes.isDark ? .dark : .light)
             .ignoresSafeArea()
