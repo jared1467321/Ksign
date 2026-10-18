@@ -207,19 +207,8 @@ struct InstallDrawerSheet: View {
 			.padding(.top, 22)
 			.padding(.bottom, 14)
 
-			ScrollView {
-				VPNReconnectBannerView()
-					.padding(.horizontal, 20)
-				DeviceConnectionSetupView()
-					.padding(.horizontal, 20)
-					.padding(.bottom, 12)
-				BulkInstallPreviewView(
-					jobs: session.jobs,
-					originalCount: session.totalCount
-				)
+			InstallDrawerApps()
 				.equatable()
-				.padding(.bottom, 20)
-			}
 		}
 		.nbThemeCanvas()
 		// Nested inside the drawer, the way it used to be nested inside the row.
@@ -248,5 +237,22 @@ struct InstallDrawerSheet: View {
 		return session.isPaused
 			? .localized("Paused")
 			: .localized("Installing")
+	}
+}
+
+// Header progress cannot invalidate the scroll contents. This wrapper has no
+// changing inputs, so its equality check is constant-time. Descendants receive
+// their own membership, connection and per-job events independently.
+private struct InstallDrawerApps: View, Equatable {
+	var body: some View {
+		ScrollView {
+			VPNReconnectBannerView()
+				.padding(.horizontal, 20)
+			DeviceConnectionSetupView()
+				.padding(.horizontal, 20)
+				.padding(.bottom, 12)
+			BulkInstallPreviewView()
+				.padding(.bottom, 20)
+		}
 	}
 }

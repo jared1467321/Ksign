@@ -258,7 +258,11 @@ final class InstallJob: ObservableObject, Identifiable {
 		case queued, running, completed, failed
 	}
 
-	@Published private(set) var phase: Phase = .queued
+	@Published private(set) var phase: Phase = .queued {
+		didSet {
+			if phase != oldValue { InstallSession.shared.jobDidChangePhase(self) }
+		}
+	}
 
 	// Batched-prompt role. The server + local method collapses several apps'
 	// prompts into one: a group shares a single confirmation served by the
@@ -284,7 +288,9 @@ final class InstallJob: ObservableObject, Identifiable {
 
 	private var _cancellables = Set<AnyCancellable>()
 	private var _installTask: Task<Void, Never>?
-	private var _packagingTask: Task<Void, Never>?
+	private var _packagingTask: Task<Void, Never>? {
+		didSet { InstallSession.shared.jobWorkDidChange(self) }
+	}
 	private var _packagingAttempt: PackagingAttempt?
 	private var _retryAfterPackaging = false
 	private let _statusEpoch = InstallStatusEpoch()
@@ -294,7 +300,9 @@ final class InstallJob: ObservableObject, Identifiable {
 	// tracks holders by identity now, so releasing twice — or releasing
 	// something that never held a slot — is harmless, and there's nothing left
 	// for a second flag to guard against.
-	private var _holdsSlot = false
+	private var _holdsSlot = false {
+		didSet { InstallSession.shared.jobWorkDidChange(self) }
+	}
 	private var _started = false
 
 	// Where `ArchiveHandler` built this job's .ipa, so it can be deleted once
@@ -1801,8 +1809,9 @@ final class InstallQueueCoordinator {
 		// every queued app to rebuild the full session ID set on each poll.
 		let candidates = _holders.subtracting(_deviceWorkers)
 		guard !candidates.isEmpty else { return }
-		let live = Set(InstallSession.shared.jobs.map { $0.id })
-		let orphaned = candidates.subtracting(live)
+		// Check only slot holders against the session's membership index. Waiting
+		// apps must not be traversed on every admission sample either.
+		let orphaned = candidates.filter { !InstallSession.shared.containsJob($0) }
 		guard !orphaned.isEmpty else { return }
 
 		_holders.subtract(orphaned)

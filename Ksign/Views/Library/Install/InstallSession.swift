@@ -40,6 +40,15 @@ final class InstallSession: ObservableObject {
 	}
 	private var _foregroundSnapshot: ForegroundSnapshot?
 
+	// Queued icons are static. Register their count once, then sample only jobs
+	// that have left the queue. Phase transitions move jobs between these sets;
+	// neither the timer nor header getters need to visit waiting apps.
+	private var _trackedJobs: [UUID: InstallJob] = [:]
+	private var _sampledJobs: [UUID: InstallJob] = [:]
+	private var _queuedJobIDs: Set<UUID> = []
+	private var _frozenProgressByID: [UUID: Double] = [:]
+	private var _frozenProgress = 0.0
+
 	// Keep successful library IDs after their rows retire. Bundle identifiers
 	// aren't sufficient: different signed copies can share the same bundle ID.
 	@Published private(set) var installedAppIDs: Set<String> = []
@@ -133,6 +142,57 @@ final class InstallSession: ObservableObject {
 
 	var isActive: Bool { !jobs.isEmpty }
 	var isDrawerAvailable: Bool { isActive || isFinished }
+	func containsJob(_ id: UUID) -> Bool { _trackedJobs[id] != nil }
+
+	private func _trackJob(_ job: InstallJob) {
+		_trackedJobs[job.id] = job
+		_queuedJobIDs.insert(job.id)
+	}
+
+	private func _untrackJob(_ job: InstallJob) {
+		_trackedJobs.removeValue(forKey: job.id)
+		_sampledJobs.removeValue(forKey: job.id)
+		_queuedJobIDs.remove(job.id)
+		_unfreezeProgress(for: job)
+	}
+
+	// Called after a job's published phase changes, including retries. Ignore
+	// callbacks from removed jobs; they must not re-enter foreground tracking.
+	func jobDidChangePhase(_ job: InstallJob) {
+		guard _trackedJobs[job.id] === job else { return }
+		_unfreezeProgress(for: job)
+		if job.phase == .queued {
+			_sampledJobs.removeValue(forKey: job.id)
+			_queuedJobIDs.insert(job.id)
+			// A retry can retain progress from its previous attempt. Preserve it
+			// once while queued, without polling its view model again.
+			_freezeProgress(for: job)
+		} else {
+			_queuedJobIDs.remove(job.id)
+			_sampledJobs[job.id] = job
+		}
+	}
+
+	// Cleanup can still own work after a terminal status. If work arrives after
+	// its last sample, restore tracking immediately so cancellation stays safe.
+	func jobWorkDidChange(_ job: InstallJob) {
+		guard _trackedJobs[job.id] === job, job.phase != .queued,
+			_sampledJobs[job.id] == nil, job.hasWorkInProgress else { return }
+		_unfreezeProgress(for: job)
+		_sampledJobs[job.id] = job
+	}
+
+	private func _freezeProgress(for job: InstallJob) {
+		let progress = job.viewModel.overallProgress
+		_frozenProgressByID[job.id] = progress
+		_frozenProgress += progress
+	}
+
+	private func _unfreezeProgress(for job: InstallJob) {
+		_frozenProgress -= _frozenProgressByID.removeValue(forKey: job.id) ?? 0
+		// Avoid carrying subtraction roundoff into a later batch.
+		if _frozenProgressByID.isEmpty { _frozenProgress = 0 }
+	}
 
 	// MARK: - Starting
 
@@ -192,6 +252,7 @@ final class InstallSession: ObservableObject {
 				let staleJob = jobs[stale]
 				staleJob.cancel()
 				BulkInstallLiveActivityReporter.shared.remove(staleJob.id)
+				_untrackJob(staleJob)
 				jobs.remove(at: stale)
 				totalCount = max(0, totalCount - 1)
 			}
@@ -201,6 +262,7 @@ final class InstallSession: ObservableObject {
 
 			do {
 				let job = try InstallJob(app: app)
+				_trackJob(job)
 				jobs.append(job)
 				BulkInstallLiveActivityReporter.shared.register(job.id, name: app.name)
 				totalCount += 1
@@ -299,6 +361,7 @@ final class InstallSession: ObservableObject {
 		// The row fades locally. Do not animate a new position for every
 		// remaining app whenever one install finishes.
 		_ = jobs.remove(at: index)
+		_untrackJob(job)
 
 		_retired.append(job)
 
@@ -324,6 +387,7 @@ final class InstallSession: ObservableObject {
 		withAnimation(.easeInOut(duration: 0.25)) {
 			_ = jobs.remove(at: index)
 		}
+		_untrackJob(job)
 		BulkInstallLiveActivityReporter.shared.remove(job.id)
 
 		// Keep the count honest: "4 of 7" with six rows showing is worse than
@@ -397,19 +461,19 @@ final class InstallSession: ObservableObject {
 	// Whether there's a manifest in flight the paused "clear" action could
 	// reset — any app still at a prompt or stuck mid-install.
 	var hasInFlightGroup: Bool {
-		jobs.contains { $0.isInFlightGroupMember }
+		_sampledJobs.values.contains { $0.isInFlightGroupMember }
 	}
 
 	// How many jobs are sitting in the queue rather than installing.
 	var waitingCount: Int {
-		jobs.filter { $0.phase == .queued || ($0.phase == .running && $0.batchRole == .awaiting) }.count
+		_queuedJobIDs.count + _sampledJobs.values.filter { $0.phase == .running && $0.batchRole == .awaiting }.count
 	}
 
 	// Parked server packages are safe to discard. Builders, active manifests,
 	// solo installs, and native workers still cleaning up must drain first.
 	var hasWorkInProgress: Bool {
 		InstallQueueCoordinator.shared.activeCount > 0 || InstallQueueCoordinator.shared.hasDeviceWorkInProgress
-			|| jobs.contains { $0.hasWorkInProgress }
+			|| _sampledJobs.values.contains { $0.hasWorkInProgress }
 	}
 
 	var canCancelAndSelectInstalled: Bool {
@@ -431,12 +495,10 @@ final class InstallSession: ObservableObject {
 	// Apps still building/installing. Parked server packages are waiting for a
 	// manifest, so they mustn't appear to be active work while paused.
 	//
-	// Recomputed rather than stored, and `phase` lives on the job rather than
-	// here, so a queued job flipping to running doesn't republish this object
-	// on its own. The 0.4s snapshot includes these counters as well as progress,
-	// so a count change still redraws its observers even if progress is unchanged.
+	// Only started jobs are inspected. The 0.4s snapshot includes these counters
+	// so a count change refreshes the header even before progress advances.
 	var runningCount: Int {
-		jobs.filter { $0.phase == .running && $0.hasWorkInProgress }.count
+		_sampledJobs.values.filter { $0.phase == .running && $0.hasWorkInProgress }.count
 	}
 
 	// How many rows are still on the drawer. Deliberately not `totalCount`:
@@ -448,6 +510,11 @@ final class InstallSession: ObservableObject {
 	// Clears everything, including failed rows. Backs the drawer's close button.
 	func dismissAll() {
 		for job in jobs { job.cancel() }
+		_trackedJobs.removeAll()
+		_sampledJobs.removeAll()
+		_queuedJobIDs.removeAll()
+		_frozenProgressByID.removeAll()
+		_frozenProgress = 0
 		withAnimation(.easeInOut(duration: 0.25)) { jobs.removeAll() }
 		isFinished = false
 		installedAppIDs.removeAll()
@@ -620,19 +687,25 @@ final class InstallSession: ObservableObject {
 	}
 
 	private func _recomputeProgress() {
-		var inFlight = 0.0
+		var inFlight = _frozenProgress
 		var running = 0
-		var waiting = 0
+		var waiting = _queuedJobIDs.count
 		var hasWork = InstallQueueCoordinator.shared.activeCount > 0
 			|| InstallQueueCoordinator.shared.hasDeviceWorkInProgress
 		var hasGroup = false
-		for job in jobs {
+		for job in _sampledJobs.values {
 			inFlight += job.viewModel.overallProgress
 			let working = job.hasWorkInProgress
 			if job.phase == .running && working { running += 1 }
-			if job.phase == .queued || (job.phase == .running && job.batchRole == .awaiting) { waiting += 1 }
+			if job.phase == .running && job.batchRole == .awaiting { waiting += 1 }
 			hasWork = hasWork || working
 			hasGroup = hasGroup || job.isInFlightGroupMember
+			// Keep terminal jobs observable through native cleanup, then retain
+			// their last contribution without polling them on later ticks.
+			if !working, job.phase == .completed || job.phase == .failed {
+				_freezeProgress(for: job)
+				_sampledJobs.removeValue(forKey: job.id)
+			}
 		}
 
 		// Jobs already retired count as a whole unit each; the ones still

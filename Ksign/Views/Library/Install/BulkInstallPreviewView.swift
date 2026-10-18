@@ -10,20 +10,13 @@ import NimbleExtensions
 import NimbleViews
 
 // The grid of in-flight installs shown inside the drawer.
-struct BulkInstallPreviewView: View, Equatable {
-	var jobs: [InstallJob]
+struct BulkInstallPreviewView: View {
+	@State private var jobs = InstallSession.shared.jobs
 	// The size of the batch when it started, which is *not* `jobs.count` —
 	// finished apps are removed as they go.
-	var originalCount: Int
+	@State private var originalCount = InstallSession.shared.totalCount
 
 	private let _columns = [GridItem(.adaptive(minimum: 80))]
-
-	// Aggregate progress updates the drawer header every 0.4 seconds. The grid
-	// only needs rebuilding when its membership/layout changes; each row observes
-	// its own job and progress model independently.
-	static func == (lhs: Self, rhs: Self) -> Bool {
-		lhs.originalCount == rhs.originalCount && lhs.jobs.elementsEqual(rhs.jobs, by: { $0 === $1 })
-	}
 
 	var body: some View {
 		Group {
@@ -71,5 +64,9 @@ struct BulkInstallPreviewView: View, Equatable {
 				.allowsHitTesting(false)
 		}
 		.padding(.horizontal)
+		// Membership/layout changes are events. Numeric progress belongs to the
+		// header and active rows, and never compares or republishes this array.
+		.onReceive(InstallSession.shared.$jobs) { jobs = $0 }
+		.onReceive(InstallSession.shared.$totalCount) { originalCount = $0 }
 	}
 }

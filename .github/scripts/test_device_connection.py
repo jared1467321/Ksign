@@ -45,6 +45,14 @@ def session_controls_source():
     # EditMode's UI-only convenience accessor is replaced with its equivalent.
     tab_body = tab_body.replace("_isEditMode.isEditing", "_isEditMode == .active")
     tests = tests.replace("// PRODUCTION_JOB_METHODS", job_methods)
+    phase = swift_block(jobs, "@Published private(set) var phase:")
+    phase = phase.replace("@Published private(set)", "@CountedPhaseRead")
+    tests = tests.replace("// PRODUCTION_JOB_PHASE", phase)
+    for declaration, placeholder in (
+        ("private var _packagingTask:", "// PRODUCTION_PACKAGING_TASK"),
+        ("private var _holdsSlot =", "// PRODUCTION_SLOT_STATE"),
+    ):
+        tests = tests.replace(placeholder, swift_block(jobs, declaration).removeprefix("private "))
     tests = tests.replace("// PRODUCTION_LIBRARY_METHODS", library_methods)
     tests = tests.replace("// PRODUCTION_TAB_CHANGE", tab_body)
     return tests + "\n" + swift_block(session, "@MainActor\nfinal class InstallSession:")

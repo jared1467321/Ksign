@@ -12,6 +12,19 @@ import Foundation
     init(wrappedValue: Value) { self.value = wrappedValue }
 }
 enum PublicationMetrics { static var count = 0 }
+enum ForegroundReadMetrics {
+    static var phases = 0
+    static var progress = 0
+    static func reset() { phases = 0; progress = 0 }
+}
+@propertyWrapper struct CountedPhaseRead<Value> {
+    private var value: Value
+    var wrappedValue: Value {
+        get { ForegroundReadMetrics.phases += 1; return value }
+        set { value = newValue }
+    }
+    init(wrappedValue: Value) { self.value = wrappedValue }
+}
 protocol ObservableObject {}
 struct Animation { static func easeInOut(duration: Double) -> Self { Self() } }
 func withAnimation(_ animation: Animation, _ action: () -> Void) { action() }
@@ -44,7 +57,11 @@ final class InstallerStatusViewModel {
         case broken(Error)
     }
     var status: InstallerStatus = .none
-    var overallProgress = 0.0
+    private var progress = 0.0
+    var overallProgress: Double {
+        get { ForegroundReadMetrics.progress += 1; return progress }
+        set { progress = newValue }
+    }
 }
 final class ServerInstaller {
     var shutdowns = 0
@@ -100,7 +117,7 @@ final class PackagingAttempt {
     let app: AppInfoPresentable
     enum Phase { case queued, running, completed, failed }
     enum BatchRole { case none, pending, awaiting, host, member }
-    var phase: Phase = .queued
+    // PRODUCTION_JOB_PHASE
     var batchRole: BatchRole = .none
     var hasStarted = false
     let isDeviceInstall: Bool
@@ -111,8 +128,8 @@ final class PackagingAttempt {
     var cancellations = 0
     var promptCount = 0
     var archiveCleanups = 0
-    var _holdsSlot = false
-    var _packagingTask: Task<Void, Never>?
+    // PRODUCTION_SLOT_STATE
+    // PRODUCTION_PACKAGING_TASK
     var _packagingAttempt: PackagingAttempt?
     var _installTask: Task<Void, Never>?
     let _statusEpoch = StatusEpoch()
@@ -180,6 +197,75 @@ extension InstallSession {
             }
         }
         defaults.set(2, forKey: "Feather.batchGroupSize")
+
+        // Waiting apps are counted by events, never inspected by foreground
+        // samples/header getters. Run the production phase observer as well as
+        // the session so retries, removal and completion exercise both sides.
+        defaults.set(1, forKey: "Feather.installationMethod")
+        session.start(apps: (0..<1_000).map { TestApp(uuid: "static-\($0)") })
+        ForegroundReadMetrics.reset()
+        for _ in 0..<100 {
+            session.sampleForegroundForTesting()
+            precondition(session.waitingCount == 1_000 && session.runningCount == 0)
+            precondition(!session.hasWorkInProgress && !session.hasInFlightGroup)
+        }
+        precondition(ForegroundReadMetrics.phases == 0 && ForegroundReadMetrics.progress == 0,
+                     "Foreground refreshes must never revisit queued apps")
+
+        let active = session.jobs[0]
+        active.begin()
+        active.viewModel.overallProgress = 0.6
+        ForegroundReadMetrics.reset()
+        for _ in 0..<100 {
+            session.sampleForegroundForTesting()
+            precondition(session.waitingCount == 999 && session.runningCount == 1)
+            precondition(session.hasWorkInProgress)
+        }
+        precondition(ForegroundReadMetrics.progress == 100 && ForegroundReadMetrics.phases < 3_000,
+                     "Only the one active app should contribute per-tick reads")
+        precondition(abs(session.aggregateProgress - 0.6 / 1_000) < 1e-12)
+        let removed = session.jobs.last!
+        session.remove(removed)
+        precondition(!session.containsJob(removed.id) && session.containsJob(active.id))
+        session.sampleForegroundForTesting()
+        precondition(session.waitingCount == 998 && session.totalCount == 999)
+        precondition(abs(session.aggregateProgress - 0.6 / 999) < 1e-12)
+        active.viewModel.overallProgress = 1
+        active.deliver(.completed(.success(())))
+        ForegroundReadMetrics.reset()
+        for _ in 0..<100 { session.sampleForegroundForTesting() }
+        precondition(ForegroundReadMetrics.phases == 0 && ForegroundReadMetrics.progress == 0,
+                     "Settled progress should be retained without polling terminal apps")
+        precondition(abs(session.aggregateProgress - 1.0 / 999) < 1e-12)
+
+        let failed = session.jobs[1]
+        failed.begin()
+        failed.viewModel.overallProgress = 0.3
+        failed.deliver(.completed(.failure(TestFailure.failed)))
+        session.sampleForegroundForTesting()
+        session.retry(failed)
+        ForegroundReadMetrics.reset()
+        for _ in 0..<100 { session.sampleForegroundForTesting() }
+        precondition(ForegroundReadMetrics.phases == 0 && ForegroundReadMetrics.progress == 0)
+        precondition(session.waitingCount == 998)
+        precondition(abs(session.aggregateProgress - 1.3 / 999) < 1e-12,
+                     "A queued retry retains its previous progress without further reads")
+        failed.begin()
+        failed.viewModel.overallProgress = 0.7
+        session.sampleForegroundForTesting()
+        precondition(abs(session.aggregateProgress - 1.7 / 999) < 1e-12,
+                     "Starting a retry must replace its frozen progress, without double-counting")
+        failed.deliver(.completed(.failure(TestFailure.failed)))
+        session.start(apps: [failed.app])
+        precondition(!session.containsJob(failed.id))
+        failed.phase = .running // late callbacks from replaced jobs are ignored
+        session.sampleForegroundForTesting()
+        precondition(session.waitingCount == 998 && session.runningCount == 0)
+        precondition(abs(session.aggregateProgress - 1.0 / 999) < 1e-12)
+        session.dismissAll()
+        session.sampleForegroundForTesting()
+        precondition(session.waitingCount == 0 && !session.hasWorkInProgress)
+        precondition(!session.containsJob(active.id))
 
         // Same partial-batch workflow for native, local server, and external
         // server. Running jobs settle, queued jobs remain intact until cancel.
@@ -339,6 +425,6 @@ extension InstallSession {
         session.cancelAndSelectInstalled()
         precondition(session.installedSelectionRequest?.appIDs.isEmpty == true)
         precondition(!InstallQueueCoordinator.shared.isPaused && !session.isActive)
-        print("Passed install pause/drain/cancel, success tracking, retirement, and Signed selection scenarios")
+        print("Passed static 1,000-app queue, active-only foreground sampling, install pause/drain/cancel, success tracking, retirement, and Signed selection scenarios")
     }
 }

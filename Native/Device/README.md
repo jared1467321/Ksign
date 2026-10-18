@@ -79,6 +79,11 @@ source trees from the chunk-size experiment.
   the timer remains for memory/throughput measurements and eligibility changes.
   Foreground session notifications are emitted only when progress, counters or
   control state change, while all drawer positions retain the same behavior.
+  Queued drawer apps retain static artwork and a stored waiting count; header
+  refreshes do not inspect their phases or progress. Phase changes move apps
+  into or out of foreground sampling, and the grid subscribes to membership
+  changes independently of the header. Settled progress remains cached, while
+  native cleanup stays tracked until cancellation/selection is safe.
 - Uploads use bounded 1 MiB chunks. The experimental chunk-size picker has
   been removed; previously saved sizes no longer affect uploads. **Settings →
   Installation → iDevice → Upload performance** retains the latest completed
@@ -180,6 +185,9 @@ new work racing with cleanup, and waiting for the actual VPN disconnection.
 They also cover share sheet completion/cancellation, failed presentation,
 background notification activation, dismissing sheets for new work, stale
 sheet callbacks, and releasing installation cleanup before user selection.
+The drawer checks exercise 1,000 queued apps with no per-app reads during
+foreground refreshes, then verify active progress, removal, retries, failed-entry
+replacement, and terminal cleanup without polling the remaining queued apps.
 
 The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and

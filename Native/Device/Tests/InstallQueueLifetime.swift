@@ -44,11 +44,13 @@ final class ArchiveMemoryCoordinator {
     struct Job { let id: UUID }
     static let shared = InstallSession()
     private var storedJobs: [Job] = []
+    private var jobIDs: Set<UUID> = []
     var jobListReads = 0
     var jobs: [Job] {
         get { jobListReads += 1; return storedJobs }
-        set { storedJobs = newValue }
+        set { storedJobs = newValue; jobIDs = Set(newValue.map { $0.id }) }
     }
+    func containsJob(_ id: UUID) -> Bool { jobIDs.contains(id) }
 }
 
 final class NativeWorkerBarrier {
