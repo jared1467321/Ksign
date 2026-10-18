@@ -61,6 +61,7 @@ private final class ThemeEditingWindowInstallerView: UIView {
     }
 }
 
+@MainActor
 private final class ThemeEditingOverlayWindowManager: NSObject {
     static let shared = ThemeEditingOverlayWindowManager()
 
@@ -185,8 +186,14 @@ private struct ThemeEditingCandidate: Identifiable, Equatable {
     }
 }
 
+@MainActor
 private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendable {
-    @Published var isEditingTheme = false
+    private let inspectionOwner = UUID()
+    @Published var isEditingTheme = false {
+        didSet {
+            NBThemeInspectorRegistry.shared.setInspectionActive(isEditingTheme, owner: inspectionOwner)
+        }
+    }
     @Published var editingRole: NBThemeRole?
     @Published var editingElementID: String?
     private var editingThemeID: String?
@@ -207,6 +214,13 @@ private final class ThemeEditingCoordinator: ObservableObject, @unchecked Sendab
     private let themes = NBThemeManager.shared
 
     init() {}
+
+    deinit {
+        let owner = inspectionOwner
+        DispatchQueue.main.async {
+            NBThemeInspectorRegistry.shared.setInspectionActive(false, owner: owner)
+        }
+    }
 
     func beginEditing() {
         if themes.isActiveThemeBuiltIn {

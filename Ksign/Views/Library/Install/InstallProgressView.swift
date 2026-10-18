@@ -20,7 +20,7 @@ struct InstallProgressView: View {
 	// rather than the old on/off flag, because "being worked on" covers two
 	// visibly different things: the manifest that's installing right now, and
 	// the apps building behind it for the manifest after that.
-	enum Activity {
+	enum Activity: Equatable {
 		// Sitting in the queue, not released to build yet — no dot.
 		case none
 		// Built or building for the *next* manifest — purple.
@@ -50,78 +50,35 @@ struct InstallProgressView: View {
 				// Outside the scale effect on purpose: the dot holds still
 				// while the icon breathes, and it's outside the pie mask so
 				// it can't be clipped by the progress fill.
-				.nbThemeOverlay(alignment: .topTrailing) { _activityDot }
-		}
-	}
-	
-	// The pie fill alone is hard to read on light or busy artwork, so this is
-	// the unambiguous "this one is going" marker: a dot wrapped in a glow that
-	// pulses, so an in-progress app is easy to pick out at a glance.
-	//
-	// Two colours, because a grid where thirty icons all wear the same dot
-	// doesn't answer the question anyone actually has — which of these is
-	// happening *now*. Orange is the manifest in flight; purple is the pool
-	// building behind it, which will fire as the next manifest once this one
-	// clears. Undotted icons haven't been released to build at all.
-	//
-	// Neither one is green on purpose. Green means "done" everywhere else in
-	// the app, and it's also the tint, so a green dot on a green-tinted grid
-	// is the one thing here that shouldn't blend in. Orange and purple are the
-	// two colours on this screen that aren't the accent.
-	@ViewBuilder
-	private var _activityDot: some View {
-		if activity != .none {
-			let dot: NBThemeRole = activity == .upcoming ? .tertiaryAccent : .warning
-			ZStack {
-				// Only active installs pulse; queued rows have no glow layer.
-				Circle()
-					.nbThemeFill(dot)
-					.frame(width: 13, height: 13)
-					.blur(radius: 3.5)
-					.scaleEffect(_isPulsing ? 2.0 : 1.2)
-					.nbThemeOpacity(_isPulsing ? 0.85 : 0.3)
-					.nbThemePaintLayer(0)
-					.animation(
-						_shouldPulse ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
-						value: _isPulsing
-					)
-
-				Circle()
-					.nbThemeFill(dot)
-					.nbThemeOverlay(
-						Circle().nbThemeStrokeBorder(.overlayText, opacity: 0.9, lineWidth: 1)
-					)
-					.frame(width: 13, height: 13)
-					.nbThemeShadow(dot, opacity: 0.9, radius: 4)
-					.nbThemePaintLayer(1)
-			}
-			.nbThemePaintGroup()
-			// Crossfade the purple -> orange handover.
-			.animation(.easeInOut(duration: 0.2), value: activity)
-			// Keep the dot on the edge of the scaled icon artwork.
-			.offset(x: -5, y: 5)
+				.nbThemeOverlay(alignment: .topTrailing) {
+					InstallActivityDot(activity: activity, isPulsing: _isPulsing, shouldPulse: _shouldPulse)
+						.equatable()
+				}
 		}
 	}
 	
 	@ViewBuilder
 	private func _appIcon() -> some View {
 		ZStack {
-			FRAppIconView(app: app)
+			InstallStaticAppIcon(app: app)
+				.equatable()
 				.nbThemeOpacity(0.2)
 				.frame(width: 54, height: 54)
 
 			
-			FRAppIconView(app: app)
+			InstallStaticAppIcon(app: app)
+				.equatable()
 				.frame(width: 54, height: 54)
 				.mask(
 					ZStack {
 						Circle().strokeBorder(.white, lineWidth: 4.5)
 						PieShape(progress: viewModel.overallProgress)
+							// Finish between 0.2s samples; animate only the path.
+							.animation(.linear(duration: 0.15), value: viewModel.overallProgress)
 							.scaleEffect(viewModel.isCompleted ? 2.2 : 1)
 							.animation(.smooth, value: viewModel.isCompleted)
 					}
 				)
-				.animation(.smooth, value: viewModel.overallProgress)
 		}
 	}
 	
@@ -145,6 +102,65 @@ struct InstallProgressView: View {
 		var animatableData: Double {
 			get { progress }
 			set { progress = newValue }
+		}
+	}
+}
+
+// Progress changes neither the artwork nor its border. Keep the cached image,
+// loading task and theme-inspector subtree out of numeric-progress diffs.
+struct InstallStaticAppIcon: View, Equatable {
+	let app: AppInfoPresentable
+	private let identity: String
+
+	init(app: AppInfoPresentable) {
+		self.app = app
+		identity = "\(app.uuid ?? "?")|\(app.icon ?? "?")|\(app.isSigned)"
+	}
+
+	static func == (lhs: Self, rhs: Self) -> Bool { lhs.identity == rhs.identity }
+	var body: some View { FRAppIconView(app: app) }
+}
+
+// Numeric progress does not change the activity marker. Keep it out of those
+// diffs while preserving the glow and pulse for apps currently installing.
+private struct InstallActivityDot: View, Equatable {
+	let activity: InstallProgressView.Activity
+	let isPulsing: Bool
+	let shouldPulse: Bool
+
+	@ViewBuilder
+	var body: some View {
+		if activity != .none {
+			let dot: NBThemeRole = activity == .upcoming ? .tertiaryAccent : .warning
+			ZStack {
+				if shouldPulse {
+					Circle()
+						.nbThemeFill(dot)
+						.frame(width: 13, height: 13)
+						.blur(radius: 3.5)
+						.scaleEffect(isPulsing ? 2.0 : 1.2)
+						.nbThemeOpacity(isPulsing ? 0.85 : 0.3)
+						.nbThemePaintLayer(0)
+						.animation(
+							shouldPulse ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
+							value: isPulsing
+						)
+				}
+
+				Circle()
+					.nbThemeFill(dot)
+					.nbThemeOverlay(
+						Circle().nbThemeStrokeBorder(.overlayText, opacity: 0.9, lineWidth: 1)
+					)
+					.frame(width: 13, height: 13)
+					.nbThemeShadow(dot, opacity: 0.9, radius: 4)
+					.nbThemePaintLayer(1)
+			}
+			.nbThemePaintGroup()
+			// Crossfade the purple -> orange handover.
+			.animation(.easeInOut(duration: 0.2), value: activity)
+			// Keep the dot on the edge of the scaled icon artwork.
+			.offset(x: -5, y: 5)
 		}
 	}
 }

@@ -172,6 +172,21 @@ public final class NBThemeInspectorRegistry: ObservableObject {
 
     @Published public private(set) var revision: UInt64 = 0
 
+    private var inspectionOwners: Set<UUID> = []
+    public var isInspectionActive: Bool { !inspectionOwners.isEmpty }
+
+    /// Multiple scene editors may be open at once. Keep metadata registered
+    /// while idle, but only sample layout and notify the overlay while editing.
+    public func setInspectionActive(_ active: Bool, owner: UUID) {
+        let wasActive = isInspectionActive
+        if active {
+            inspectionOwners.insert(owner)
+        } else {
+            inspectionOwners.remove(owner)
+        }
+        if !wasActive && isInspectionActive { revision &+= 1 }
+    }
+
     private final class Record {
         let id: UUID
         weak var view: UIView?
@@ -230,7 +245,7 @@ public final class NBThemeInspectorRegistry: ObservableObject {
             existing.elementID = elementID
             existing.initialColor = initialColor
             existing.metadata = metadata
-            if changed { revision &+= 1 }
+            if changed && isInspectionActive { revision &+= 1 }
         } else {
             records[id] = Record(
                 id: id,
@@ -241,13 +256,13 @@ public final class NBThemeInspectorRegistry: ObservableObject {
                 initialColor: initialColor,
                 metadata: metadata
             )
-            revision &+= 1
+            if isInspectionActive { revision &+= 1 }
         }
     }
 
     fileprivate func unregister(id: UUID) {
         precondition(Thread.isMainThread)
-        if records.removeValue(forKey: id) != nil {
+        if records.removeValue(forKey: id) != nil && isInspectionActive {
             revision &+= 1
         }
     }
@@ -496,6 +511,7 @@ public extension View {
         _ role: NBThemeRole,
         opacity: Double = 1,
         in shape: S,
+        supportsGloss: Bool = true,
         elementID explicitElementID: String? = nil,
         fileID: StaticString = #fileID,
         line: UInt = #line,
@@ -506,7 +522,8 @@ public extension View {
             role: role,
             opacity: opacity,
             elementID: elementID,
-            shape: shape
+            shape: shape,
+            supportsGloss: supportsGloss
         ))
     }
 
@@ -842,6 +859,7 @@ private struct NBThemeShapedBackgroundModifier<S: Shape>: ViewModifier {
     let opacity: Double
     let elementID: String
     let shape: S
+    let supportsGloss: Bool
 
     func body(content: Content) -> some View {
         let _ = themes.previewRevision
@@ -850,7 +868,7 @@ private struct NBThemeShapedBackgroundModifier<S: Shape>: ViewModifier {
         content
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .background {
-                NBThemeSurface(resolved, in: shape, supportsGloss: role.supportsGlossySurface, tintStrength: role.glassTintStrength)
+                NBThemeSurface(resolved, in: shape, supportsGloss: supportsGloss && role.supportsGlossySurface, tintStrength: role.glassTintStrength)
             }
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
@@ -1246,11 +1264,19 @@ private final class NBThemeTargetAnchorView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard NBThemeInspectorRegistry.shared.isInspectionActive else { return }
         scheduleReport()
     }
 
     func scheduleReport() {
         guard !reportScheduled, !isDismantled else { return }
+        // Retain the weak view and paint metadata so opening the editor can
+        // immediately discover existing sheets. Idle updates need no queued
+        // main-thread callback or conversion to window coordinates.
+        guard NBThemeInspectorRegistry.shared.isInspectionActive else {
+            reportNow()
+            return
+        }
         reportScheduled = true
         DispatchQueue.main.async { [weak self] in
             self?.reportScheduled = false
@@ -1280,7 +1306,9 @@ private final class NBThemeTargetAnchorView: UIView {
             id: targetID,
             view: self,
             role: role,
-            frame: convert(bounds, to: window),
+            // visibleTargets samples the current geometry when editing starts;
+            // a cached frame is only needed for active layout invalidations.
+            frame: NBThemeInspectorRegistry.shared.isInspectionActive ? convert(bounds, to: window) : .zero,
             elementID: elementID,
             initialColor: initialColor,
             metadata: metadata

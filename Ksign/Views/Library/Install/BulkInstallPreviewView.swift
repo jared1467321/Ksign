@@ -51,8 +51,25 @@ struct BulkInstallPreviewView: View, Equatable {
 		}
 		.frame(maxWidth: .infinity, alignment: .center)
 		.padding(.vertical, 24)
-		.nbThemeBackground(.elevated)
-		.cornerRadius(22.5)
+		// The sheet already supplies viewport-sized glass. A second live glass
+		// surface here would grow to the height of the entire waiting queue.
+		.nbThemeBackground(
+			.elevated, opacity: 0.55,
+			in: RoundedRectangle(cornerRadius: 22.5), supportsGloss: false
+		)
+		.nbThemeOverlay {
+			RoundedRectangle(cornerRadius: 22.5)
+				.fill(LinearGradient(
+					colors: [.white.opacity(0.035), .clear],
+					startPoint: .topLeading, endPoint: .bottomTrailing
+				))
+				.allowsHitTesting(false)
+		}
+		.nbThemeOverlay {
+			RoundedRectangle(cornerRadius: 22.5)
+				.nbThemeStroke(.text, opacity: 0.07, lineWidth: 0.5)
+				.allowsHitTesting(false)
+		}
 		.padding(.horizontal)
 	}
 }

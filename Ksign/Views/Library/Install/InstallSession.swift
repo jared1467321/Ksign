@@ -298,9 +298,9 @@ final class InstallSession: ObservableObject {
 	private func _retire(_ job: InstallJob) {
 		guard let index = jobs.firstIndex(where: { $0 === job }) else { return }
 
-		withAnimation(.easeInOut(duration: 0.25)) {
-			_ = jobs.remove(at: index)
-		}
+		// The row fades locally. Do not animate a new position for every
+		// remaining app whenever one install finishes.
+		_ = jobs.remove(at: index)
 
 		_retired.append(job)
 

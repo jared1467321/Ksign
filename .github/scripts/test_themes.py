@@ -5,8 +5,33 @@ import shutil
 import subprocess
 import tempfile
 import re
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_inspector_lifetime(directory, compiler):
+    source = (ROOT / "NimbleKit/Sources/NimbleExtensions/View/NBThemeInspectorTarget.swift").read_text()
+    registry = source[source.index("@MainActor\npublic final class NBThemeInspectorRegistry:"):
+                      source.index("// MARK: - Public theme-paint helpers")]
+    # Picking is covered by the dedicated C suite. Retain the actual registry,
+    # visibility calculations and cleanup without that unrelated C dependency.
+    start = registry.index("    /// Pure production selector")
+    end = registry.index("    /// Clip against scroll containers", start)
+    registry = registry[:start] + registry[end:]
+    if sys.platform != "darwin":
+        # Linux's main actor can run off the initial OS thread. Verify actor
+        # isolation instead of UIKit's Darwin-specific main-thread identity.
+        registry = registry.replace("precondition(Thread.isMainThread)", "MainActor.preconditionIsolated()")
+    anchor = source[source.index("private final class NBThemeTargetAnchorView:"):
+                    source.index("private struct NBThemePaintGroupModifier:")]
+    tests = (ROOT / "Native/Theme/InspectorLifetime.swift").read_text()
+    path = directory / "InspectorLifetime.swift"
+    path.write_text(tests.replace("// PRODUCTION_REGISTRY", registry).replace("// PRODUCTION_ANCHOR", anchor))
+    executable = directory / "InspectorLifetime"
+    subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
+                    str(directory / "modules"), str(path), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)
 
 
 def test_aurora_work(directory, compiler):
@@ -88,6 +113,7 @@ def main():
         subprocess.run([compiler, "-swift-version", "6", "-parse-as-library", "-module-cache-path",
                         str(directory / "modules"), str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)
+        test_inspector_lifetime(directory, compiler)
         test_aurora_work(directory, compiler)
         test_aurora_lifetime(directory, compiler)
         test_aurora_rendering(directory, compiler)

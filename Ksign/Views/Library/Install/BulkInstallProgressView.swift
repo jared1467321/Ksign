@@ -44,12 +44,22 @@ struct BulkInstallProgressView: View {
 
 	var body: some View {
 		VStack(spacing: 6) {
-			InstallProgressView(
-				app: job.app,
-				viewModel: job.viewModel,
-				activity: _activity,
-				animatesIcon: _activity == .active
-			)
+			if job.phase == .queued {
+				// Waiting apps need one cached image, with no progress observer,
+				// second artwork layer, mask or repeating animation.
+				InstallStaticAppIcon(app: job.app)
+					.equatable()
+					.nbThemeOpacity(0.35)
+					.frame(width: 54, height: 54)
+					.scaleEffect(0.81)
+			} else {
+				InstallProgressView(
+					app: job.app,
+					viewModel: job.viewModel,
+					activity: _activity,
+					animatesIcon: _activity == .active
+				)
+			}
 
 			if job.phase == .failed {
 				Text(.localized("Failed"))
@@ -57,6 +67,10 @@ struct BulkInstallProgressView: View {
 					.nbThemeForeground(.danger)
 			}
 		}
+		// Finish the progress fill, then fade only this icon before retirement.
+		// Moving all remaining queued icons is deliberately not animated.
+		.opacity(job.phase == .completed ? 0 : 1)
+		.animation(.easeOut(duration: 0.25).delay(1.25), value: job.phase == .completed)
 		// Long press for the same two actions the Home Screen gives you. Using
 		// the system context menu rather than a custom gesture means the lift,
 		// the blur and the haptics all come for free and match the rest of iOS.
