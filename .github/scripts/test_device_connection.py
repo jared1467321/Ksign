@@ -50,7 +50,7 @@ def session_controls_source():
     return tests + "\n" + swift_block(session, "@MainActor\nfinal class InstallSession:")
 
 
-def queue_lifetime_source():
+def queue_lifetime_source(load=False):
     jobs = (ROOT / "Ksign/Views/Library/Install/InstallJob.swift").read_text()
     marker = "@MainActor\nfinal class InstallQueueCoordinator"
     coordinator = marker + jobs.split(marker, 1)[1]
@@ -59,6 +59,13 @@ def queue_lifetime_source():
     snapshot_start = jobs.index("private struct _ProcessMemorySnapshot {")
     snapshot_end = jobs.index("\nprivate func _processPhysicalFootprintBytes()", snapshot_start)
     snapshot = jobs[snapshot_start:snapshot_end]
+    fixture = (ROOT / "Native/Device/Tests/InstallQueueLifetime.swift").read_text()
+    if load:
+        fixture = fixture[:fixture.index("@main struct InstallQueueLifetimeTests")]
+        fixture += (ROOT / "Native/Device/Tests/InstallAdmissionLoad.swift").read_text()
+        coordinator = coordinator.replace(
+            "private func _reclaimOrphans() {",
+            "private func _reclaimOrphans() {\n AdmissionMetrics.passes += 1")
     if sys.platform != "darwin":
         # Linux logging uses String; the admission and memory-pressure handlers
         # stay verbatim against the platform event/source doubles in the fixture.
@@ -66,12 +73,13 @@ def queue_lifetime_source():
     tuning = (ROOT / "Ksign/Backend/Device/NativeInstallConcurrency.swift").read_text()
     tuning = tuning.replace("import IDeviceSwift", "")
     return "\n".join((
-        (ROOT / "Native/Device/Tests/InstallQueueLifetime.swift").read_text(),
+        fixture,
         (ROOT / "Native/Device/IDeviceInstallationWorker.swift").read_text(),
         swift_block((ROOT / "Native/Device/InstallationProxy.swift").read_text(),
                     "public enum IDeviceUploadEvent:"),
         tuning,
         snapshot,
+        swift_block(jobs, "private final class InstallAdmissionCancellation:"),
         coordinator,
     ))
 
@@ -117,6 +125,11 @@ def main():
         source = directory / "ConnectionRecovery.swift"
         source.write_text("\n".join(sources))
         executable = directory / "ConnectionRecoveryTests"
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        source.write_text(queue_lifetime_source(load=True))
         subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
                         str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)

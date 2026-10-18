@@ -4,9 +4,14 @@ import Foundation
 // library selection methods. Only platform/UI and installation services below
 // are doubled; no device, server, or library file is touched.
 @propertyWrapper struct Published<Value> {
-    var wrappedValue: Value
-    init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
+    private var value: Value
+    var wrappedValue: Value {
+        get { value }
+        set { value = newValue; PublicationMetrics.count += 1 }
+    }
+    init(wrappedValue: Value) { self.value = wrappedValue }
 }
+enum PublicationMetrics { static var count = 0 }
 protocol ObservableObject {}
 struct Animation { static func easeInOut(duration: Double) -> Self { Self() } }
 func withAnimation(_ animation: Animation, _ action: () -> Void) { action() }
@@ -155,6 +160,10 @@ enum EditMode { case active, inactive }
 }
 enum TestFailure: Error { case failed }
 
+extension InstallSession {
+    func sampleForegroundForTesting() { _recomputeProgress() }
+}
+
 @main struct InstallSessionControlsTests {
     @MainActor static func main() async throws {
         let session = InstallSession.shared
@@ -285,7 +294,16 @@ enum TestFailure: Error { case failed }
 
         session.start(apps: [TestApp(uuid: "upload-finished")])
         let uploading = session.jobs[0]
+        session.sampleForegroundForTesting()
+        let unchangedPublications = PublicationMetrics.count
+        for _ in 0..<100 { session.sampleForegroundForTesting() }
+        precondition(PublicationMetrics.count == unchangedPublications,
+                     "Unchanged progress/counters must not keep invalidating every session observer")
         uploading.begin()
+        let beforeCountChange = PublicationMetrics.count
+        session.sampleForegroundForTesting()
+        precondition(PublicationMetrics.count > beforeCountChange && session.aggregateProgress == 0,
+                     "Queued-to-running changes must refresh counters even before progress advances")
         let attempt = PackagingAttempt()
         uploading._packagingAttempt = attempt
         InstallQueueCoordinator.shared.hasDeviceWorkInProgress = true

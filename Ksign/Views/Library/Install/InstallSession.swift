@@ -31,6 +31,15 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
 
+	private struct ForegroundSnapshot: Equatable {
+		let progress: Double
+		let running: Int
+		let waiting: Int
+		let hasWork: Bool
+		let hasGroup: Bool
+	}
+	private var _foregroundSnapshot: ForegroundSnapshot?
+
 	// Keep successful library IDs after their rows retire. Bundle identifiers
 	// aren't sufficient: different signed copies can share the same bundle ID.
 	@Published private(set) var installedAppIDs: Set<String> = []
@@ -426,9 +435,8 @@ final class InstallSession: ObservableObject {
 	//
 	// Recomputed rather than stored, and `phase` lives on the job rather than
 	// here, so a queued job flipping to running doesn't republish this object
-	// on its own. It doesn't need to: the 0.4s tick reassigns
-	// `aggregateProgress` the whole time a batch is live, which redraws
-	// anything reading this. Worst case the count is 0.4s stale.
+	// on its own. The 0.4s snapshot includes these counters as well as progress,
+	// so a count change still redraws its observers even if progress is unchanged.
 	var runningCount: Int {
 		jobs.filter { $0.phase == .running && $0.hasWorkInProgress }.count
 	}
@@ -614,17 +622,32 @@ final class InstallSession: ObservableObject {
 	}
 
 	private func _recomputeProgress() {
-		guard totalCount > 0 else {
-			aggregateProgress = 0
-			return
+		var inFlight = 0.0
+		var running = 0
+		var waiting = 0
+		var hasWork = InstallQueueCoordinator.shared.activeCount > 0
+			|| InstallQueueCoordinator.shared.hasDeviceWorkInProgress
+		var hasGroup = false
+		for job in jobs {
+			inFlight += job.viewModel.overallProgress
+			let working = job.hasWorkInProgress
+			if job.phase == .running && working { running += 1 }
+			if job.phase == .queued || (job.phase == .running && job.batchRole == .awaiting) { waiting += 1 }
+			hasWork = hasWork || working
+			hasGroup = hasGroup || job.isInFlightGroupMember
 		}
 
 		// Jobs already retired count as a whole unit each; the ones still
 		// running contribute whatever they've managed so far.
 		let finished = Double(max(0, totalCount - jobs.count))
-		let inFlight = jobs.reduce(0.0) { $0 + $1.viewModel.overallProgress }
-
-		aggregateProgress = min(1.0, (finished + inFlight) / Double(totalCount))
+		let progress = totalCount > 0 ? min(1.0, (finished + inFlight) / Double(totalCount)) : 0
+		let snapshot = ForegroundSnapshot(progress: progress, running: running,
+			waiting: waiting, hasWork: hasWork, hasGroup: hasGroup)
+		guard snapshot != _foregroundSnapshot else { return }
+		_foregroundSnapshot = snapshot
+		// Reassigning the same @Published value still invalidates every session
+		// observer. Publish only when visible progress/counters/control state changed.
+		aggregateProgress = progress
 	}
 
 	// MARK: - Webview (server method 1)

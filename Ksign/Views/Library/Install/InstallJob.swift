@@ -1094,6 +1094,21 @@ final class InstallPromptCoordinator {
 	}
 }
 
+private final class InstallAdmissionCancellation: @unchecked Sendable {
+	private let lock = NSLock()
+	private var cancelled = false
+	var isCancelled: Bool {
+		lock.lock()
+		defer { lock.unlock() }
+		return cancelled
+	}
+	func cancel() {
+		lock.lock()
+		cancelled = true
+		lock.unlock()
+	}
+}
+
 // Limits how many installs run at once. Each job acquires a slot before
 // starting and releases it when it finishes (or gives up), so a large batch
 // installs a few at a time instead of all at once.
@@ -1171,7 +1186,19 @@ final class InstallQueueCoordinator {
 	private var _nativeTuner: NativeInstallConcurrencyTuner?
 	private var _nativeSampledAt: TimeInterval = 0
 	private var _nativeMemoryRetryAt: TimeInterval = 0
-	private var _waiters: Set<UUID> = []
+	private struct Waiter {
+		let jobID: UUID
+		let mayStart: () -> Bool
+		let cancellation: InstallAdmissionCancellation
+		let continuation: CheckedContinuation<Bool, Never>
+	}
+	// Waiting jobs suspend on continuations. One shared sampler owns admission;
+	// a large selection must not create one main-actor polling loop per app.
+	private var _waiters: [UUID: Waiter] = [:]
+	private var _waiterOrder: [UUID] = []
+	private var _admissionTask: Task<Void, Never>?
+	private var _admissionWake: CheckedContinuation<Void, Never>?
+	private var _admissionWakeToken: UUID?
 
 	private init() {
 		_startMemoryPressureMonitoring()
@@ -1231,50 +1258,116 @@ final class InstallQueueCoordinator {
 	func setPaused(_ paused: Bool) {
 		_isPaused = paused
 		_nativeTuner?.suspend()
+		_wakeAdmissionSampling()
 	}
 
 	// Waits until a slot is free, then claims it for `id` and returns true.
 	// Returns false if the calling task is cancelled while waiting. Because this
 	// runs on MainActor, check + admission + claim are atomic: waiting jobs cannot
 	// all sample the same headroom and stampede through together.
-	func acquire(for id: UUID, mayStart: () -> Bool = { true }) async -> Bool {
-		_waiters.insert(id)
-		defer { _waiters.remove(id) }
-		while true {
-			if Task.isCancelled { return false }
+	func acquire(for id: UUID, mayStart: @escaping () -> Bool = { true }) async -> Bool {
+		let token = UUID()
+		let cancellation = InstallAdmissionCancellation()
+		return await withTaskCancellationHandler {
+			await withCheckedContinuation { continuation in
+				guard !Task.isCancelled, !cancellation.isCancelled else {
+					continuation.resume(returning: false)
+					return
+				}
+				_waiters[token] = Waiter(jobID: id, mayStart: mayStart,
+					cancellation: cancellation, continuation: continuation)
+				_waiterOrder.append(token)
+				_startAdmissionSampling()
+			}
+		} onCancel: {
+			// Invalidate synchronously before the main-actor removal is delivered.
+			// Tokens distinguish an old waiter from a retry of the same job ID.
+			cancellation.cancel()
+			Task { @MainActor [weak self] in self?._cancelWaiter(token) }
+		}
+	}
 
-			_reclaimOrphans()
-			_sampleNativeThroughput()
+	private func _cancelWaiter(_ token: UUID) {
+		guard let waiter = _waiters.removeValue(forKey: token) else { return }
+		waiter.continuation.resume(returning: false)
+		if _waiters.isEmpty { _waiterOrder.removeAll(keepingCapacity: true) }
+	}
 
-			let effectiveMax = _effectiveMaxConcurrent
-			// Eligibility scans the session to preserve native selection order. No
-			// waiter needs that scan while every slot is already occupied.
-			let mayCheckNativeMemory = _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt
-			if !_isPaused, effectiveMax > 0, _holders.count < effectiveMax, mayCheckNativeMemory, mayStart() {
-				if !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: id) {
-					_holders.insert(id)
-					ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
-					if _usesAdaptiveMemoryAdmission {
-						_beginAdmissionObservation(for: id)
-					}
-					return true
-				} else if _nativeTuner != nil {
-					// Memory headroom is shared by all native waiters. One failed
-					// check is sufficient for this sampling interval; don't make the
-					// rest scan the same selection and remeasure the same process.
+	private func _startAdmissionSampling() {
+		guard _admissionTask == nil else {
+			if !_isPaused, _holders.count < _effectiveMaxConcurrent,
+			   _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt {
+				_wakeAdmissionSampling()
+			}
+			return
+		}
+		_admissionTask = Task { @MainActor in
+			defer { self._admissionTask = nil }
+			while !self._waiters.isEmpty {
+				self._admitWaitingJobs()
+				guard !self._waiters.isEmpty else { break }
+				let fullyStopped = self._isPaused || self._effectiveMaxConcurrent == 0
+				await self._waitForAdmissionChange(after: fullyStopped ? 0.5 : self._sampleInterval)
+			}
+		}
+	}
+
+	private func _waitForAdmissionChange(after interval: TimeInterval) async {
+		await withCheckedContinuation { continuation in
+			let token = UUID()
+			_admissionWake = continuation
+			_admissionWakeToken = token
+			DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+				guard let self, self._admissionWakeToken == token else { return }
+				self._wakeAdmissionSampling()
+			}
+		}
+	}
+
+	private func _wakeAdmissionSampling() {
+		let wake = _admissionWake
+		_admissionWake = nil
+		_admissionWakeToken = nil
+		wake?.resume()
+	}
+
+	private func _admitWaitingJobs() {
+		_reclaimOrphans()
+		_sampleNativeThroughput()
+		guard !_isPaused else { return }
+		for token in _waiterOrder {
+			guard let waiter = _waiters[token] else { continue }
+			if waiter.cancellation.isCancelled {
+				_cancelWaiter(token)
+				continue
+			}
+			guard _holders.count < _effectiveMaxConcurrent else { break }
+			guard _nativeTuner == nil || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt else { break }
+			// Preserve the existing native selection/self-update eligibility rules.
+			guard waiter.mayStart() else { continue }
+			guard !_usesAdaptiveMemoryAdmission || _adaptiveAdmissionIsSafe(for: waiter.jobID) else {
+				if _nativeTuner != nil {
+					_nativeMemoryRetryAt = ProcessInfo.processInfo.systemUptime + _sampleInterval
+				}
+				break
+			}
+			_holders.insert(waiter.jobID)
+			ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
+			if _usesAdaptiveMemoryAdmission {
+				_beginAdmissionObservation(for: waiter.jobID)
+				if _nativeTuner != nil {
 					_nativeMemoryRetryAt = ProcessInfo.processInfo.systemUptime + _sampleInterval
 				}
 			}
-
-			// A paused/pressure-blocked queue can sleep longer. During adaptive
-			// throttling we intentionally wake at the sampling cadence so the next
-			// slot can be admitted as soon as headroom stabilizes or recovers.
-			let fullyStopped = _isPaused || effectiveMax == 0
-			try? await Task.sleep(
-				nanoseconds: fullyStopped
-					? 500_000_000
-					: UInt64(_sampleInterval * 1_000_000_000)
-			)
+			_waiters.removeValue(forKey: token)
+			waiter.continuation.resume(returning: true)
+			// Adaptive admission always observes the newest job before adding
+			// another. Let its caller mark the job running before checking order
+			// again, rather than scanning every remaining queued job in this pass.
+			if _usesAdaptiveMemoryAdmission { break }
+		}
+		if _waiterOrder.count != _waiters.count {
+			_waiterOrder.removeAll { _waiters[$0] == nil }
 		}
 	}
 
@@ -1288,6 +1381,7 @@ final class InstallQueueCoordinator {
 		_deviceWorkers.remove(id)
 		NativeInstallUploadTelemetry.shared.remove(id)
 		if _deferredReleases.remove(id) != nil { release(id) }
+		_wakeAdmissionSampling()
 	}
 
 	// Successful AFC close frees upload capacity without cancelling the native
@@ -1309,6 +1403,9 @@ final class InstallQueueCoordinator {
 	private func _releaseHolder(_ id: UUID) {
 		guard _holders.remove(id) != nil else { return }
 		_nativeMemoryRetryAt = 0
+		// Refill freed upload slots immediately, without waiting for the next
+		// memory/throughput sample or waking every queued task.
+		_wakeAdmissionSampling()
 		ArchiveMemoryCoordinator.shared.setBuildCount(_holders.count)
 
 		// Capture one last sample while the just-finished job's footprint is still

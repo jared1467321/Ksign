@@ -74,6 +74,11 @@ source trees from the chunk-size experiment.
   reservations and Ksign's exclusive self-update remain tracked independently.
   Numeric drawer progress is coalesced to at most five deliveries per second
   per attempt, with immediate final values at phase boundaries and completion.
+  Waiting apps suspend on one shared admission sampler instead of each polling
+  the main actor. Upload completion and pause/resume wake that sampler directly;
+  the timer remains for memory/throughput measurements and eligibility changes.
+  Foreground session notifications are emitted only when progress, counters or
+  control state change, while all drawer positions retain the same behavior.
 - Uploads use bounded 1 MiB chunks. The experimental chunk-size picker has
   been removed; previously saved sizes no longer affect uploads. **Settings →
   Installation → iDevice → Upload performance** retains the latest completed
