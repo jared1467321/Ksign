@@ -18,6 +18,7 @@ final class SigningHandler: NSObject {
 	private var _movedAppPath: URL?
 	private var _archiveApp: ArchiveBackedApp?
     private var _archiveResourceDigests: Data?
+    private var _archiveTweakWorkspace: ArchiveTweakWorkspace?
 	private var _signedArchiveMetadata: ArchiveBackedAppMetadata?
 	private var _signedArchiveIcon: String?
 	private var _archiveSourceURL: URL?
@@ -62,12 +63,12 @@ final class SigningHandler: NSObject {
 			let appName = URL(fileURLWithPath: archiveApp.rootAppPath).lastPathComponent
 			let movedAppURL = _uniqueWorkDir.appendingPathComponent(appName, isDirectory: true)
 
-			// Direct dylib injection adds files and patches already-materialized
-			// executables. Debs and arbitrary support/framework replacements still
-			// require the complete tree to preserve their existing mutation behavior.
-			let needsFullTreeForTweaks = _options.injectionFiles.contains {
+            // Canonical archives use a journal of exact tweak destinations.
+            // Ambiguous aliases retain complete extraction for source-order compatibility.
+			let hasBroadTweakMutations = _options.injectionFiles.contains {
 				$0.pathExtension.lowercased() != "dylib"
 			} || _options.experiment_replaceSubstrateWithEllekit
+            let needsFullTreeForTweaks = hasBroadTweakMutations && !archiveApp.supportsSparseTweakMutations
 			if needsFullTreeForTweaks {
 				_archiveUsesFullExtractionFallback = true
 				_archiveOriginalRelativePaths = Set(archiveApp.paths())
@@ -90,16 +91,7 @@ final class SigningHandler: NSObject {
                     hashResources: !_options.onlyModify,
                     excludedResourcePaths: hashExclusions
 				)
-				if !_options.injectionFiles.isEmpty {
-					// The injector checks this framework's presence before adding the
-					// bundled ElleKit loader. Preserve the existing framework, including
-					// resources that sparse Mach-O extraction otherwise leaves in the IPA.
-					let loaderPath = "Frameworks/CydiaSubstrate.framework"
-					try archiveApp.extractTree(
-						relativePath: loaderPath,
-						to: movedAppURL.appendingPathComponent(loaderPath, isDirectory: true)
-					)
-				}
+
 				_movedAppPath = movedAppURL
 			}
 
@@ -215,6 +207,7 @@ final class SigningHandler: NSObject {
 		if let sourceArchive = _archiveSourceURL, let rootAppPath = _archiveRootAppPath {
 			let archiveDestination = destinationURL.appendingPathComponent("Archive.ipa", isDirectory: false)
 			var finalDeletedPaths = _archiveExplicitDeletedPaths
+            if let workspace = _archiveTweakWorkspace { finalDeletedPaths.formUnion(workspace.deletedPaths()) }
 
 			// The tweak compatibility fallback starts from a complete extracted app,
 			// and tweak/deb installation may remove arbitrary files without going
@@ -322,6 +315,7 @@ final class SigningHandler: NSObject {
 
 		var deletedPaths = _archiveExplicitDeletedPaths
 		deletedPaths.formUnion(_archiveSigningHiddenPaths)
+        if let workspace = _archiveTweakWorkspace { deletedPaths.formUnion(workspace.deletedPaths()) }
 		return ArchiveSigningContext(
 			archiveURL: archiveURL,
 			rootAppPath: rootAppPath,
@@ -491,9 +485,18 @@ extension SigningHandler {
 	}
 
 	private func _inject(for app: URL, with tweaks: [URL], with options: Options) async throws {
-		let handler = TweakHandler(app: app, with: tweaks, options: options)
+        let workspace: ArchiveTweakWorkspace?
+        if let archive = _archiveApp, !_archiveUsesFullExtractionFallback {
+            workspace = ArchiveTweakWorkspace(archive: archive, appURL: app,
+                excluded: _archiveExplicitDeletedPaths.union(_archiveSigningHiddenPaths))
+        } else { workspace = nil }
+        let handler = TweakHandler(app: app, with: tweaks, options: options,
+            prepareDestination: workspace.map { workspace in
+                { path, replacing in try workspace.prepare(path, replacing: replacing) }
+            })
 		do {
 			try await handler.getInputFiles()
+            _archiveTweakWorkspace = workspace
 		} catch {
 			throw error
 		}

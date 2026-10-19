@@ -22,6 +22,10 @@ public enum Zsign {
         ChangeDylibPath(appExecutable, old, new)
     }
 
+    public static func patchDylibs(appExecutable: String, rewrites: [String: String], injections: [String], weak: Bool = true) -> Bool {
+        PatchMachODylibs(appExecutable, rewrites, injections, weak)
+    }
+
     public static func sign(
         appPath: String = "",
         provisionPath: String = "",

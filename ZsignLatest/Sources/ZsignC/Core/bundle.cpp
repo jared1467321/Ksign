@@ -747,7 +747,68 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 	return true;
 }
 
-bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
+namespace {
+
+static void AppendResourceXML(string& out, const string& text)
+{
+    for (char c : text) {
+        if (c == '&') out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else out += c;
+    }
+}
+
+static void AppendResourceKey(string& out, const string& key, size_t depth)
+{
+    out.append(depth, '\t'); out += "<key>";
+    AppendResourceXML(out, key); out += "</key>\n";
+}
+
+static void AppendResourceData(string& out, const string& hash, size_t depth)
+{
+    out.append(depth, '\t'); out += "<data>\n";
+    out.append(depth, '\t'); out += hash; out += '\n';
+    out.append(depth, '\t'); out += "</data>\n";
+}
+
+struct ResourceEnvelope {
+    string prefix, rules, suffix;
+    ResourceEnvelope() {
+        jvalue rules;
+	rules["rules"]["^.*"] = true;
+	rules["rules"]["^.*\\.lproj/"]["optional"] = true;
+	rules["rules"]["^.*\\.lproj/"]["weight"] = 1000.0;
+	rules["rules"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
+	rules["rules"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+	rules["rules"]["^Base\\.lproj/"]["weight"] = 1010.0;
+	rules["rules"]["^version.plist$"] = true;
+
+	rules["rules2"]["^.*"] = true;
+	rules["rules2"][".*\\.dSYM($|/)"]["weight"] = 11.0;
+	rules["rules2"]["^(.*/)?\\.DS_Store$"]["omit"] = true;
+	rules["rules2"]["^(.*/)?\\.DS_Store$"]["weight"] = 2000.0;
+	rules["rules2"]["^.*\\.lproj/"]["optional"] = true;
+	rules["rules2"]["^.*\\.lproj/"]["weight"] = 1000.0;
+	rules["rules2"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
+	rules["rules2"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
+	rules["rules2"]["^Base\\.lproj/"]["weight"] = 1010.0;
+	rules["rules2"]["^Info\\.plist$"]["omit"] = true;
+	rules["rules2"]["^Info\\.plist$"]["weight"] = 20.0;
+	rules["rules2"]["^PkgInfo$"]["omit"] = true;
+	rules["rules2"]["^PkgInfo$"]["weight"] = 20.0;
+	rules["rules2"]["^embedded\\.provisionprofile$"]["weight"] = 20.0;
+	rules["rules2"]["^version\\.plist$"]["weight"] = 20.0;
+
+        string xml; rules.style_write_plist(xml);
+        const size_t begin = xml.find("<dict>\n") + 7;
+        const size_t end = xml.rfind("</dict>\n</plist>\n");
+        prefix = xml.substr(0, begin); this->rules = xml.substr(begin, end - begin); suffix = xml.substr(end);
+    }
+};
+
+} // namespace
+
+bool ZBundle::GenerateCodeResources(const string& strFolder, const string& strBundleExe, string& output)
 {
 	if (m_indexedFiles.empty() && m_indexedFolders.empty()) {
 		if (!BuildFileIndex()) {
@@ -755,7 +816,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		}
 	}
 
-	set<string> setFiles;
+	vector<string> files;
 	const string strPrefix = strFolder + "/";
 
 	// Reuse the single app-tree index instead of recursively walking the bundle
@@ -765,7 +826,6 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	for (auto file = m_sortedFiles.lower_bound(strPrefix); file != m_sortedFiles.end(); ++file) {
         const string& strPath = *file;
         if (0 != strPath.compare(0, strPrefix.size(), strPrefix)) break;
-		string strLinkTarget;
 		const bool hasDiskPath = m_overlayFiles.count(strPath) != 0;
 		const bool hasArchivePath = (m_archiveEntries.find(strPath) != m_archiveEntries.end());
 		if (!hasDiskPath && !hasArchivePath) {
@@ -774,42 +834,32 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 		string strNode = strPath.substr(strPrefix.size());
 		ZUtil::StringReplace(strNode, "\\", "/");
-		setFiles.insert(strNode);
+		files.push_back(std::move(strNode));
 	}
 
-	jvalue jvInfo;
-	jvInfo.read_plist_from_file("%s/Info.plist", strFolder.c_str());
-	string strBundleExe = jvInfo["CFBundleExecutable"];
-
-#ifdef _WIN32
-	iconv ic;
-	strBundleExe = ic.U82A(strBundleExe);
-#endif
-
-	setFiles.erase("_CodeSignature/CodeResources");
-	setFiles.erase(strBundleExe);
-	const string resolvedExecutable = ResolvedExecutablePath(strFolder + "/" + strBundleExe);
-	const string resolvedPrefix = ResolvedExecutablePath(strFolder) + "/";
-	if (0 == resolvedExecutable.compare(0, resolvedPrefix.size(), resolvedPrefix)) {
-		// The real executable of a versioned framework is excluded too; hashing
-		// it here would seal bytes that its own final signature is about to change.
-		setFiles.erase(resolvedExecutable.substr(resolvedPrefix.size()));
-	}
+    // The subtree index already has lexical order. Normalize legacy aliases,
+    // sorting only if normalization changed that order, then deduplicate.
+    if (!std::is_sorted(files.begin(), files.end())) sort(files.begin(), files.end());
+    files.erase(unique(files.begin(), files.end()), files.end());
+    const string resolvedExecutable = ResolvedExecutablePath(strFolder + "/" + strBundleExe);
+    const string resolvedPrefix = ResolvedExecutablePath(strFolder) + "/";
+    const string physicalExecutable = resolvedExecutable.compare(0, resolvedPrefix.size(), resolvedPrefix) == 0 ?
+        resolvedExecutable.substr(resolvedPrefix.size()) : strBundleExe;
 
 	struct ResourceHash
 	{
 		string key;
-		string sha1;
-		string sha256;
+        ResourceDigest computed;
+        const ResourceDigest* digest = NULL;
 		bool isSymlink = false;
 		bool hashOK = true;
-		bool cached = false;
 		string symlinkTarget;
 	};
 
 	vector<ResourceHash> hashes;
-	hashes.reserve(setFiles.size());
-	for (const string& strKey : setFiles) {
+	hashes.reserve(files.size());
+	for (string& strKey : files) {
+        if (strKey == "_CodeSignature/CodeResources" || strKey == strBundleExe || strKey == physicalExecutable) continue;
 		if (m_bRemoveProvision && strKey == "embedded.mobileprovision") {
 			string strProvFile = strFolder + "/embedded.mobileprovision";
 			remove(strProvFile.c_str());
@@ -819,15 +869,13 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		}
 
 		ResourceHash item;
-		item.key = strKey;
-		string strFile = strFolder + "/" + strKey;
+		item.key = std::move(strKey);
+		string strFile = strFolder + "/" + item.key;
 		item.isSymlink = GetLogicalSymbolicLinkTarget(strFile, item.symlinkTarget);
 		if (!item.isSymlink) {
 			auto cached = m_resourceDigests.find(strFile);
 			if (cached != m_resourceDigests.end()) {
-				item.sha1 = cached->second.sha1;
-				item.sha256 = cached->second.sha256;
-				item.cached = true;
+                item.digest = &cached->second;
 			}
 		}
 		hashes.push_back(std::move(item));
@@ -838,7 +886,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	// This keeps CodeResources byte-for-byte stable while using multiple cores.
 	vector<size_t> pending;
 	for (size_t i = 0; i < hashes.size(); i++) {
-		if (!hashes[i].isSymlink && !hashes[i].cached) {
+		if (!hashes[i].isSymlink && hashes[i].digest == NULL) {
 			pending.push_back(i);
 		}
 	}
@@ -862,7 +910,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 				return;
 			}
 		}
-		item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
+		item.hashOK = HashLogicalFile(strFile, item.computed.sha1, item.computed.sha256, reader);
 	});
 
 	for (const ResourceHash& item : hashes) {
@@ -874,89 +922,58 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 	// Publish only after every worker has finished. Unchanged descendants can
 	// reuse these digests when sealing their parents without inflating again.
-	for (const ResourceHash& item : hashes) {
-		if (!item.isSymlink && !item.cached) {
-			m_resourceDigests[strFolder + "/" + item.key] = {item.sha1, item.sha256};
-		}
-	}
-
-	jvCodeRes.clear();
-	jvCodeRes["files"] = jvalue(jvalue::E_OBJECT);
-	jvCodeRes["files2"] = jvalue(jvalue::E_OBJECT);
-
 	for (ResourceHash& item : hashes) {
-		string strKey = item.key;
+        if (!item.isSymlink && item.digest == NULL) {
+            item.digest = &m_resourceDigests.emplace(strFolder + "/" + item.key, std::move(item.computed)).first->second;
+        }
+    }
+
+    // Emit the same ordered XML directly; the large per-resource plist object
+    // tree and copies of cached digest strings are unnecessary.
+    static const ResourceEnvelope envelope;
+    output.clear();
+    output.reserve(envelope.prefix.size() + envelope.rules.size() + hashes.size() * 320);
+    output += envelope.prefix;
+    for (int version = 1; version <= 2; version++) {
+        AppendResourceKey(output, version == 1 ? "files" : "files2", 1);
+        const size_t opening = output.size();
+        output += "\t<dict>\n";
+        bool any = false;
+        for (const ResourceHash& item : hashes) {
+            string key = item.key;
 #ifdef _WIN32
-		strKey = ic.A2U8(strKey);
+            iconv ic; key = ic.A2U8(key);
 #endif
-
-		bool bomit1 = false;
-		bool bomit2 = false;
-
-		if (ZFile::IsPathSuffix(strKey, ".lproj/locversion.plist")) {
-			bomit1 = true;
-			bomit2 = true;
-		}
-
-		if (ZFile::IsPathSuffix(strKey, ".DS_Store") || "Info.plist" == strKey || "PkgInfo" == strKey) {
-			bomit2 = true;
-		}
-
-		if (item.isSymlink) {
-			// Apple's V2 resource envelope seals the symbolic link itself, not the
-			// bytes reached by following it. V1 only contains regular files.
-			if (!bomit2) {
-				jvCodeRes["files2"][strKey]["symlink"] = item.symlinkTarget;
-				if (string::npos != strKey.rfind(".lproj/")) {
-					jvCodeRes["files2"][strKey]["optional"] = true;
-				}
-			}
-			continue;
-		}
-
-		if (!bomit1) {
-			if (string::npos != strKey.rfind(".lproj/")) {
-				jvCodeRes["files"][strKey]["hash"] = "data:" + item.sha1;
-				jvCodeRes["files"][strKey]["optional"] = true;
-			} else {
-				jvCodeRes["files"][strKey] = "data:" + item.sha1;
-			}
-		}
-
-		if (!bomit2) {
-			jvCodeRes["files2"][strKey]["hash"] = "data:" + item.sha1;
-			jvCodeRes["files2"][strKey]["hash2"] = "data:" + item.sha256;
-			if (string::npos != strKey.rfind(".lproj/")) {
-				jvCodeRes["files2"][strKey]["optional"] = true;
-			}
-		}
-	}
-
-	jvCodeRes["rules"]["^.*"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/"]["optional"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/"]["weight"] = 1000.0;
-	jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
-	jvCodeRes["rules"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
-	jvCodeRes["rules"]["^Base\\.lproj/"]["weight"] = 1010.0;
-	jvCodeRes["rules"]["^version.plist$"] = true;
-
-	jvCodeRes["rules2"]["^.*"] = true;
-	jvCodeRes["rules2"][".*\\.dSYM($|/)"]["weight"] = 11.0;
-	jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["omit"] = true;
-	jvCodeRes["rules2"]["^(.*/)?\\.DS_Store$"]["weight"] = 2000.0;
-	jvCodeRes["rules2"]["^.*\\.lproj/"]["optional"] = true;
-	jvCodeRes["rules2"]["^.*\\.lproj/"]["weight"] = 1000.0;
-	jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["omit"] = true;
-	jvCodeRes["rules2"]["^.*\\.lproj/locversion.plist$"]["weight"] = 1100.0;
-	jvCodeRes["rules2"]["^Base\\.lproj/"]["weight"] = 1010.0;
-	jvCodeRes["rules2"]["^Info\\.plist$"]["omit"] = true;
-	jvCodeRes["rules2"]["^Info\\.plist$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^PkgInfo$"]["omit"] = true;
-	jvCodeRes["rules2"]["^PkgInfo$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^embedded\\.provisionprofile$"]["weight"] = 20.0;
-	jvCodeRes["rules2"]["^version\\.plist$"]["weight"] = 20.0;
-
-	return true;
+            if (ZFile::IsPathSuffix(key, ".lproj/locversion.plist") ||
+                (version == 1 && item.isSymlink) ||
+                (version == 2 && (ZFile::IsPathSuffix(key, ".DS_Store") || key == "Info.plist" || key == "PkgInfo"))) continue;
+            any = true;
+            const bool optional = key.find(".lproj/") != string::npos;
+            AppendResourceKey(output, key, 2);
+            if (version == 1 && !optional) { AppendResourceData(output, item.digest->sha1, 2); continue; }
+            output += "\t\t<dict>\n";
+            if (item.isSymlink) {
+                AppendResourceKey(output, "symlink", 3);
+                // Preserve the legacy plist writer's tagged-string handling.
+                jvalue target(item.symlinkTarget);
+                if (target.is_data_string()) AppendResourceData(output, item.symlinkTarget.substr(5), 3);
+                else {
+                    output += target.is_date_string() ? "\t\t\t<date>" : "\t\t\t<string>";
+                    AppendResourceXML(output, target.is_date_string() ? item.symlinkTarget.substr(5) : item.symlinkTarget);
+                    output += target.is_date_string() ? "</date>\n" : "</string>\n";
+                }
+            } else {
+                AppendResourceKey(output, "hash", 3); AppendResourceData(output, item.digest->sha1, 3);
+                if (version == 2) { AppendResourceKey(output, "hash2", 3); AppendResourceData(output, item.digest->sha256, 3); }
+            }
+            if (optional) { AppendResourceKey(output, "optional", 3); output += "\t\t\t<true/>\n"; }
+            output += "\t\t</dict>\n";
+        }
+        if (any) output += "\t</dict>\n";
+        else output.replace(opening, string::npos, "\t<dict/>\n");
+    }
+    output += envelope.rules; output += envelope.suffix;
+    return true;
 }
 
 void ZBundle::GetChangedFiles(jvalue& jvNode, vector<string>& arrChangedFiles)
@@ -1139,13 +1156,14 @@ bool ZBundle::SignNode(jvalue& jvNode)
 	string strCodeResFile = strBaseFolder + "/_CodeSignature/CodeResources";
 	m_resourceDigests.erase(strCodeResFile);
 
+	string strCodeResData;
 	jvalue jvCodeRes;
 	if (!bForceSign) {
 		jvCodeRes.read_plist_from_file(strCodeResFile.c_str());
 	}
 
 	if (bForceSign || jvCodeRes.is_null()) { // create
-		if (!GenerateCodeResources(strBaseFolder, jvCodeRes)) {
+		if (!GenerateCodeResources(strBaseFolder, strBundleExe, strCodeResData)) {
 			ZLog::ErrorV(">>> Create CodeResources failed! %s\n", strBaseFolder.c_str());
 			return false;
 		}
@@ -1174,8 +1192,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 		}
 	}
 
-	string strCodeResData;
-	jvCodeRes.style_write_plist(strCodeResData);
+	if (strCodeResData.empty()) jvCodeRes.style_write_plist(strCodeResData);
 	if (!ZFile::WriteFile(strCodeResFile.c_str(), strCodeResData)) {
 		ZLog::ErrorV("\tWriting CodeResources failed! %s\n", strCodeResFile.c_str());
 		return false;

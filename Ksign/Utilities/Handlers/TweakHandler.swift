@@ -19,14 +19,47 @@ class TweakHandler {
 	private var _urls: [URL]
 	private let _app: URL
     private var _options: Options
+    private let _prepareDestination: ((String, Bool) throws -> Void)?
+    private lazy var _mainExecutable = Bundle(url: _app)?.executableURL
+    private struct MachOPatch {
+        var rewrites: [String: String] = [:]
+        var injections: [String] = []
+    }
+    private var _patches: [URL: MachOPatch] = [:]
+    private var _patchOrder: [URL] = []
+
+    private func _queuePatch(for executable: URL, rewriteSubstrate: Bool = false, injection: String? = nil) {
+        let executable = executable.resolvingSymlinksInPath().standardizedFileURL
+        if _patches[executable] == nil { _patchOrder.append(executable) }
+        var patch = _patches[executable] ?? MachOPatch()
+        if rewriteSubstrate {
+            patch.rewrites["/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"] = "@rpath/CydiaSubstrate.framework/CydiaSubstrate"
+        }
+        if let injection { patch.injections.append(injection) }
+        _patches[executable] = patch
+    }
+
+    private func _applyPatches() {
+        for executable in _patchOrder {
+            guard let patch = _patches[executable] else { continue }
+            let success = Zsign.patchDylibs(appExecutable: executable.path, rewrites: patch.rewrites, injections: patch.injections)
+            if !success { Logger.misc.warning("One or more load-command edits failed for \(executable.lastPathComponent)") }
+        }
+        _patches.removeAll(); _patchOrder.removeAll()
+    }
     
-    init(app: URL, with urls: [URL], options: Options = OptionsManager.shared.options) {
+    init(app: URL, with urls: [URL], options: Options = OptionsManager.shared.options,
+         prepareDestination: ((String, Bool) throws -> Void)? = nil) {
 		self._app = app
 		self._urls = urls
         self._options = options
+        self._prepareDestination = prepareDestination
 	}
     
     private func _checkEllekit() async throws {
+        if !_urls.isEmpty || _options.experiment_replaceSubstrateWithEllekit {
+            try _prepareDestination?("Frameworks/CydiaSubstrate.framework", false)
+        }
         let frameworksPath = _app.appendingPathComponent("Frameworks").appendingPathComponent("CydiaSubstrate.framework")
 
         func addEllekit() async throws {
@@ -109,6 +142,7 @@ class TweakHandler {
 		if _options.injectIntoExtensions && !_injectedDylibNames.isEmpty {
 			_injectIntoAllExtensions(dylibNames: _injectedDylibNames)
 		}
+        _applyPatches()
 	}
 	
 	// finally, handle extracted contents
@@ -120,6 +154,7 @@ class TweakHandler {
 			case "framework":
 				try await _handleFramework(at: url)
 			case "bundle":
+                try _prepareDestination?(url.lastPathComponent, false)
 				let destinationURL = _app.appendingPathComponent(url.lastPathComponent)
 				
 				// Use copyItem instead of moveFileIfNeeded to preserve the original file
@@ -152,12 +187,14 @@ class TweakHandler {
 		}
 
 		destinationURL = destinationURL.appendingPathComponent(url.lastPathComponent)
+        let relative = (_options.injectFolder == .frameworks ? "Frameworks/" : "") + url.lastPathComponent
+        try _prepareDestination?(relative, false)
 
 		if !_fileManager.fileExists(atPath: destinationURL.path) {
 			try _fileManager.copyItem(at: url, to: destinationURL)
 		}
 		
-		guard let appexe = Bundle(url: _app)?.executableURL else {
+		guard let appexe = _mainExecutable else {
 			return
 		}
 		
@@ -165,16 +202,8 @@ class TweakHandler {
 		// this is not a good solution, at most this would work for basic tweaks
 		// we recommend you use newer theos to compile, and make sure it works
 		// using the ellekit framework
-		_ = Zsign.changeDylibPath(
-			appExecutable: destinationURL.path,
-			for: "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
-			with: "@rpath/CydiaSubstrate.framework/CydiaSubstrate"
-		)
-		// inject if there's a valid app main executable
-		_ = Zsign.injectDyLib(
-			appExecutable: appexe.path,
-			with: "\(_options.injectPath.rawValue)\(injectFolder.rawValue)\(destinationURL.lastPathComponent)"
-		)
+		_queuePatch(for: destinationURL, rewriteSubstrate: true)
+        _queuePatch(for: appexe, injection: "\(_options.injectPath.rawValue)\(injectFolder.rawValue)\(destinationURL.lastPathComponent)")
 
 		_injectedDylibNames.append(destinationURL.lastPathComponent)
 	}
@@ -205,6 +234,7 @@ class TweakHandler {
 	}
 	
 	private func _handleFramework(at url: URL) async throws {
+        try _prepareDestination?("Frameworks/" + url.lastPathComponent, false)
 		let destinationURL = _app.appendingPathComponent("Frameworks").appendingPathComponent(url.lastPathComponent)
 
 		if !_fileManager.fileExists(atPath: destinationURL.path) {
@@ -213,7 +243,7 @@ class TweakHandler {
 		
 		guard
 			let fexe = Bundle(url: destinationURL)?.executableURL,
-			let appexe = Bundle(url: _app)?.executableURL
+			let appexe = _mainExecutable
 		else {
 			print("Error: Could not find executable in framework or app bundle")
 			return
@@ -223,22 +253,12 @@ class TweakHandler {
 		// this is not a good solution, at most this would work for basic tweaks
 		// I recommend you use newer theos to compile, and make sure it works
 		// using the ellekit framework
-		let pathChangeResult = Zsign.changeDylibPath(
-			appExecutable: fexe.path,
-			for: "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
-			with: "@rpath/CydiaSubstrate.framework/CydiaSubstrate"
-		)
-		print("Path change result for \(fexe.lastPathComponent): \(pathChangeResult)")
-		
-		// inject if there's a valid app main executable
-		let injectResult = Zsign.injectDyLib(
-			appExecutable: appexe.path,
-			with: "@executable_path/Frameworks/\(destinationURL.lastPathComponent)/\(fexe.lastPathComponent)"
-		)
-		print("Inject result for \(destinationURL.lastPathComponent): \(injectResult)")
+		_queuePatch(for: fexe, rewriteSubstrate: true)
+        _queuePatch(for: appexe, injection: "@executable_path/Frameworks/\(destinationURL.lastPathComponent)/\(fexe.lastPathComponent)")
 	}
 
 	private func _handleBundle(at url: URL) async throws {
+        try _prepareDestination?(url.lastPathComponent, true)
 		let destinationURL = _app.appendingPathComponent(url.lastPathComponent)
 
 		if _fileManager.fileExists(atPath: destinationURL.path) {
@@ -373,7 +393,7 @@ extension TweakHandler {
 	}
 
 	// Injects a dylib into an extension's executable
-	private func _injectIntoExtension(extensionURL: URL, dylibName: String) {
+	private func _injectIntoExtension(extensionURL: URL, dylibNames: [String]) {
 		guard 
 			let extensionBundle = Bundle(url: extensionURL),
 			let extensionExecutable = extensionBundle.executableURL 
@@ -387,6 +407,7 @@ extension TweakHandler {
 			injectFolder = .root
 		}
 		
+        for dylibName in dylibNames {
 		let injectPath: String
 		if _options.injectPath == .rpath {
 			injectPath = "@rpath/\(dylibName)"
@@ -396,17 +417,9 @@ extension TweakHandler {
 			injectPath = "@executable_path/../../\(dylibName)"
 		}
 		
-		let success = Zsign.injectDyLib(
-			appExecutable: extensionExecutable.path,
-			with: injectPath
-		)
-		
-		if success {
-			Logger.misc.info("Injected \(dylibName) into extension: \(extensionURL.lastPathComponent)")
-		} else {
-			Logger.misc.warning("Failed to inject into extension: \(extensionURL.lastPathComponent)")
-		}
-	}
+        _queuePatch(for: extensionExecutable, injection: injectPath)
+        }
+    }
 
 	// Injects all dylibs into all discovered extensions
 	private func _injectIntoAllExtensions(dylibNames: [String]) {
@@ -420,9 +433,7 @@ extension TweakHandler {
 		Logger.misc.info("Found \(extensions.count) app extension(s) for injection")
 
 		for extensionURL in extensions {
-			for dylibName in dylibNames {
-				_injectIntoExtension(extensionURL: extensionURL, dylibName: dylibName)
-			}
+            _injectIntoExtension(extensionURL: extensionURL, dylibNames: dylibNames)
 		}
 	}
 }

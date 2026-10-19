@@ -5,6 +5,8 @@
 #include "mz_zip.h"
 #include <stdexcept>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
+#include "signing.h"
 #include <openssl/cms.h>
 #include <openssl/pem.h>
 
@@ -63,16 +65,73 @@ extern "C" int32_t __wrap_mz_zip_entry_read_open(void* handle, uint8_t raw, cons
 static atomic<size_t> pageSHA1(0), pageSHA256(0);
 static bool countPages = false;
 static atomic<size_t> rootParses(0);
-extern "C" unsigned char* __real_SHA1(const unsigned char*, size_t, unsigned char*);
-extern "C" unsigned char* __wrap_SHA1(const unsigned char* bytes, size_t size, unsigned char* hash) {
-    if (countPages && size == 4096) pageSHA1++;
-    return __real_SHA1(bytes, size, hash);
+static atomic<size_t> digestContexts(0);
+extern "C" EVP_MD_CTX* __real_EVP_MD_CTX_new();
+extern "C" EVP_MD_CTX* __wrap_EVP_MD_CTX_new() {
+    if (countPages) digestContexts++;
+    return __real_EVP_MD_CTX_new();
 }
-extern "C" unsigned char* __real_SHA256(const unsigned char*, size_t, unsigned char*);
-extern "C" unsigned char* __wrap_SHA256(const unsigned char* bytes, size_t size, unsigned char* hash) {
-    if (countPages && size == 4096) pageSHA256++;
-    return __real_SHA256(bytes, size, hash);
+extern "C" int __real_EVP_DigestUpdate(EVP_MD_CTX*, const void*, size_t);
+extern "C" int __wrap_EVP_DigestUpdate(EVP_MD_CTX* ctx, const void* bytes, size_t size) {
+    if (countPages && size == 4096) {
+        int type = EVP_MD_CTX_get_type(ctx);
+        if (type == NID_sha1) pageSHA1++;
+        if (type == NID_sha256) pageSHA256++;
+    }
+    return __real_EVP_DigestUpdate(ctx, bytes, size);
 }
+static atomic<size_t> patchMaps(0);
+static bool countPatchMaps = false;
+extern "C" void* __real_mmap(void*, size_t, int, int, int, off_t);
+extern "C" void* __wrap_mmap(void* address, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (countPatchMaps) patchMaps++;
+    return __real_mmap(address, length, prot, flags, fd, offset);
+}
+
+static void CheckPreparedMetadata() {
+    ZSignAsset asset;
+    assert(asset.Init("", "", "", "", "", true, false, false));
+    auto entitlement = [](const string& value) { return "<plist><dict><key>value</key><string>" + value + "</string></dict></plist>"; };
+    asset.m_strEntitleData = entitlement("first");
+    const auto& first = asset.PreparedEntitlements(true);
+    assert(first.xml.data.find("first") != string::npos);
+    assert(&first == &asset.PreparedEntitlements(true));
+    assert(asset.PreparedEntitlements(false).xml.data.find("first") == string::npos);
+    asset.m_strEntitleData = entitlement("second");
+    const auto& second = asset.PreparedEntitlements(true);
+    assert(second.xml.data.find("second") != string::npos && second.xml.data.find("first") == string::npos);
+    string sha1, sha256; ZSHA::SHA(second.xml.data, sha1, sha256);
+    assert(second.xml.sha1 == sha1 && second.xml.sha256 == sha256);
+    asset.m_strSubjectCN = "First certificate";
+    const string requirement = asset.PreparedRequirements("test.first").data;
+    assert(requirement != asset.PreparedRequirements("test.second").data);
+    asset.m_strSubjectCN = "Second certificate";
+    assert(requirement != asset.PreparedRequirements("test.first").data);
+    assert(asset.Init("", "", "", "", "", true, true, false));
+    assert(asset.PreparedEntitlements(true).xml.data.empty());
+}
+
+static void CheckPatches(const string& sequential, const string& batched) {
+    const string oldPath = "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate";
+    const string newPath = "@rpath/CydiaSubstrate.framework/CydiaSubstrate";
+    { ZMachO macho; assert(macho.Init(sequential.c_str())); assert(macho.InjectDylib(true, oldPath.c_str())); assert(macho.Free()); }
+    string original; assert(ZFile::ReadFile(sequential.c_str(), original));
+    assert(ZFile::WriteFile(batched.c_str(), original));
+    vector<string> injections = {"@executable_path/A.dylib", "@executable_path/A.dylib", "@executable_path/B.dylib"};
+    patchMaps = 0; countPatchMaps = true;
+    { ZMachO macho; assert(macho.Init(sequential.c_str())); assert(macho.ChangeDylibPath(oldPath.c_str(), newPath.c_str())); assert(macho.Free()); }
+    for (const string& path : injections) {
+        ZMachO macho; assert(macho.Init(sequential.c_str())); assert(macho.InjectDylib(true, path.c_str())); assert(macho.Free());
+    }
+    countPatchMaps = false; assert(patchMaps == 4);
+    patchMaps = 0; countPatchMaps = true;
+    { ZMachO macho; assert(macho.Init(batched.c_str())); assert(macho.PatchDylibs({{oldPath, newPath}}, injections, true)); assert(macho.Free()); }
+    countPatchMaps = false; assert(patchMaps == 1);
+    string expected, actual;
+    assert(ZFile::ReadFile(sequential.c_str(), expected) && ZFile::ReadFile(batched.c_str(), actual));
+    assert(expected == actual);
+}
+
 extern "C" X509* __real_PEM_read_bio_X509(BIO*, X509**, pem_password_cb*, void*);
 extern "C" X509* __wrap_PEM_read_bio_X509(BIO* bio, X509** cert, pem_password_cb* cb, void* ctx) {
     rootParses++;
@@ -84,10 +143,12 @@ static void SignBinary(const string& path, ZSignAsset& asset, size_t pages) {
     assert(stat(path.c_str(), &before) == 0);
     ZMachO macho;
     assert(macho.Init(path.c_str()));
-    pageSHA1 = 0; pageSHA256 = 0; countPages = true;
+    pageSHA1 = 0; pageSHA256 = 0; digestContexts = 0; countPages = true;
     assert(macho.Sign(&asset, true, "test.binary", "", "", ""));
     countPages = false;
     assert(pageSHA1 == (asset.m_bSHA256Only ? 0 : pages) && pageSHA256 == pages);
+    const size_t slices = pages / 256;
+    assert(digestContexts <= slices * ZUtil::GetWorkerCount(256) * (asset.m_bSHA256Only ? 1 : 2));
     struct stat after = {};
     assert(stat(path.c_str(), &after) == 0);
     assert((before.st_mode & 07777) == (after.st_mode & 07777));
@@ -156,6 +217,8 @@ static void CheckPool()
 
 int main(int argc, char** argv)
 {
+    CheckPreparedMetadata();
+    if (argc == 4 && string(argv[1]) == "--patches") { CheckPatches(argv[2], argv[3]); return 0; }
     if (argc == 5 && string(argv[1]) == "--cms") { CheckCMS(argv[2], argv[3], argv[4]); return 0; }
     if (argc == 4 && string(argv[1]) == "--binary") {
         ZSignAsset asset;

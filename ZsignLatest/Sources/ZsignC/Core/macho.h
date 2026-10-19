@@ -21,6 +21,7 @@ public:
 				const string& strCodeResourcesData);
 	bool InjectDylib(bool bWeakInject, const char* szDylibFile);
 	bool ChangeDylibPath(const char* oldPath, const char* newPath);
+	bool PatchDylibs(const vector<pair<string, string>>& rewrites, const vector<string>& injections, bool weak);
 	std::vector<std::string> ListDylibs();
 	void RemoveDylibs(const set<string>& setDylibs);
 

@@ -10,6 +10,7 @@ Pass --swiftc /path/to/swiftc to check the Swift archive and final metadata code
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -323,7 +324,33 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
                     str(shim), str(app), str(ROOT / "Tests/archive_metadata_regressions.swift"),
                     str(obj), str(minizip), "-Xlinker", "-lz", "-Xlinker", "-lpthread", "-Xlinker", "-lcrypto",
                     "-o", str(executable)], check=True)
-    subprocess.run([str(executable), str(source), str(work)], check=True)
+    tweak_source = work / "tweak-source.ipa"
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(tweak_source, "w", zipfile.ZIP_DEFLATED) as output:
+        for entry in original.infolist():
+            if not stat.S_ISLNK(entry.external_attr >> 16):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    output.writestr(entry, original.read(entry))
+        output.writestr(APP + "/Replace.bundle/old.txt", b"old")
+        output.writestr(APP + "/Replace.bundle/shared.txt", b"original shared")
+        output.writestr(APP + "/Replace.bundle.extra/untouched.txt", b"untouched")
+    subprocess.run([str(executable), str(source), str(work), str(tweak_source)], check=True)
+    handler = work / "TweakHandler.swift"
+    handler.write_text((ROOT.parent / "Ksign/Utilities/Handlers/TweakHandler.swift").read_text()
+        .replace("import Zsign", "").replace("import OSLog", "").replace("Bundle(url:", "TweakBundle(url:").replace("Bundle.main", "TweakBundle.main"))
+    subprocess.run([str(compiler), "-swift-version", "5", "-parse-as-library",
+                    "-module-cache-path", str(work / "swift-cache"), "-I", str(module),
+                    str(ROOT.parent / "ASignArchiveKit/Sources/ASignArchiveKit/ASignArchiveKit.swift"),
+                    str(shim), str(app), str(handler), str(ROOT / "Tests/tweak_workspace_regressions.swift"),
+                    str(obj), str(minizip), "-Xlinker", "-lz", "-Xlinker", "-lpthread", "-Xlinker", "-lcrypto",
+                    "-o", str(executable)], check=True)
+    subprocess.run([str(executable), str(tweak_source), str(work)], check=True)
+    with zipfile.ZipFile(work / "tweak-handler-full.ipa") as full, zipfile.ZipFile(work / "tweak-handler-sparse.ipa") as sparse:
+        contents = lambda archive: {entry.filename: archive.read(entry) for entry in archive.infolist() if not entry.is_dir()}
+        expected, actual = contents(full), contents(sparse)
+        different = sorted(name for name in expected.keys() | actual.keys() if expected.get(name) != actual.get(name))
+        assert not different, f"Sparse/full tweak archive contents differ: {different}"
+
 
 
 def main():
@@ -331,6 +358,7 @@ def main():
     parser.add_argument("--minizip-source", type=Path, required=True)
     parser.add_argument("--minizip-build", type=Path, required=True)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--reference-digests", type=Path, help="Compare signed fixture contents with a previous revision")
     parser.add_argument("--swiftc", type=Path, help="Also compile the Swift archive and metadata checks")
     args = parser.parse_args()
     repository = ROOT.parent
@@ -356,12 +384,27 @@ def main():
                         "-Wl,--wrap=mz_zip_entry_read_open", "-lssl", "-lcrypto", "-lz",
                         "-Wl,--wrap=mz_zip_reader_open_file",
                         "-Wl,--wrap=mz_zip_reader_goto_next_entry", "-Wl,--wrap=lstat",
-                        "-Wl,--wrap=SHA1", "-Wl,--wrap=SHA256", "-Wl,--wrap=PEM_read_bio_X509",
+                        "-Wl,--wrap=EVP_DigestUpdate", "-Wl,--wrap=EVP_MD_CTX_new",
+                        "-Wl,--wrap=PEM_read_bio_X509", "-Wl,--wrap=mmap",
                         "-o", str(executable)], check=True)
         source = work / "source.ipa"
         fixture(source)
+        if args.reference_digests:
+            reference = json.loads(args.reference_digests.read_text())
+            def verify_reference(*arguments, **keywords):
+                result = verify_archive(*arguments, **keywords)
+                expected = reference.pop(0)
+                actual = {name: hashlib.sha256(data).hexdigest() for name, data in result.items()}
+                assert actual == expected, "Signed contents differ from the reference revision"
+                return result
+            verify = verify_reference
+        else:
+            verify = verify_archive
         extraction_checks(executable, work)
         growth_and_cms_checks(executable, work)
+        patch_source, patch_output = work / "patch-source", work / "patch-output"
+        patch_source.write_bytes(macho())
+        subprocess.run([str(executable), "--patches", str(patch_source), str(patch_output)], check=True, stdout=subprocess.PIPE)
         if args.swiftc:
             swift_metadata_checks(args.swiftc, work, archive, includes,
                                   args.minizip_build / "libminizip.a", source)
@@ -401,7 +444,7 @@ def main():
             standalone_logs = [line for line in run.stdout.splitlines() if ">>> SignFile:" in line]
             assert len(standalone_logs) == 4, standalone_logs
             assert all(line.endswith(("Standalone.dylib", "Injected.dylib")) for line in standalone_logs)
-            results.append(verify_archive(destination))
+            results.append(verify(destination))
         assert results[0] == results[1], "Serial and parallel signing must emit identical contents"
         assert results[1] == results[2], "Sparse and filesystem signing must emit identical contents"
         assert results[2] == results[3], "Relative and absolute paths must emit identical contents"
@@ -413,14 +456,14 @@ def main():
             destination = work / (mode[2:] + ".ipa")
             subprocess.run([str(executable), str(source), str(destination), str(overlay), APP, mode],
                            check=True, stdout=subprocess.PIPE)
-            edited.append(verify_archive(destination, edited_resource=True))
+            edited.append(verify(destination, edited_resource=True))
         assert edited[0] == edited[1], "An overlay must invalidate the original resource digest"
         overlay = work / "profiles.app"
         overlay.mkdir()
         destination = work / "profiles.ipa"
         subprocess.run([str(executable), str(source), str(destination), str(overlay), APP, "--profiles"],
                        env={**os.environ, "ZSIGN_WORKERS": "4"}, check=True, stdout=subprocess.PIPE)
-        verify_archive(destination, profiles=True)
+        verify(destination, profiles=True)
         source = work / "aliased-source.ipa"
         fixture(source, aliases=True)
         overlay = work / "aliased.app"
@@ -428,11 +471,12 @@ def main():
         destination = work / "aliased.ipa"
         subprocess.run([str(executable), str(source), str(destination), str(overlay), APP],
                        env={**os.environ, "ZSIGN_WORKERS": "4"}, check=True, stdout=subprocess.PIPE)
-        verify_archive(destination)
+        verify(destination)
         with zipfile.ZipFile(destination) as archive:
             real = archive.read(APP + "/AliasFiles/Code")
             assert real == archive.read(APP + "/AliasLink/Code")
             verify_signature(real, None, None)
+        if args.reference_digests: assert not reference, "Reference fixtures were not all exercised"
     print("Passed worker reuse/concurrency, single executable signing, hash reuse, signature/page hashes,")
     print("nested seals, selective parallel extraction/aliases/CRC, shared indexes, sparse additions and deletions.")
 

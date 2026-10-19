@@ -152,6 +152,24 @@ final class ArchiveBackedApp {
 		entriesByPath = index
 	}
 
+    /// Ambiguous filesystem aliases retain the complete-tree tweak fallback.
+    /// Canonical trees can materialize just the destinations the injector uses.
+    var supportsSparseTweakMutations: Bool {
+        var spellings: [String: String] = [:]
+        for entry in entriesByPath.values {
+            if entry.isSymlink || entry.path.contains("//") || !entry.path.utf8.allSatisfy({ $0 < 128 }) { return false }
+            var parent = ""
+            for component in entry.path.split(separator: "/", omittingEmptySubsequences: true) {
+                if component == "." { return false }
+                parent += (parent.isEmpty ? "" : "/") + component
+                let folded = parent.lowercased()
+                if let previous = spellings[folded], previous != parent { return false }
+                spellings[folded] = parent
+            }
+        }
+        return true
+    }
+
 	func metadata(overlayAppURL: URL? = nil, deletedPaths: Set<String> = []) throws -> ArchiveBackedAppMetadata {
 		let plistPath = rootAppPath + "/Info.plist"
 		guard let entry = entriesByPath[plistPath] else {
@@ -428,6 +446,72 @@ final class ArchiveBackedApp {
 		guard !path.hasPrefix("/"), !path.hasPrefix("\\"), !path.contains("\\") else { return false }
 		return !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." })
 	}
+}
+
+/// An operation-local journal for tweak destinations. Source resources outside
+/// those destinations stay in the IPA. Whole replacements need only a path
+/// snapshot; add-only destinations materialize their existing contents first.
+final class ArchiveTweakWorkspace {
+    private let archive: ArchiveBackedApp
+    private let appURL: URL
+    private let excluded: Set<String>
+    private var prepared = Set<String>()
+    private var replacements = Set<String>()
+    private var originals = Set<String>()
+    private let fileManager = FileManager.default
+
+    init(archive: ArchiveBackedApp, appURL: URL, excluded: Set<String>) {
+        self.archive = archive; self.appURL = appURL; self.excluded = excluded
+    }
+
+    private func contains(_ paths: Set<String>, _ candidate: String) -> Bool {
+        paths.contains { candidate == $0 || candidate.hasPrefix($0 + "/") }
+    }
+
+    func prepare(_ relativePath: String, replacing: Bool) throws {
+        let path = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !path.isEmpty, !relativePath.hasPrefix("/"), !path.contains("\\"),
+              !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0.isEmpty || $0 == "." || $0 == ".." })
+        else { throw ArchiveBackedAppError.unsafePath(relativePath) }
+        if replacing { replacements.insert(path) }
+        if contains(prepared, path) { return }
+        prepared.insert(path)
+        originals.formUnion(archive.paths(relativePrefix: path).map {
+            $0.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }.filter { $0 == path || $0.hasPrefix(path + "/") })
+        if replacing || contains(excluded, path) { return }
+        let scratch = fileManager.temporaryDirectory.appendingPathComponent("FeatherTweakInputs_" + UUID().uuidString)
+        defer { try? fileManager.removeItem(at: scratch) }
+        let staged = scratch.appendingPathComponent("Input")
+        guard try archive.extractTree(relativePath: path, to: staged) else { return }
+        try merge(staged, relativePath: path)
+    }
+
+    private func merge(_ staged: URL, relativePath: String) throws {
+        if contains(excluded, relativePath) || contains(replacements, relativePath) { return }
+        let destination = appURL.appendingPathComponent(relativePath)
+        let attributes = try fileManager.attributesOfItem(atPath: staged.path)
+        let directory = attributes[.type] as? FileAttributeType == .typeDirectory
+        let exists = fileManager.fileExists(atPath: destination.path) ||
+            (try? fileManager.destinationOfSymbolicLink(atPath: destination.path)) != nil
+        if directory {
+            if !exists { try fileManager.createDirectory(at: destination, withIntermediateDirectories: true) }
+            for child in try fileManager.contentsOfDirectory(at: staged, includingPropertiesForKeys: nil) {
+                try merge(child, relativePath: relativePath + "/" + child.lastPathComponent)
+            }
+        } else if !exists {
+            try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fileManager.copyItem(at: staged, to: destination)
+        }
+    }
+
+    func deletedPaths() -> Set<String> {
+        Set(originals.filter { path in
+            let destination = appURL.appendingPathComponent(path)
+            return !fileManager.fileExists(atPath: destination.path) &&
+                (try? fileManager.destinationOfSymbolicLink(atPath: destination.path)) == nil
+        })
+    }
 }
 
 // MARK: - Helpers

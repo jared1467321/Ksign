@@ -1,5 +1,7 @@
 #include "common.h"
 #include "openssl.h"
+#include "mach-o.h"
+#include "signing.h"
 #include <openssl/pem.h>
 #include <openssl/cms.h>
 #include <openssl/err.h>
@@ -356,6 +358,39 @@ static bool StackContainsIssuerOf(STACK_OF(X509)* certs, X509* cert)
 		}
 	}
 	return false;
+}
+
+static void HashPreparedBlob(ZSignAsset::PreparedBlob& blob)
+{
+    if (blob.data.empty()) { blob.sha1.assign(20, 0); blob.sha256.assign(32, 0); }
+    else ZSHA::SHA(blob.data, blob.sha1, blob.sha256);
+}
+
+const ZSignAsset::PreparedBlob& ZSignAsset::PreparedRequirements(const string& bundleId)
+{
+    auto key = make_pair(bundleId, m_strSubjectCN);
+    auto found = m_requirements.find(key);
+    if (found != m_requirements.end()) return found->second;
+    PreparedBlob blob;
+    ZSign::SlotBuildRequirements(bundleId, m_strSubjectCN, blob.data);
+    HashPreparedBlob(blob);
+    return m_requirements.emplace(std::move(key), std::move(blob)).first->second;
+}
+
+const ZSignAsset::EntitlementBlobs& ZSignAsset::PreparedEntitlements(bool executable)
+{
+    auto& blobs = m_entitlements[executable ? 1 : 0];
+    static const string noEntitlements;
+    const string& source = executable ? m_strEntitleData : noEntitlements;
+    if (blobs.ready && blobs.source == source) return blobs;
+    blobs = EntitlementBlobs();
+    blobs.source = source;
+    const string empty = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
+    ZSign::SlotBuildEntitlements(executable ? source : empty, blobs.xml.data);
+    ZSign::SlotBuildDerEntitlements(executable ? source : "", blobs.der.data);
+    HashPreparedBlob(blobs.xml); HashPreparedBlob(blobs.der);
+    blobs.ready = true;
+    return blobs;
 }
 
 bool ZSignAsset::PrepareCMSChain()
@@ -882,6 +917,8 @@ void ZSignAsset::Reset()
 	EVP_PKEY_free((EVP_PKEY*)m_evpPKey);
 	m_cmsChain = m_caCerts = m_x509Cert = m_evpPKey = NULL;
 	m_cmsSizeBound = 0;
+    m_requirements.clear();
+    m_entitlements[0] = EntitlementBlobs(); m_entitlements[1] = EntitlementBlobs();
 	m_strTeamId.clear(); m_strSubjectCN.clear(); m_strProvData.clear();
 	m_strEntitleData.clear(); m_strApplicationId.clear();
 }

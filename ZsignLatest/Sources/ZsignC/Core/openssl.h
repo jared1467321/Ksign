@@ -11,6 +11,11 @@ public:
 	// Includes the blob wrapper and a conservative bound for CMS attributes.
 	size_t CMSSignatureSizeBound();
 
+    struct PreparedBlob { string data, sha1, sha256; };
+    struct EntitlementBlobs { string source; bool ready = false; PreparedBlob xml, der; };
+    const PreparedBlob& PreparedRequirements(const string& bundleId);
+    const EntitlementBlobs& PreparedEntitlements(bool executable);
+
 public:
 	bool Init(const string& strCertFile, 
 				const string& strPKeyFile,
@@ -69,6 +74,8 @@ private:
 	void*	m_caCerts; // STACK_OF(X509)* CA chain recovered from the input p12, if any
 	void* m_cmsChain;
 	size_t m_cmsSizeBound;
+    map<pair<string, string>, PreparedBlob> m_requirements;
+    EntitlementBlobs m_entitlements[2];
 
 public:
 	static const char* s_szAppleDevCACert;

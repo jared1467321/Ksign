@@ -2,7 +2,7 @@
 #include "json.h"
 #include "archo.h"
 #include "signing.h"
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
 ZArchO::ZArchO()
 {
@@ -324,47 +324,41 @@ void ZArchO::PrintInfo()
 	ZLog::Print("------------------------------------------------------------------\n");
 }
 
-static void BuildCodeSlotHashes(uint8_t* pCodeBase,
-	uint32_t uCodeLength,
-	bool bNeedSHA1,
-	bool bNeedSHA256,
-	string& strSHA1Slots,
-	string& strSHA256Slots)
+static bool BuildCodeSlotHashes(uint8_t* pCodeBase,
+    uint32_t uCodeLength, bool bNeedSHA1, bool bNeedSHA256,
+    string& strSHA1Slots, string& strSHA256Slots)
 {
-	const uint32_t uPageSize = 1u << 12;
-	const uint32_t uCodeSlots = (uCodeLength + uPageSize - 1) / uPageSize;
-	if (0 == uCodeSlots || (!bNeedSHA1 && !bNeedSHA256)) {
-		return;
-	}
-
-	if (bNeedSHA1) {
-		strSHA1Slots.resize((size_t)uCodeSlots * 20);
-	}
-	if (bNeedSHA256) {
-		strSHA256Slots.resize((size_t)uCodeSlots * 32);
-	}
-
-	auto hashSlot = [&](uint32_t slot) {
-		const uint32_t offset = slot * uPageSize;
-		const uint32_t length = std::min<uint32_t>(uPageSize, uCodeLength - offset);
-		if (bNeedSHA1) {
-			uint8_t hash1[20];
-			::SHA1(pCodeBase + offset, length, hash1);
-			memcpy(&strSHA1Slots[(size_t)slot * 20], hash1, sizeof(hash1));
-		}
-		if (bNeedSHA256) {
-			uint8_t hash256[32];
-			::SHA256(pCodeBase + offset, length, hash256);
-			memcpy(&strSHA256Slots[(size_t)slot * 32], hash256, sizeof(hash256));
-		}
-	};
-
-	const size_t workerCount = (uCodeLength >= 512 * 1024 && uCodeSlots >= 64) ? ZUtil::GetWorkerCount(uCodeSlots) : 1;
-	// Claim contiguous page groups to reduce atomic contention and preserve
-	// locality while reusing the same workers as resource hashing.
-	ZUtil::ParallelFor(uCodeSlots, workerCount, [&](size_t slot, size_t) {
-		hashSlot((uint32_t)slot);
-	}, 16);
+    const size_t pageSize = 4096;
+    const size_t slots = ((size_t)uCodeLength + pageSize - 1) / pageSize;
+    if (slots == 0 || (!bNeedSHA1 && !bNeedSHA256)) return true;
+    if (bNeedSHA1) strSHA1Slots.resize(slots * 20);
+    if (bNeedSHA256) strSHA256Slots.resize(slots * 32);
+    const size_t workers = uCodeLength >= 512 * 1024 && slots >= 64 ? ZUtil::GetWorkerCount(slots) : 1;
+    using Context = unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    vector<Context> sha1, sha256;
+    for (size_t lane = 0; lane < workers; lane++) {
+        sha1.emplace_back(bNeedSHA1 ? EVP_MD_CTX_new() : NULL, EVP_MD_CTX_free);
+        sha256.emplace_back(bNeedSHA256 ? EVP_MD_CTX_new() : NULL, EVP_MD_CTX_free);
+        if ((bNeedSHA1 && (!sha1.back() || EVP_DigestInit_ex(sha1.back().get(), EVP_sha1(), NULL) != 1)) ||
+            (bNeedSHA256 && (!sha256.back() || EVP_DigestInit_ex(sha256.back().get(), EVP_sha256(), NULL) != 1))) return false;
+    }
+    atomic<bool> ok(true);
+    ZUtil::ParallelFor(slots, workers, [&](size_t slot, size_t lane) {
+        if (!ok.load(std::memory_order_relaxed)) return;
+        const size_t offset = slot * pageSize;
+        const size_t length = std::min(pageSize, (size_t)uCodeLength - offset);
+        auto hash = [&](EVP_MD_CTX* ctx, char* destination, unsigned int expected) {
+            unsigned int written = 0;
+            // A null digest reinitializes the existing implementation, retaining
+            // its allocation/provider selection for every page in this lane.
+            return EVP_DigestInit_ex(ctx, NULL, NULL) == 1 &&
+                EVP_DigestUpdate(ctx, pCodeBase + offset, length) == 1 &&
+                EVP_DigestFinal_ex(ctx, (unsigned char*)destination, &written) == 1 && written == expected;
+        };
+        if ((bNeedSHA1 && !hash(sha1[lane].get(), &strSHA1Slots[slot * 20], 20)) ||
+            (bNeedSHA256 && !hash(sha256[lane].get(), &strSHA256Slots[slot * 32], 32))) ok.store(false, std::memory_order_relaxed);
+    }, 16);
+    return ok.load();
 }
 
 bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset, 
@@ -376,39 +370,17 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	const string& strCodeResourcesSHA256, 
 	string& strOutput)
 {
-	string strRequirementsSlot;
-	string strEntitlementsSlot;
-	string strDerEntitlementsSlot;
-
-	string strEmptyEntitlements = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
-	ZSign::SlotBuildRequirements(strBundleId, pSignAsset->m_strSubjectCN, strRequirementsSlot);
-	ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
-	ZSign::SlotBuildDerEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : "", strDerEntitlementsSlot);
-
-	auto BuildSpecialSlotHashes = [&](const string& strData, string& strSHA1, string& strSHA256) {
-		if (strData.empty()) {
-			if (!pSignAsset->m_bSHA256Only) {
-				strSHA1.append(20, 0);
-			}
-			strSHA256.append(32, 0);
-		} else if (pSignAsset->m_bSHA256Only) {
-			ZSHA::SHA256(strData, strSHA256);
-		} else {
-			ZSHA::SHA(strData, strSHA1, strSHA256);
-		}
-	};
-
-	string strRequirementsSlotSHA1;
-	string strRequirementsSlotSHA256;
-	BuildSpecialSlotHashes(strRequirementsSlot, strRequirementsSlotSHA1, strRequirementsSlotSHA256);
-
-	string strEntitlementsSlotSHA1;
-	string strEntitlementsSlotSHA256;
-	BuildSpecialSlotHashes(strEntitlementsSlot, strEntitlementsSlotSHA1, strEntitlementsSlotSHA256);
-
-	string strDerEntitlementsSlotSHA1;
-	string strDerEntitlementsSlotSHA256;
-	BuildSpecialSlotHashes(strDerEntitlementsSlot, strDerEntitlementsSlotSHA1, strDerEntitlementsSlotSHA256);
+	const auto& requirements = pSignAsset->PreparedRequirements(strBundleId);
+	const auto& entitlements = pSignAsset->PreparedEntitlements(IsExecute());
+	const string& strRequirementsSlot = requirements.data;
+	const string& strEntitlementsSlot = entitlements.xml.data;
+	const string& strDerEntitlementsSlot = entitlements.der.data;
+	const string& strRequirementsSlotSHA1 = requirements.sha1;
+	const string& strRequirementsSlotSHA256 = requirements.sha256;
+	const string& strEntitlementsSlotSHA1 = entitlements.xml.sha1;
+	const string& strEntitlementsSlotSHA256 = entitlements.xml.sha256;
+	const string& strDerEntitlementsSlotSHA1 = entitlements.der.sha1;
+	const string& strDerEntitlementsSlotSHA256 = entitlements.der.sha256;
 
 	uint8_t* pCodeSlots1Data = NULL;
 	uint8_t* pCodeSlots256Data = NULL;
@@ -430,12 +402,12 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 
 	string strComputedSHA1Slots;
 	string strComputedSHA256Slots;
-	BuildCodeSlotHashes(m_pBase,
+	if (!BuildCodeSlotHashes(m_pBase,
 		m_uCodeLength,
 		!pSignAsset->m_bSHA256Only && !bHaveSHA1Slots,
 		!bHaveSHA256Slots,
 		strComputedSHA1Slots,
-		strComputedSHA256Slots);
+		strComputedSHA256Slots)) return false;
 
 	if (!pSignAsset->m_bSHA256Only && !bHaveSHA1Slots) {
 		pCodeSlots1Data = (uint8_t*)strComputedSHA1Slots.data();
@@ -677,17 +649,14 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 
 uint32_t ZArchO::RequiredCodeSignSpace(ZSignAsset* asset, const string& bundleId)
 {
-	string requirements, entitlements, der;
-	const string empty = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
-	ZSign::SlotBuildRequirements(bundleId, asset->m_strSubjectCN, requirements);
-	ZSign::SlotBuildEntitlements(IsExecute() ? asset->m_strEntitleData : empty, entitlements);
-	ZSign::SlotBuildDerEntitlements(IsExecute() ? asset->m_strEntitleData : "", der);
+	const auto& requirements = asset->PreparedRequirements(bundleId);
+	const auto& entitlements = asset->PreparedEntitlements(IsExecute());
 	const uint64_t pages = ((uint64_t)m_uCodeLength + 4095) / 4096;
 	// Upper bounds: seven special slots, all six blob indexes, and both CDs
 	// unless SHA256-only. No page bytes are read and no CMS signature is made.
 	const uint64_t cdHeader = sizeof(CS_CodeDirectory) + bundleId.size() + 1 + asset->m_strTeamId.size() + 1;
 	uint64_t size = sizeof(CS_SuperBlob) + 6 * sizeof(CS_BlobIndex) +
-		requirements.size() + entitlements.size() + der.size() + cdHeader + (pages + 7) * 32;
+		requirements.data.size() + entitlements.xml.data.size() + entitlements.der.data.size() + cdHeader + (pages + 7) * 32;
 	if (!asset->m_bSHA256Only) size += cdHeader + (pages + 7) * 20;
 	if (!asset->m_bAdhoc) {
 		size_t cms = asset->CMSSignatureSizeBound();

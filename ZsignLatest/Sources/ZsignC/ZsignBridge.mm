@@ -216,6 +216,22 @@ bool ChangeDylibPath(NSString *filePath, NSString *oldPath, NSString *newPath)
     }
 }
 
+bool PatchMachODylibs(NSString *filePath, NSDictionary<NSString *, NSString *> *rewrites, NSArray<NSString *> *injections, bool weak)
+{
+    @autoreleasepool {
+        vector<pair<string, string>> changes;
+        for (NSString *oldPath in [[rewrites allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+            changes.emplace_back(ToString(oldPath), ToString(rewrites[oldPath]));
+        }
+        vector<string> paths;
+        for (NSString *path in injections) paths.push_back(ToString(path));
+        ZMachO macho;
+        if (!macho.Init(ToString(filePath).c_str())) return false;
+        const bool success = macho.PatchDylibs(changes, paths, weak);
+        return macho.Free() && success;
+    }
+}
+
 int zsign(
     NSString *app,
     NSString *prov,

@@ -170,6 +170,14 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 	return CloseFile();
 }
 
+bool ZMachO::PatchDylibs(const vector<pair<string, string>>& rewrites, const vector<string>& injections, bool weak)
+{
+	bool success = true;
+	for (const auto& rewrite : rewrites) success = ChangeDylibPath(rewrite.first.c_str(), rewrite.second.c_str()) && success;
+	for (const string& path : injections) success = InjectDylib(weak, path.c_str()) && success;
+	return success;
+}
+
 bool ZMachO::ReallocCodeSignSpace(const vector<uint32_t>& signatureSizes)
 {
 	ZLog::Warn(">>> Realloc CodeSignature space... \n");
