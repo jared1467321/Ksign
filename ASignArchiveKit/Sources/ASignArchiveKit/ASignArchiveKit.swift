@@ -121,6 +121,12 @@ public final class ASignArchiveIndex {
         self.signingManifest = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: manifest), count: count,
             deallocator: .custom { [storage] _, _ in withExtendedLifetime(storage) {} })
     }
+
+    /// Reject a review handoff if its immutable archive has been replaced.
+    public func validate() throws {
+        let status = asign_archive_index_validate(handle)
+        guard status == 0 else { throw ASignArchiveError.entryAccessFailed(code: status) }
+    }
 }
 
 public enum ASignArchive {
@@ -261,24 +267,43 @@ public enum ASignArchive {
 
     /// Materialize only the files zsign or ASign modification logic must touch on disk.
     /// Untouched resources remain archive-backed.
+    @discardableResult
     public static func materializeSigningInputs(
         from archiveURL: URL,
         rootAppPath: String,
         to destinationAppURL: URL,
         includeInfoPlistStrings: Bool = false,
         index: ASignArchiveIndex? = nil,
-        workers: UInt32 = 0
-    ) throws {
+        workers: UInt32 = 0,
+        hashResources: Bool = false,
+        excludedResourcePaths: Set<String> = []
+    ) throws -> Data? {
+        if hashResources, index == nil {
+            return try materializeSigningInputs(from: archiveURL, rootAppPath: rootAppPath,
+                to: destinationAppURL, includeInfoPlistStrings: includeInfoPlistStrings,
+                index: ASignArchiveIndex(archiveURL: archiveURL), workers: workers,
+                hashResources: true, excludedResourcePaths: excludedResourcePaths)
+        }
         let fileManager = FileManager.default
         try fileManager.createDirectory(
             at: destinationAppURL,
             withIntermediateDirectories: true
         )
 
+        var digestBytes: UnsafeMutablePointer<UInt8>?
+        var digestSize = 0
+        defer { if let digestBytes { asign_archive_free_buffer(digestBytes) } }
+        let exclusions = excludedResourcePaths.sorted().joined(separator: "\n")
         let status: Int32 = archiveURL.path.withCString { archivePath in
             rootAppPath.withCString { rootPath in
                 destinationAppURL.path.withCString { destinationPath in
                     if let index {
+                        if hashResources {
+                            return exclusions.withCString { excluded in
+                                asign_archive_index_materialize_with_digests(index.handle, rootPath, destinationPath,
+                                    includeInfoPlistStrings ? 1 : 0, workers, excluded, &digestBytes, &digestSize)
+                            }
+                        }
                         return asign_archive_index_materialize(index.handle, rootPath, destinationPath,
                             includeInfoPlistStrings ? 1 : 0, workers)
                     }
@@ -295,6 +320,7 @@ public enum ASignArchive {
         guard status == 0 else {
             throw ASignArchiveError.materializationFailed(code: status)
         }
+        return digestBytes.map { Data(bytes: $0, count: digestSize) }
     }
 
     /// Build the final IPA from an original IPA plus a sparse on-disk overlay.

@@ -5,10 +5,11 @@ enum ArchiveBackedAppError: Error { case invalidInfoPlist, rootAppNotFound }
 final class ArchiveBackedApp {
     static var info: [String: Any] = [:]
     static var binary = Data()
+    static var opens = 0
     static var extractions = 0
     static var archives: [String: ([String: Any], Data)] = [:]
     let archiveURL: URL
-    init(archiveURL: URL) throws { self.archiveURL = archiveURL }
+    init(archiveURL: URL) throws { self.archiveURL = archiveURL; Self.opens += 1 }
     func data(relativePath: String, maximumBytes: Int) throws -> Data? {
         precondition(relativePath == "Info.plist")
         return try PropertyListSerialization.data(fromPropertyList: Self.archives[archiveURL.path]?.0 ?? Self.info, format: .binary, options: 0)

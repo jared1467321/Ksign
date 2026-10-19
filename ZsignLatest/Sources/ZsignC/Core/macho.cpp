@@ -9,7 +9,6 @@ ZMachO::ZMachO()
 {
 	m_pBase = NULL;
 	m_sSize = 0;
-	m_bCSRealloced = false;
 }
 
 ZMachO::~ZMachO()
@@ -127,21 +126,33 @@ bool ZMachO::CheckSignature() const
 
 bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, string strInfoSHA1, string strInfoSHA256, const string& strCodeResourcesData)
 {
-	if (NULL == m_pBase || m_arrArchOes.empty()) {
+	if (NULL == pSignAsset || NULL == m_pBase || m_arrArchOes.empty()) {
 		return false;
+	}
+
+	if (strBundleId.empty()) {
+		jvalue info; info.read_plist(m_arrArchOes.front()->m_strInfoPlist);
+		strBundleId = info["CFBundleIdentifier"].as_string();
+		if (strBundleId.empty()) strBundleId = ZUtil::GetBaseName(m_strFile.c_str());
+	}
+	// Reserve every slice before any page hashing/signing. Growth changes load
+	// commands, so pre-existing page hashes cannot be reused after resizing.
+	vector<uint32_t> signatureSizes;
+	bool grow = false;
+	for (ZArchO* archo : m_arrArchOes) {
+		uint32_t required = archo->RequiredCodeSignSpace(pSignAsset, strBundleId);
+		if (required == 0 || (uint64_t)archo->m_uCodeLength + required > UINT32_MAX) return false;
+		signatureSizes.push_back(required);
+		grow = grow || archo->m_pCodeSignSegment == NULL ||
+			(uint64_t)archo->m_uCodeLength + required > archo->m_uLength;
+	}
+	if (grow) {
+		if (!ReallocCodeSignSpace(signatureSizes)) return false;
+		bForce = true;
 	}
 
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
 		ZArchO* archo = m_arrArchOes[i];
-		if (strBundleId.empty()) {
-			jvalue jvInfo;
-			jvInfo.read_plist(archo->m_strInfoPlist);
-			strBundleId = jvInfo["CFBundleIdentifier"].as_cstr();
-			if (strBundleId.empty()) {
-				strBundleId = ZUtil::GetBaseName(m_strFile.c_str());
-			}
-		}
-
 		if (strInfoSHA1.empty() || strInfoSHA256.empty()) {
 			if (archo->m_strInfoPlist.empty()) {
 				strInfoSHA1.append(20, 0);
@@ -152,12 +163,6 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 		}
 
 		if (!archo->Sign(pSignAsset, bForce, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResourcesData)) {
-			if (!archo->m_bEnoughSpace && !m_bCSRealloced) {
-				m_bCSRealloced = true;
-				if (ReallocCodeSignSpace()) {
-					return Sign(pSignAsset, bForce, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResourcesData);
-				}
-			}
 			return false;
 		}
 	}
@@ -165,7 +170,7 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 	return CloseFile();
 }
 
-bool ZMachO::ReallocCodeSignSpace()
+bool ZMachO::ReallocCodeSignSpace(const vector<uint32_t>& signatureSizes)
 {
 	ZLog::Warn(">>> Realloc CodeSignature space... \n");
 
@@ -178,11 +183,26 @@ bool ZMachO::ReallocCodeSignSpace()
 	}
 #endif
 
+#ifndef _WIN32
+	if (m_arrArchOes.size() == 1) {
+		ZArchO* archo = m_arrArchOes[0];
+		uint32_t newLength = std::max(archo->m_uLength, archo->m_uCodeLength + signatureSizes[0]);
+		// A thin Mach-O can extend its inode, retaining mode, hard links and
+		// framework aliases without copying the original executable.
+		int fd = open(m_strFile.c_str(), O_RDWR);
+		if (fd < 0) return false;
+		bool ok = archo->SetCodeSignSpace(newLength) && CloseFile();
+		if (ok) ok = ftruncate(fd, newLength) == 0;
+		close(fd);
+		return ok && OpenFile(m_strFile.c_str());
+	}
+#endif
+
 	vector<uint32_t> arrMachOesSizes;
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
 		string strNewArchOFile;
 		ZUtil::StringFormatV(strNewArchOFile, "%s.archo.%d", m_strFile.c_str(), i);
-		uint32_t uNewLength = m_arrArchOes[i]->ReallocCodeSignSpace(strNewArchOFile);
+		uint32_t uNewLength = m_arrArchOes[i]->ReallocCodeSignSpace(strNewArchOFile, signatureSizes[i]);
 		if (uNewLength <= 0) {
 			ZLog::Error(">>> Failed!\n");
 			return false;

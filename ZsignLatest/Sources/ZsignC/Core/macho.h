@@ -30,12 +30,11 @@ private:
 
 	bool NewArchO(uint8_t* pBase, uint32_t uLength);
 	void FreeArchOes();
-	bool ReallocCodeSignSpace();
+	bool ReallocCodeSignSpace(const vector<uint32_t>& signatureSizes);
 
 private:
 	size_t			m_sSize;
 	string			m_strFile;
 	uint8_t*		m_pBase;
-	bool			m_bCSRealloced;
 	vector<ZArchO*> m_arrArchOes;
 };

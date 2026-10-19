@@ -13,6 +13,7 @@ enum SigningPreflight {
         let name: String
         let bundleIdentifier: String?
         let info: [String: Any]?
+        var archiveApp: ArchiveBackedApp? = nil
     }
     struct Issue {
         let name: String
@@ -23,20 +24,22 @@ enum SigningPreflight {
         var eligibleIndices: [Int] = []
         var skipped: [Issue] = []
         var installed: [Issue] = []
+        var archiveApps: [Int: ArchiveBackedApp] = [:]
     }
 
     static func candidate(_ source: Source) -> Candidate {
-        let info = readInfo(source)
+        let archiveApp = source.archiveURL.flatMap { try? ArchiveBackedApp(archiveURL: $0) }
+        let info = source.archiveURL != nil && archiveApp == nil ? nil : readInfo(source, archiveApp: archiveApp)
         let custom = source.customIdentifier.flatMap { $0.isEmpty ? nil : $0 }
         return Candidate(name: source.name,
             bundleIdentifier: custom ?? (info?["CFBundleIdentifier"] as? String) ?? source.recordedIdentifier,
-            info: info)
+            info: info, archiveApp: archiveApp)
     }
 
-    static func readInfo(_ source: Source) -> [String: Any]? {
+    static func readInfo(_ source: Source, archiveApp: ArchiveBackedApp? = nil) -> [String: Any]? {
         let data: Data?
         if let archiveURL = source.archiveURL {
-            data = try? ArchiveBackedApp(archiveURL: archiveURL)
+            data = try? (archiveApp ?? ArchiveBackedApp(archiveURL: archiveURL))
                 .data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024)
         } else if let directory = source.appDirectory,
                   let file = try? FileHandle(forReadingFrom: directory.appendingPathComponent("Info.plist")) {
@@ -58,6 +61,7 @@ enum SigningPreflight {
                 continue
             }
             report.eligibleIndices.append(index)
+            report.archiveApps[index] = candidate.archiveApp
             if let id = candidate.bundleIdentifier, !id.isEmpty,
                installedIDs.insert(id).inserted, isInstalled(id) {
                 report.installed.append(Issue(name: candidate.name, reason: id))

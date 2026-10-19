@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <openssl/evp.h>
 
 #include "mz.h"
 #include "mz_strm.h"
@@ -835,11 +836,18 @@ int32_t asign_archive_index_open(const char *path, asign_archive_index **out_ind
     return MZ_OK;
 }
 
-static int32_t asign_index_open_reader(const asign_archive_index *index, void **reader) {
-    if (index == NULL || reader == NULL) return MZ_PARAM_ERROR;
+int32_t asign_archive_index_validate(const asign_archive_index *index) {
+    if (index == NULL) return MZ_PARAM_ERROR;
     struct stat st;
     if (stat(index->path, &st) != 0 || !asign_index_identity_matches(&index->identity, &st))
         return MZ_READ_ERROR;
+    return MZ_OK;
+}
+
+static int32_t asign_index_open_reader(const asign_archive_index *index, void **reader) {
+    if (index == NULL || reader == NULL) return MZ_PARAM_ERROR;
+    int32_t status = asign_archive_index_validate(index);
+    if (status != MZ_OK) return status;
     *reader = mz_zip_reader_create();
     if (*reader == NULL) return MZ_MEM_ERROR;
     int32_t err = mz_zip_reader_set_recover(*reader, 1);
@@ -1536,16 +1544,64 @@ int32_t asign_archive_index_extract_prefix(const asign_archive_index *index, con
     return err != MZ_OK ? err : (found ? MZ_OK : ASIGN_ARCHIVE_NOT_FOUND);
 }
 
+static int asign_deleted_path_matches(const char *relative, const char *deleted_paths);
+static int asign_is_code_signature_path(const char *relative);
+
+typedef struct asign_resource_digest_s {
+    uint8_t valid;
+    uint8_t sha1[20];
+    uint8_t sha256[32];
+} asign_resource_digest;
+
+// Keep the four-byte probe open. Ordinary resources finish decoding/hashing
+// here, so the signer can seal them without a second inflate/open operation.
+static int32_t asign_classify_and_hash(void *reader, int *is_macho, asign_resource_digest *digest) {
+    *is_macho = 0;
+    int32_t err = mz_zip_reader_entry_open(reader);
+    if (err != MZ_OK) return err;
+    uint32_t magic = 0;
+    int32_t count = mz_zip_reader_entry_read(reader, &magic, sizeof(magic));
+    if (count < 0) { mz_zip_reader_entry_close(reader); return count; }
+    *is_macho = count == sizeof(magic) && asign_is_macho_magic(magic);
+    if (*is_macho || digest == NULL) {
+        (void)mz_zip_reader_entry_close(reader); // deliberately partial probe
+        return MZ_OK;
+    }
+    EVP_MD_CTX *sha1 = EVP_MD_CTX_new(), *sha256 = EVP_MD_CTX_new();
+    int ok = sha1 != NULL && sha256 != NULL &&
+        EVP_DigestInit_ex(sha1, EVP_sha1(), NULL) == 1 &&
+        EVP_DigestInit_ex(sha256, EVP_sha256(), NULL) == 1 &&
+        EVP_DigestUpdate(sha1, &magic, (size_t)count) == 1 &&
+        EVP_DigestUpdate(sha256, &magic, (size_t)count) == 1;
+    uint8_t buffer[64 * 1024];
+    while (ok && (count = mz_zip_reader_entry_read(reader, buffer, sizeof(buffer))) > 0) {
+        ok = EVP_DigestUpdate(sha1, buffer, (size_t)count) == 1 &&
+             EVP_DigestUpdate(sha256, buffer, (size_t)count) == 1;
+    }
+    int32_t closed = mz_zip_reader_entry_close(reader);
+    unsigned int length1 = 0, length256 = 0;
+    if (count < 0) err = count;
+    else if (closed != MZ_OK) err = closed;
+    else if (!ok || EVP_DigestFinal_ex(sha1, digest->sha1, &length1) != 1 ||
+        EVP_DigestFinal_ex(sha256, digest->sha256, &length256) != 1 ||
+        length1 != 20 || length256 != 32) err = MZ_INTERNAL_ERROR;
+    if (err == MZ_OK) digest->valid = 1;
+    EVP_MD_CTX_free(sha1); EVP_MD_CTX_free(sha256);
+    return err;
+}
+
 typedef struct asign_materialize_job_s {
     const asign_archive_index *index;
     const char *root;
     const char *destination;
     uint8_t include_strings;
     uint8_t *selected;
+    asign_resource_digest *digests;
+    const char *excluded_paths;
     atomic_size_t next;
     atomic_int error;
     int extracting;
-    void *readers[4];
+    void *readers[6];
 } asign_materialize_job;
 
 typedef struct asign_materialize_lane_s {
@@ -1578,11 +1634,14 @@ static void *asign_materialize_worker(void *context) {
                     (job->include_strings && (strcmp(relative, "InfoPlist.strings") == 0 ||
                                               asign_path_has_suffix(relative, "/InfoPlist.strings"))))
                     job->selected[i] = 1;
-                else if (entry->size >= 4) {
+                else if (entry->size >= 4 || job->digests != NULL) {
                     mz_zip_file *info = NULL;
                     int is_macho = 0;
+                    asign_resource_digest *digest = job->digests != NULL &&
+                        !asign_deleted_path_matches(relative, job->excluded_paths) &&
+                        !asign_is_code_signature_path(relative) ? &job->digests[i] : NULL;
                     err = asign_index_seek(reader, entry->position, &info);
-                    if (err == MZ_OK) err = asign_current_entry_is_macho(reader, &is_macho);
+                    if (err == MZ_OK) err = asign_classify_and_hash(reader, &is_macho, digest);
                     job->selected[i] = (uint8_t)is_macho;
                 }
             }
@@ -1593,9 +1652,9 @@ static void *asign_materialize_worker(void *context) {
 }
 
 static int32_t asign_materialize_run(asign_materialize_job *job, uint32_t workers) {
-    pthread_t threads[3];
-    asign_materialize_lane lanes[4];
-    for (size_t i = 0; i < 4; i++) lanes[i] = (asign_materialize_lane){job, i};
+    pthread_t threads[5];
+    asign_materialize_lane lanes[6];
+    for (size_t i = 0; i < 6; i++) lanes[i] = (asign_materialize_lane){job, i};
     size_t started = 0;
     atomic_store(&job->next, 0);
     // Failed thread creation simply leaves the remaining work to fewer workers.
@@ -1677,32 +1736,68 @@ static int32_t asign_materialize_serial_selected(asign_materialize_job *job, int
 
 int32_t asign_archive_index_materialize(const asign_archive_index *index, const char *root_path,
     const char *destination, uint8_t include_strings, uint32_t workers) {
-    if (index == NULL || destination == NULL) return MZ_PARAM_ERROR;
+    return asign_archive_index_materialize_with_digests(index, root_path, destination,
+        include_strings, workers, NULL, NULL, NULL);
+}
+
+int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *index, const char *root_path,
+    const char *destination, uint8_t include_strings, uint32_t workers,
+    const char *excluded_paths, uint8_t **out_digests, size_t *out_size) {
+    if (index == NULL || destination == NULL || ((out_digests == NULL) != (out_size == NULL))) return MZ_PARAM_ERROR;
+    if (out_digests != NULL) { *out_digests = NULL; *out_size = 0; }
     char *root = asign_trimmed_root_copy(root_path);
     if (root == NULL || !asign_relative_path_is_safe(root)) { free(root); return MZ_PARAM_ERROR; }
     if (mkdir(destination, 0755) != 0 && errno != EEXIST) { free(root); return MZ_WRITE_ERROR; }
     uint8_t *selected = calloc(index->names.count > 0 ? index->names.count : 1, 1);
     if (selected == NULL) { free(root); return MZ_MEM_ERROR; }
+    asign_resource_digest *digests = out_digests != NULL ? calloc(index->names.count > 0 ? index->names.count : 1, sizeof(*digests)) : NULL;
+    if (out_digests != NULL && digests == NULL) { free(selected); free(root); return MZ_MEM_ERROR; }
     asign_materialize_job job = {.index = index, .root = root, .destination = destination,
-        .include_strings = include_strings, .selected = selected};
+        .include_strings = include_strings, .selected = selected, .digests = digests, .excluded_paths = excluded_paths};
     atomic_init(&job.next, 0);
     atomic_init(&job.error, MZ_OK);
+    // Hashing keeps the signer's six-lane CPU budget; disk extraction remains
+    // capped at four. Reuse the classification readers across both phases.
+    uint32_t maximum_workers = digests != NULL ? 6 : 4;
     if (workers == 0) {
         long processors = sysconf(_SC_NPROCESSORS_ONLN);
-        workers = processors > 0 && processors < 4 ? (uint32_t)processors : 4;
+        workers = processors > 0 && processors < maximum_workers ? (uint32_t)processors : maximum_workers;
     }
-    if (workers > 4) workers = 4;
+    if (workers > maximum_workers) workers = maximum_workers;
     int32_t err = asign_materialize_run(&job, workers);
     if (err == MZ_OK && !asign_materialize_parallel_paths_safe(&job)) {
         // Ambiguous aliases retain the old serial order, including symlink order.
         err = asign_materialize_serial_selected(&job, 0);
     } else if (err == MZ_OK) {
         job.extracting = 1;
-        err = asign_materialize_run(&job, workers);
+        err = asign_materialize_run(&job, workers > 4 ? 4 : workers);
         // Install links only after all independent regular writes have joined.
         if (err == MZ_OK) err = asign_materialize_serial_selected(&job, 1);
     }
-    for (size_t i = 0; i < 4; i++) if (job.readers[i] != NULL) mz_zip_reader_delete(&job.readers[i]);
+    for (size_t i = 0; i < 6; i++) if (job.readers[i] != NULL) mz_zip_reader_delete(&job.readers[i]);
+    if (err == MZ_OK) err = asign_archive_index_validate(index);
+    if (err == MZ_OK && digests != NULL) {
+        size_t count = 0;
+        for (size_t i = 0; i < index->names.count; i++) count += digests[i].valid != 0;
+        if (count > (SIZE_MAX - 8) / 60) err = MZ_MEM_ERROR;
+        else {
+            size_t size = 8 + count * 60;
+            uint8_t *data = malloc(size);
+            if (data == NULL) err = MZ_MEM_ERROR;
+            else {
+                memcpy(data, "ASHSH001", 8);
+                uint8_t *cursor = data + 8;
+                for (size_t i = 0; i < index->names.count; i++) if (digests[i].valid) {
+                    asign_store_le(cursor, (uint64_t)index->ordered[i]->position, 8);
+                    memcpy(cursor + 8, digests[i].sha1, 20);
+                    memcpy(cursor + 28, digests[i].sha256, 32);
+                    cursor += 60;
+                }
+                *out_digests = data; *out_size = size;
+            }
+        }
+    }
+    free(digests);
     free(selected);
     free(root);
     return err;

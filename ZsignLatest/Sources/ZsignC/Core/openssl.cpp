@@ -358,16 +358,14 @@ static bool StackContainsIssuerOf(STACK_OF(X509)* certs, X509* cert)
 	return false;
 }
 
-bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHashData, const string& strCDHashesPlist, const string& strCodeDirectorySlotSHA1, const string& strAltnateCodeDirectorySlot256, string& strCMSOutput)
+bool ZSignAsset::PrepareCMSChain()
 {
-	if (!pscert || !pspkey) {
-		return CMSError();
-	}
-
-	X509* scert = (X509*)pscert;
-	EVP_PKEY* spkey = (EVP_PKEY*)pspkey;
-
+	if (m_cmsChain != NULL) return true;
+	X509* scert = (X509*)m_x509Cert;
+	if (scert == NULL) return false;
 	STACK_OF(X509)* otherCerts = sk_X509_new_null();
+	auto chainCleanup = unique_ptr<STACK_OF(X509), void(*)(STACK_OF(X509)*)>(otherCerts,
+		[](STACK_OF(X509)* chain) { sk_X509_pop_free(chain, X509_free); });
 	if (!otherCerts) {
 		return CMSError();
 	}
@@ -432,13 +430,54 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 		}
 	}
 
+	m_cmsChain = chainCleanup.release();
+	return true;
+}
+
+size_t ZSignAsset::CMSSignatureSizeBound()
+{
+	if (m_bAdhoc) return 0;
+	if (m_cmsSizeBound != 0) return m_cmsSizeBound;
+	if (!PrepareCMSChain()) return 0;
+	// CMS is detached: it contains certificates, one key signature and fixed
+	// attributes (two CD hashes), never the code directory's page-hash payload.
+	int keySize = EVP_PKEY_get_size((EVP_PKEY*)m_evpPKey);
+	int leafSize = i2d_X509((X509*)m_x509Cert, NULL);
+	if (keySize <= 0 || leafSize <= 0) return 0;
+	// The signer identifier repeats the leaf's issuer/serial, bounded by a
+	// second leaf encoding even for unusually large distinguished names.
+	size_t bound = 4096 + (size_t)keySize + 2 * (size_t)leafSize;
+	auto chain = (STACK_OF(X509)*)m_cmsChain;
+	for (int i = 0; i < sk_X509_num(chain); i++) {
+		int length = i2d_X509(sk_X509_value(chain, i), NULL);
+		if (length <= 0 || bound > SIZE_MAX - (size_t)length) return 0;
+		bound += (size_t)length;
+	}
+	m_cmsSizeBound = bound;
+	return bound;
+}
+
+bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHashData, const string& strCDHashesPlist, const string& strCodeDirectorySlotSHA1, const string& strAltnateCodeDirectorySlot256, string& strCMSOutput)
+{
+	if (!pscert || !pspkey) {
+		return CMSError();
+	}
+
+	X509* scert = (X509*)pscert;
+	EVP_PKEY* spkey = (EVP_PKEY*)pspkey;
+
+	if (!PrepareCMSChain()) return false;
+	auto otherCerts = (STACK_OF(X509)*)m_cmsChain;
+
 	BIO* in = BIO_new_mem_buf(strCDHashData.c_str(), (int)strCDHashData.size());
+	auto inCleanup = unique_ptr<BIO, decltype(&BIO_free)>(in, BIO_free);
 	if (!in) {
 		return CMSError();
 	}
 
 	int nFlags = CMS_PARTIAL | CMS_DETACHED | CMS_NOSMIMECAP | CMS_BINARY;
 	CMS_ContentInfo* cms = CMS_sign(NULL, NULL, otherCerts, NULL, nFlags);
+	auto cmsCleanup = unique_ptr<CMS_ContentInfo, decltype(&CMS_ContentInfo_free)>(cms, CMS_ContentInfo_free);
 	if (!cms) {
 		return CMSError();
 	}
@@ -451,6 +490,7 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 
 	// add plist
 	ASN1_OBJECT* obj = OBJ_txt2obj("1.2.840.113635.100.9.1", 1);
+	auto objCleanup = unique_ptr<ASN1_OBJECT, decltype(&ASN1_OBJECT_free)>(obj, ASN1_OBJECT_free);
 	if (!obj) {
 		return CMSError();
 	}
@@ -472,17 +512,20 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 	}
 
 	ASN1_OBJECT* obj2 = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
+	auto obj2Cleanup = unique_ptr<ASN1_OBJECT, decltype(&ASN1_OBJECT_free)>(obj2, ASN1_OBJECT_free);
 	if (!obj2) {
 		return CMSError();
 	}
 
 	X509_ATTRIBUTE* attr = X509_ATTRIBUTE_new();
+	auto attrCleanup = unique_ptr<X509_ATTRIBUTE, decltype(&X509_ATTRIBUTE_free)>(attr, X509_ATTRIBUTE_free);
 	if (!attr) {
 		return CMSError();
 	}
 	X509_ATTRIBUTE_set1_object(attr, obj2);
 
 	ASN1_TYPE* type_256 = (ASN1_TYPE*)GenerateASN1Type(sha256);
+	auto type_256Cleanup = unique_ptr<ASN1_TYPE, decltype(&ASN1_TYPE_free)>(type_256, ASN1_TYPE_free);
 	if (!type_256) {
 		return CMSError();
 	}
@@ -498,6 +541,7 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 	}
 
 	BIO* out = BIO_new(BIO_s_mem());
+	auto outCleanup = unique_ptr<BIO, decltype(&BIO_free)>(out, BIO_free);
 	if (!out) {
 		return CMSError();
 	}
@@ -515,8 +559,6 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 
 	strCMSOutput.clear();
 	strCMSOutput.append(bptr->data, bptr->length);
-	ASN1_TYPE_free(type_256);
-	sk_X509_pop_free(otherCerts, X509_free); // CMS_sign holds its own references
 	return (!strCMSOutput.empty());
 }
 
@@ -527,8 +569,11 @@ bool ZSignAsset::GetCMSContent(const string& strCMSDataInput, string& strContent
 	}
 
 	BIO* in = BIO_new(BIO_s_mem());
+	auto inCleanup = unique_ptr<BIO, decltype(&BIO_free)>(in, BIO_free);
+	if (!in) return CMSError();
 	OPENSSL_assert((size_t)BIO_write(in, strCMSDataInput.data(), (int)strCMSDataInput.size()) == strCMSDataInput.size());
 	CMS_ContentInfo* cms = d2i_CMS_bio(in, NULL);
+	auto cmsCleanup = unique_ptr<CMS_ContentInfo, decltype(&CMS_ContentInfo_free)>(cms, CMS_ContentInfo_free);
 	if (!cms) {
 		return CMSError();
 	}
@@ -820,9 +865,25 @@ ZSignAsset::ZSignAsset()
 	m_evpPKey = NULL;
 	m_x509Cert = NULL;
 	m_caCerts = NULL;
+	m_cmsChain = NULL;
+	m_cmsSizeBound = 0;
 	m_bAdhoc = false;
 	m_bSingleBinary = false;
 	m_bSHA256Only = false;
+}
+
+ZSignAsset::~ZSignAsset() { Reset(); }
+
+void ZSignAsset::Reset()
+{
+	sk_X509_pop_free((STACK_OF(X509)*)m_cmsChain, X509_free);
+	sk_X509_pop_free((STACK_OF(X509)*)m_caCerts, X509_free);
+	X509_free((X509*)m_x509Cert);
+	EVP_PKEY_free((EVP_PKEY*)m_evpPKey);
+	m_cmsChain = m_caCerts = m_x509Cert = m_evpPKey = NULL;
+	m_cmsSizeBound = 0;
+	m_strTeamId.clear(); m_strSubjectCN.clear(); m_strProvData.clear();
+	m_strEntitleData.clear(); m_strApplicationId.clear();
 }
 
 bool ZSignAsset::Init(
@@ -835,6 +896,7 @@ bool ZSignAsset::Init(
 	bool bSHA256Only,
 	bool bSingleBinary)
 {
+	Reset();
 	m_bAdhoc = bAdhoc;
 	m_bSHA256Only = bSHA256Only;
 	m_bSingleBinary = bSingleBinary;
@@ -875,6 +937,9 @@ bool ZSignAsset::Init(
 
 	X509* x509Cert = NULL;
 	EVP_PKEY* evpPKey = NULL;
+	auto cleanup = unique_ptr<void, function<void(void*)>>((void*)this, [&](void*) {
+		X509_free(x509Cert); EVP_PKEY_free(evpPKey);
+	});
 	BIO* bioPKey = BIO_new_file(strPKeyFile.c_str(), "rb");
 	if (NULL != bioPKey) {
 		evpPKey = PEM_read_bio_PrivateKey(bioPKey, NULL, NULL, (void*)strPassword.c_str());
@@ -883,7 +948,9 @@ bool ZSignAsset::Init(
 			evpPKey = d2i_PrivateKey_bio(bioPKey, NULL);
 			if (NULL == evpPKey) {
 				BIO_reset(bioPKey);
-				OSSL_PROVIDER_load(NULL, "legacy");
+				static unique_ptr<OSSL_PROVIDER, decltype(&OSSL_PROVIDER_unload)> legacyProvider(
+					OSSL_PROVIDER_load(NULL, "legacy"), OSSL_PROVIDER_unload);
+				(void)legacyProvider;
 				PKCS12* p12 = d2i_PKCS12_bio(bioPKey, NULL);
 				if (NULL != p12) {
 					STACK_OF(X509)* caCerts = NULL;
@@ -934,6 +1001,7 @@ bool ZSignAsset::Init(
 				x509Cert = d2i_X509_bio(bioCert, NULL);
 				if (NULL != x509Cert) {
 					if (X509_check_private_key(x509Cert, evpPKey)) {
+						BIO_free(bioCert);
 						break;
 					}
 					X509_free(x509Cert);
@@ -956,6 +1024,7 @@ bool ZSignAsset::Init(
 
 	m_evpPKey = evpPKey;
 	m_x509Cert = x509Cert;
+	cleanup.release();
 	return true;
 }
 

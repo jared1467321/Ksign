@@ -17,6 +17,7 @@ final class SigningHandler: NSObject {
 	var signedAppID: String { _uuid }
 	private var _movedAppPath: URL?
 	private var _archiveApp: ArchiveBackedApp?
+    private var _archiveResourceDigests: Data?
 	private var _signedArchiveMetadata: ArchiveBackedAppMetadata?
 	private var _signedArchiveIcon: String?
 	private var _archiveSourceURL: URL?
@@ -77,12 +78,17 @@ final class SigningHandler: NSObject {
 				}
 				_movedAppPath = movedAppURL
 			} else {
-				try ASignArchive.materializeSigningInputs(
+                var hashExclusions = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
+                hashExclusions.insert("embedded.mobileprovision")
+                if _options.removeWatchPlaceholder { hashExclusions.insert("com.apple.WatchPlaceholder") }
+				_archiveResourceDigests = try ASignArchive.materializeSigningInputs(
 					from: archiveURL,
 					rootAppPath: archiveApp.rootAppPath,
 					to: movedAppURL,
 					includeInfoPlistStrings: _options.appName != nil,
-                    index: archiveApp.archiveIndex
+                    index: archiveApp.archiveIndex,
+                    hashResources: !_options.onlyModify,
+                    excludedResourcePaths: hashExclusions
 				)
 				if !_options.injectionFiles.isEmpty {
 					// The injector checks this framework's presence before adding the
@@ -320,7 +326,8 @@ final class SigningHandler: NSObject {
 			archiveURL: archiveURL,
 			rootAppPath: rootAppPath,
 			deletedPaths: deletedPaths,
-            manifest: _archiveApp?.archiveIndex.signingManifest
+            manifest: _archiveApp?.archiveIndex.signingManifest,
+            resourceDigests: _archiveResourceDigests
 		)
 	}
 

@@ -14,6 +14,7 @@ struct ArchiveSigningContext {
 	let rootAppPath: String
 	let deletedPaths: Set<String>
     let manifest: Data?
+    let resourceDigests: Data?
 }
 
 final class ZsignHandler {
@@ -65,7 +66,8 @@ final class ZsignHandler {
             archivePath: _archiveContext?.archiveURL.path ?? "",
             archiveRootPath: _archiveContext?.rootAppPath ?? "",
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
-            archiveManifest: _archiveContext?.manifest
+            archiveManifest: _archiveContext?.manifest,
+            archiveResourceDigests: _archiveContext?.resourceDigests
         ) else {
             throw SigningFileHandlerError.signFailed
         }
@@ -83,7 +85,8 @@ final class ZsignHandler {
             archivePath: _archiveContext?.archiveURL.path ?? "",
             archiveRootPath: _archiveContext?.rootAppPath ?? "",
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
-            archiveManifest: _archiveContext?.manifest
+            archiveManifest: _archiveContext?.manifest,
+            archiveResourceDigests: _archiveContext?.resourceDigests
         ) else {
             throw SigningFileHandlerError.signFailed
         }

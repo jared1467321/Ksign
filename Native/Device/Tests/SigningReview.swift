@@ -107,6 +107,7 @@ enum UIAlertController {
         UIApplication.installed = ["app.pad", "app.store"]
         let manager = DeviceInstallationManager.shared
         manager.identities = ["app.pad": "TEAM.app.pad", "app.store": "STORE.app.store"]
+        let opensBeforeReview = ArchiveBackedApp.opens
         let sources = apps.prefix(3).map { SigningPreflight.source(for: $0) }
         var report: SigningPreflight.Report?
         var returnedToEditing = false
@@ -124,6 +125,9 @@ enum UIAlertController {
         UIAlertController.actions[2].tap()
         precondition(report?.eligibleIndices == [0, 1], "Continue Signing retains installed apps and iPad-only apps")
         precondition(report?.skipped.count == 1)
+        precondition(ArchiveBackedApp.opens == opensBeforeReview + 6, "Each review opens each source once")
+        precondition(report?.archiveApps.keys.sorted() == [0, 1], "Retain only eligible source indexes")
+        precondition(report?.archiveApps[0]?.archiveURL == pad && report?.archiveApps[1]?.archiveURL == store)
 
         let result = await SigningPreflightCoordinator.prepareInstallation(["pad-id", "store-id", "tv-id", "missing-id", "legacy-id"])
         precondition(result.appIDs == ["pad-id", "legacy-id"], "Only the exact eligible signed IDs enter the drawer")

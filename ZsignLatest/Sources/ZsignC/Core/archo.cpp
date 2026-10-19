@@ -675,15 +675,35 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 	return true;
 }
 
-uint32_t ZArchO::ReallocCodeSignSpace(const string& strNewFile)
+uint32_t ZArchO::RequiredCodeSignSpace(ZSignAsset* asset, const string& bundleId)
 {
-	ZFile::RemoveFile(strNewFile.c_str());
-
-	uint32_t uNewLength = m_uCodeLength + ZUtil::ByteAlign(((m_uCodeLength / 4096) + 1) * (20 + 32), 4096) + 32768; //32K Should Be Enough
-	if (NULL == m_pLinkEditSegment || uNewLength <= m_uLength) {
-		return 0;
+	string requirements, entitlements, der;
+	const string empty = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
+	ZSign::SlotBuildRequirements(bundleId, asset->m_strSubjectCN, requirements);
+	ZSign::SlotBuildEntitlements(IsExecute() ? asset->m_strEntitleData : empty, entitlements);
+	ZSign::SlotBuildDerEntitlements(IsExecute() ? asset->m_strEntitleData : "", der);
+	const uint64_t pages = ((uint64_t)m_uCodeLength + 4095) / 4096;
+	// Upper bounds: seven special slots, all six blob indexes, and both CDs
+	// unless SHA256-only. No page bytes are read and no CMS signature is made.
+	const uint64_t cdHeader = sizeof(CS_CodeDirectory) + bundleId.size() + 1 + asset->m_strTeamId.size() + 1;
+	uint64_t size = sizeof(CS_SuperBlob) + 6 * sizeof(CS_BlobIndex) +
+		requirements.size() + entitlements.size() + der.size() + cdHeader + (pages + 7) * 32;
+	if (!asset->m_bSHA256Only) size += cdHeader + (pages + 7) * 20;
+	if (!asset->m_bAdhoc) {
+		size_t cms = asset->CMSSignatureSizeBound();
+		if (cms == 0 || cms > UINT32_MAX) return 0;
+		size += cms;
 	}
+	return size <= UINT32_MAX - 15 ? (uint32_t)((size + 15) & ~uint64_t(15)) : 0;
+}
 
+bool ZArchO::SetCodeSignSpace(uint32_t uNewLength)
+{
+	if (NULL == m_pLinkEditSegment || uNewLength < m_uLength || uNewLength < m_uCodeLength) return false;
+	if (NULL == m_pCodeSignSegment && m_uLoadCommandsFreeSpace < sizeof(codesignature_command)) {
+		ZLog::Error(">>> Can't find free space of LoadCommands for CodeSignature!\n");
+		return false;
+	}
 	load_command* pseglc = (load_command*)m_pLinkEditSegment;
 	switch (BO(pseglc->cmd)) {
 	case LC_SEGMENT:
@@ -708,9 +728,9 @@ uint32_t ZArchO::ReallocCodeSignSpace(const string& strNewFile)
 
 	codesignature_command* pcslc = (codesignature_command*)m_pCodeSignSegment;
 	if (NULL == pcslc) {
-		if (m_uLoadCommandsFreeSpace < 4) {
+		if (m_uLoadCommandsFreeSpace < sizeof(codesignature_command)) {
 			ZLog::Error(">>> Can't find free space of LoadCommands for CodeSignature!\n");
-			return 0;
+			return false;
 		}
 
 		pcslc = (codesignature_command*)(m_pBase + m_uHeaderSize + BO(m_pHeader->sizeofcmds));
@@ -721,6 +741,17 @@ uint32_t ZArchO::ReallocCodeSignSpace(const string& strNewFile)
 		m_pHeader->sizeofcmds = BO(BO(m_pHeader->sizeofcmds) + sizeof(codesignature_command));
 	}
 	pcslc->datasize = BO(uNewLength - m_uCodeLength);
+
+	return true;
+}
+
+uint32_t ZArchO::ReallocCodeSignSpace(const string& strNewFile, uint32_t signatureSize)
+{
+	uint64_t required = (uint64_t)m_uCodeLength + signatureSize;
+	if (required > UINT32_MAX) return 0;
+	uint32_t uNewLength = std::max(m_uLength, (uint32_t)required);
+	if (!SetCodeSignSpace(uNewLength)) return 0;
+	ZFile::RemoveFile(strNewFile.c_str());
 
 	if (!ZFile::AppendFile(strNewFile.c_str(), (const char*)m_pBase, m_uLength)) {
 		return 0;

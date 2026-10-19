@@ -5,6 +5,11 @@ class ZSignAsset
 {
 public:
 	ZSignAsset();
+	~ZSignAsset();
+	ZSignAsset(const ZSignAsset&) = delete;
+	ZSignAsset& operator=(const ZSignAsset&) = delete;
+	// Includes the blob wrapper and a conservative bound for CMS attributes.
+	size_t CMSSignatureSizeBound();
 
 public:
 	bool Init(const string& strCertFile, 
@@ -23,6 +28,8 @@ public:
 						string& strCMSOutput);
 
 private:
+	bool PrepareCMSChain();
+	void Reset();
 	bool GenerateCMS(void* pscert, 
 						void* pspkey, 
 						const string& strCDHashData, 
@@ -60,6 +67,8 @@ private:
 	void*	m_evpPKey;
 	void*	m_x509Cert;
 	void*	m_caCerts; // STACK_OF(X509)* CA chain recovered from the input p12, if any
+	void* m_cmsChain;
+	size_t m_cmsSizeBound;
 
 public:
 	static const char* s_szAppleDevCACert;

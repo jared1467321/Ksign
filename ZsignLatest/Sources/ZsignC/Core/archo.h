@@ -25,7 +25,9 @@ public:
 	bool ChangeDylibPath(const char* oldPath, const char* newPath);
 	std::vector<std::string> ListDylibs();
 	void RemoveDylibs(const set<string>& setDylibs);
-	uint32_t ReallocCodeSignSpace(const string& strNewFile);
+	uint32_t RequiredCodeSignSpace(ZSignAsset* asset, const string& bundleId);
+	bool SetCodeSignSpace(uint32_t newLength);
+	uint32_t ReallocCodeSignSpace(const string& strNewFile, uint32_t signatureSize);
 
 private:
 	uint32_t	BO(uint32_t uVal);

@@ -315,14 +315,14 @@ extension SigningView {
 		_isSigning = true
 		let options = _temporaryOptions
 		let certificate = _selectedCert()
-		SigningPreflightCoordinator.review([SigningPreflight.source(for: app, options: options)]) { _ in
-			_runSigning(options: options, certificate: certificate)
+		SigningPreflightCoordinator.review([SigningPreflight.source(for: app, options: options)]) { report in
+			_runSigning(options: options, certificate: certificate, archiveApp: report.archiveApps[0])
 		} onCancel: {
 			_isSigning = false
 		}
 	}
 
-	private func _runSigning(options: Options, certificate: CertificatePair?) {
+	private func _runSigning(options: Options, certificate: CertificatePair?, archiveApp: ArchiveBackedApp?) {
 		BackgroundTaskManager.shared.begin(.signing)
 		let generator = UIImpactFeedbackGenerator(style: .light)
 		generator.impactOccurred()
@@ -346,6 +346,7 @@ extension SigningView {
 			using: options,
 			icon: appIcon,
 			certificate: certificate,
+            archiveApp: archiveApp,
 			backgroundCompletion: { error, _ in
 				BackgroundTaskManager.shared.report(
 					.signing,

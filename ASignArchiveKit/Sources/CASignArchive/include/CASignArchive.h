@@ -27,6 +27,7 @@ typedef int32_t (*asign_archive_entry_cb)(
 typedef struct asign_archive_index_s asign_archive_index;
 int32_t asign_archive_index_open(const char *path, asign_archive_index **index);
 void asign_archive_index_close(asign_archive_index *index);
+int32_t asign_archive_index_validate(const asign_archive_index *index);
 int32_t asign_archive_index_enumerate(const asign_archive_index *index, asign_archive_entry_cb callback, void *context);
 // ASIDX001, followed by LE (position:u64, size:u64, flags:u32, nameLength:u32,
 // name:UTF8) records. Flags: bit 0 directory, bit 1 symlink. Borrowed until close.
@@ -39,6 +40,12 @@ int32_t asign_archive_index_extract_prefix(const asign_archive_index *index, con
     const char *destination_path);
 int32_t asign_archive_index_materialize(const asign_archive_index *index, const char *root,
     const char *destination, uint8_t include_info_plist_strings, uint32_t workers);
+// Optional operation-local resource digests, computed while classifying entries.
+// ASHSH001 followed by (central-directory position:u64 LE, SHA1:20, SHA256:32).
+// Excluded app-relative paths are newline-delimited. Free output with free_buffer.
+int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *index, const char *root,
+    const char *destination, uint8_t include_info_plist_strings, uint32_t workers,
+    const char *excluded_paths, uint8_t **digests, size_t *digests_size);
 int32_t asign_archive_index_rebuild(const asign_archive_index *index, const char *destination,
     const char *root, const char *overlay, const char *deleted, uint8_t omit_signatures,
     int16_t compression, asign_archive_progress_cb progress, void *context);

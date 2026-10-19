@@ -37,9 +37,11 @@ static string ToString(NSString *value)
 static void EnsureOpenSSLProviders()
 {
     // OpenSSL 3 needs the legacy provider for a number of older PKCS#12 files.
-    // Provider handles intentionally live for the process lifetime.
-    OSSL_PROVIDER_load(NULL, "default");
-    OSSL_PROVIDER_load(NULL, "legacy");
+    // Keep one reference per provider until process shutdown.
+    static unique_ptr<OSSL_PROVIDER, decltype(&OSSL_PROVIDER_unload)> defaultProvider(
+        OSSL_PROVIDER_load(NULL, "default"), OSSL_PROVIDER_unload);
+    static unique_ptr<OSSL_PROVIDER, decltype(&OSSL_PROVIDER_unload)> legacyProvider(
+        OSSL_PROVIDER_load(NULL, "legacy"), OSSL_PROVIDER_unload);
 }
 
 static NSDate * _Nullable DateFromASN1Time(const ASN1_TIME *time)
@@ -229,6 +231,7 @@ int zsign(
     NSString *archiveRootPath,
     NSArray<NSString *> *archiveDeletedPaths,
     NSData *archiveManifest,
+    NSData *archiveResourceDigests,
     void (^ _Nullable completionHandler)(BOOL success)
 ) {
     @autoreleasepool {
@@ -281,7 +284,11 @@ int zsign(
             if (archiveManifest.length > 0) {
                 manifest.assign((const char*)archiveManifest.bytes, archiveManifest.length);
             }
-            bundle.SetArchiveBacking(archive, archiveRoot, archiveDeleted, std::move(manifest));
+            string digests;
+            if (archiveResourceDigests.length > 0) {
+                digests.assign((const char*)archiveResourceDigests.bytes, archiveResourceDigests.length);
+            }
+            bundle.SetArchiveBacking(archive, archiveRoot, archiveDeleted, std::move(manifest), std::move(digests));
         }
         const bool success = bundle.SignFolder(
             &asset,
@@ -293,7 +300,7 @@ int zsign(
             removeDylibs,
             true,   // force sign
             false,  // weak inject
-            true,   // enable cache
+            false,  // forced app signing never reads the path-based cache
             dontGenerateEmbeddedMobileProvision
         );
 

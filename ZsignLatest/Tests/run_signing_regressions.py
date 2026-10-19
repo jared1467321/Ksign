@@ -89,7 +89,7 @@ def fixture(path, aliases=False):
             add("root.dat", b"last duplicate wins")
 
 
-def verify_signature(data, info, resources):
+def verify_signature(data, info, resources, expected_directories=2):
     ncmds = struct.unpack_from("<I", data, 16)[0]
     command = 32
     for _ in range(ncmds):
@@ -123,15 +123,15 @@ def verify_signature(data, info, resources):
                 begin = base + hash_offset - slot * hash_size
                 assert data[begin:begin + hash_size] == expected
         directories += 1
-    assert directories == 2
+    assert directories == expected_directories
 
 
-def verify_archive(path, profiles=False):
+def verify_archive(path, profiles=False, edited_resource=False):
     with zipfile.ZipFile(path) as archive:
         assert archive.testzip() is None
         names = archive.namelist()
         assert len(names) == len(set(names))
-        assert archive.read(APP + "/root.dat") == b"last duplicate wins"
+        assert archive.read(APP + "/root.dat") == (b"last duplicate wins edited" if edited_resource else b"last duplicate wins")
         assert not any("/Deleted/" in name or name.endswith("/obsolete") or
                        (not profiles and name.endswith("/embedded.mobileprovision")) for name in names)
         if profiles:
@@ -218,18 +218,18 @@ def extraction_checks(executable, work):
             assert "large.dat" not in outputs[0]
             assert outputs[0]["en.lproj/InfoPlist.strings"][1] == b"localized"
 
-    for label in ("bad-crc", "escape-link"):
+    for label in ("bad-crc", "bad-resource-crc", "escape-link"):
         source = work / f"extract-{label}.ipa"
         with zipfile.ZipFile(source, "w") as archive:
             archive.writestr(APP + "/Info.plist", b"metadata")
-            if label == "bad-crc":
-                archive.writestr(APP + "/Code", binary)
+            if label in ("bad-crc", "bad-resource-crc"):
+                archive.writestr(APP + "/Code", binary if label == "bad-crc" else b"ordinary resource payload")
             else:
                 entry = zipfile.ZipInfo(APP + "/Link")
                 entry.create_system = 3
                 entry.external_attr = (stat.S_IFLNK | 0o777) << 16
                 archive.writestr(entry, b"../../outside")
-        if label == "bad-crc":
+        if label in ("bad-crc", "bad-resource-crc"):
             with zipfile.ZipFile(source) as archive:
                 entry = archive.getinfo(APP + "/Code")
                 offset = entry.header_offset + 30 + len(entry.filename.encode()) + len(entry.extra) + 12
@@ -241,6 +241,64 @@ def extraction_checks(executable, work):
             overlay.mkdir()
             run = subprocess.run([str(executable), "--extract", str(source), str(overlay), workers])
             assert run.returncode != 0, label
+
+
+def growth_and_cms_checks(executable, work):
+    # Small existing signatures force growth before the first page-hash pass.
+    for mode in ("dual", "sha256", "large", "fat"):
+        path = work / f"growth-{mode}"
+        data = macho(code_size=1024 * 1024, signature_size=16)
+        if mode == "fat":
+            # One slice requires growth, the other has ample signature capacity.
+            second = macho(code_size=1024 * 1024, signature_size=32768)
+            offset = 16384
+            offset2 = (offset + len(data) + 16383) // 16384 * 16384
+            header = struct.pack(">II", 0xcafebabe, 2)
+            header += struct.pack(">IIIII", 0x100000c, 0, offset, len(data), 14)
+            header += struct.pack(">IIIII", 0x100000c, 2, offset2, len(second), 14)
+            data = header.ljust(offset, b"\0") + data
+            data = data.ljust(offset2, b"\0") + second
+        path.write_bytes(data)
+        path.chmod(0o751)
+        link = work / f"growth-{mode}-link"
+        os.link(path, link)
+        subprocess.run([str(executable), "--binary", str(path), mode], check=True, stdout=subprocess.PIPE)
+        if mode != "fat": assert link.read_bytes() == path.read_bytes()
+        data = path.read_bytes()
+        if mode == "fat":
+            for index in range(2):
+                _, _, offset, size, _ = struct.unpack_from(">IIIII", data, 8 + 20 * index)
+                verify_signature(data[offset:offset + size], None, None)
+        else:
+            verify_signature(data, None, None, 1 if mode == "sha256" else 2)
+
+    # A local fixture chain exercises real CMS signing and allocation lifetimes.
+    def openssl(*args):
+        subprocess.run(["openssl", *map(str, args)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    root_key, root_cert = work / "root.key", work / "root.pem"
+    key, request, cert = work / "leaf.key", work / "leaf.csr", work / "leaf.pem"
+    openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", root_key,
+            "-out", root_cert, "-subj", "/CN=Signing Test Root", "-days", "1")
+    openssl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", request,
+            "-subj", "/CN=Signing Test Leaf")
+    openssl("x509", "-req", "-in", request, "-CA", root_cert, "-CAkey", root_key,
+            "-CAcreateserial", "-out", cert, "-days", "1")
+    p12 = work / "test.p12"
+    openssl("pkcs12", "-export", "-inkey", key, "-in", cert, "-certfile", root_cert,
+            "-out", p12, "-passout", "pass:test")
+    profile = work / "profile.plist"
+    profile.write_bytes(plistlib.dumps({"TeamIdentifier": ["TEAM"], "Entitlements": {
+        "application-identifier": "TEAM.test.binary"}}))
+    provision = work / "profile.mobileprovision"
+    openssl("cms", "-sign", "-binary", "-nodetach", "-in", profile, "-signer", cert,
+            "-inkey", key, "-outform", "DER", "-out", provision)
+    binary = work / "growth-cms"
+    binary.write_bytes(macho(code_size=1024 * 1024, signature_size=16))
+    binary.chmod(0o751)
+    subprocess.run([str(executable), "--cms", str(p12), str(provision), str(binary)],
+                   check=True, stdout=subprocess.PIPE)
+    # The CMS signature is checked in C++; independently verify the final page hashes.
+    verify_signature(binary.read_bytes(), None, None)
 
 
 def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
@@ -263,7 +321,7 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
                     "-module-cache-path", str(work / "swift-cache"), "-I", str(module),
                     str(ROOT.parent / "ASignArchiveKit/Sources/ASignArchiveKit/ASignArchiveKit.swift"),
                     str(shim), str(app), str(ROOT / "Tests/archive_metadata_regressions.swift"),
-                    str(obj), str(minizip), "-Xlinker", "-lz", "-Xlinker", "-lpthread",
+                    str(obj), str(minizip), "-Xlinker", "-lz", "-Xlinker", "-lpthread", "-Xlinker", "-lcrypto",
                     "-o", str(executable)], check=True)
     subprocess.run([str(executable), str(source), str(work)], check=True)
 
@@ -298,19 +356,24 @@ def main():
                         "-Wl,--wrap=mz_zip_entry_read_open", "-lssl", "-lcrypto", "-lz",
                         "-Wl,--wrap=mz_zip_reader_open_file",
                         "-Wl,--wrap=mz_zip_reader_goto_next_entry", "-Wl,--wrap=lstat",
+                        "-Wl,--wrap=SHA1", "-Wl,--wrap=SHA256", "-Wl,--wrap=PEM_read_bio_X509",
                         "-o", str(executable)], check=True)
         source = work / "source.ipa"
         fixture(source)
         extraction_checks(executable, work)
+        growth_and_cms_checks(executable, work)
         if args.swiftc:
             swift_metadata_checks(args.swiftc, work, archive, includes,
                                   args.minizip_build / "libminizip.a", source)
         results = []
-        for workers, filesystem, relative in (("1", False, False), ("4", False, False),
-                                               ("4", True, False), ("4", True, True)):
+        for workers, filesystem, relative, fused in (("1", False, False, False), ("4", False, False, False),
+                ("4", True, False, False), ("4", True, True, False),
+                ("1", False, False, True), ("4", False, False, True)):
             label = f"{workers}-{'filesystem' if filesystem else 'sparse'}"
             if relative:
                 label += "-relative"
+            if fused:
+                label += "-fused"
             overlay = work / f"overlay-{label}.app"
             overlay.mkdir()
             if filesystem:
@@ -329,6 +392,8 @@ def main():
                        overlay.name if relative else str(overlay), APP]
             if filesystem:
                 command.append("--filesystem")
+            elif fused:
+                command.append("--fused")
             run = subprocess.run(command,
                                  env={**os.environ, "ZSIGN_WORKERS": workers}, text=True,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=work)
@@ -340,6 +405,16 @@ def main():
         assert results[0] == results[1], "Serial and parallel signing must emit identical contents"
         assert results[1] == results[2], "Sparse and filesystem signing must emit identical contents"
         assert results[2] == results[3], "Relative and absolute paths must emit identical contents"
+        assert results[0] == results[4] == results[5], "Fused classification/hashing must emit identical signatures/seals"
+        edited = []
+        for mode in ("--overlay", "--fused-overlay"):
+            overlay = work / (mode[2:] + ".app")
+            overlay.mkdir()
+            destination = work / (mode[2:] + ".ipa")
+            subprocess.run([str(executable), str(source), str(destination), str(overlay), APP, mode],
+                           check=True, stdout=subprocess.PIPE)
+            edited.append(verify_archive(destination, edited_resource=True))
+        assert edited[0] == edited[1], "An overlay must invalidate the original resource digest"
         overlay = work / "profiles.app"
         overlay.mkdir()
         destination = work / "profiles.ipa"

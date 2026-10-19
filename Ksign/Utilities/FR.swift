@@ -103,6 +103,7 @@ enum FR {
 		using options: Options,
 		icon: UIImage?,
 		certificate: CertificatePair?,
+        archiveApp suppliedArchiveApp: ArchiveBackedApp? = nil,
 		backgroundCompletion: ((Error?, String?) -> Void)? = nil,
 		completion: @escaping (Error?, String?) -> Void
 	) {
@@ -123,7 +124,13 @@ enum FR {
 			handler.appIcon = icon
 
 			do {
-                let archiveApp = try Storage.shared.getArchiveURL(for: app).map { try ArchiveBackedApp(archiveURL: $0) }
+                let archiveApp = try Storage.shared.getArchiveURL(for: app).map { url in
+                    if let suppliedArchiveApp, suppliedArchiveApp.archiveURL.standardizedFileURL == url.standardizedFileURL {
+                        try suppliedArchiveApp.archiveIndex.validate()
+                        return suppliedArchiveApp
+                    }
+                    return try ArchiveBackedApp(archiveURL: url)
+                }
 				try SigningPreflight.checkPlatform(for: app, archiveApp: archiveApp)
 				try await handler.copy(archiveApp: archiveApp)
 

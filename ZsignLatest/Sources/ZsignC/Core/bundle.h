@@ -22,7 +22,7 @@ public:
 	void SetArchiveBacking(const string& archivePath,
 						 const string& archiveRootPath,
 						 const vector<string>& deletedPaths,
-						 string manifest = "");
+						 string manifest = "", string resourceDigests = "");
 
 	bool SignFolder(ZSignAsset* pSignAsset,
 					const string& strFolder,
@@ -61,6 +61,7 @@ private:
 	bool BuildFileIndex();
 	void CloseArchiveReaders();
 	bool AddArchiveFileIndex();
+	bool SeedArchiveResourceDigests();
 	void EnsureIndexedFile(const string& strFile, bool overlay = false);
 	bool IndexOverlayFile(const string& strFile);
 	bool HasOverlayPath(const string& strPath) const;
@@ -111,6 +112,7 @@ private:
 	string			m_strArchivePath;
 	string			m_strArchiveRootPath;
 	string m_archiveManifest;
+	string m_archiveResourceDigests;
 	set<string>		m_setArchiveDeletedPaths;
 	map<string, ArchiveEntry> m_archiveEntries;
 

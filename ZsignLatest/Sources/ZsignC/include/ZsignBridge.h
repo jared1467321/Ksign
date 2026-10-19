@@ -30,6 +30,7 @@ int zsign(
     NSString *archiveRootPath,
     NSArray<NSString *> *archiveDeletedPaths,
     NSData * _Nullable archiveManifest,
+    NSData * _Nullable archiveResourceDigests,
     void (^ _Nullable completionHandler)(BOOL success)
 );
 

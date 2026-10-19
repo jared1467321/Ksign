@@ -7,6 +7,11 @@ import Foundation
         let source = URL(fileURLWithPath: CommandLine.arguments[1])
         let work = URL(fileURLWithPath: CommandLine.arguments[2])
         let app = try ArchiveBackedApp(archiveURL: source)
+        let sparse = work.appendingPathComponent("swift-fused.app")
+        let digests = try ASignArchive.materializeSigningInputs(from: source, rootAppPath: app.rootAppPath,
+            to: sparse, hashResources: true)
+        precondition(digests?.prefix(8) == Data("ASHSH001".utf8))
+        precondition(!FileManager.default.fileExists(atPath: sparse.appendingPathComponent("root.dat").path))
         let info = try app.data(relativePath: "Info.plist")!
         check(try app.data(relativePath: "Info.plist") == info)
         do {
@@ -52,10 +57,15 @@ import Foundation
         let stale = work.appendingPathComponent("stale.ipa")
         try FileManager.default.copyItem(at: source, to: stale)
         let staleIndex = try ASignArchiveIndex(archiveURL: stale)
+        try staleIndex.validate()
         let file = try FileHandle(forWritingTo: stale)
         try file.seekToEnd()
         try file.write(contentsOf: Data([0]))
         try file.close()
+        do {
+            try staleIndex.validate()
+            preconditionFailure("A review handoff must reject a changed source before reusing cached metadata")
+        } catch is ASignArchiveError { }
         do {
             _ = try ASignArchive.readEntry(from: stale, path: app.rootAppPath + "/Info.plist",
                                           maximumBytes: 1024 * 1024, index: staleIndex)

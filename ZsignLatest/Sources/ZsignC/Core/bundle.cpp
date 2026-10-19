@@ -114,10 +114,11 @@ static bool IsCodeSignatureRelativePath(const string& relativePath)
 void ZBundle::SetArchiveBacking(const string& archivePath,
                                 const string& archiveRootPath,
                                 const vector<string>& deletedPaths,
-                                string manifest)
+                                string manifest, string resourceDigests)
 {
     m_strArchivePath = archivePath;
     m_archiveManifest = std::move(manifest);
+    m_archiveResourceDigests = std::move(resourceDigests);
     m_strArchiveRootPath = NormalizeArchiveLogicalPath(archiveRootPath);
     m_setArchiveDeletedPaths.clear();
     for (const string& value : deletedPaths) {
@@ -271,7 +272,30 @@ bool ZBundle::BuildFileIndex()
 
     if (!indexOK) return false;
     if (!m_strArchivePath.empty() && !m_strArchiveRootPath.empty()) {
-        return AddArchiveFileIndex();
+        return AddArchiveFileIndex() && SeedArchiveResourceDigests();
+    }
+    return true;
+}
+
+bool ZBundle::SeedArchiveResourceDigests()
+{
+    if (m_archiveResourceDigests.empty()) return true;
+    const string& data = m_archiveResourceDigests;
+    if (data.size() < 8 || data.compare(0, 8, "ASHSH001") != 0 || (data.size() - 8) % 60 != 0) return false;
+    unordered_map<int64_t, ResourceDigest> digests;
+    jbase64 b64;
+    for (size_t offset = 8; offset < data.size(); offset += 60) {
+        uint64_t position = 0;
+        for (size_t byte = 0; byte < 8; byte++) position |= (uint64_t)(uint8_t)data[offset + byte] << (byte * 8);
+        if (position > INT64_MAX) return false;
+        ResourceDigest digest = {b64.encode(data.substr(offset + 8, 20)), b64.encode(data.substr(offset + 28, 32))};
+        if (!digests.emplace((int64_t)position, std::move(digest)).second) return false;
+    }
+    // Only archive-only surviving entries may reuse source hashes. Overlay
+    // aliases, replacements and explicit deletions have already been filtered.
+    for (const auto& entry : m_archiveEntries) {
+        auto digest = digests.find(entry.second.cdPosition);
+        if (digest != digests.end()) m_resourceDigests[entry.first] = digest->second;
     }
     return true;
 }
@@ -1545,9 +1569,11 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 	}
 
 	string strCacheName;
-	ZSHA::SHA1Text(m_strAppFolder, strCacheName);
-	if (!ZFile::IsFileExistsV("./.zsign_cache/%s.json", strCacheName.c_str())) {
-		m_bForceSign = true;
+	if (!m_bForceSign || bEnableCache) {
+		ZSHA::SHA1Text(m_strAppFolder, strCacheName);
+		if (!ZFile::IsFileExistsV("./.zsign_cache/%s.json", strCacheName.c_str())) {
+			m_bForceSign = true;
+		}
 	}
 
 	jvalue jvRoot;
@@ -1565,7 +1591,7 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 		if (!GetObjectsToSign(m_strAppFolder, jvRoot)) {
 			return false;
 		}
-		GetNodeChangedFiles(jvRoot);
+		if (bEnableCache) GetNodeChangedFiles(jvRoot);
 	} else {
 		jvRoot.read_from_file("./.zsign_cache/%s.json", strCacheName.c_str());
 	}

@@ -269,13 +269,14 @@ extension BulkSigningView {
 		let certificate = _selectedCert()
 		let configs = _configs
 		SigningPreflightCoordinator.review(configs.map { SigningPreflight.source(for: $0.app, options: $0.options) }) { report in
-			_runSigning(configs: report.eligibleIndices.map { configs[$0] }, certificate: certificate, skipped: report.skipped)
+			_runSigning(configs: report.eligibleIndices.map { configs[$0] }, certificate: certificate,
+                skipped: report.skipped, archiveApps: report.eligibleIndices.map { report.archiveApps[$0] })
 		} onCancel: {
 			_isSigning = false
 		}
 	}
 
-	private func _runSigning(configs: [AppSignConfig], certificate: CertificatePair?, skipped: [SigningPreflight.Issue]) {
+	private func _runSigning(configs: [AppSignConfig], certificate: CertificatePair?, skipped: [SigningPreflight.Issue], archiveApps: [ArchiveBackedApp?]) {
 		let generator = UIImpactFeedbackGenerator(style: .light)
 		generator.impactOccurred()
 		_isSigning = true
@@ -304,7 +305,7 @@ extension BulkSigningView {
 			// already runs detached; previously the continuation resumed only through
 			// the UI completion callback, so the first app could finish in the
 			// background while the loop remained parked until foreground.
-			for config in configs {
+			for (index, config) in configs.enumerated() {
 				let currentName = config.app.name ?? .localized("Unknown")
 				BackgroundTaskManager.shared.report(
 					.signing,
@@ -318,7 +319,8 @@ extension BulkSigningView {
 				do {
 					let signedID = try await Self._signOne(
 						config,
-						certificate: certificate
+						certificate: certificate,
+                        archiveApp: archiveApps[index]
 					)
 					signedIDs.append(signedID)
 
@@ -384,7 +386,8 @@ extension BulkSigningView {
 	// each sign can be awaited sequentially in the loop above.
 	private static func _signOne(
 		_ config: AppSignConfig,
-		certificate: CertificatePair?
+		certificate: CertificatePair?,
+        archiveApp: ArchiveBackedApp?
 	) async throws -> String {
 		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
 			FR.signPackageFile(
@@ -392,6 +395,7 @@ extension BulkSigningView {
 				using: config.options,
 				icon: config.icon,
 				certificate: certificate,
+                archiveApp: archiveApp,
 				backgroundCompletion: { error, signedID in
 					if let error {
 						continuation.resume(throwing: error)
