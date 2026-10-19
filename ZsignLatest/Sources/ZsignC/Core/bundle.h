@@ -21,7 +21,8 @@ public:
 public:
 	void SetArchiveBacking(const string& archivePath,
 						 const string& archiveRootPath,
-						 const vector<string>& deletedPaths);
+						 const vector<string>& deletedPaths,
+						 string manifest = "");
 
 	bool SignFolder(ZSignAsset* pSignAsset,
 					const string& strFolder,
@@ -60,7 +61,10 @@ private:
 	bool BuildFileIndex();
 	void CloseArchiveReaders();
 	bool AddArchiveFileIndex();
-	void EnsureIndexedFile(const string& strFile);
+	void EnsureIndexedFile(const string& strFile, bool overlay = false);
+	bool IndexOverlayFile(const string& strFile);
+	bool HasOverlayPath(const string& strPath) const;
+	void ForgetIndexedFile(const string& strFile);
 	bool IsArchiveDeleted(const string& relativePath) const;
 	bool GetLogicalSymbolicLinkTarget(const string& strPath, string& strTarget) const;
 	bool HashLogicalFile(const string& strPath, string& strSHA1Base64, string& strSHA256Base64, void* archiveReader = NULL) const;
@@ -83,6 +87,14 @@ private:
 	vector<string>	m_indexedFolders;
 	unordered_set<string> m_indexedFileSet;
 	unordered_set<string> m_indexedFolderSet;
+	set<string> m_sortedFiles;
+	struct OverlayFile {
+		bool isSymlink = false;
+		string symlinkTarget;
+	};
+	unordered_map<string, OverlayFile> m_overlayFiles;
+	unordered_set<string> m_overlayFolders;
+	unordered_set<string> m_overlayFoldedPaths;
 	struct ResourceDigest {
 		string sha1;
 		string sha256;
@@ -98,6 +110,7 @@ private:
 	};
 	string			m_strArchivePath;
 	string			m_strArchiveRootPath;
+	string m_archiveManifest;
 	set<string>		m_setArchiveDeletedPaths;
 	map<string, ArchiveEntry> m_archiveEntries;
 

@@ -7,6 +7,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #include "mz.h"
 #include "mz_strm.h"
@@ -440,25 +442,39 @@ static void asign_string_set_free(asign_string_set *set) {
     set->capacity = 0;
 }
 
-static size_t asign_string_hash(const char *value) {
+static unsigned char asign_fold_ascii(unsigned char value) {
+    return value >= 'A' && value <= 'Z' ? (unsigned char)(value + 'a' - 'A') : value;
+}
+
+static size_t asign_string_hash_length(const char *value, size_t length, int fold) {
     uint64_t hash = UINT64_C(14695981039346656037);
-    while (*value != '\0') {
-        hash ^= (unsigned char)*value++;
+    for (size_t i = 0; i < length; i++) {
+        hash ^= fold ? asign_fold_ascii((unsigned char)value[i]) : (unsigned char)value[i];
         hash *= UINT64_C(1099511628211);
     }
     return (size_t)hash;
 }
 
-static int asign_string_set_contains(const asign_string_set *set, const char *value) {
-    if (set == NULL || value == NULL || set->capacity == 0)
-        return 0;
-    size_t slot = asign_string_hash(value) & (set->capacity - 1);
+static size_t asign_string_hash(const char *value) {
+    return asign_string_hash_length(value, strlen(value), 0);
+}
+
+static int asign_string_set_contains_length(const asign_string_set *set, const char *value, size_t length, int fold) {
+    if (set == NULL || value == NULL || set->capacity == 0) return 0;
+    size_t slot = asign_string_hash_length(value, length, fold) & (set->capacity - 1);
     while (set->items[slot] != NULL) {
-        if (strcmp(set->items[slot], value) == 0)
-            return 1;
+        const char *candidate = set->items[slot];
+        size_t i = 0;
+        while (i < length && candidate[i] != '\0' &&
+            (unsigned char)candidate[i] == (fold ? asign_fold_ascii((unsigned char)value[i]) : (unsigned char)value[i])) i++;
+        if (i == length && candidate[i] == '\0') return 1;
         slot = (slot + 1) & (set->capacity - 1);
     }
     return 0;
+}
+
+static int asign_string_set_contains(const asign_string_set *set, const char *value) {
+    return value != NULL && asign_string_set_contains_length(set, value, strlen(value), 0);
 }
 
 static int32_t asign_string_set_add(asign_string_set *set, const char *value) {
@@ -619,6 +635,8 @@ static int32_t asign_make_parent_directories(const char *path) {
 typedef struct asign_entry_position_s {
     char *name;
     int64_t position;
+    int64_t size;
+    uint32_t flags;
 } asign_entry_position;
 
 typedef struct asign_entry_index_s {
@@ -651,7 +669,9 @@ static int32_t asign_entry_index_build(void *reader, asign_entry_index *index, v
         err = mz_zip_reader_entry_get_info(reader, &info);
         if (err != MZ_OK)
             break;
-        if (info == NULL || info->filename == NULL) {
+        if (info == NULL || info->filename == NULL || info->uncompressed_size < 0 ||
+            !asign_relative_path_is_safe(info->filename) ||
+            strchr(info->filename, '\n') != NULL || strchr(info->filename, '\r') != NULL) {
             err = MZ_FORMAT_ERROR;
             break;
         }
@@ -670,7 +690,11 @@ static int32_t asign_entry_index_build(void *reader, asign_entry_index *index, v
             err = MZ_MEM_ERROR;
             break;
         }
-        index->entries[index->count++] = (asign_entry_position){name, mz_zip_get_entry(*zip_handle)};
+        uint32_t flags = mz_zip_reader_entry_is_dir(reader) == MZ_OK ? 1 : 0;
+        if (mz_zip_attrib_is_symlink(info->external_fa, info->version_madeby) == MZ_OK ||
+            (info->linkname != NULL && info->linkname[0] != '\0'))
+            flags |= 2;
+        index->entries[index->count++] = (asign_entry_position){name, mz_zip_get_entry(*zip_handle), info->uncompressed_size, flags};
         err = mz_zip_reader_goto_next_entry(reader);
     }
     if (err != MZ_END_OF_LIST)
@@ -701,6 +725,195 @@ static int asign_entry_index_is_current(const asign_entry_index *index, const ch
             lo = mid + 1;
     }
     return 0;
+}
+
+struct asign_archive_index_s {
+    asign_entry_index names;
+    const asign_entry_position **ordered;
+    char *path;
+    struct stat identity;
+    uint8_t *manifest;
+    size_t manifest_size;
+};
+
+static int asign_index_identity_matches(const struct stat *a, const struct stat *b) {
+    if (a->st_dev != b->st_dev || a->st_ino != b->st_ino || a->st_size != b->st_size ||
+        a->st_mtime != b->st_mtime || a->st_ctime != b->st_ctime) return 0;
+#ifdef __APPLE__
+    return a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    return a->st_mtim.tv_nsec == b->st_mtim.tv_nsec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
+static const asign_entry_position *asign_index_find(const asign_archive_index *index, const char *name) {
+    size_t lo = 0, hi = index->names.count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int order = strcmp(name, index->names.entries[mid].name);
+        if (order == 0) return &index->names.entries[mid];
+        if (order < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return NULL;
+}
+
+static int asign_index_order_compare(const void *lhs, const void *rhs) {
+    const asign_entry_position *a = *(const asign_entry_position *const *)lhs;
+    const asign_entry_position *b = *(const asign_entry_position *const *)rhs;
+    return (a->position > b->position) - (a->position < b->position);
+}
+
+static void asign_store_le(uint8_t *bytes, uint64_t value, size_t length) {
+    for (size_t i = 0; i < length; i++) bytes[i] = (uint8_t)(value >> (8 * i));
+}
+
+void asign_archive_index_close(asign_archive_index *index) {
+    if (index == NULL) return;
+    asign_entry_index_free(&index->names);
+    free(index->ordered);
+    free(index->manifest);
+    free(index->path);
+    free(index);
+}
+
+int32_t asign_archive_index_open(const char *path, asign_archive_index **out_index) {
+    if (path == NULL || out_index == NULL) return MZ_PARAM_ERROR;
+    *out_index = NULL;
+    asign_archive_index *index = calloc(1, sizeof(*index));
+    if (index == NULL) return MZ_MEM_ERROR;
+    index->path = strdup(path);
+    void *reader = mz_zip_reader_create(), *zip = NULL;
+    int32_t err = index->path != NULL && reader != NULL ? MZ_OK : MZ_MEM_ERROR;
+    if (err == MZ_OK && stat(path, &index->identity) != 0) err = MZ_OPEN_ERROR;
+    if (err == MZ_OK) err = mz_zip_reader_set_recover(reader, 1);
+    if (err == MZ_OK) err = mz_zip_reader_open_file(reader, path);
+    if (err == MZ_OK) err = asign_entry_index_build(reader, &index->names, &zip);
+    if (reader != NULL) mz_zip_reader_delete(&reader);
+    struct stat final_identity;
+    if (err == MZ_OK && (stat(path, &final_identity) != 0 ||
+        !asign_index_identity_matches(&index->identity, &final_identity))) err = MZ_READ_ERROR;
+    if (err == MZ_OK && index->names.count > SIZE_MAX / sizeof(*index->ordered)) err = MZ_MEM_ERROR;
+    if (err == MZ_OK && index->names.count > 0) {
+        index->ordered = malloc(index->names.count * sizeof(*index->ordered));
+        if (index->ordered == NULL) err = MZ_MEM_ERROR;
+    }
+    size_t total = 8;
+    for (size_t i = 0; err == MZ_OK && i < index->names.count; i++) {
+        size_t length = strlen(index->names.entries[i].name);
+        if (length > UINT32_MAX || length > SIZE_MAX - 24 || total > SIZE_MAX - 24 - length) {
+            err = MZ_MEM_ERROR;
+            break;
+        }
+        total += 24 + length;
+        index->ordered[i] = &index->names.entries[i];
+    }
+    if (err == MZ_OK) {
+        if (index->names.count > 1)
+            qsort(index->ordered, index->names.count, sizeof(*index->ordered), asign_index_order_compare);
+        index->manifest = malloc(total);
+        if (index->manifest == NULL) err = MZ_MEM_ERROR;
+    }
+    if (err != MZ_OK) {
+        asign_archive_index_close(index);
+        return err;
+    }
+    memcpy(index->manifest, "ASIDX001", 8);
+    uint8_t *cursor = index->manifest + 8;
+    for (size_t i = 0; i < index->names.count; i++) {
+        const asign_entry_position *entry = index->ordered[i];
+        size_t length = strlen(entry->name);
+        asign_store_le(cursor, (uint64_t)entry->position, 8);
+        asign_store_le(cursor + 8, (uint64_t)entry->size, 8);
+        asign_store_le(cursor + 16, entry->flags, 4);
+        asign_store_le(cursor + 20, length, 4);
+        memcpy(cursor + 24, entry->name, length);
+        cursor += 24 + length;
+    }
+    index->manifest_size = total;
+    *out_index = index;
+    return MZ_OK;
+}
+
+static int32_t asign_index_open_reader(const asign_archive_index *index, void **reader) {
+    if (index == NULL || reader == NULL) return MZ_PARAM_ERROR;
+    struct stat st;
+    if (stat(index->path, &st) != 0 || !asign_index_identity_matches(&index->identity, &st))
+        return MZ_READ_ERROR;
+    *reader = mz_zip_reader_create();
+    if (*reader == NULL) return MZ_MEM_ERROR;
+    int32_t err = mz_zip_reader_set_recover(*reader, 1);
+    if (err == MZ_OK) err = mz_zip_reader_open_file(*reader, index->path);
+    // Initialize minizip's reader metadata pointer before seeking the underlying
+    // ZIP handle. mz_zip_goto_entry updates that same current-entry structure.
+    if (err == MZ_OK && index->names.count > 0) err = mz_zip_reader_goto_first_entry(*reader);
+    if (err != MZ_OK) mz_zip_reader_delete(reader);
+    return err;
+}
+
+static int32_t asign_index_seek(void *reader, int64_t position, mz_zip_file **info) {
+    void *zip = NULL;
+    int32_t err = mz_zip_reader_get_zip_handle(reader, &zip);
+    if (err == MZ_OK) err = mz_zip_goto_entry(zip, position);
+    if (err == MZ_OK) err = mz_zip_entry_get_info(zip, info);
+    mz_zip_file *reader_info = NULL;
+    if (err == MZ_OK) err = mz_zip_reader_entry_get_info(reader, &reader_info);
+    if (err == MZ_OK && reader_info != *info) err = MZ_FORMAT_ERROR;
+    return err;
+}
+
+int32_t asign_archive_index_enumerate(const asign_archive_index *index, asign_archive_entry_cb callback, void *context) {
+    if (index == NULL || callback == NULL) return MZ_PARAM_ERROR;
+    for (size_t i = 0; i < index->names.count; i++) {
+        const asign_entry_position *entry = index->ordered[i];
+        int32_t err = callback(entry->name, entry->size, entry->flags & 1, (entry->flags >> 1) & 1, context);
+        if (err != MZ_OK) return err;
+    }
+    return MZ_OK;
+}
+
+const uint8_t *asign_archive_index_manifest(const asign_archive_index *index, size_t *size) {
+    if (index == NULL || size == NULL) return NULL;
+    *size = index->manifest_size;
+    return index->manifest;
+}
+
+int32_t asign_archive_index_read(const asign_archive_index *index, const char *path,
+    int64_t maximum, uint8_t **data, int64_t *size) {
+    if (index == NULL || path == NULL || maximum < 0 || data == NULL || size == NULL)
+        return MZ_PARAM_ERROR;
+    *data = NULL;
+    *size = 0;
+    const asign_entry_position *entry = asign_index_find(index, path);
+    if (entry == NULL) return ASIGN_ARCHIVE_NOT_FOUND;
+    if (entry->flags & 1) return MZ_FORMAT_ERROR;
+    if (entry->size > maximum || (uint64_t)entry->size > SIZE_MAX) return MZ_BUF_ERROR;
+    void *reader = NULL;
+    mz_zip_file *info = NULL;
+    int32_t err = asign_index_open_reader(index, &reader);
+    if (err == MZ_OK) err = asign_index_seek(reader, entry->position, &info);
+    uint8_t *buffer = NULL;
+    if (err == MZ_OK) {
+        buffer = malloc(entry->size > 0 ? (size_t)entry->size : 1);
+        if (buffer == NULL) err = MZ_MEM_ERROR;
+    }
+    if (err == MZ_OK) err = mz_zip_reader_entry_open(reader);
+    if (err == MZ_OK) {
+        int64_t offset = 0;
+        while (offset < entry->size) {
+            int32_t amount = mz_zip_reader_entry_read(reader, buffer + offset,
+                (int32_t)(entry->size - offset > INT32_MAX ? INT32_MAX : entry->size - offset));
+            if (amount <= 0) { err = amount < 0 ? amount : MZ_READ_ERROR; break; }
+            offset += amount;
+        }
+        int32_t closed = mz_zip_reader_entry_close(reader);
+        if (err == MZ_OK) err = closed;
+    }
+    if (reader != NULL) mz_zip_reader_delete(&reader);
+    if (err != MZ_OK) { free(buffer); return err; }
+    *data = buffer;
+    *size = entry->size;
+    return MZ_OK;
 }
 
 // CRC mismatches remain fatal. A complete decoded stream alone cannot prove
@@ -1270,6 +1483,231 @@ int32_t asign_archive_materialize_signing_inputs(
     return err;
 }
 
+static int32_t asign_index_save(void *reader, const asign_entry_position *entry,
+    const char *relative, const char *destination) {
+    mz_zip_file *info = NULL;
+    int32_t err = asign_index_seek(reader, entry->position, &info);
+    if (err != MZ_OK) return err;
+    if (entry->flags & 2) return asign_save_current_symlink(reader, info, relative, destination);
+    err = asign_make_parent_directories(destination);
+    if (err != MZ_OK) return err;
+    if (entry->flags & 1) {
+        if (mkdir(destination, 0755) != 0 && errno != EEXIST) return MZ_WRITE_ERROR;
+        return MZ_OK;
+    }
+    (void)unlink(destination);
+    return mz_zip_reader_entry_save_file(reader, destination);
+}
+
+int32_t asign_archive_index_extract(const asign_archive_index *index, const char *path, const char *destination) {
+    if (index == NULL || path == NULL || destination == NULL) return MZ_PARAM_ERROR;
+    const asign_entry_position *entry = asign_index_find(index, path);
+    if (entry == NULL) return ASIGN_ARCHIVE_NOT_FOUND;
+    void *reader = NULL;
+    int32_t err = asign_index_open_reader(index, &reader);
+    const char *name = strrchr(path, '/');
+    if (err == MZ_OK) err = asign_index_save(reader, entry, name ? name + 1 : path, destination);
+    if (reader != NULL) mz_zip_reader_delete(&reader);
+    return err;
+}
+
+int32_t asign_archive_index_extract_prefix(const asign_archive_index *index, const char *prefix_path,
+    const char *destination) {
+    if (index == NULL || destination == NULL) return MZ_PARAM_ERROR;
+    char *prefix = asign_trimmed_root_copy(prefix_path);
+    if (prefix == NULL || !asign_relative_path_is_safe(prefix)) { free(prefix); return MZ_PARAM_ERROR; }
+    void *reader = NULL;
+    int32_t err = asign_index_open_reader(index, &reader);
+    int found = 0;
+    for (size_t i = 0; err == MZ_OK && i < index->names.count; i++) {
+        const asign_entry_position *entry = index->ordered[i];
+        const char *relative = NULL;
+        if (!asign_entry_relative_to_root(entry->name, prefix, &relative)) continue;
+        char *target = *relative ? asign_join_path(destination, relative) : strdup(destination);
+        if (target == NULL) { err = MZ_MEM_ERROR; break; }
+        const char *link_relative = relative;
+        if (!*relative) { const char *name = strrchr(prefix, '/'); link_relative = name ? name + 1 : prefix; }
+        err = asign_index_save(reader, entry, link_relative, target);
+        free(target);
+        found = 1;
+    }
+    if (reader != NULL) mz_zip_reader_delete(&reader);
+    free(prefix);
+    return err != MZ_OK ? err : (found ? MZ_OK : ASIGN_ARCHIVE_NOT_FOUND);
+}
+
+typedef struct asign_materialize_job_s {
+    const asign_archive_index *index;
+    const char *root;
+    const char *destination;
+    uint8_t include_strings;
+    uint8_t *selected;
+    atomic_size_t next;
+    atomic_int error;
+    int extracting;
+    void *readers[4];
+} asign_materialize_job;
+
+typedef struct asign_materialize_lane_s {
+    asign_materialize_job *job;
+    size_t lane;
+} asign_materialize_lane;
+
+static void *asign_materialize_worker(void *context) {
+    asign_materialize_lane *lane = context;
+    asign_materialize_job *job = lane->job;
+    void **slot = &job->readers[lane->lane];
+    int32_t err = *slot != NULL ? MZ_OK : asign_index_open_reader(job->index, slot);
+    if (err != MZ_OK) { atomic_store(&job->error, err); return NULL; }
+    void *reader = *slot;
+    for (;;) {
+        size_t i = atomic_fetch_add(&job->next, 1);
+        if (i >= job->index->names.count || atomic_load(&job->error) != MZ_OK) break;
+        const asign_entry_position *entry = job->index->ordered[i];
+        const char *relative = NULL;
+        if (!asign_entry_relative_to_root(entry->name, job->root, &relative) || !*relative) continue;
+        if (job->extracting) {
+            if (!job->selected[i] || (entry->flags & 2)) continue;
+            char *target = asign_join_path(job->destination, relative);
+            err = target ? asign_index_save(reader, entry, relative, target) : MZ_MEM_ERROR;
+            free(target);
+        } else {
+            if (entry->flags & 2) job->selected[i] = 1;
+            else if (!(entry->flags & 1)) {
+                if (strcmp(relative, "Info.plist") == 0 || asign_path_has_suffix(relative, "/Info.plist") ||
+                    (job->include_strings && (strcmp(relative, "InfoPlist.strings") == 0 ||
+                                              asign_path_has_suffix(relative, "/InfoPlist.strings"))))
+                    job->selected[i] = 1;
+                else if (entry->size >= 4) {
+                    mz_zip_file *info = NULL;
+                    int is_macho = 0;
+                    err = asign_index_seek(reader, entry->position, &info);
+                    if (err == MZ_OK) err = asign_current_entry_is_macho(reader, &is_macho);
+                    job->selected[i] = (uint8_t)is_macho;
+                }
+            }
+        }
+        if (err != MZ_OK) { atomic_store(&job->error, err); break; }
+    }
+    return NULL;
+}
+
+static int32_t asign_materialize_run(asign_materialize_job *job, uint32_t workers) {
+    pthread_t threads[3];
+    asign_materialize_lane lanes[4];
+    for (size_t i = 0; i < 4; i++) lanes[i] = (asign_materialize_lane){job, i};
+    size_t started = 0;
+    atomic_store(&job->next, 0);
+    // Failed thread creation simply leaves the remaining work to fewer workers.
+    for (uint32_t i = 1; i < workers; i++) {
+        if (pthread_create(&threads[started], NULL, asign_materialize_worker, &lanes[i]) == 0) started++;
+    }
+    asign_materialize_worker(&lanes[0]);
+    for (size_t i = 0; i < started; i++) pthread_join(threads[i], NULL);
+    return atomic_load(&job->error);
+}
+
+static int asign_materialize_parallel_paths_safe(const asign_materialize_job *job) {
+    asign_string_set paths = {0};
+    asign_string_set symlink_paths = {0};
+    int safe = 1;
+    for (size_t i = 0; safe && i < job->index->names.count; i++) {
+        const asign_entry_position *entry = job->index->ordered[i];
+        if (!job->selected[i] || !(entry->flags & 2)) continue;
+        char *key = strdup(entry->name);
+        if (key == NULL) { safe = 0; break; }
+        for (char *p = key; *p; p++) {
+            if (*p >= 'A' && *p <= 'Z') *p = (char)(*p + 'a' - 'A');
+        }
+        if (asign_string_set_add(&symlink_paths, key) != MZ_OK) safe = 0;
+        free(key);
+    }
+    for (size_t i = 0; safe && i < job->index->names.count; i++) {
+        if (!job->selected[i]) continue;
+        const char *path = job->index->ordered[i]->name;
+        char *key = strdup(path);
+        if (key == NULL) { safe = 0; break; }
+        char *component = key;
+        for (char *p = key;; p++) {
+            unsigned char value = (unsigned char)*p;
+            // Preserve source-order behavior for noncanonical/case-alias paths
+            // and Unicode names on case-insensitive, normalization-aware APFS.
+            if (value >= 128) safe = 0;
+            if (value >= 'A' && value <= 'Z') *p = (char)(value + 'a' - 'A');
+            if (*p == '/' || *p == '\0') {
+                size_t length = (size_t)(p - component);
+                if ((length == 0 && *p != '\0') || (length == 1 && component[0] == '.')) safe = 0;
+                if (*p == '\0') break;
+                component = p + 1;
+            }
+        }
+        if (asign_string_set_contains(&paths, key) || asign_string_set_add(&paths, key) != MZ_OK) safe = 0;
+        free(key);
+        // Do not schedule a real file through an archive's symlink ancestor.
+        char *parent = strdup(path);
+        if (parent == NULL) { safe = 0; break; }
+        for (char *p = parent; safe && *p; p++) {
+            if (*p >= 'A' && *p <= 'Z') *p = (char)(*p + 'a' - 'A');
+            if (*p != '/') continue;
+            *p = '\0';
+            if (asign_string_set_contains(&symlink_paths, parent)) safe = 0;
+            *p = '/';
+        }
+        free(parent);
+    }
+    asign_string_set_free(&paths);
+    asign_string_set_free(&symlink_paths);
+    return safe;
+}
+
+static int32_t asign_materialize_serial_selected(asign_materialize_job *job, int links_only) {
+    void **reader = &job->readers[0];
+    int32_t err = *reader != NULL ? MZ_OK : asign_index_open_reader(job->index, reader);
+    for (size_t i = 0; err == MZ_OK && i < job->index->names.count; i++) {
+        const asign_entry_position *entry = job->index->ordered[i];
+        if (!job->selected[i] || (links_only && !(entry->flags & 2))) continue;
+        const char *relative = NULL;
+        asign_entry_relative_to_root(entry->name, job->root, &relative);
+        char *target = asign_join_path(job->destination, relative);
+        err = target ? asign_index_save(*reader, entry, relative, target) : MZ_MEM_ERROR;
+        free(target);
+    }
+    return err;
+}
+
+int32_t asign_archive_index_materialize(const asign_archive_index *index, const char *root_path,
+    const char *destination, uint8_t include_strings, uint32_t workers) {
+    if (index == NULL || destination == NULL) return MZ_PARAM_ERROR;
+    char *root = asign_trimmed_root_copy(root_path);
+    if (root == NULL || !asign_relative_path_is_safe(root)) { free(root); return MZ_PARAM_ERROR; }
+    if (mkdir(destination, 0755) != 0 && errno != EEXIST) { free(root); return MZ_WRITE_ERROR; }
+    uint8_t *selected = calloc(index->names.count > 0 ? index->names.count : 1, 1);
+    if (selected == NULL) { free(root); return MZ_MEM_ERROR; }
+    asign_materialize_job job = {.index = index, .root = root, .destination = destination,
+        .include_strings = include_strings, .selected = selected};
+    atomic_init(&job.next, 0);
+    atomic_init(&job.error, MZ_OK);
+    if (workers == 0) {
+        long processors = sysconf(_SC_NPROCESSORS_ONLN);
+        workers = processors > 0 && processors < 4 ? (uint32_t)processors : 4;
+    }
+    if (workers > 4) workers = 4;
+    int32_t err = asign_materialize_run(&job, workers);
+    if (err == MZ_OK && !asign_materialize_parallel_paths_safe(&job)) {
+        // Ambiguous aliases retain the old serial order, including symlink order.
+        err = asign_materialize_serial_selected(&job, 0);
+    } else if (err == MZ_OK) {
+        job.extracting = 1;
+        err = asign_materialize_run(&job, workers);
+        // Install links only after all independent regular writes have joined.
+        if (err == MZ_OK) err = asign_materialize_serial_selected(&job, 1);
+    }
+    for (size_t i = 0; i < 4; i++) if (job.readers[i] != NULL) mz_zip_reader_delete(&job.readers[i]);
+    free(selected);
+    free(root);
+    return err;
+}
+
 static int asign_deleted_path_matches(const char *relative, const char *deleted_paths) {
     if (relative == NULL || deleted_paths == NULL || deleted_paths[0] == '\0')
         return 0;
@@ -1370,83 +1808,58 @@ static int32_t asign_writer_add_overlay_file(
     return mz_zip_writer_add_file(writer, disk_path, archive_path);
 }
 
-static int32_t asign_append_new_overlay_entries(
-    void *writer,
-    const char *disk_root,
-    const char *relative,
-    const char *archive_root,
-    int16_t compression_level,
-    const char *deleted_paths,
-    asign_string_set *already_written
-) {
-    char *directory_path = relative[0] == '\0' ? strdup(disk_root) : asign_join_path(disk_root, relative);
-    if (directory_path == NULL)
-        return MZ_MEM_ERROR;
-    DIR *dir = opendir(directory_path);
-    if (dir == NULL) {
-        free(directory_path);
-        return MZ_OPEN_ERROR;
-    }
-
+static int32_t asign_collect_overlay_files(const char *root, const char *relative,
+    const char *deleted, asign_string_set *files, asign_string_set *folded) {
+    char *directory = *relative ? asign_join_path(root, relative) : strdup(root);
+    if (directory == NULL) return MZ_MEM_ERROR;
+    DIR *dir = opendir(directory);
+    free(directory);
+    if (dir == NULL) return MZ_OPEN_ERROR;
     int32_t err = MZ_OK;
-    struct dirent *entry = NULL;
+    struct dirent *entry;
     while (err == MZ_OK && (entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-
-        size_t rel_len = strlen(relative);
-        size_t name_len = strlen(entry->d_name);
-        size_t child_len = rel_len + (rel_len > 0 ? 1 : 0) + name_len + 1;
-        char *child_rel = (char *)malloc(child_len);
-        if (child_rel == NULL) {
-            err = MZ_MEM_ERROR;
-            break;
-        }
-        if (rel_len > 0)
-            snprintf(child_rel, child_len, "%s/%s", relative, entry->d_name);
-        else
-            snprintf(child_rel, child_len, "%s", entry->d_name);
-
-        char *child_disk = asign_join_path(disk_root, child_rel);
-        size_t archive_len = strlen(archive_root) + 1 + strlen(child_rel) + 1;
-        char *child_archive = (char *)malloc(archive_len);
-        if (child_disk == NULL || child_archive == NULL) {
-            free(child_rel);
-            free(child_disk);
-            free(child_archive);
-            err = MZ_MEM_ERROR;
-            break;
-        }
-        snprintf(child_archive, archive_len, "%s/%s", archive_root, child_rel);
-
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char *child = *relative ? asign_join_path(relative, entry->d_name) : strdup(entry->d_name);
+        char *path = child ? asign_join_path(root, child) : NULL;
         struct stat st;
-        if (asign_deleted_path_matches(child_rel, deleted_paths)) {
-            // Deletion has higher precedence than the sparse overlay. This also
-            // prevents a deleted subtree that still contains an incidental
-            // materialized file from being re-added during the final append pass.
-        } else if (lstat(child_disk, &st) != 0) {
-            err = MZ_READ_ERROR;
-        } else if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
-            err = asign_append_new_overlay_entries(writer, disk_root, child_rel, archive_root,
-                                                    compression_level, deleted_paths, already_written);
-        } else if (!asign_string_set_contains(already_written, child_archive)) {
-            err = asign_writer_add_overlay_file(writer, child_disk, child_archive, compression_level);
-            if (err == MZ_OK)
-                err = asign_string_set_add(already_written, child_archive);
+        if (child == NULL || path == NULL) err = MZ_MEM_ERROR;
+        else if (asign_deleted_path_matches(child, deleted)) { /* deletion wins */ }
+        else if (lstat(path, &st) != 0) err = MZ_READ_ERROR;
+        else if (S_ISDIR(st.st_mode)) err = asign_collect_overlay_files(root, child, deleted, files, folded);
+        else {
+            err = asign_string_set_add(files, child);
+            for (char *p = child; *p; p++) *p = (char)asign_fold_ascii((unsigned char)*p);
+            if (err == MZ_OK) err = asign_string_set_add(folded, child);
         }
-
-        free(child_rel);
-        free(child_disk);
-        free(child_archive);
+        free(child);
+        free(path);
     }
-
     closedir(dir);
-    free(directory_path);
     return err;
 }
 
-int32_t asign_archive_rebuild_with_overlay(
-    const char *source_archive_path,
+// Most source resources have no overlay at all. Only actual indexed files,
+// case/Unicode aliases and descendants of symlinks can need a disk lookup.
+static int asign_overlay_contains(const asign_string_set *files, const asign_string_set *folded,
+    const char *root, const char *relative) {
+    size_t length = strlen(relative);
+    if (asign_string_set_contains_length(files, relative, length, 0)) return 1;
+    int candidate = asign_string_set_contains_length(folded, relative, length, 1);
+    for (size_t i = 0; !candidate && i < length; i++) {
+        if ((unsigned char)relative[i] >= 128) candidate = 1;
+        else if (relative[i] == '/' && asign_string_set_contains_length(folded, relative, i, 1)) candidate = 1;
+    }
+    if (!candidate) return 0;
+    char *path = asign_join_path(root, relative);
+    if (path == NULL) return -1;
+    struct stat st;
+    int exists = lstat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+    free(path);
+    return exists;
+}
+
+int32_t asign_archive_index_rebuild(
+    const asign_archive_index *index,
     const char *destination_archive_path,
     const char *root_entry_path,
     const char *overlay_app_path,
@@ -1456,7 +1869,7 @@ int32_t asign_archive_rebuild_with_overlay(
     asign_archive_progress_cb progress_cb,
     void *userdata
 ) {
-    if (source_archive_path == NULL || destination_archive_path == NULL ||
+    if (index == NULL || destination_archive_path == NULL ||
         root_entry_path == NULL || overlay_app_path == NULL)
         return MZ_PARAM_ERROR;
 
@@ -1466,18 +1879,14 @@ int32_t asign_archive_rebuild_with_overlay(
         return MZ_PARAM_ERROR;
     }
 
-    void *reader = mz_zip_reader_create();
+    void *reader = NULL;
     void *writer = mz_zip_writer_create();
-    if (reader == NULL || writer == NULL) {
-        if (reader != NULL) mz_zip_reader_delete(&reader);
-        if (writer != NULL) mz_zip_writer_delete(&writer);
+    if (writer == NULL) {
         free(root);
         return MZ_MEM_ERROR;
     }
 
-    int32_t err = mz_zip_reader_set_recover(reader, 1);
-    if (err == MZ_OK)
-        err = mz_zip_reader_open_file(reader, source_archive_path);
+    int32_t err = asign_index_open_reader(index, &reader);
 
     mz_zip_writer_set_compress_method(writer, compression_level == 0 ? MZ_COMPRESS_METHOD_STORE : MZ_COMPRESS_METHOD_DEFLATE);
     mz_zip_writer_set_compress_level(writer, compression_level);
@@ -1487,41 +1896,21 @@ int32_t asign_archive_rebuild_with_overlay(
         err = mz_zip_writer_open_file(writer, destination_archive_path, 0, 0);
 
     int64_t total_bytes = 0;
-    if (err == MZ_OK) {
-        int32_t size_status = MZ_OK;
-        total_bytes = asign_reader_total_size(reader, &size_status);
-        if (size_status != MZ_OK)
-            err = size_status;
+    for (size_t i = 0; i < index->names.count; i++) {
+        int64_t size = index->ordered[i]->size;
+        if (size > INT64_MAX - total_bytes) { err = MZ_FORMAT_ERROR; break; }
+        total_bytes += size;
     }
-
-    asign_entry_index entries = {0};
-    void *zip_handle = NULL;
-    if (err == MZ_OK)
-        err = asign_entry_index_build(reader, &entries, &zip_handle);
+    asign_string_set overlay_files = {0}, folded_overlay_files = {0};
+    if (err == MZ_OK) err = asign_collect_overlay_files(overlay_app_path, "", deleted_paths, &overlay_files, &folded_overlay_files);
 
     asign_string_set written = {0};
     int64_t processed = 0;
-    if (err == MZ_OK) {
-        if (progress_cb != NULL)
-            progress_cb(0.0, userdata);
-        err = mz_zip_reader_goto_first_entry(reader);
-    }
-
-    while (err == MZ_OK) {
+    if (err == MZ_OK && progress_cb != NULL) progress_cb(0.0, userdata);
+    for (size_t entry_index = 0; err == MZ_OK && entry_index < index->names.count; entry_index++) {
         mz_zip_file *file_info = NULL;
-        err = mz_zip_reader_entry_get_info(reader, &file_info);
-        if (err != MZ_OK)
-            break;
-        if (file_info == NULL || file_info->filename == NULL) {
-            err = MZ_FORMAT_ERROR;
-            break;
-        }
-
-        // Emit exactly the duplicate that zsign hashed/materialized.
-        if (!asign_entry_index_is_current(&entries, file_info->filename, zip_handle)) {
-            err = mz_zip_reader_goto_next_entry(reader);
-            continue;
-        }
+        err = asign_index_seek(reader, index->ordered[entry_index]->position, &file_info);
+        if (err != MZ_OK) break;
 
         const char *entry_name = file_info->filename;
         const char *relative = NULL;
@@ -1538,13 +1927,13 @@ int32_t asign_archive_rebuild_with_overlay(
                 asign_deleted_path_matches(relative, deleted_paths)) {
                 skip = 1;
             } else {
-                char *overlay = asign_join_path(overlay_app_path, relative);
-                if (overlay == NULL) {
+                int present = asign_overlay_contains(&overlay_files, &folded_overlay_files, overlay_app_path, relative);
+                char *overlay = present > 0 ? asign_join_path(overlay_app_path, relative) : NULL;
+                if (present < 0 || (present > 0 && overlay == NULL)) {
                     err = MZ_MEM_ERROR;
                     break;
                 }
-                struct stat st;
-                if (lstat(overlay, &st) == 0 && !S_ISDIR(st.st_mode)) {
+                if (present > 0) {
                     if (asign_string_set_contains(&written, entry_name)) {
                         // ZIP permits duplicate names. Once a logical path has been
                         // replaced, omit later duplicates so the signed archive has
@@ -1584,19 +1973,23 @@ int32_t asign_archive_rebuild_with_overlay(
         if (progress_cb != NULL && total_bytes > 0)
             progress_cb((double)processed / (double)total_bytes, userdata);
 
-        err = mz_zip_reader_goto_next_entry(reader);
     }
-    if (err == MZ_END_OF_LIST)
-        err = MZ_OK;
-
-    if (err == MZ_OK) {
-        err = asign_append_new_overlay_entries(writer, overlay_app_path, "", root,
-                                               compression_level, deleted_paths, &written);
+    // The same overlay index drives additions; no second filesystem walk.
+    for (size_t i = 0; err == MZ_OK && i < overlay_files.capacity; i++) {
+        const char *relative = overlay_files.items[i];
+        if (relative == NULL) continue;
+        char *name = asign_join_path(root, relative);
+        char *disk = asign_join_path(overlay_app_path, relative);
+        if (name == NULL || disk == NULL) err = MZ_MEM_ERROR;
+        else if (!asign_string_set_contains(&written, name))
+            err = asign_writer_add_overlay_file(writer, disk, name, compression_level);
+        free(name);
+        free(disk);
     }
-
-    asign_entry_index_free(&entries);
+    asign_string_set_free(&overlay_files);
+    asign_string_set_free(&folded_overlay_files);
     asign_string_set_free(&written);
-    int32_t reader_close = mz_zip_reader_close(reader);
+    int32_t reader_close = reader != NULL ? mz_zip_reader_close(reader) : MZ_OK;
     int32_t writer_close = mz_zip_writer_close(writer);
     mz_zip_reader_delete(&reader);
     mz_zip_writer_delete(&writer);
@@ -1608,5 +2001,16 @@ int32_t asign_archive_rebuild_with_overlay(
         err = writer_close;
     if (err == MZ_OK && progress_cb != NULL)
         progress_cb(1.0, userdata);
+    return err;
+}
+
+int32_t asign_archive_rebuild_with_overlay(const char *source, const char *destination,
+    const char *root, const char *overlay, const char *deleted, uint8_t omit_signatures,
+    int16_t compression, asign_archive_progress_cb progress, void *context) {
+    asign_archive_index *index = NULL;
+    int32_t err = asign_archive_index_open(source, &index);
+    if (err == MZ_OK) err = asign_archive_index_rebuild(index, destination, root, overlay,
+        deleted, omit_signatures, compression, progress, context);
+    asign_archive_index_close(index);
     return err;
 }

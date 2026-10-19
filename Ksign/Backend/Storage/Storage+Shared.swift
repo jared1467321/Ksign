@@ -116,13 +116,17 @@ enum ArchiveBackedAppError: LocalizedError {
 /// does not extract the app tree. Small metadata resources can be read or cached
 /// selectively, and callers that need a directory listing operate on ZIP names.
 final class ArchiveBackedApp {
+	let archiveIndex: ASignArchiveIndex
+	private var cachedRootInfo: Data?
 	let archiveURL: URL
 	let rootAppPath: String
 	private let entriesByPath: [String: ASignArchiveEntry]
 
 	init(archiveURL: URL) throws {
 		self.archiveURL = archiveURL
-		let entries = try ASignArchive.entries(in: archiveURL)
+		let archiveIndex = try ASignArchiveIndex(archiveURL: archiveURL)
+		self.archiveIndex = archiveIndex
+		let entries = try ASignArchive.entries(in: archiveURL, index: archiveIndex)
 
 		var index: [String: ASignArchiveEntry] = [:]
 		var rootCandidates = Set<String>()
@@ -148,7 +152,7 @@ final class ArchiveBackedApp {
 		entriesByPath = index
 	}
 
-	func metadata() throws -> ArchiveBackedAppMetadata {
+	func metadata(overlayAppURL: URL? = nil, deletedPaths: Set<String> = []) throws -> ArchiveBackedAppMetadata {
 		let plistPath = rootAppPath + "/Info.plist"
 		guard let entry = entriesByPath[plistPath] else {
 			throw ArchiveBackedAppError.infoPlistMissing
@@ -157,7 +161,12 @@ final class ArchiveBackedApp {
 			throw ArchiveBackedAppError.infoPlistTooLarge
 		}
 
-		let data = try read(entry: entry, maximumBytes: 16 * 1024 * 1024)
+        let data: Data
+        if let overlayAppURL {
+            data = try Data(contentsOf: overlayAppURL.appendingPathComponent("Info.plist"))
+        } else {
+            data = try read(entry: entry, maximumBytes: 16 * 1024 * 1024)
+        }
 		guard
 			let object = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
 		else {
@@ -171,7 +180,7 @@ final class ArchiveBackedApp {
 		let identifier = Self.nonEmptyString(object["CFBundleIdentifier"])
 		let version = Self.nonEmptyString(object["CFBundleShortVersionString"])
 			?? Self.nonEmptyString(object["CFBundleVersion"])
-		let iconPath = resolvePrimaryIconPath(from: object)
+		let iconPath = resolvePrimaryIconPath(from: object, overlayAppURL: overlayAppURL, deletedPaths: deletedPaths)
 
 		return ArchiveBackedAppMetadata(
 			rootAppPath: rootAppPath,
@@ -213,9 +222,11 @@ final class ArchiveBackedApp {
 	}
 
 	@discardableResult
-	func cachePrimaryIcon(in directory: URL, fileName: String = "Icon") throws -> String? {
-		let metadata = try metadata()
-		guard let iconPath = metadata.iconArchivePath, let entry = entriesByPath[iconPath] else { return nil }
+    func cachePrimaryIcon(in directory: URL, fileName: String = "Icon", overlayAppURL: URL? = nil,
+                          metadata suppliedMetadata: ArchiveBackedAppMetadata? = nil,
+                          deletedPaths: Set<String> = []) throws -> String? {
+        let metadata = try suppliedMetadata ?? metadata(overlayAppURL: overlayAppURL, deletedPaths: deletedPaths)
+        guard let iconPath = metadata.iconArchivePath else { return nil }
 		let ext = URL(fileURLWithPath: iconPath).pathExtension
 		let cacheName = ext.isEmpty ? fileName : "\(fileName).\(ext)"
 		let destination = directory.appendingPathComponent(cacheName)
@@ -223,16 +234,23 @@ final class ArchiveBackedApp {
 		if FileManager.default.fileExists(atPath: destination.path) {
 			try FileManager.default.removeItem(at: destination)
 		}
-		guard try ASignArchive.extractEntry(from: archiveURL, path: iconPath, to: destination) else { return nil }
+        let relative = String(iconPath.dropFirst(rootAppPath.count + 1))
+        if let overlayAppURL, FileManager.default.fileExists(atPath: overlayAppURL.appendingPathComponent(relative).path) {
+            try FileManager.default.copyItem(at: overlayAppURL.appendingPathComponent(relative), to: destination)
+        } else {
+            guard entriesByPath[iconPath] != nil,
+                  try ASignArchive.extractEntry(from: archiveURL, path: iconPath, to: destination, index: archiveIndex)
+            else { return nil }
+        }
 		return cacheName
 	}
 
 	func extract(relativePath: String, to destination: URL) throws -> Bool {
 		guard let archivePath = archivePath(forRelativePath: relativePath),
-			let entry = entriesByPath[archivePath]
+			entriesByPath[archivePath] != nil
 		else { return false }
 		try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-		return try ASignArchive.extractEntry(from: archiveURL, path: archivePath, to: destination)
+		return try ASignArchive.extractEntry(from: archiveURL, path: archivePath, to: destination, index: archiveIndex)
 	}
 
 	/// Resolves a resource name the same way iOS icon declarations commonly do:
@@ -283,14 +301,14 @@ final class ArchiveBackedApp {
 			let archiveBase = archivePath(forRelativePath: clean),
 			entriesByPath.keys.contains(where: { $0 == archiveBase || $0.hasPrefix(archiveBase + "/") })
 		else { return false }
-		return try ASignArchive.extractPrefix(from: archiveURL, prefix: archiveBase, to: destination)
+		return try ASignArchive.extractPrefix(from: archiveURL, prefix: archiveBase, to: destination, index: archiveIndex)
 	}
 
 	/// Explicit compatibility helper for features whose semantics require an
 	/// extracted app tree (currently Crypt Check Extracted). Normal browsing,
 	/// signing, installation and export do not call this.
 	func extractRootApp(to destination: URL) throws {
-		guard try ASignArchive.extractPrefix(from: archiveURL, prefix: rootAppPath, to: destination) else {
+		guard try ASignArchive.extractPrefix(from: archiveURL, prefix: rootAppPath, to: destination, index: archiveIndex) else {
 			throw ArchiveBackedAppError.rootAppNotFound
 		}
 	}
@@ -305,17 +323,24 @@ final class ArchiveBackedApp {
 		guard maximumBytes >= 0, entry.uncompressedSize >= 0, entry.uncompressedSize <= Int64(maximumBytes) else {
 			throw ArchiveBackedAppError.infoPlistTooLarge
 		}
+        if entry.path == rootAppPath + "/Info.plist", let cachedRootInfo {
+            guard cachedRootInfo.count <= maximumBytes else { throw ArchiveBackedAppError.infoPlistTooLarge }
+            return cachedRootInfo
+        }
 		guard let data = try ASignArchive.readEntry(
 			from: archiveURL,
 			path: entry.path,
-			maximumBytes: Int64(maximumBytes)
+			maximumBytes: Int64(maximumBytes),
+            index: archiveIndex
 		) else {
 			throw ArchiveBackedAppError.infoPlistMissing
 		}
+        if entry.path == rootAppPath + "/Info.plist" { cachedRootInfo = data }
 		return data
 	}
 
-	private func resolvePrimaryIconPath(from plist: [String: Any]) -> String? {
+    private func resolvePrimaryIconPath(from plist: [String: Any], overlayAppURL: URL? = nil,
+                                        deletedPaths: Set<String> = []) -> String? {
 		var candidates: [String] = []
 
 		func appendIconFiles(_ key: String) {
@@ -340,15 +365,25 @@ final class ArchiveBackedApp {
 
 		let rootPrefix = rootAppPath + "/"
 		let imageExtensions = Set(["png", "jpg", "jpeg", "heic"])
-		let rootFiles = entriesByPath.keys.filter { path in
-			guard path.hasPrefix(rootPrefix) else { return false }
-			let relative = String(path.dropFirst(rootPrefix.count))
-			return !relative.contains("/")
-		}
+        func isDeleted(_ path: String) -> Bool {
+            let relative = String(path.dropFirst(rootPrefix.count))
+            return deletedPaths.contains { relative == $0 || relative.hasPrefix($0 + "/") }
+        }
+        var rootFiles = Set(entriesByPath.keys.filter { path in
+            guard path.hasPrefix(rootPrefix) else { return false }
+            return !path.dropFirst(rootPrefix.count).contains("/") && !isDeleted(path)
+        })
+        if let overlayAppURL,
+           let diskFiles = try? FileManager.default.contentsOfDirectory(atPath: overlayAppURL.path) {
+            rootFiles.formUnion(diskFiles.map { rootPrefix + $0 }.filter { !isDeleted($0) })
+        }
 
-		for candidate in candidates where !candidate.isEmpty {
+		for candidate in candidates where !candidate.isEmpty && Self.isSafeRelativePath(candidate) {
 			let direct = rootPrefix + candidate
-			if entriesByPath[direct] != nil { return direct }
+            if !isDeleted(direct), entriesByPath[direct] != nil ||
+                (overlayAppURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(candidate).path) } ?? false) {
+                return direct
+            }
 			if URL(fileURLWithPath: candidate).pathExtension.isEmpty {
 				let matches = rootFiles.filter { path in
 					let name = URL(fileURLWithPath: path).lastPathComponent

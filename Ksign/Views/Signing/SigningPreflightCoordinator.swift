@@ -14,7 +14,14 @@ extension SigningPreflight {
 
     // Also used by the worker, so no caller can accidentally sign an explicitly
     // incompatible platform by bypassing the signing screen's review.
-    static func checkPlatform(for app: AppInfoPresentable) throws {
+    static func checkPlatform(for app: AppInfoPresentable, archiveApp: ArchiveBackedApp? = nil) throws {
+        if let archiveApp {
+            if let data = try archiveApp.data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024),
+               let info = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+                try IDeviceInstallPreflight.checkPlatform(info)
+            }
+            return
+        }
         if let info = readInfo(source(for: app)) { try IDeviceInstallPreflight.checkPlatform(info) }
     }
 }

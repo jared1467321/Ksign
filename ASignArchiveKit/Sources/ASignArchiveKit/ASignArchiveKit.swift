@@ -88,16 +88,55 @@ private let progressBridge: @convention(c) (Double, UnsafeMutableRawPointer?) ->
     box.handler(min(max(progress, 0), 1))
 }
 
+// Data copies can outlive the public index; retain native storage until the
+// final manifest reference is released.
+private final class ArchiveIndexStorage {
+    let handle: OpaquePointer
+    init(_ handle: OpaquePointer) { self.handle = handle }
+    deinit { asign_archive_index_close(handle) }
+}
+
+/// A reusable logical view of one immutable source archive. Entry locations are
+/// shared by metadata access, selective extraction, signing and IPA rebuilding.
+public final class ASignArchiveIndex {
+    public let archiveURL: URL
+    public let signingManifest: Data
+    private let storage: ArchiveIndexStorage
+    fileprivate var handle: OpaquePointer { storage.handle }
+
+    public init(archiveURL: URL) throws {
+        var index: OpaquePointer?
+        let status = archiveURL.path.withCString { asign_archive_index_open($0, &index) }
+        guard status == 0, let index else {
+            throw ASignArchiveError.entryAccessFailed(code: status)
+        }
+        var count = 0
+        guard let manifest = asign_archive_index_manifest(index, &count) else {
+            asign_archive_index_close(index)
+            throw ASignArchiveError.entryAccessFailed(code: -5)
+        }
+        self.archiveURL = archiveURL
+        let storage = ArchiveIndexStorage(index)
+        self.storage = storage
+        self.signingManifest = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: manifest), count: count,
+            deallocator: .custom { [storage] _, _ in withExtendedLifetime(storage) {} })
+    }
+}
+
 public enum ASignArchive {
     /// Returns central-directory entries in archive order. Duplicate names are
     /// preserved so callers can deliberately apply last-entry-wins semantics.
-    public static func entries(in archiveURL: URL) throws -> [ASignArchiveEntry] {
+    /// Supplying an index returns its already-resolved, last-entry-wins view.
+    public static func entries(in archiveURL: URL, index: ASignArchiveIndex? = nil) throws -> [ASignArchiveEntry] {
         let context = EntryListContext()
         let opaque = Unmanaged.passRetained(context).toOpaque()
         defer { Unmanaged<EntryListContext>.fromOpaque(opaque).release() }
 
         let status: Int32 = archiveURL.path.withCString { archivePath in
-            asign_archive_enumerate_entries(archivePath, entryListBridge, opaque)
+            if let index {
+                return asign_archive_index_enumerate(index.handle, entryListBridge, opaque)
+            }
+            return asign_archive_enumerate_entries(archivePath, entryListBridge, opaque)
         }
         guard status == 0 else {
             throw ASignArchiveError.entryAccessFailed(code: status)
@@ -110,14 +149,18 @@ public enum ASignArchive {
     public static func readEntry(
         from archiveURL: URL,
         path: String,
-        maximumBytes: Int64
+        maximumBytes: Int64,
+        index: ASignArchiveIndex? = nil
     ) throws -> Data? {
         precondition(maximumBytes >= 0)
         var bytes: UnsafeMutablePointer<UInt8>?
         var size: Int64 = 0
         let status: Int32 = archiveURL.path.withCString { archivePath in
             path.withCString { entryPath in
-                asign_archive_read_entry(archivePath, entryPath, maximumBytes, &bytes, &size)
+                if let index {
+                    return asign_archive_index_read(index.handle, entryPath, maximumBytes, &bytes, &size)
+                }
+                return asign_archive_read_entry(archivePath, entryPath, maximumBytes, &bytes, &size)
             }
         }
         if status == archiveNotFoundStatus { return nil }
@@ -139,7 +182,8 @@ public enum ASignArchive {
     public static func extractEntry(
         from archiveURL: URL,
         path: String,
-        to destinationURL: URL
+        to destinationURL: URL,
+        index: ASignArchiveIndex? = nil
     ) throws -> Bool {
         try FileManager.default.createDirectory(
             at: destinationURL.deletingLastPathComponent(),
@@ -148,7 +192,10 @@ public enum ASignArchive {
         let status: Int32 = archiveURL.path.withCString { archivePath in
             path.withCString { entryPath in
                 destinationURL.path.withCString { destinationPath in
-                    asign_archive_extract_entry(archivePath, entryPath, destinationPath)
+                    if let index {
+                        return asign_archive_index_extract(index.handle, entryPath, destinationPath)
+                    }
+                    return asign_archive_extract_entry(archivePath, entryPath, destinationPath)
                 }
             }
         }
@@ -163,7 +210,8 @@ public enum ASignArchive {
     public static func extractPrefix(
         from archiveURL: URL,
         prefix: String,
-        to destinationURL: URL
+        to destinationURL: URL,
+        index: ASignArchiveIndex? = nil
     ) throws -> Bool {
         try FileManager.default.createDirectory(
             at: destinationURL.deletingLastPathComponent(),
@@ -172,7 +220,10 @@ public enum ASignArchive {
         let status: Int32 = archiveURL.path.withCString { archivePath in
             prefix.withCString { prefixPath in
                 destinationURL.path.withCString { destinationPath in
-                    asign_archive_extract_prefix(archivePath, prefixPath, destinationPath)
+                    if let index {
+                        return asign_archive_index_extract_prefix(index.handle, prefixPath, destinationPath)
+                    }
+                    return asign_archive_extract_prefix(archivePath, prefixPath, destinationPath)
                 }
             }
         }
@@ -214,7 +265,9 @@ public enum ASignArchive {
         from archiveURL: URL,
         rootAppPath: String,
         to destinationAppURL: URL,
-        includeInfoPlistStrings: Bool = false
+        includeInfoPlistStrings: Bool = false,
+        index: ASignArchiveIndex? = nil,
+        workers: UInt32 = 0
     ) throws {
         let fileManager = FileManager.default
         try fileManager.createDirectory(
@@ -225,7 +278,11 @@ public enum ASignArchive {
         let status: Int32 = archiveURL.path.withCString { archivePath in
             rootAppPath.withCString { rootPath in
                 destinationAppURL.path.withCString { destinationPath in
-                    asign_archive_materialize_signing_inputs(
+                    if let index {
+                        return asign_archive_index_materialize(index.handle, rootPath, destinationPath,
+                            includeInfoPlistStrings ? 1 : 0, workers)
+                    }
+                    return asign_archive_materialize_signing_inputs(
                         archivePath,
                         rootPath,
                         destinationPath,
@@ -251,7 +308,8 @@ public enum ASignArchive {
         deletedPaths: Set<String> = [],
         omitExistingCodeSignatures: Bool = true,
         compression: ASignArchiveCompression = .none,
-        progress: ((Double) -> Void)? = nil
+        progress: ((Double) -> Void)? = nil,
+        index: ASignArchiveIndex? = nil
     ) throws {
         let fileManager = FileManager.default
         try fileManager.createDirectory(
@@ -274,7 +332,12 @@ public enum ASignArchive {
                 rootAppPath.withCString { rootPath in
                     overlayAppURL.path.withCString { overlayPath in
                         deletionList.withCString { deletedPathList in
-                            asign_archive_rebuild_with_overlay(
+                            if let index {
+                                return asign_archive_index_rebuild(index.handle, destinationPath, rootPath,
+                                    overlayPath, deletedPathList, omitExistingCodeSignatures ? 1 : 0,
+                                    compression.minizipLevel, progressBridge, opaque)
+                            }
+                            return asign_archive_rebuild_with_overlay(
                                 sourcePath,
                                 destinationPath,
                                 rootPath,

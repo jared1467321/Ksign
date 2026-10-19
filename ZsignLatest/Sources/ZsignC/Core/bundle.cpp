@@ -63,6 +63,12 @@ static string ResolvedExecutablePath(const string& path)
 	return path;
 }
 
+static string FoldASCIIPath(string path)
+{
+    for (char& ch : path) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 'a' - 'A');
+    return path;
+}
+
 static string NormalizeArchiveLogicalPath(string path)
 {
     replace(path.begin(), path.end(), '\\', '/');
@@ -107,9 +113,11 @@ static bool IsCodeSignatureRelativePath(const string& relativePath)
 
 void ZBundle::SetArchiveBacking(const string& archivePath,
                                 const string& archiveRootPath,
-                                const vector<string>& deletedPaths)
+                                const vector<string>& deletedPaths,
+                                string manifest)
 {
     m_strArchivePath = archivePath;
+    m_archiveManifest = std::move(manifest);
     m_strArchiveRootPath = NormalizeArchiveLogicalPath(archiveRootPath);
     m_setArchiveDeletedPaths.clear();
     for (const string& value : deletedPaths) {
@@ -238,14 +246,22 @@ bool ZBundle::BuildFileIndex()
     m_indexedFolders.clear();
     m_indexedFileSet.clear();
     m_indexedFolderSet.clear();
+    m_sortedFiles.clear();
+    m_overlayFiles.clear();
+    m_overlayFolders.clear();
+    m_overlayFoldedPaths.clear();
     m_archiveEntries.clear();
 
+    bool indexOK = true;
     if (!ZFile::EnumFolder(m_strAppFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
         if (bFolder) {
+            m_overlayFolders.insert(strPath);
+            m_overlayFoldedPaths.insert(FoldASCIIPath(strPath));
             if (m_indexedFolderSet.insert(strPath).second) {
                 m_indexedFolders.push_back(strPath);
             }
         } else {
+            indexOK = IndexOverlayFile(strPath) && indexOK;
             EnsureIndexedFile(strPath);
         }
         return false;
@@ -253,6 +269,7 @@ bool ZBundle::BuildFileIndex()
         return false;
     }
 
+    if (!indexOK) return false;
     if (!m_strArchivePath.empty() && !m_strArchiveRootPath.empty()) {
         return AddArchiveFileIndex();
     }
@@ -261,6 +278,53 @@ bool ZBundle::BuildFileIndex()
 
 bool ZBundle::AddArchiveFileIndex()
 {
+    if (!m_archiveManifest.empty()) {
+        // The immutable entry-location transport is defined in CASignArchive.h.
+        if (m_archiveManifest.size() < 8 || m_archiveManifest.compare(0, 8, "ASIDX001") != 0) return false;
+        size_t cursor = 8;
+        auto readLE = [&](size_t offset, size_t length) -> uint64_t {
+            uint64_t value = 0;
+            for (size_t i = 0; i < length; i++) value |= (uint64_t)(uint8_t)m_archiveManifest[offset + i] << (8 * i);
+            return value;
+        };
+        const string prefix = m_strArchiveRootPath + "/";
+        while (cursor < m_archiveManifest.size()) {
+            if (m_archiveManifest.size() - cursor < 24) return false;
+            uint64_t position = readLE(cursor, 8), size = readLE(cursor + 8, 8);
+            uint32_t flags = (uint32_t)readLE(cursor + 16, 4);
+            size_t length = (size_t)readLE(cursor + 20, 4);
+            cursor += 24;
+            if (length == 0 || length > m_archiveManifest.size() - cursor ||
+                position > INT64_MAX || size > INT64_MAX || flags > 3) return false;
+            string name = m_archiveManifest.substr(cursor, length);
+            cursor += length;
+            if (name.find('\0') != string::npos || !IsSafeArchiveRelativePath(name)) return false;
+            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) continue;
+            string relative = name.substr(prefix.size());
+            while (!relative.empty() && relative.back() == '/') relative.pop_back();
+            if (relative.empty() || IsArchiveDeleted(relative)) continue;
+            const string logical = m_strAppFolder + "/" + relative;
+            if (HasOverlayPath(logical)) continue;
+            if ((flags & 1) && !(flags & 2)) {
+                if (m_indexedFolderSet.insert(logical).second) m_indexedFolders.push_back(logical);
+            } else {
+                // Every surviving source symlink is materialized before signing.
+                if (flags & 2) return false;
+                ArchiveEntry entry;
+                entry.cdPosition = (int64_t)position;
+                m_archiveEntries[logical] = entry;
+                EnsureIndexedFile(logical);
+                size_t slash = relative.find('/');
+                while (slash != string::npos) {
+                    string folder = m_strAppFolder + "/" + relative.substr(0, slash);
+                    if (!HasOverlayPath(folder) && m_indexedFolderSet.insert(folder).second)
+                        m_indexedFolders.push_back(folder);
+                    slash = relative.find('/', slash + 1);
+                }
+            }
+        }
+        return true;
+    }
     void* reader = mz_zip_reader_create();
     if (NULL == reader) {
         return false;
@@ -314,10 +378,10 @@ bool ZBundle::AddArchiveFileIndex()
                 const string logicalPath = m_strAppFolder + "/" + relative;
                 const bool isDirectory = (MZ_OK == mz_zip_reader_entry_is_dir(reader));
                 if (isDirectory) {
-                    if (!PathExistsNoFollow(logicalPath) && m_indexedFolderSet.insert(logicalPath).second) {
+                    if (!HasOverlayPath(logicalPath) && m_indexedFolderSet.insert(logicalPath).second) {
                         m_indexedFolders.push_back(logicalPath);
                     }
-                } else if (!PathExistsNoFollow(logicalPath)) {
+                } else if (!HasOverlayPath(logicalPath)) {
                     ArchiveEntry archiveEntry;
                     archiveEntry.cdPosition = mz_zip_get_entry(zipHandle);
                     archiveEntry.isSymlink = (MZ_OK == mz_zip_attrib_is_symlink(info->external_fa, info->version_madeby));
@@ -347,7 +411,7 @@ bool ZBundle::AddArchiveFileIndex()
                     size_t slash = relative.find('/');
                     while (slash != string::npos) {
                         string folder = m_strAppFolder + "/" + relative.substr(0, slash);
-                        if (!PathExistsNoFollow(folder) && m_indexedFolderSet.insert(folder).second) {
+                        if (!HasOverlayPath(folder) && m_indexedFolderSet.insert(folder).second) {
                             m_indexedFolders.push_back(folder);
                         }
                         slash = relative.find('/', slash + 1);
@@ -371,16 +435,14 @@ bool ZBundle::AddArchiveFileIndex()
 
 bool ZBundle::GetLogicalSymbolicLinkTarget(const string& strPath, string& strTarget) const
 {
-    if (GetSymbolicLinkTarget(strPath, strTarget)) {
-        return true;
+    auto disk = m_overlayFiles.find(strPath);
+    if (disk != m_overlayFiles.end()) {
+        strTarget = disk->second.symlinkTarget;
+        return disk->second.isSymlink;
     }
-    if (PathExistsNoFollow(strPath)) {
-        strTarget.clear();
-        return false;
-    }
-    auto it = m_archiveEntries.find(strPath);
-    if (it != m_archiveEntries.end() && it->second.isSymlink) {
-        strTarget = it->second.symlinkTarget;
+    auto archived = m_archiveEntries.find(strPath);
+    if (archived != m_archiveEntries.end() && archived->second.isSymlink) {
+        strTarget = archived->second.symlinkTarget;
         return true;
     }
     strTarget.clear();
@@ -392,7 +454,7 @@ bool ZBundle::HashLogicalFile(const string& strPath,
                               string& strSHA256Base64,
                               void* archiveReader) const
 {
-    if (PathExistsNoFollow(strPath)) {
+    if (m_overlayFiles.count(strPath) != 0) {
         return ZSHA::SHABase64File(strPath.c_str(), strSHA1Base64, strSHA256Base64);
     }
 
@@ -460,11 +522,56 @@ bool ZBundle::HashLogicalFile(const string& strPath,
     return success;
 }
 
-void ZBundle::EnsureIndexedFile(const string& strFile)
+bool ZBundle::IndexOverlayFile(const string& strFile)
 {
-	if (m_indexedFileSet.insert(strFile).second) {
-		m_indexedFiles.push_back(strFile);
-	}
+    OverlayFile file;
+#ifndef _WIN32
+    struct stat st {};
+    if (lstat(strFile.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) return false;
+    file.isSymlink = S_ISLNK(st.st_mode);
+    if (file.isSymlink && !GetSymbolicLinkTarget(strFile, file.symlinkTarget)) return false;
+#else
+    if (!ZFile::IsFileExists(strFile.c_str())) return false;
+#endif
+    m_overlayFiles[strFile] = std::move(file);
+    m_overlayFoldedPaths.insert(FoldASCIIPath(strFile));
+    return true;
+}
+
+bool ZBundle::HasOverlayPath(const string& path) const
+{
+    if (m_overlayFiles.count(path) != 0 || m_overlayFolders.count(path) != 0) return true;
+    const string folded = FoldASCIIPath(path);
+    if (m_overlayFoldedPaths.count(folded) != 0 ||
+        any_of(path.begin(), path.end(), [](unsigned char ch) { return ch >= 128; }))
+        return PathExistsNoFollow(path);
+    // Directory aliases are the exceptional case: the tree walk deliberately
+    // does not traverse symlinks. Preserve disk precedence beneath those aliases.
+    size_t slash = path.find('/');
+    while (slash != string::npos) {
+        const string parentPath = path.substr(0, slash);
+        auto parent = m_overlayFiles.find(parentPath);
+        if ((parent != m_overlayFiles.end() && parent->second.isSymlink) ||
+            (parent == m_overlayFiles.end() && m_overlayFoldedPaths.count(folded.substr(0, slash)) != 0 &&
+             m_overlayFolders.count(parentPath) == 0)) return PathExistsNoFollow(path);
+        slash = path.find('/', slash + 1);
+    }
+    return false;
+}
+
+void ZBundle::EnsureIndexedFile(const string& strFile, bool overlay)
+{
+    if (overlay) IndexOverlayFile(strFile);
+    if (m_indexedFileSet.insert(strFile).second) m_indexedFiles.push_back(strFile);
+    m_sortedFiles.insert(strFile);
+}
+
+void ZBundle::ForgetIndexedFile(const string& strFile)
+{
+    m_overlayFiles.erase(strFile);
+    m_archiveEntries.erase(strFile);
+    m_sortedFiles.erase(strFile);
+    m_resourceDigests.erase(strFile);
 }
 
 static bool IsPathWithinFolder(const string& strPath, const string& strFolder)
@@ -587,7 +694,7 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 		}
 
 		string strLinkTarget;
-		if (GetSymbolicLinkTarget(strPath, strLinkTarget)) {
+		if (GetLogicalSymbolicLinkTarget(strPath, strLinkTarget)) {
 			continue;
 		}
 
@@ -631,12 +738,11 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 	// for every nested signing node. Files created during signing (notably
 	// nested CodeResources and profiles) are appended to the index as they are
 	// produced, while removed files are filtered here by existence.
-	for (const string& strPath : m_indexedFiles) {
-		if (strPath.size() <= strPrefix.size() || 0 != strPath.compare(0, strPrefix.size(), strPrefix)) {
-			continue;
-		}
+	for (auto file = m_sortedFiles.lower_bound(strPrefix); file != m_sortedFiles.end(); ++file) {
+        const string& strPath = *file;
+        if (0 != strPath.compare(0, strPrefix.size(), strPrefix)) break;
 		string strLinkTarget;
-		const bool hasDiskPath = PathExistsNoFollow(strPath);
+		const bool hasDiskPath = m_overlayFiles.count(strPath) != 0;
 		const bool hasArchivePath = (m_archiveEntries.find(strPath) != m_archiveEntries.end());
 		if (!hasDiskPath && !hasArchivePath) {
 			continue;
@@ -683,7 +789,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		if (m_bRemoveProvision && strKey == "embedded.mobileprovision") {
 			string strProvFile = strFolder + "/embedded.mobileprovision";
 			remove(strProvFile.c_str());
-			m_resourceDigests.erase(strProvFile);
+			ForgetIndexedFile(strProvFile);
 			ZLog::Print(">>> Removed embedded.mobileprovision\n");
 			continue;
 		}
@@ -961,7 +1067,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 					baseName = baseName.substr(17);
 				}
 				ZFile::RemoveFileV("%s/%s", m_strAppFolder.c_str(), baseName.c_str());
-				m_resourceDigests.erase(m_strAppFolder + "/" + baseName);
+				ForgetIndexedFile(m_strAppFolder + "/" + baseName);
 			}
 			bForceSign = true;
 		}
@@ -997,7 +1103,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 					ZLog::ErrorV(">>> Can't write embedded.mobileprovision!\n");
 					return false;
 				}
-				EnsureIndexedFile(strBaseFolder + "/embedded.mobileprovision");
+				EnsureIndexedFile(strBaseFolder + "/embedded.mobileprovision", true);
 				m_resourceDigests.erase(strBaseFolder + "/embedded.mobileprovision");
 				bForceSign = true;
 				break;
@@ -1050,7 +1156,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 		ZLog::ErrorV("\tWriting CodeResources failed! %s\n", strCodeResFile.c_str());
 		return false;
 	}
-	EnsureIndexedFile(strCodeResFile);
+	EnsureIndexedFile(strCodeResFile, true);
 
 	if (!macho.Sign(m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData)) {
 		return false;
@@ -1380,6 +1486,10 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 	m_indexedFolders.clear();
 	m_indexedFileSet.clear();
 	m_indexedFolderSet.clear();
+	m_sortedFiles.clear();
+	m_overlayFiles.clear();
+	m_overlayFolders.clear();
+	m_overlayFoldedPaths.clear();
 	m_bWeakInject = bWeakInject;
 	m_bRemoveProvision = bRemoveProvision;
 	m_setRemoveDylibs.clear();

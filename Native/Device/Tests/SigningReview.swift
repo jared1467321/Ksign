@@ -100,6 +100,10 @@ enum UIAlertController {
                     Signed(uuid: "tv-id", name: "TV", identifier: "app.tv", archive: tv, directory: nil),
                     Signed(uuid: "legacy-id", name: "Legacy", identifier: "app.legacy", archive: nil, directory: directory)]
         Storage.shared.apps = apps
+        try SigningPreflight.checkPlatform(for: apps[0], archiveApp: ArchiveBackedApp(archiveURL: pad))
+        try InstallPreflightTests.expectSkip {
+            try SigningPreflight.checkPlatform(for: apps[2], archiveApp: ArchiveBackedApp(archiveURL: tv))
+        }
         UIApplication.installed = ["app.pad", "app.store"]
         let manager = DeviceInstallationManager.shared
         manager.identities = ["app.pad": "TEAM.app.pad", "app.store": "STORE.app.store"]

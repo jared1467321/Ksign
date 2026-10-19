@@ -228,6 +228,7 @@ int zsign(
     NSString *archivePath,
     NSString *archiveRootPath,
     NSArray<NSString *> *archiveDeletedPaths,
+    NSData *archiveManifest,
     void (^ _Nullable completionHandler)(BOOL success)
 ) {
     @autoreleasepool {
@@ -276,7 +277,11 @@ int zsign(
         const string archive = ToString(archivePath);
         const string archiveRoot = ToString(archiveRootPath);
         if (!archive.empty() && !archiveRoot.empty()) {
-            bundle.SetArchiveBacking(archive, archiveRoot, archiveDeleted);
+            string manifest;
+            if (archiveManifest.length > 0) {
+                manifest.assign((const char*)archiveManifest.bytes, archiveManifest.length);
+            }
+            bundle.SetArchiveBacking(archive, archiveRoot, archiveDeleted, std::move(manifest));
         }
         const bool success = bundle.SignFolder(
             &asset,

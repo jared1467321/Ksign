@@ -123,8 +123,9 @@ enum FR {
 			handler.appIcon = icon
 
 			do {
-				try SigningPreflight.checkPlatform(for: app)
-				try await handler.copy()
+                let archiveApp = try Storage.shared.getArchiveURL(for: app).map { try ArchiveBackedApp(archiveURL: $0) }
+				try SigningPreflight.checkPlatform(for: app, archiveApp: archiveApp)
+				try await handler.copy(archiveApp: archiveApp)
 
 				try await handler.modify()
 

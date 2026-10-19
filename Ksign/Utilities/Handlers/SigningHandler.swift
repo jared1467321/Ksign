@@ -16,6 +16,9 @@ final class SigningHandler: NSObject {
 	private let _uuid = UUID().uuidString
 	var signedAppID: String { _uuid }
 	private var _movedAppPath: URL?
+	private var _archiveApp: ArchiveBackedApp?
+	private var _signedArchiveMetadata: ArchiveBackedAppMetadata?
+	private var _signedArchiveIcon: String?
 	private var _archiveSourceURL: URL?
 	private var _archiveRootAppPath: String?
 	private var _archiveUsesFullExtractionFallback = false
@@ -46,11 +49,12 @@ final class SigningHandler: NSObject {
 		super.init()
 	}
 	
-	func copy() async throws {
+	func copy(archiveApp suppliedArchiveApp: ArchiveBackedApp? = nil) async throws {
 		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
 
 		if let archiveURL = Storage.shared.getArchiveURL(for: _app) {
-			let archiveApp = try ArchiveBackedApp(archiveURL: archiveURL)
+			let archiveApp = try suppliedArchiveApp ?? ArchiveBackedApp(archiveURL: archiveURL)
+            _archiveApp = archiveApp
 			_archiveSourceURL = archiveURL
 			_archiveRootAppPath = archiveApp.rootAppPath
 
@@ -77,7 +81,8 @@ final class SigningHandler: NSObject {
 					from: archiveURL,
 					rootAppPath: archiveApp.rootAppPath,
 					to: movedAppURL,
-					includeInfoPlistStrings: _options.appName != nil
+					includeInfoPlistStrings: _options.appName != nil,
+                    index: archiveApp.archiveIndex
 				)
 				if !_options.injectionFiles.isEmpty {
 					// The injector checks this framework's presence before adding the
@@ -236,8 +241,14 @@ final class SigningHandler: NSObject {
 				overlayAppURL: movedAppPath,
 				deletedPaths: finalDeletedPaths,
 				omitExistingCodeSignatures: !_options.onlyModify,
-				compression: .none
+				compression: .none,
+                index: _archiveApp?.archiveIndex
 			)
+            guard let archiveApp = _archiveApp else { throw SigningFileHandlerError.appNotFound }
+            let metadata = try archiveApp.metadata(overlayAppURL: movedAppPath, deletedPaths: finalDeletedPaths)
+            _signedArchiveIcon = try archiveApp.cachePrimaryIcon(in: destinationURL, overlayAppURL: movedAppPath,
+                metadata: metadata, deletedPaths: finalDeletedPaths)
+            _signedArchiveMetadata = metadata
 			_signedArchiveURL = archiveDestination
 			print("[\(_uuid)] Built archive-backed signed IPA: \(archiveDestination.path)")
 			try? _fileManager.removeItem(at: _uniqueWorkDir)
@@ -252,11 +263,9 @@ final class SigningHandler: NSObject {
 	}
 
 	func addToDatabase() async throws {
-		if let signedArchiveURL = _signedArchiveURL {
-			let archiveApp = try ArchiveBackedApp(archiveURL: signedArchiveURL)
-			let metadata = try archiveApp.metadata()
-			let destinationDirectory = signedArchiveURL.deletingLastPathComponent()
-			let cachedIcon = try archiveApp.cachePrimaryIcon(in: destinationDirectory)
+		if _signedArchiveURL != nil {
+            guard let metadata = _signedArchiveMetadata else { throw SigningFileHandlerError.infoPlistNotFound }
+            let cachedIcon = _signedArchiveIcon
 
 			await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
 				Storage.shared.addSigned(
@@ -310,7 +319,8 @@ final class SigningHandler: NSObject {
 		return ArchiveSigningContext(
 			archiveURL: archiveURL,
 			rootAppPath: rootAppPath,
-			deletedPaths: deletedPaths
+			deletedPaths: deletedPaths,
+            manifest: _archiveApp?.archiveIndex.signingManifest
 		)
 	}
 

@@ -36,6 +36,7 @@ public enum Zsign {
         archivePath: String = "",
         archiveRootPath: String = "",
         archiveDeletedPaths: [String] = [],
+        archiveManifest: Data? = nil,
         completion: ((Bool) -> Void)? = nil
     ) -> Bool {
         zsign(
@@ -52,6 +53,7 @@ public enum Zsign {
             archivePath,
             archiveRootPath,
             archiveDeletedPaths,
+            archiveManifest,
             completion.map { callback in
                 { success in callback(success) }
             }
