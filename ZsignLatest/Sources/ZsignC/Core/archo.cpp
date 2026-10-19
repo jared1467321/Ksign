@@ -360,30 +360,11 @@ static void BuildCodeSlotHashes(uint8_t* pCodeBase,
 	};
 
 	const size_t workerCount = (uCodeLength >= 512 * 1024 && uCodeSlots >= 64) ? ZUtil::GetWorkerCount(uCodeSlots) : 1;
-	if (workerCount <= 1) {
-		for (uint32_t slot = 0; slot < uCodeSlots; slot++) {
-			hashSlot(slot);
-		}
-		return;
-	}
-
-	atomic<uint32_t> next(0);
-	vector<thread> workers;
-	workers.reserve(workerCount);
-	for (size_t worker = 0; worker < workerCount; worker++) {
-		workers.emplace_back([&]() {
-			for (;;) {
-				uint32_t slot = next.fetch_add(1, std::memory_order_relaxed);
-				if (slot >= uCodeSlots) {
-					break;
-				}
-				hashSlot(slot);
-			}
-		});
-	}
-	for (thread& worker : workers) {
-		worker.join();
-	}
+	// Claim contiguous page groups to reduce atomic contention and preserve
+	// locality while reusing the same workers as resource hashing.
+	ZUtil::ParallelFor(uCodeSlots, workerCount, [&](size_t slot, size_t) {
+		hashSlot((uint32_t)slot);
+	}, 16);
 }
 
 bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset, 

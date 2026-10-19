@@ -432,7 +432,7 @@ typedef struct asign_string_set_s {
 static void asign_string_set_free(asign_string_set *set) {
     if (set == NULL)
         return;
-    for (size_t i = 0; i < set->count; i++)
+    for (size_t i = 0; i < set->capacity; i++)
         free(set->items[i]);
     free(set->items);
     set->items = NULL;
@@ -440,12 +440,23 @@ static void asign_string_set_free(asign_string_set *set) {
     set->capacity = 0;
 }
 
+static size_t asign_string_hash(const char *value) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    while (*value != '\0') {
+        hash ^= (unsigned char)*value++;
+        hash *= UINT64_C(1099511628211);
+    }
+    return (size_t)hash;
+}
+
 static int asign_string_set_contains(const asign_string_set *set, const char *value) {
-    if (set == NULL || value == NULL)
+    if (set == NULL || value == NULL || set->capacity == 0)
         return 0;
-    for (size_t i = 0; i < set->count; i++) {
-        if (strcmp(set->items[i], value) == 0)
+    size_t slot = asign_string_hash(value) & (set->capacity - 1);
+    while (set->items[slot] != NULL) {
+        if (strcmp(set->items[slot], value) == 0)
             return 1;
+        slot = (slot + 1) & (set->capacity - 1);
     }
     return 0;
 }
@@ -455,16 +466,32 @@ static int32_t asign_string_set_add(asign_string_set *set, const char *value) {
         return MZ_PARAM_ERROR;
     if (asign_string_set_contains(set, value))
         return MZ_OK;
-    if (set->count == set->capacity) {
-        size_t next = set->capacity == 0 ? 32 : set->capacity * 2;
-        char **grown = (char **)realloc(set->items, next * sizeof(char *));
+    // Power-of-two open addressing, kept at most half full. This set is used
+    // only for membership; ZIP emission order still follows the source archive.
+    if (set->count >= set->capacity / 2) {
+        if (set->capacity > SIZE_MAX / 2 / sizeof(char *))
+            return MZ_MEM_ERROR;
+        size_t next = set->capacity == 0 ? 64 : set->capacity * 2;
+        char **grown = (char **)calloc(next, sizeof(char *));
         if (grown == NULL)
             return MZ_MEM_ERROR;
+        for (size_t i = 0; i < set->capacity; i++) {
+            if (set->items[i] == NULL)
+                continue;
+            size_t slot = asign_string_hash(set->items[i]) & (next - 1);
+            while (grown[slot] != NULL)
+                slot = (slot + 1) & (next - 1);
+            grown[slot] = set->items[i];
+        }
+        free(set->items);
         set->items = grown;
         set->capacity = next;
     }
-    set->items[set->count] = strdup(value);
-    if (set->items[set->count] == NULL)
+    size_t slot = asign_string_hash(value) & (set->capacity - 1);
+    while (set->items[slot] != NULL)
+        slot = (slot + 1) & (set->capacity - 1);
+    set->items[slot] = strdup(value);
+    if (set->items[slot] == NULL)
         return MZ_MEM_ERROR;
     set->count++;
     return MZ_OK;

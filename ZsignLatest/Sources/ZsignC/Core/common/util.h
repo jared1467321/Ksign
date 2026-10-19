@@ -19,6 +19,10 @@ public:
 	static uint32_t		Swap(uint32_t value);
 	static uint64_t		Swap(uint64_t value);
 	static size_t		GetWorkerCount(size_t taskCount, size_t maxWorkers = 6);
+	// Synchronous batches share a bounded pool. Each lane is exclusive within
+	// a batch, allowing callers to reuse per-lane ZIP readers across batches.
+	static void ParallelFor(size_t taskCount, size_t workerCount,
+		const function<void(size_t, size_t)>& task, size_t chunkSize = 1);
 };
 
 #define LE(x) ZUtil::Swap(x)

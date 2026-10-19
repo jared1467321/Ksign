@@ -7,11 +7,16 @@
 #include <set>
 #include <map>
 #include <stdint.h>
+#include <unordered_map>
+#include <unordered_set>
 
 class ZBundle
 {
 public:
 	ZBundle();
+	~ZBundle();
+	ZBundle(const ZBundle&) = delete;
+	ZBundle& operator=(const ZBundle&) = delete;
 
 public:
 	void SetArchiveBacking(const string& archivePath,
@@ -53,6 +58,7 @@ private:
 private:
 	bool FindAppFolder(const string& strFolder, string& strAppFolder);
 	bool BuildFileIndex();
+	void CloseArchiveReaders();
 	bool AddArchiveFileIndex();
 	void EnsureIndexedFile(const string& strFile);
 	bool IsArchiveDeleted(const string& relativePath) const;
@@ -75,6 +81,15 @@ private:
 	set<string>		m_setRemoveDylibs;
 	vector<string>	m_indexedFiles;
 	vector<string>	m_indexedFolders;
+	unordered_set<string> m_indexedFileSet;
+	unordered_set<string> m_indexedFolderSet;
+	struct ResourceDigest {
+		string sha1;
+		string sha256;
+	};
+	// Only accessed by the signing thread, between parallel hashing batches.
+	unordered_map<string, ResourceDigest> m_resourceDigests;
+	vector<void*> m_archiveReaders;
 
 	struct ArchiveEntry {
 		int64_t cdPosition = -1;

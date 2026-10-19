@@ -1,4 +1,132 @@
 #include "util.h"
+#include <condition_variable>
+#include <deque>
+#include <future>
+
+namespace {
+
+thread_local bool isSigningPoolWorker = false;
+
+class SigningWorkerPool {
+public:
+	SigningWorkerPool()
+	{
+		const size_t count = ZUtil::GetWorkerCount(6);
+		try {
+			for (size_t i = 0; i < count; i++) {
+				workers.emplace_back([this]() {
+					isSigningPoolWorker = true;
+					for (;;) {
+						function<void()> task;
+						{
+							unique_lock<mutex> lock(queueMutex);
+							ready.wait(lock, [&]() { return stopping || !tasks.empty(); });
+							if (stopping && tasks.empty()) {
+								return;
+							}
+							task = std::move(tasks.front());
+							tasks.pop_front();
+						}
+						task();
+					}
+				});
+			}
+		} catch (...) {
+			Stop();
+			throw;
+		}
+	}
+
+	~SigningWorkerPool()
+	{
+		Stop();
+	}
+
+	void Stop()
+	{
+		{
+			lock_guard<mutex> lock(queueMutex);
+			stopping = true;
+		}
+		ready.notify_all();
+		for (thread& worker : workers) {
+			worker.join();
+		}
+	}
+
+	future<void> Submit(function<void()> task)
+	{
+		auto packaged = make_shared<packaged_task<void()>>(std::move(task));
+		auto result = packaged->get_future();
+		{
+			lock_guard<mutex> lock(queueMutex);
+			tasks.emplace_back([packaged]() { (*packaged)(); });
+		}
+		ready.notify_one();
+		return result;
+	}
+
+private:
+	mutex queueMutex;
+	condition_variable ready;
+	deque<function<void()>> tasks;
+	vector<thread> workers;
+	bool stopping = false;
+};
+
+} // namespace
+
+void ZUtil::ParallelFor(size_t taskCount, size_t workerCount,
+	const function<void(size_t, size_t)>& task, size_t chunkSize)
+{
+	workerCount = std::min(workerCount, GetWorkerCount(taskCount));
+	if (workerCount <= 1 || isSigningPoolWorker) {
+		// Nested batches must not wait on the pool they are already occupying.
+		for (size_t i = 0; i < taskCount; i++) {
+			task(i, 0);
+		}
+		return;
+	}
+
+	static SigningWorkerPool pool;
+	atomic<size_t> next(0);
+	chunkSize = std::max<size_t>(1, chunkSize);
+	vector<future<void>> results;
+	results.reserve(workerCount);
+	exception_ptr failure;
+	try {
+		for (size_t lane = 0; lane < workerCount; lane++) {
+			results.push_back(pool.Submit([&, lane]() {
+				for (;;) {
+					const size_t first = next.fetch_add(chunkSize, std::memory_order_relaxed);
+					if (first >= taskCount) {
+						return;
+					}
+					const size_t end = first + std::min(chunkSize, taskCount - first);
+					for (size_t i = first; i < end; i++) {
+						task(i, lane);
+					}
+				}
+			}));
+		}
+	} catch (...) {
+		failure = current_exception();
+	}
+	// Drain every lane before returning, including if one task throws, so no
+	// worker can retain references into a completed signing stack frame.
+	for (auto& result : results) {
+		try {
+			result.get();
+		} catch (...) {
+			if (!failure) {
+				failure = current_exception();
+			}
+		}
+	}
+	if (failure) {
+		rethrow_exception(failure);
+	}
+}
 
 #ifdef _WIN32
 #define PRId64						"lld"

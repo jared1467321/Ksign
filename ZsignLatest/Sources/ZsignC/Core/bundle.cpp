@@ -50,6 +50,19 @@ static bool PathExistsNoFollow(const string& path)
 #endif
 }
 
+static string ResolvedExecutablePath(const string& path)
+{
+#ifndef _WIN32
+	// Versioned frameworks commonly expose their executable through symlinks.
+	// Discovery sees the real file, while CFBundleExecutable names the alias.
+	char resolved[PATH_MAX];
+	if (NULL != realpath(path.c_str(), resolved)) {
+		return resolved;
+	}
+#endif
+	return path;
+}
+
 static string NormalizeArchiveLogicalPath(string path)
 {
     replace(path.begin(), path.end(), '\\', '/');
@@ -138,6 +151,22 @@ ZBundle::ZBundle()
 	m_bInjectExtensions = false;
 }
 
+ZBundle::~ZBundle()
+{
+	CloseArchiveReaders();
+}
+
+void ZBundle::CloseArchiveReaders()
+{
+	for (void*& reader : m_archiveReaders) {
+		if (NULL != reader) {
+			mz_zip_reader_close(reader);
+			mz_zip_reader_delete(&reader);
+		}
+	}
+	m_archiveReaders.clear();
+}
+
 bool ZBundle::FindAppFolder(const string& strFolder, string& strAppFolder)
 {
 	if (ZFile::IsPathSuffix(strFolder, ".app") || ZFile::IsPathSuffix(strFolder, ".appex")) {
@@ -207,13 +236,17 @@ bool ZBundle::BuildFileIndex()
 {
     m_indexedFiles.clear();
     m_indexedFolders.clear();
+    m_indexedFileSet.clear();
+    m_indexedFolderSet.clear();
     m_archiveEntries.clear();
 
     if (!ZFile::EnumFolder(m_strAppFolder.c_str(), true, NULL, [&](bool bFolder, const string& strPath) {
         if (bFolder) {
-            m_indexedFolders.push_back(strPath);
+            if (m_indexedFolderSet.insert(strPath).second) {
+                m_indexedFolders.push_back(strPath);
+            }
         } else {
-            m_indexedFiles.push_back(strPath);
+            EnsureIndexedFile(strPath);
         }
         return false;
     })) {
@@ -281,8 +314,7 @@ bool ZBundle::AddArchiveFileIndex()
                 const string logicalPath = m_strAppFolder + "/" + relative;
                 const bool isDirectory = (MZ_OK == mz_zip_reader_entry_is_dir(reader));
                 if (isDirectory) {
-                    if (!PathExistsNoFollow(logicalPath) &&
-                        std::find(m_indexedFolders.begin(), m_indexedFolders.end(), logicalPath) == m_indexedFolders.end()) {
+                    if (!PathExistsNoFollow(logicalPath) && m_indexedFolderSet.insert(logicalPath).second) {
                         m_indexedFolders.push_back(logicalPath);
                     }
                 } else if (!PathExistsNoFollow(logicalPath)) {
@@ -308,17 +340,14 @@ bool ZBundle::AddArchiveFileIndex()
                     }
                     // Last duplicate wins for the merged logical resource view.
                     m_archiveEntries[logicalPath] = archiveEntry;
-                    if (std::find(m_indexedFiles.begin(), m_indexedFiles.end(), logicalPath) == m_indexedFiles.end()) {
-                        m_indexedFiles.push_back(logicalPath);
-                    }
+                    EnsureIndexedFile(logicalPath);
 
                     // ZIPs are allowed to omit explicit directory entries. Add all
                     // logical parents so nested bundle discovery still works.
                     size_t slash = relative.find('/');
                     while (slash != string::npos) {
                         string folder = m_strAppFolder + "/" + relative.substr(0, slash);
-                        if (!PathExistsNoFollow(folder) &&
-                            std::find(m_indexedFolders.begin(), m_indexedFolders.end(), folder) == m_indexedFolders.end()) {
+                        if (!PathExistsNoFollow(folder) && m_indexedFolderSet.insert(folder).second) {
                             m_indexedFolders.push_back(folder);
                         }
                         slash = relative.find('/', slash + 1);
@@ -433,7 +462,7 @@ bool ZBundle::HashLogicalFile(const string& strPath,
 
 void ZBundle::EnsureIndexedFile(const string& strFile)
 {
-	if (std::find(m_indexedFiles.begin(), m_indexedFiles.end(), strFile) == m_indexedFiles.end()) {
+	if (m_indexedFileSet.insert(strFile).second) {
 		m_indexedFiles.push_back(strFile);
 	}
 }
@@ -526,14 +555,27 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 		return depthA > depthB;
 	});
 
+	unordered_set<string> bundleExecutables;
+	const string rootExecutable = m_strAppFolder + "/" + jvInfo["bundle_executable"].as_string();
+	bundleExecutables.insert(rootExecutable);
+	bundleExecutables.insert(ResolvedExecutablePath(rootExecutable));
 	for (const string& bundlePath : allBundles) {
 		jvalue jvNode;
 		if (GetSignFolderInfo(bundlePath, jvNode)) {
+			const string executable = bundlePath + "/" + jvNode["bundle_executable"].as_string();
+			bundleExecutables.insert(executable);
+			bundleExecutables.insert(ResolvedExecutablePath(executable));
 			jvInfo["folders"].push_back(jvNode);
 		}
 	}
 
 	for (const string& strPath : m_indexedFiles) {
+		// Bundle executables are signed with their final resource seal below.
+		// Archive-only resources cannot be executable inputs: sparse extraction
+		// already materialized every Mach-O that discovery needs to inspect.
+		if (bundleExecutables.count(strPath) != 0 || m_archiveEntries.count(strPath) != 0) {
+			continue;
+		}
 		// Preserve MobileInstallation watch placeholders byte-for-byte as parent
 		// resources. They are metadata bundles, not independently signable code.
 		if (isInsidePlaceholder(strPath)) {
@@ -566,7 +608,7 @@ bool ZBundle::GetObjectsToSign(const string& strFolder, jvalue& jvInfo)
 			fclose(fp);
 		}
 
-		if (bMachO) {
+		if (bMachO && bundleExecutables.count(ResolvedExecutablePath(strPath)) == 0) {
 			jvInfo["files"].push_back(strPath.substr(m_strAppFolder.size() + 1));
 		}
 	}
@@ -616,6 +658,13 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 
 	setFiles.erase("_CodeSignature/CodeResources");
 	setFiles.erase(strBundleExe);
+	const string resolvedExecutable = ResolvedExecutablePath(strFolder + "/" + strBundleExe);
+	const string resolvedPrefix = ResolvedExecutablePath(strFolder) + "/";
+	if (0 == resolvedExecutable.compare(0, resolvedPrefix.size(), resolvedPrefix)) {
+		// The real executable of a versioned framework is excluded too; hashing
+		// it here would seal bytes that its own final signature is about to change.
+		setFiles.erase(resolvedExecutable.substr(resolvedPrefix.size()));
+	}
 
 	struct ResourceHash
 	{
@@ -624,6 +673,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		string sha256;
 		bool isSymlink = false;
 		bool hashOK = true;
+		bool cached = false;
 		string symlinkTarget;
 	};
 
@@ -633,6 +683,7 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		if (m_bRemoveProvision && strKey == "embedded.mobileprovision") {
 			string strProvFile = strFolder + "/embedded.mobileprovision";
 			remove(strProvFile.c_str());
+			m_resourceDigests.erase(strProvFile);
 			ZLog::Print(">>> Removed embedded.mobileprovision\n");
 			continue;
 		}
@@ -641,74 +692,61 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, jvalue& jvCodeRes)
 		item.key = strKey;
 		string strFile = strFolder + "/" + strKey;
 		item.isSymlink = GetLogicalSymbolicLinkTarget(strFile, item.symlinkTarget);
+		if (!item.isSymlink) {
+			auto cached = m_resourceDigests.find(strFile);
+			if (cached != m_resourceDigests.end()) {
+				item.sha1 = cached->second.sha1;
+				item.sha256 = cached->second.sha256;
+				item.cached = true;
+			}
+		}
 		hashes.push_back(std::move(item));
 	}
 
 	// File hashing is independent. Hash in parallel into fixed result slots,
 	// then commit to the plist serially in the same sorted-key order as before.
 	// This keeps CodeResources byte-for-byte stable while using multiple cores.
-	const size_t workerCount = (hashes.size() >= 8) ? ZUtil::GetWorkerCount(hashes.size()) : 1;
-	auto openArchiveReader = [&]() -> void* {
-		if (m_strArchivePath.empty()) {
-			return NULL;
-		}
-		void* reader = mz_zip_reader_create();
-		if (NULL == reader || MZ_OK != mz_zip_reader_open_file(reader, m_strArchivePath.c_str())) {
-			if (NULL != reader) {
-				mz_zip_reader_delete(&reader);
-			}
-			return NULL;
-		}
-		return reader;
-	};
-	auto closeArchiveReader = [&](void*& reader) {
-		if (NULL != reader) {
-			mz_zip_reader_close(reader);
-			mz_zip_reader_delete(&reader);
-		}
-	};
-
-	if (workerCount <= 1) {
-		void* reader = openArchiveReader();
-		for (ResourceHash& item : hashes) {
-			if (item.isSymlink) {
-				continue;
-			}
-			string strFile = strFolder + "/" + item.key;
-			item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
-		}
-		closeArchiveReader(reader);
-	} else {
-		atomic<size_t> next(0);
-		vector<thread> workers;
-		workers.reserve(workerCount);
-		for (size_t worker = 0; worker < workerCount; worker++) {
-			workers.emplace_back([&]() {
-				void* reader = openArchiveReader();
-				for (;;) {
-					size_t index = next.fetch_add(1, std::memory_order_relaxed);
-					if (index >= hashes.size()) {
-						break;
-					}
-					ResourceHash& item = hashes[index];
-					if (item.isSymlink) {
-						continue;
-					}
-					string strFile = strFolder + "/" + item.key;
-					item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
-				}
-				closeArchiveReader(reader);
-			});
-		}
-		for (thread& worker : workers) {
-			worker.join();
+	vector<size_t> pending;
+	for (size_t i = 0; i < hashes.size(); i++) {
+		if (!hashes[i].isSymlink && !hashes[i].cached) {
+			pending.push_back(i);
 		}
 	}
+	const size_t workerCount = (pending.size() >= 8) ? ZUtil::GetWorkerCount(pending.size()) : 1;
+	if (m_archiveReaders.size() < workerCount) {
+		m_archiveReaders.resize(workerCount, NULL);
+	}
+	ZUtil::ParallelFor(pending.size(), workerCount, [&](size_t index, size_t lane) {
+		ResourceHash& item = hashes[pending[index]];
+		const string strFile = strFolder + "/" + item.key;
+		void*& reader = m_archiveReaders[lane];
+		// Open lazily: many nested bundles have no archive-only resources.
+		// A lane owns this reader exclusively until the batch has completed.
+		if (NULL == reader && m_archiveEntries.count(strFile) != 0) {
+			reader = mz_zip_reader_create();
+			if (NULL == reader || MZ_OK != mz_zip_reader_open_file(reader, m_strArchivePath.c_str())) {
+				if (NULL != reader) {
+					mz_zip_reader_delete(&reader);
+				}
+				item.hashOK = false;
+				return;
+			}
+		}
+		item.hashOK = HashLogicalFile(strFile, item.sha1, item.sha256, reader);
+	});
 
 	for (const ResourceHash& item : hashes) {
 		if (!item.isSymlink && !item.hashOK) {
 			ZLog::ErrorV(">>> Can't hash logical resource: %s/%s\n", strFolder.c_str(), item.key.c_str());
 			return false;
+		}
+	}
+
+	// Publish only after every worker has finished. Unchanged descendants can
+	// reuse these digests when sealing their parents without inflating again.
+	for (const ResourceHash& item : hashes) {
+		if (!item.isSymlink && !item.cached) {
+			m_resourceDigests[strFolder + "/" + item.key] = {item.sha1, item.sha256};
 		}
 	}
 
@@ -848,6 +886,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 	if (jvNode.has("files")) {
 		for (size_t i = 0; i < jvNode["files"].size(); i++) {
 			string strFile = jvNode["files"][i];
+			m_resourceDigests.erase(m_strAppFolder + "/" + strFile);
 			ZLog::PrintV(">>> SignFile: \t%s\n", strFile.c_str());
 			ZMachO macho;
 			if (macho.InitV("%s/%s", m_strAppFolder.c_str(), strFile.c_str())) {
@@ -894,10 +933,15 @@ bool ZBundle::SignNode(jvalue& jvNode)
 	}
 
 	string strExePath = strBaseFolder + "/" + strBundleExe;
+	// Signing may rewrite or replace the executable, including through a
+	// versioned framework alias. Never retain a digest of the previous bytes.
+	m_resourceDigests.erase(strExePath);
+	m_resourceDigests.erase(ResolvedExecutablePath(strExePath));
 	ZLog::PrintV(">>> SignFolder: %s, (%s)\n", ("/" == strFolder) ? ZUtil::GetBaseName(m_strAppFolder.c_str()) : strFolder.c_str(), strBundleExe.c_str());
 
 	ZMachO macho;
-	if (!macho.Init(strExePath.c_str())) {
+	// Grow signatures on the target inode, preserving framework symlink aliases.
+	if (!macho.Init(ResolvedExecutablePath(strExePath).c_str())) {
 		ZLog::ErrorV(">>> Can't parse BundleExecute file! %s\n", strExePath.c_str());
 		return false;
 	}
@@ -917,6 +961,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 					baseName = baseName.substr(17);
 				}
 				ZFile::RemoveFileV("%s/%s", m_strAppFolder.c_str(), baseName.c_str());
+				m_resourceDigests.erase(m_strAppFolder + "/" + baseName);
 			}
 			bForceSign = true;
 		}
@@ -953,6 +998,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 					return false;
 				}
 				EnsureIndexedFile(strBaseFolder + "/embedded.mobileprovision");
+				m_resourceDigests.erase(strBaseFolder + "/embedded.mobileprovision");
 				bForceSign = true;
 				break;
 			}
@@ -961,6 +1007,7 @@ bool ZBundle::SignNode(jvalue& jvNode)
 
 	ZFile::CreateFolderV("%s/_CodeSignature", strBaseFolder.c_str());
 	string strCodeResFile = strBaseFolder + "/_CodeSignature/CodeResources";
+	m_resourceDigests.erase(strCodeResFile);
 
 	jvalue jvCodeRes;
 	if (!bForceSign) {
@@ -1327,8 +1374,12 @@ bool ZBundle::SignFolder(ZSignAsset* pSignAsset,
 {
 	m_bForceSign = bForce;
 	m_pSignAsset = pSignAsset;
+	CloseArchiveReaders();
+	m_resourceDigests.clear();
 	m_indexedFiles.clear();
 	m_indexedFolders.clear();
+	m_indexedFileSet.clear();
+	m_indexedFolderSet.clear();
 	m_bWeakInject = bWeakInject;
 	m_bRemoveProvision = bRemoveProvision;
 	m_setRemoveDylibs.clear();

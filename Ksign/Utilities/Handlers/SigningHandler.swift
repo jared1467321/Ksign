@@ -57,10 +57,12 @@ final class SigningHandler: NSObject {
 			let appName = URL(fileURLWithPath: archiveApp.rootAppPath).lastPathComponent
 			let movedAppURL = _uniqueWorkDir.appendingPathComponent(appName, isDirectory: true)
 
-			// Tweak/deb injection can copy arbitrary support bundles and replace
-			// existing framework trees. Keep that broad mutation path on an explicit
-			// compatibility fallback for now; normal archive-backed signing stays sparse.
-			let needsFullTreeForTweaks = !_options.injectionFiles.isEmpty || _options.experiment_replaceSubstrateWithEllekit
+			// Direct dylib injection adds files and patches already-materialized
+			// executables. Debs and arbitrary support/framework replacements still
+			// require the complete tree to preserve their existing mutation behavior.
+			let needsFullTreeForTweaks = _options.injectionFiles.contains {
+				$0.pathExtension.lowercased() != "dylib"
+			} || _options.experiment_replaceSubstrateWithEllekit
 			if needsFullTreeForTweaks {
 				_archiveUsesFullExtractionFallback = true
 				_archiveOriginalRelativePaths = Set(archiveApp.paths())
@@ -77,6 +79,16 @@ final class SigningHandler: NSObject {
 					to: movedAppURL,
 					includeInfoPlistStrings: _options.appName != nil
 				)
+				if !_options.injectionFiles.isEmpty {
+					// The injector checks this framework's presence before adding the
+					// bundled ElleKit loader. Preserve the existing framework, including
+					// resources that sparse Mach-O extraction otherwise leaves in the IPA.
+					let loaderPath = "Frameworks/CydiaSubstrate.framework"
+					try archiveApp.extractTree(
+						relativePath: loaderPath,
+						to: movedAppURL.appendingPathComponent(loaderPath, isDirectory: true)
+					)
+				}
 				_movedAppPath = movedAppURL
 			}
 
