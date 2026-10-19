@@ -65,6 +65,9 @@ final class NativeCalls {
     private var clientsCreated = 0
     private var clientsFreed = 0
     private var nextInstallationError: IdeviceFfiError?
+    private var lookupIdentity: String?
+    private var lookupIDs: [String] = []
+    private var installationCalls = 0
     private var writeCounts: [Int] = []
 
     func recordWrite(_ count: Int) {
@@ -88,11 +91,35 @@ final class NativeCalls {
     func installationResult() -> UnsafeMutablePointer<IdeviceFfiError>? {
         condition.lock()
         defer { condition.unlock() }
+        installationCalls += 1
         guard let error = nextInstallationError else { return nil }
         nextInstallationError = nil
         let pointer = UnsafeMutablePointer<IdeviceFfiError>.allocate(capacity: 1)
         pointer.initialize(to: error)
         return pointer
+    }
+
+    func setLookupIdentity(_ identity: String?) {
+        condition.lock()
+        defer { condition.unlock() }
+        lookupIdentity = identity
+    }
+    func lookup(_ client: OpaquePointer, id: String) -> UnsafeMutablePointer<CChar>? {
+        use(client)
+        condition.lock()
+        defer { condition.unlock() }
+        lookupIDs.append(id)
+        return lookupIdentity.flatMap { strdup($0) }
+    }
+    func installCallCount() -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return installationCalls
+    }
+    func expectLookupIDs(_ ids: [String]) {
+        condition.lock()
+        defer { condition.unlock() }
+        precondition(lookupIDs == ids, "Preflight must query only the incoming bundle")
     }
 
     func handle() -> OpaquePointer {
@@ -250,6 +277,12 @@ func afc_remove_path(_ client: OpaquePointer?, _ path: String) -> UnsafeMutableP
 }
 func afc_client_free(_ client: OpaquePointer?) { NativeCalls.shared.freeClient(client) }
 func installation_proxy_client_free(_ client: OpaquePointer?) { NativeCalls.shared.freeClient(client) }
+func ksign_installation_lookup(_ client: OpaquePointer?, _ id: String,
+    _ output: inout UnsafeMutablePointer<CChar>?) -> UnsafeMutablePointer<IdeviceFfiError>? {
+    output = NativeCalls.shared.lookup(client!, id: id)
+    return nil
+}
+func ksign_pairing_string_free(_ value: UnsafeMutablePointer<CChar>?) { free(value) }
 func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: String,
     _ options: OpaquePointer?, _ callback: @convention(c) (UInt64, UnsafeMutableRawPointer?) -> Void,
     _ context: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<IdeviceFfiError>? {
@@ -355,6 +388,43 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
                          "Delayed progress must not republish after terminal completion")
         }
         NativeCalls.shared.expectCleanClients(16, tunnelCount: 2)
+        _ = NativeCalls.shared.takeWriteCounts()
+        let beforeSkip = NativeCalls.shared.installCallCount()
+        NativeCalls.shared.setLookupIdentity(#"{"bundleIdentifier":"app.test","applicationIdentifier":"STORE.app.test"}"#)
+        let preflight = IDeviceInstallPreflight(bundleIdentifier: "app.test") { _ in
+            throw IDeviceInstallSkip(reason: "Installed app conflict")
+        }
+        do {
+            try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa, preflight: preflight)
+            preconditionFailure("Conflicting apps must be skipped")
+        } catch let skip as IDeviceInstallSkip {
+            precondition(skip.reason == "Installed app conflict")
+        }
+        precondition(NativeCalls.shared.takeWriteCounts().isEmpty,
+                     "A skipped app must not upload any IPA bytes")
+        precondition(NativeCalls.shared.installCallCount() == beforeSkip,
+                     "A skipped app must not send an install command")
+        NativeCalls.shared.expectCleanClients(17, tunnelCount: 2)
+
+        // Missing installed bundles and compatible updates proceed on the same tunnel.
+        NativeCalls.shared.setLookupIdentity(nil)
+        try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa, preflight: preflight)
+        NativeCalls.shared.setLookupIdentity(#"{"bundleIdentifier":"app.test","applicationIdentifier":"TEAM.app.test"}"#)
+        let compatible = IDeviceInstallPreflight(bundleIdentifier: "app.test") { installed in
+            precondition(installed.applicationIdentifier == "TEAM.app.test")
+        }
+        try await InstallationProxy(viewModel: InstallerStatusViewModel()).install(at: ipa, preflight: compatible)
+        precondition(NativeCalls.shared.installCallCount() == beforeSkip + 2)
+        NativeCalls.shared.expectLookupIDs(["app.test", "app.test", "app.test"])
+        NativeCalls.shared.expectCleanClients(23, tunnelCount: 2)
+        let bytesBeforeValidation = NativeCalls.shared.takeWriteCounts()
+        precondition(!bytesBeforeValidation.isEmpty)
+        try await InstallationProxy(viewModel: InstallerStatusViewModel()).validate(compatible)
+        precondition(NativeCalls.shared.takeWriteCounts().isEmpty,
+                     "Signing handoff validation must not upload the package")
+        precondition(NativeCalls.shared.installCallCount() == beforeSkip + 2,
+                     "Signing handoff validation must not submit an install command")
+        NativeCalls.shared.expectCleanClients(24, tunnelCount: 2)
         NativeCalls.shared.expectFreed(1)
         await HeartbeatManager.shared.resetInstallationConnection()
         NativeCalls.shared.expectFreed(2)

@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 import PhotosUI
 import NimbleViews
+import IDeviceSwift
 
 // MARK: - View
 struct SigningView: View {
@@ -311,6 +312,18 @@ extension SigningView {
 			return
 		}
 
+		_isSigning = true
+		let options = _temporaryOptions
+		let certificate = _selectedCert()
+		SigningPreflightCoordinator.review([SigningPreflight.source(for: app, options: options)]) { _ in
+			_runSigning(options: options, certificate: certificate)
+		} onCancel: {
+			_isSigning = false
+		}
+	}
+
+	private func _runSigning(options: Options, certificate: CertificatePair?) {
+		BackgroundTaskManager.shared.begin(.signing)
 		let generator = UIImpactFeedbackGenerator(style: .light)
 		generator.impactOccurred()
 		_isLogsPresenting = _optionsManager.options.signingLogs
@@ -330,45 +343,56 @@ extension SigningView {
 
 		FR.signPackageFile(
 			app,
-			using: _temporaryOptions,
+			using: options,
 			icon: appIcon,
-			certificate: _selectedCert(),
-			backgroundCompletion: { error in
+			certificate: certificate,
+			backgroundCompletion: { error, _ in
 				BackgroundTaskManager.shared.report(
 					.signing,
 					completed: 1,
 					total: 1,
 					fraction: nil,
-					detail: error == nil ? "Completed" : "Error",
+					detail: error == nil ? "Completed" : (error is IDeviceInstallSkip ? "Finished with Skips" : "Error"),
 					currentItem: app.name
 				)
 			}
-		) { [self] error in
+		) { [self] error, signedID in
 			if let error {
+				BackgroundTaskManager.shared.end(.signing, success: error is IDeviceInstallSkip)
 				let ok = UIAlertAction(title: .localized("Dismiss"), style: .cancel) { _ in
 					dismiss()
 				}
 				
 				UIAlertController.showAlert(
-					title: .localized("Signing"),
+					title: error is IDeviceInstallSkip ? "Signing Skipped" : .localized("Signing"),
 					message: error.localizedDescription,
 					actions: [ok]
 				)
 			} else {
 				// Remove app after signed option thing
-				if _temporaryOptions.removeApp && !app.isSigned {
+				if options.removeApp && !app.isSigned {
 					Storage.shared.deleteApp(for: app)
 				}
                 
-				if signAndInstall {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        NotificationCenter.default.post(
-                            name: NSNotification.Name("feather.installApp"),
-                            object: nil
-                        )
-                    }
-                }
-				dismiss()
+				Task { @MainActor in
+					if signAndInstall, let signedID {
+						let handoff = await SigningPreflightCoordinator.prepareInstallation([signedID])
+						if let id = handoff.appIDs.first {
+							DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+								NotificationCenter.default.post(name: NSNotification.Name("feather.installApp"), object: id)
+							}
+						}
+						if !handoff.withheld.isEmpty {
+							BackgroundTaskManager.shared.end(.signing, success: true)
+							UIAlertController.showAlertWithOk(title: "Signed · Not Installed",
+								message: handoff.withheld.map(\.description).joined(separator: "\n\n") + "\n\nThe signed app remains in Signed Apps.",
+								action: { dismiss() })
+							return
+						}
+					}
+					BackgroundTaskManager.shared.end(.signing, success: true)
+					dismiss()
+				}
 			}
 		}
 	}

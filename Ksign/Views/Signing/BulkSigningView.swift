@@ -9,6 +9,7 @@ import SwiftUI
 import NimbleExtensions
 import NimbleViews
 import PhotosUI
+import IDeviceSwift
 
 struct AppSignConfig: Identifiable {
     var id: String? { app.uuid }
@@ -264,20 +265,27 @@ extension BulkSigningView {
 			return
 		}
 
+		_isSigning = true
+		let certificate = _selectedCert()
+		let configs = _configs
+		SigningPreflightCoordinator.review(configs.map { SigningPreflight.source(for: $0.app, options: $0.options) }) { report in
+			_runSigning(configs: report.eligibleIndices.map { configs[$0] }, certificate: certificate, skipped: report.skipped)
+		} onCancel: {
+			_isSigning = false
+		}
+	}
+
+	private func _runSigning(configs: [AppSignConfig], certificate: CertificatePair?, skipped: [SigningPreflight.Issue]) {
 		let generator = UIImpactFeedbackGenerator(style: .light)
 		generator.impactOccurred()
 		_isSigning = true
 
-		// Capture these once up front. The certificate selection can't
-		// change while signing is in progress, and copying the configs
-		// keeps the loop independent of any later view-state mutation.
-		let certificate = _selectedCert()
-		let configs = _configs
-
 		Task.detached(priority: .userInitiated) {
 			var failures: [(name: String, error: Error)] = []
-			var successCount = 0
-			var processedCount = 0
+			var signedIDs: [String] = []
+			var skippedApps = skipped
+			var processedCount = skipped.count
+			let total = configs.count + skipped.count
 
 			// Seed one stable batch report before the first worker claims signing.
 			// Signing has no trustworthy sub-step percentage here, so processed-app
@@ -286,8 +294,8 @@ extension BulkSigningView {
 			BackgroundTaskManager.shared.claim(.signing)
 			BackgroundTaskManager.shared.report(
 				.signing,
-				completed: 0,
-				total: configs.count,
+				completed: processedCount,
+				total: total,
 				fraction: nil,
 				detail: "Signing"
 			)
@@ -301,24 +309,26 @@ extension BulkSigningView {
 				BackgroundTaskManager.shared.report(
 					.signing,
 					completed: processedCount,
-					total: configs.count,
+					total: total,
 					fraction: nil,
 					detail: "Signing",
 					currentItem: currentName
 				)
 
 				do {
-					try await Self._signOne(
+					let signedID = try await Self._signOne(
 						config,
 						certificate: certificate
 					)
-					successCount += 1
+					signedIDs.append(signedID)
 
 					if config.options.removeApp, !config.app.isSigned {
 						await MainActor.run {
 							Storage.shared.deleteApp(for: config.app)
 						}
 					}
+				} catch let skip as IDeviceInstallSkip {
+					skippedApps.append(.init(name: currentName, reason: skip.reason))
 				} catch {
 					failures.append((currentName, error))
 				}
@@ -327,45 +337,45 @@ extension BulkSigningView {
 				BackgroundTaskManager.shared.report(
 					.signing,
 					completed: processedCount,
-					total: configs.count,
+					total: total,
 					fraction: nil,
 					detail: "Signing",
 					currentItem: currentName
 				)
 			}
 
+			let handoff = signAndInstall
+				? await SigningPreflightCoordinator.prepareInstallation(signedIDs)
+				: SigningPreflightCoordinator.Handoff()
 			BackgroundTaskManager.shared.report(
 				.signing,
 				completed: processedCount,
-				total: configs.count,
+				total: total,
 				fraction: nil,
-				detail: failures.isEmpty ? "Completed" : "Error",
+				detail: failures.isEmpty ? (skippedApps.isEmpty && handoff.withheld.isEmpty ? "Completed" : "Finished with Skips") : "Error",
 				currentItem: nil
 			)
 			BackgroundTaskManager.shared.release(.signing, success: failures.isEmpty)
 
+			var sections: [String] = []
+			if !skippedApps.isEmpty { sections.append("Skipped before signing:\n" + skippedApps.map(\.description).joined(separator: "\n")) }
+			if !failures.isEmpty { sections.append("Signing failed:\n" + failures.map { "\($0.name): \($0.error.localizedDescription)" }.joined(separator: "\n")) }
+			if !handoff.withheld.isEmpty { sections.append("Signed, not queued for installation:\n" + handoff.withheld.map(\.description).joined(separator: "\n") + "\n\nThese signed apps remain in Signed Apps.") }
+			let summary = sections.joined(separator: "\n\n")
+
 			await MainActor.run {
-				if !failures.isEmpty {
-					let message = failures
-						.map { "\($0.name): \($0.error.localizedDescription)" }
-						.joined(separator: "\n")
-					UIAlertController.showAlertWithOk(title: .localized("Error"), message: message)
-				}
-
-				NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSigningFinished"), object: nil)
 				_isSigning = false
-
-				if signAndInstall, successCount > 0 {
-					let count = successCount
-					DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-						NotificationCenter.default.post(
-							name: NSNotification.Name("ksign.bulkSignAndInstall"),
-							object: count
-						)
+				let finish = {
+					NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSigningFinished"), object: nil)
+					if signAndInstall, !handoff.appIDs.isEmpty {
+						DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+							NotificationCenter.default.post(name: NSNotification.Name("ksign.bulkSignAndInstall"), object: handoff.appIDs)
+						}
 					}
+					dismiss()
 				}
-
-				dismiss()
+				if summary.isEmpty { finish() }
+				else { UIAlertController.showAlertWithOk(title: "Signing Results", message: summary, action: finish) }
 			}
 		}
 	}
@@ -375,21 +385,23 @@ extension BulkSigningView {
 	private static func _signOne(
 		_ config: AppSignConfig,
 		certificate: CertificatePair?
-	) async throws {
-		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+	) async throws -> String {
+		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
 			FR.signPackageFile(
 				config.app,
 				using: config.options,
 				icon: config.icon,
 				certificate: certificate,
-				backgroundCompletion: { error in
+				backgroundCompletion: { error, signedID in
 					if let error {
 						continuation.resume(throwing: error)
+					} else if let signedID {
+						continuation.resume(returning: signedID)
 					} else {
-						continuation.resume()
+						continuation.resume(throwing: ArchiveBackedAppError.invalidArchive)
 					}
 				}
-			) { _ in
+			) { _, _ in
 				// UI completion is intentionally not the batch gate. It may be
 				// delivered later when the app is foregrounded.
 			}

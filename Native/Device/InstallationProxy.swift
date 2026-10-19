@@ -75,9 +75,27 @@ public final class InstallationProxy: Identifiable, ObservableObject {
 
     public init(viewModel: InstallerStatusViewModel) { self.viewModel = viewModel }
 
+    /// Read-only validation for the signing-to-installation handoff. No AFC
+    /// client, staging file or install command is created by this operation.
+    public func validate(_ preflight: IDeviceInstallPreflight) async throws {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await IDeviceInstallationWorker.performInstallation { [self] in
+                try checkCancellation()
+                let heartbeat = HeartbeatManager.shared
+                let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
+                defer { withExtendedLifetime(connection) {} }
+                let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
+                defer { idevice_provider_free(provider) }
+                try validatePreflight(preflight, connection: connection, provider: provider)
+            }
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
     // Each proxy is one attempt. Cancellation waits for any native call already
     // in progress to return before releasing resources and its admission slot.
     public func install(at url: URL, suspend: Bool = false,
+                        preflight: IDeviceInstallPreflight? = nil,
                         isCurrent: @escaping () -> Bool = { true }) async throws {
         self.isCurrent = isCurrent
         update { $0.uploadMetrics = nil }
@@ -86,7 +104,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                 try Task.checkCancellation()
                 try await IDeviceInstallationWorker.performInstallation { [self] in
                     try cancellation.check()
-                    try installSynchronously(at: url, suspend: suspend)
+                    try installSynchronously(at: url, suspend: suspend, preflight: preflight)
                 }
                 try cancellation.check()
                 await MainActor.run {
@@ -143,7 +161,32 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         throw IDeviceSwiftError(error)
     }
 
-    private func installSynchronously(at url: URL, suspend: Bool) throws {
+    private func validatePreflight(_ preflight: IDeviceInstallPreflight,
+                                   connection: RSDConnection?, provider: OpaquePointer?) throws {
+        var client: OpaquePointer?
+        defer { installation_proxy_client_free(client) }
+        if let connection {
+            try connection.withServiceConnection { adapter, handshake in
+                try check(installation_proxy_connect_rsd(adapter, handshake, &client))
+            }
+        } else {
+            try check(installation_proxy_connect(provider, &client))
+        }
+        try checkCancellation()
+        var output: UnsafeMutablePointer<CChar>?
+        defer { ksign_pairing_string_free(output) }
+        try check(ksign_installation_lookup(client, preflight.bundleIdentifier, &output))
+        try checkCancellation()
+        guard let output else { return }
+        let installed = try JSONDecoder().decode(IDeviceInstalledApplication.self,
+            from: Data(String(cString: output).utf8))
+        guard installed.bundleIdentifier == preflight.bundleIdentifier else { return }
+        try preflight.validateInstalledApplication(installed)
+        try checkCancellation()
+    }
+
+    private func installSynchronously(at url: URL, suspend: Bool,
+                                      preflight: IDeviceInstallPreflight?) throws {
         let heartbeat = HeartbeatManager.shared
         guard FileManager.default.fileExists(atPath: HeartbeatManager.pairingFile()) else {
             throw IDeviceSwiftError(message: "Pair this device in Installation settings before installing.")
@@ -155,6 +198,9 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
         defer { idevice_provider_free(provider) }
         try checkCancellation()
+        if let preflight {
+            try validatePreflight(preflight, connection: connection, provider: provider)
+        }
         var afc: OpaquePointer?
         var proxy: OpaquePointer?
         var file: OpaquePointer?

@@ -28,6 +28,7 @@ final class InstallSession: ObservableObject {
 	// independent: its reporter owns stable job IDs and advances directly from
 	// worker progress/status callbacks, so UI scheduling cannot stall the Island.
 	@Published private(set) var completedCount = 0
+	@Published private(set) var skippedCount = 0
 	@Published private(set) var totalCount = 0
 	@Published private(set) var aggregateProgress: Double = 0
 	@Published private(set) var nativeInstallLimit = NativeInstallLimit.savedValue
@@ -56,6 +57,7 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var installedAppIDs: Set<String> = []
 	@Published private(set) var isFinished = false
 	private var _completedJobIDs: Set<UUID> = []
+	private var _skippedJobIDs: Set<UUID> = []
 
 	struct InstalledAppsSelectionRequest: Identifiable {
 		let id = UUID()
@@ -231,12 +233,14 @@ final class InstallSession: ObservableObject {
 			BulkInstallLiveActivityReporter.shared.reset()
 			installedAppIDs.removeAll()
 			_completedJobIDs.removeAll()
+			_skippedJobIDs.removeAll()
 
 			// Cleared here rather than at the end of the last batch. Zeroing
 			// these on finish would fire `didSet` and wipe the final "12 of 12"
 			// the moment it landed — the pill lingers for a few seconds after
 			// the last release and that tally is what it shows.
 			completedCount = 0
+			skippedCount = 0
 			totalCount = 0
 			aggregateProgress = 0
 
@@ -267,8 +271,9 @@ final class InstallSession: ObservableObject {
 			// A failed row for this app would otherwise block re-installing it
 			// entirely — `start` would see it as a duplicate and skip, so the
 			// Install button would silently do nothing. Clear it out first.
-			if let stale = jobs.firstIndex(where: { $0.app.uuid == app.uuid && $0.phase == .failed }) {
+			if let stale = jobs.firstIndex(where: { $0.app.uuid == app.uuid && ($0.phase == .failed || $0.phase == .skipped) }) {
 				let staleJob = jobs[stale]
+				if _skippedJobIDs.remove(staleJob.id) != nil { skippedCount -= 1 }
 				staleJob.cancel()
 				BulkInstallLiveActivityReporter.shared.remove(staleJob.id)
 				_untrackJob(staleJob)
@@ -325,7 +330,7 @@ final class InstallSession: ObservableObject {
 		guard job.isDeviceInstall else { return true }
 		let unfinished: (InstallJob) -> Bool = { candidate in
 			candidate.isDeviceInstall && candidate.id != id &&
-			candidate.phase != .completed && candidate.phase != .failed
+				!candidate.isTerminal
 		}
 		if job.isSelfUpdate {
 			return !jobs.contains(where: unfinished) && InstallQueueCoordinator.shared.activeCount == 0
@@ -341,6 +346,9 @@ final class InstallSession: ObservableObject {
 			guard _completedJobIDs.insert(job.id).inserted else { return }
 			if let uuid = job.app.uuid { installedAppIDs.insert(uuid) }
 			completedCount += 1
+		} else if job.phase == .skipped {
+			guard _skippedJobIDs.insert(job.id).inserted else { return }
+			skippedCount += 1
 		}
 		if _willBatch {
 			// Once every app in the current group is done, its shared server can
@@ -402,6 +410,7 @@ final class InstallSession: ObservableObject {
 		job.cancel()
 
 		guard let index = jobs.firstIndex(where: { $0 === job }) else { return }
+		if _skippedJobIDs.remove(job.id) != nil { skippedCount -= 1 }
 
 		withAnimation(.easeInOut(duration: 0.25)) {
 			_ = jobs.remove(at: index)
@@ -424,6 +433,7 @@ final class InstallSession: ObservableObject {
 
 	func retry(_ job: InstallJob) {
 		guard jobs.contains(where: { $0 === job }), job.phase != .completed else { return }
+		if _skippedJobIDs.remove(job.id) != nil { skippedCount -= 1 }
 		isFinished = false
 		BackgroundTaskManager.shared.claim(.bulkInstalls)
 		_startTicking()
@@ -537,6 +547,8 @@ final class InstallSession: ObservableObject {
 		withAnimation(.easeInOut(duration: 0.25)) { jobs.removeAll() }
 		isFinished = false
 		installedAppIDs.removeAll()
+		skippedCount = 0
+		_skippedJobIDs.removeAll()
 		_finishIfIdle(success: false)
 	}
 
@@ -548,13 +560,13 @@ final class InstallSession: ObservableObject {
 	// Without this a single failed install meant `release(.bulkInstalls)` was
 	// never called and the continued-processing task stayed owned indefinitely.
 	private func _releaseIfNothingRunning() {
-		guard !jobs.isEmpty, jobs.allSatisfy({ $0.phase == .completed || $0.phase == .failed }) else { return }
+		guard !jobs.isEmpty, jobs.allSatisfy({ $0.isTerminal }) else { return }
 		isFinished = true
 		DeviceInstallationManager.shared.releaseWorkflow(_deviceWorkflowID)
 
 		_recomputeProgress()
 		BulkInstallLiveActivityReporter.shared.finish()
-		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase == .completed })
+		BackgroundTaskManager.shared.release(.bulkInstalls, success: jobs.allSatisfy { $0.phase != .failed })
 		// Keep observing native cleanup until the selection action is safe.
 		if !hasWorkInProgress { _stopTicking() }
 	}
@@ -615,7 +627,7 @@ final class InstallSession: ObservableObject {
 	// Started (released to build) and not yet finished — building, parked at a
 	// prompt, or installing. This is the count the admission window holds down.
 	private var _admittedActiveCount: Int {
-		jobs.filter { $0.hasStarted && $0.phase != .completed && $0.phase != .failed }.count
+		jobs.filter { $0.hasStarted && !$0.isTerminal }.count
 	}
 
 	private func _formBatchGroups() {
@@ -630,12 +642,12 @@ final class InstallSession: ObservableObject {
 		guard !_hasGroupInFlight else { return }
 
 		let awaiting = jobs.filter {
-			$0.batchRole == .awaiting && $0.phase != .failed && $0.phase != .completed
+			$0.batchRole == .awaiting && !$0.isTerminal
 		}
 		// Could anything still join a group? A queued or still-building
 		// (pending) job might yet reach `.ready`.
 		let moreComing = jobs.contains {
-			$0.batchRole == .pending && $0.phase != .failed && $0.phase != .completed
+			$0.batchRole == .pending && !$0.isTerminal
 		}
 
 		if awaiting.count >= _batchGroupSize {
@@ -654,7 +666,7 @@ final class InstallSession: ObservableObject {
 	private var _hasGroupInFlight: Bool {
 		jobs.contains {
 			($0.batchRole == .host || $0.batchRole == .member)
-				&& $0.phase != .completed && $0.phase != .failed
+				&& !$0.isTerminal
 		}
 	}
 
@@ -722,7 +734,7 @@ final class InstallSession: ObservableObject {
 			hasGroup = hasGroup || job.isInFlightGroupMember
 			// Keep terminal jobs observable through native cleanup, then retain
 			// their last contribution without polling them on later ticks.
-			if !working, job.phase == .completed || job.phase == .failed {
+			if !working, job.isTerminal {
 				_freezeProgress(for: job)
 				_sampledJobs.removeValue(forKey: job.id)
 			}
@@ -774,6 +786,7 @@ final class BulkInstallLiveActivityReporter {
 		case installing
 		case completed
 		case failed
+		case skipped
 	}
 
 	private struct _Job {
@@ -788,7 +801,8 @@ final class BulkInstallLiveActivityReporter {
 
 		var isCompleted: Bool { stage == .completed }
 		var isFailed: Bool { stage == .failed }
-		var isTerminal: Bool { isCompleted || isFailed }
+		var isSkipped: Bool { stage == .skipped }
+		var isTerminal: Bool { isCompleted || isFailed || isSkipped }
 	}
 
 	private let _queue = DispatchQueue(
@@ -976,6 +990,9 @@ final class BulkInstallLiveActivityReporter {
 			case .completed(.success):
 				job.stage = .completed
 				job.fraction = 1
+			case .broken(let error) where error is IDeviceInstallSkip:
+				job.stage = .skipped
+				job.fraction = 1
 			case .completed(.failure), .broken:
 				job.stage = .failed
 				job.fraction = 1
@@ -1049,8 +1066,9 @@ final class BulkInstallLiveActivityReporter {
 		let values = Array(_jobs.values)
 		let completed = values.filter(\.isCompleted).count
 		let failed = values.filter(\.isFailed).count
+		let skipped = values.filter(\.isSkipped).count
 		let total = values.count
-		let allTerminal = completed + failed >= total
+		let allTerminal = completed + failed + skipped >= total
 		let aggregateFraction = min(
 			1,
 			max(0, values.reduce(0.0) { $0 + $1.fraction } / Double(total))
@@ -1060,7 +1078,7 @@ final class BulkInstallLiveActivityReporter {
 		if _paused {
 			detail = "Paused"
 		} else if allTerminal || forceTerminal {
-			detail = failed == 0 && completed == total ? "Completed" : "Error"
+			detail = failed > 0 ? "Error" : (skipped > 0 ? "Finished with Skips" : "Completed")
 		} else {
 			detail = "Installing"
 		}
@@ -1083,7 +1101,7 @@ final class BulkInstallLiveActivityReporter {
 
 		BackgroundTaskManager.shared.report(
 			.bulkInstalls,
-			completed: completed + failed,
+			completed: completed + failed + skipped,
 			total: total,
 			fraction: aggregateFraction,
 			detail: detail,

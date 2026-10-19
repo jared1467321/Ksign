@@ -103,8 +103,8 @@ enum FR {
 		using options: Options,
 		icon: UIImage?,
 		certificate: CertificatePair?,
-		backgroundCompletion: ((Error?) -> Void)? = nil,
-		completion: @escaping (Error?) -> Void
+		backgroundCompletion: ((Error?, String?) -> Void)? = nil,
+		completion: @escaping (Error?, String?) -> Void
 	) {
 		// Establish the task at the foreground/user-action boundary. Bulk signing
 		// already holds an identity claim, so this simply adds a counted worker there.
@@ -123,6 +123,7 @@ enum FR {
 			handler.appIcon = icon
 
 			do {
+				try SigningPreflight.checkPlatform(for: app)
 				try await handler.copy()
 
 				try await handler.modify()
@@ -134,16 +135,17 @@ enum FR {
 				// Batch count reporting happens before the UI callback so it cannot
 				// be delayed until the app returns to the foreground.
 				backgroundSucceeded = true
-				backgroundCompletion?(nil)
+				backgroundCompletion?(nil, handler.signedAppID)
 				DispatchQueue.main.async {
-					completion(nil)
+					completion(nil, handler.signedAppID)
 				}
 			} catch {
 				try? await handler.clean()
 				await TempMaintenance.shared.endOperation()
-				backgroundCompletion?(error)
+				if error is IDeviceInstallSkip { backgroundSucceeded = true }
+				backgroundCompletion?(error, nil)
 				DispatchQueue.main.async {
-					completion(error)
+					completion(error, nil)
 				}
 			}
 		}

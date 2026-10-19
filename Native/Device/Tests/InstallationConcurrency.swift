@@ -224,6 +224,57 @@ extension ConnectionRecoveryTests {
         try await afterRejection.value
         rejectionManager.releaseWorkflow(workflow)
         await settle()
-        print("Passed 10 native installation concurrency scenarios")
+        let (skipManager, skipTunnel, _) = fixture()
+        skipManager.retainWorkflow(workflow)
+        InstallationProxy.holdInstalls = true
+        let skipped = launch(skipManager, "skipped")
+        let skipPeer = launch(skipManager, "skipPeer")
+        try await waitUntil("Preflight scenario needs a healthy peer") { InstallationProxy.pending.count == 2 }
+        finish("skipped", error: IDeviceInstallSkip(reason: "Installed identity conflict"))
+        do { try await skipped.value; preconditionFailure("Expected a local skip") }
+        catch is IDeviceInstallSkip { }
+        let nextAfterSkip = launch(skipManager, "nextAfterSkip")
+        try await waitUntil("A skip must not wait for peers to drain") {
+            InstallationProxy.pending["nextAfterSkip"] != nil
+        }
+        expect(HeartbeatManager.shared.attempts.count == 1, "Local skips must not request tunnel recovery")
+        expect(skipTunnel.connection.starts == 0 && DevicePairingService.shared.calls == 0,
+               "Local skips must not restart VPN or pairing")
+        finish("skipPeer")
+        finish("nextAfterSkip")
+        try await skipPeer.value
+        try await nextAfterSkip.value
+        skipManager.releaseWorkflow(workflow)
+        await settle()
+
+        let (reviewManager, reviewTunnel, _) = fixture()
+        reviewManager.retainWorkflow(workflow)
+        InstallationProxy.holdInstalls = true
+        let reviewPeer = launch(reviewManager, "reviewPeer")
+        try await waitUntil("Keep a native install active during signing review") {
+            InstallationProxy.pending["reviewPeer"] != nil
+        }
+        let preflight = IDeviceInstallPreflight(bundleIdentifier: "app.review") { _ in }
+        try await reviewManager.validate(preflight)
+        expect(InstallationProxy.validationCalls == 1 && InstallationProxy.calls == 1,
+               "Read-only handoff validation must not issue an install")
+        InstallationProxy.failure = IDeviceInstallSkip(reason: "Installed identity conflict")
+        do { try await reviewManager.validate(preflight); preconditionFailure("Expected a local skip") }
+        catch is IDeviceInstallSkip { }
+        InstallationProxy.failure = nil
+        expect(reviewManager.pendingOperations == 1, "Read-only lookups must release their operation counts")
+        let afterReview = launch(reviewManager, "afterReview")
+        try await waitUntil("A signing review skip must preserve its active peer") {
+            InstallationProxy.pending["afterReview"] != nil
+        }
+        expect(HeartbeatManager.shared.attempts.count == 1 && reviewTunnel.connection.starts == 0 &&
+               DevicePairingService.shared.calls == 0, "Signing review must preserve the shared tunnel")
+        finish("reviewPeer")
+        finish("afterReview")
+        try await reviewPeer.value
+        try await afterReview.value
+        reviewManager.releaseWorkflow(workflow)
+        await settle()
+        print("Passed 12 native installation concurrency scenarios")
     }
 }

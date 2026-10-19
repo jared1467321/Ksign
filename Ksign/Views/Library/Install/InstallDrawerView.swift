@@ -163,6 +163,11 @@ struct InstallDrawerSheet: View {
 				Text("\(session.completedCount) of \(session.totalCount) installed")
 					.font(.caption.monospacedDigit())
 					.nbThemeForeground(.textSecondary)
+				if session.skippedCount > 0 {
+					Text("\(session.skippedCount) skipped · Hold a skipped app for details")
+						.font(.caption)
+						.nbThemeForeground(.warning)
+				}
 
 				if session.usesNativeInstallLimit {
 					NativeInstallLimitControl()
@@ -234,9 +239,8 @@ struct InstallDrawerSheet: View {
 
 	private var _title: String {
 		if _isSettled {
-			return session.completedCount == session.totalCount
-				? .localized("Installed")
-				: .localized("Finished with Errors")
+			if session.jobs.contains(where: { $0.phase == .failed }) { return .localized("Finished with Errors") }
+			return session.skippedCount > 0 ? .localized("Finished with Skips") : .localized("Installed")
 		}
 		return session.isPaused
 			? .localized("Paused")

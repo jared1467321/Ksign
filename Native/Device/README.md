@@ -61,6 +61,37 @@ source trees from the chunk-size experiment.
   fails individually without replacing the shared connection for later apps.
   A queued Ksign update follows the other queued device installs. Avoid adding
   more apps after Ksign's own update has already begun.
+- **Sign** and **Sign & Install**, for both single apps and batches, review the
+  current signing options before starting work. A local installed-app check warns
+  about bundle identifiers already on this device without starting the VPN.
+  **Edit Bundle IDs** returns to the signing form; **Continue Signing** signs
+  every eligible app, including installed-ID matches. The warning explains that
+  a differently signed copy cannot replace an App Store installation with the
+  same bundle identifier; compatible updates remain eligible.
+  Explicit tvOS, watchOS, visionOS, macOS and simulator targets are skipped before
+  copying or signing. iOS and iPadOS apps remain eligible, including iPad-only
+  apps on iPhone; device family 2 is never a reason to skip. Only the main app's
+  declarations are checked, so an embedded Watch companion does not block iOS.
+  Unknown declarations remain eligible. These checks do not rewrite platforms.
+- Before native **Sign & Install** hands successful packages to the drawer,
+  it inspects their final bundle identifiers and signed executable entitlements.
+  For locally detected installed matches, a targeted read-only device lookup
+  compares application identifiers. Confirmed identity conflicts are withheld
+  from installation and explained in the signing results; all successful signed
+  packages remain in Signed Apps. Matching identities and declared previous
+  application identifiers remain eligible. Only the exact successful library
+  IDs are handed off, preserving batch order even when some apps are skipped.
+  Ordinary **Sign** does not need a device connection for these checks.
+- Direct native installs from Signed Apps also inspect each final IPA when its
+  queue slot is admitted and repeat the targeted identity lookup before upload.
+  The executable is streamed to temporary storage only for an installed identity
+  match and removed after inspection. Unknown signatures remain eligible.
+  The lookup does not upload an IPA or send an installation command. A local skip
+  does not request connection recovery or affect other native workers.
+  Skipped rows remain in the drawer with a separate count; hold one and choose
+  **Why skipped?** for its reason. They are excluded from installed-app selection
+  and may be retried after resolving the conflict. Native identity checks do not
+  apply to Server installs.
 - Native installs share one limit across packaging, uploading, iOS installation
   and cleanup. The default is five active apps. **Settings → Installation →
   Native · iDevice → Installation limit** lets you choose from one to 100 for
@@ -193,6 +224,12 @@ sheet callbacks, and releasing installation cleanup before user selection.
 The drawer checks exercise 1,000 queued apps with no per-app reads during
 foreground refreshes, then verify active progress, removal, retries, failed-entry
 replacement, and terminal cleanup without polling the remaining queued apps.
+Preflight checks cover platform declarations, iPad-only eligibility, malformed
+and universal executables, signing-identity matches/conflicts and migration,
+deferred extraction, both signing review choices, and exact signed-ID handoff
+with preserved packages. Shared-tunnel tests verify read-only validation sends
+no upload or install command, local skips preserve active peers, and skipped
+rows support retry without being counted as installed.
 
 The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
 device testing are still required. Verify first-run consent/PIN, relaunch and

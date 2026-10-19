@@ -54,7 +54,7 @@ def session_controls_source():
         tests = tests.replace(placeholder, swift_block(jobs, declaration).removeprefix("private "))
     tests = tests.replace("// PRODUCTION_LIBRARY_METHODS", library_methods)
     tests = tests.replace("// PRODUCTION_TAB_CHANGE", tab_body)
-    return "\n".join((tests, swift_block(jobs, "enum NativeInstallLimit {"),
+    return "\n".join(((ROOT / "Native/Device/InstallPreflight.swift").read_text(), tests, swift_block(jobs, "enum NativeInstallLimit {"),
                       swift_block(session, "@MainActor\nfinal class InstallSession:")))
 
 
@@ -92,7 +92,7 @@ def queue_lifetime_source(load=False):
 
 def shared_rsd_source():
     sources = [(ROOT / "Native/Device/Tests/SharedRSDConnection.swift").read_text()]
-    for name in ("RSDConnection.swift", "InstallationProxy.swift", "IDeviceInstallationWorker.swift"):
+    for name in ("InstallPreflight.swift", "RSDConnection.swift", "InstallationProxy.swift", "IDeviceInstallationWorker.swift"):
         source = (ROOT / "Native/Device" / name).read_text()
         source = "\n".join(line for line in source.splitlines()
                            if line not in {"import IDevice", "import Combine", "import UIKit"})
@@ -109,7 +109,7 @@ def main():
     compiler = shutil.which("swiftc")
     if compiler is None:
         raise SystemExit("swiftc is required; run on macOS or a Swift-equipped Linux host")
-    sources = [swift_block(
+    sources = [(ROOT / "Native/Device/InstallPreflight.swift").read_text(), swift_block(
         (ROOT / "Native/Device/InstallationProxy.swift").read_text(),
         "public struct IDeviceInstallationRejection:")]
     for relative in (
@@ -131,6 +131,27 @@ def main():
         source = directory / "ConnectionRecovery.swift"
         source.write_text("\n".join(sources))
         executable = directory / "ConnectionRecoveryTests"
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        preflight = (ROOT / "Native/Device/InstallPreflight.swift").read_text()
+        wrapper = (ROOT / "Ksign/Backend/Device/DeviceInstallPreflight.swift").read_text().replace("import IDeviceSwift", "")
+        source.write_text("\n".join((preflight, wrapper,
+            (ROOT / "Ksign/Views/Signing/SigningPreflight.swift").read_text().replace("import IDeviceSwift", ""),
+            (ROOT / "Native/Device/Tests/InstallPreflight.swift").read_text())))
+        subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
+                        str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=30)
+
+        coordinator = (ROOT / "Ksign/Views/Signing/SigningPreflightCoordinator.swift").read_text()
+        coordinator = "\n".join(line for line in coordinator.splitlines()
+                               if line not in {"import CoreData", "import IDeviceSwift", "import NimbleExtensions", "import UIKit"})
+        fixtures = (ROOT / "Native/Device/Tests/InstallPreflight.swift").read_text().replace(
+            "@main struct InstallPreflightTests", "struct InstallPreflightTests")
+        source.write_text("\n".join((preflight, wrapper,
+            (ROOT / "Ksign/Views/Signing/SigningPreflight.swift").read_text().replace("import IDeviceSwift", ""),
+            coordinator, fixtures, (ROOT / "Native/Device/Tests/SigningReview.swift").read_text())))
         subprocess.run([compiler, "-swift-version", "5", "-parse-as-library",
                         str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True, timeout=30)

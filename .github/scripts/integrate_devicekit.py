@@ -99,6 +99,7 @@ def transform(inputs):
         "InstallerStatusViewModel.swift": "InstallationProxy/InstallerStatusViewModel.swift",
         "RSDConnection.swift": "Heartbeat/RSDConnection.swift",
         "IDeviceInstallationWorker.swift": "InstallationProxy/IDeviceInstallationWorker.swift",
+        "InstallPreflight.swift": "InstallationProxy/InstallPreflight.swift",
     }.items():
         outputs["Sources/IDeviceSwift/" + destination] = (TEMPLATES / name).read_text()
     return outputs

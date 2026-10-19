@@ -398,21 +398,24 @@ struct LibraryView: View {
 				}
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("feather.installApp"))) { notification in
-                if let app = _signedApps.first {
-                    _selectedInstallAppPresenting = AnyApp(base: app)
+				guard let id = notification.object as? String,
+					let app = _signedApps.first(where: { $0.uuid == id }) else { return }
+				if UserDefaults.standard.integer(forKey: "Feather.installationMethod") == 1 {
+					InstallSession.shared.start(apps: [app])
+				} else {
+					_selectedInstallAppPresenting = AnyApp(base: app)
 				}
 			}
 			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ksign.bulkSignAndInstall"))) { notification in
-				// Bulk signing just finished with "Sign & Install". The
-				// object carries how many apps were signed; they're the
-				// newest entries in the (date-descending) signed list.
-				guard let count = notification.object as? Int, count > 0 else { return }
-				let newest = Array(_signedApps.prefix(count)).map { $0 as AppInfoPresentable }
-				guard !newest.isEmpty else { return }
+				// Carry exact successful IDs. A count could accidentally pick an
+				// incompatible signed app, or an unrelated concurrent signing result.
+				guard let ids = notification.object as? [String], !ids.isEmpty else { return }
+				let apps = ids.compactMap { id in _signedApps.first(where: { $0.uuid == id }) }
+				guard !apps.isEmpty else { return }
 				// No presentation race to dodge any more: the drawer isn't a
 				// sheet on this screen, so it can't be dropped by the signing
 				// sheet dismissing at the same moment.
-				InstallSession.shared.start(apps: newest)
+				InstallSession.shared.start(apps: apps)
 			}
             .onReceive(InstallSession.shared.$installedSelectionRequest) { request in
                 guard let request else { return }

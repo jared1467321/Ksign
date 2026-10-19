@@ -95,6 +95,32 @@ final class DeviceInstallationManager: ObservableObject {
 
     func cancelSetup() { activeOperation?.cancel(); DevicePairingService.shared.cancel() }
 
+    /// Serialize read-only preflight with connection preparation. Active native
+    /// installs retain their tunnel; queries never reset it beneath those leases.
+    func validate(_ preflight: IDeviceInstallPreflight) async throws {
+        let selectedMode = mode
+        try await enqueue {
+            while self.exclusiveInstallation != nil ||
+                (!self.activeInstallations.isEmpty &&
+                 (self.needsConnectionRecovery || self.configuredMode != selectedMode)) {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if self.needsConnectionRecovery {
+                self.configuredMode = nil
+                self.needsConnectionRecovery = false
+            }
+            try Task.checkCancellation()
+            try await self.prepare(selectedMode)
+            do {
+                try await InstallationProxy(viewModel: InstallerStatusViewModel()).validate(preflight)
+            } catch {
+                if !(error is CancellationError), !(error is IDeviceInstallSkip),
+                   !(error is IDeviceInstallationRejection) { self.needsConnectionRecovery = true }
+                throw error
+            }
+        }
+    }
+
     func resetPairing() async {
         guard !isBusy, workflows.isEmpty else { return }
         if let cleanupTask { await cleanupTask.value }
@@ -117,6 +143,7 @@ final class DeviceInstallationManager: ObservableObject {
 
     func install(at url: URL, viewModel: InstallerStatusViewModel, suspend: Bool,
                  mode: DeviceConnectionMode, bundleIdentifier: String? = nil,
+                 preflight: IDeviceInstallPreflight? = nil,
                  isCurrent: @escaping () -> Bool = { true }) async throws {
         let id = UUID()
         vpnReconnect.beginDeviceWork()
@@ -156,13 +183,13 @@ final class DeviceInstallationManager: ObservableObject {
         do {
             try Task.checkCancellation()
             let proxy = InstallationProxy(viewModel: viewModel)
-            try await proxy.install(at: url, suspend: suspend, isCurrent: isCurrent)
+            try await proxy.install(at: url, suspend: suspend, preflight: preflight, isCurrent: isCurrent)
         } catch {
             // A rejected app does not invalidate a working device connection.
             // Other failed attempts must not reset the VPN beneath peers.
             // The next preparation recovers only after all active leases drain;
             // never replay an IPA whose commit may already have reached iOS.
-            if !(error is CancellationError), !(error is IDeviceInstallationRejection) {
+            if !(error is CancellationError), !(error is IDeviceInstallationRejection), !(error is IDeviceInstallSkip) {
                 needsConnectionRecovery = true
             }
             throw error

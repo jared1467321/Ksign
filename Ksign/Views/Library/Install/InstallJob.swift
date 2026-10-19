@@ -255,7 +255,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// the session samples all jobs on its own 0.4-second cadence so one poller
 	// cannot redraw the entire drawer on every sample.
 	enum Phase: Equatable {
-		case queued, running, completed, failed
+		case queued, running, completed, failed, skipped
 	}
 
 	@Published private(set) var phase: Phase = .queued {
@@ -284,6 +284,11 @@ final class InstallJob: ObservableObject, Identifiable {
 	private let _deviceConnectionMode: DeviceConnectionMode
 	var isDeviceInstall: Bool { _installationMethod == 1 }
 	var isSelfUpdate: Bool { isDeviceInstall && app.identifier == Bundle.main.bundleIdentifier }
+	var isTerminal: Bool { phase == .completed || phase == .failed || phase == .skipped }
+	var skipReason: String? {
+		guard case .broken(let error) = viewModel.status else { return nil }
+		return (error as? IDeviceInstallSkip)?.reason
+	}
 	private let _serverMethod: Int
 
 	private var _cancellables = Set<AnyCancellable>()
@@ -611,7 +616,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// all of these; there's no watchdog to clear a stalled one automatically.
 	var isInFlightGroupMember: Bool {
 		(batchRole == .host || batchRole == .member)
-			&& phase != .completed && phase != .failed
+			&& !isTerminal
 	}
 
 	// Drops a batched app back into the ready pool so the session can fold it
@@ -696,7 +701,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	private func _handleStatus(_ newStatus: InstallerStatusViewModel.InstallerStatus) {
 		// Terminal statuses can arrive through more than one callback. Don't
 		// count them twice or let a late callback turn a success into a failure.
-		guard phase != .completed, phase != .failed else { return }
+		guard !isTerminal else { return }
 		// Per-job ActivityKit *state* does not live here. Jobs forward primitive
 		// progress/status callbacks into one batch reporter, which derives a single
 		// aggregate snapshot; the controller then serializes/coalesces that snapshot.
@@ -756,6 +761,8 @@ final class InstallJob: ObservableObject, Identifiable {
 				// package instead of rebuilding it, which is the whole reason
 				// retrying a dismissed prompt is instant.
 				_cleanupArchive()
+			} else if case .broken(let error) = newStatus, error is IDeviceInstallSkip {
+				phase = .skipped
 			} else {
 				phase = .failed
 			}
@@ -852,12 +859,14 @@ final class InstallJob: ObservableObject, Identifiable {
 						}
 					} else if method == 1 {
 						try Task.checkCancellation()
+						let preflight = try DeviceInstallPreflight.inspect(packageURL)
 						try await DeviceInstallationManager.shared.install(
 							at: packageURL,
 							viewModel: viewModel,
 							suspend: app.identifier == Bundle.main.bundleIdentifier!,
 							mode: connectionMode,
-							bundleIdentifier: app.identifier,
+							bundleIdentifier: preflight?.bundleIdentifier ?? app.identifier,
+							preflight: preflight,
 							isCurrent: { attempt.isCurrent }
 						)
 					}
@@ -904,9 +913,11 @@ final class InstallJob: ObservableObject, Identifiable {
 						}
 					} else if method == 1 {
 						try Task.checkCancellation()
+						let preflight = try DeviceInstallPreflight.inspect(packageURL)
 						try await DeviceInstallationManager.shared.install(at: packageURL, viewModel: viewModel,
 							suspend: app.identifier == Bundle.main.bundleIdentifier!, mode: connectionMode,
-							bundleIdentifier: app.identifier,
+							bundleIdentifier: preflight?.bundleIdentifier ?? app.identifier,
+							preflight: preflight,
 							isCurrent: { attempt.isCurrent })
 					}
 				} catch let error as CancellationError {

@@ -118,6 +118,49 @@ pub unsafe extern "C" fn ksign_pairing_string_free(value: *mut c_char) {
     if !value.is_null() { drop(unsafe { CString::from_raw(value) }); }
 }
 
+/// Read-only, targeted lookup. Return only the identity needed for preflight,
+/// without exporting Rust-owned plist arrays or unrelated installed-app data.
+/// A null output means the bundle is not installed. Free non-null output with
+/// ksign_pairing_string_free. The client is borrowed exclusively until return.
+#[cfg(feature = "installation_proxy")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ksign_installation_lookup(
+    client: *mut crate::installation_proxy::InstallationProxyClientHandle,
+    bundle_identifier: *const c_char,
+    out_identity: *mut *mut c_char,
+) -> *mut IdeviceFfiError {
+    if client.is_null() || bundle_identifier.is_null() || out_identity.is_null() {
+        return ffi_err!(idevice::IdeviceError::FfiInvalidArg);
+    }
+    unsafe { *out_identity = std::ptr::null_mut(); }
+    let bundle = match unsafe { CStr::from_ptr(bundle_identifier) }.to_str() {
+        Ok(value) => value.to_owned(),
+        Err(_) => return ffi_err!(idevice::IdeviceError::FfiInvalidString),
+    };
+    let result: Result<Option<String>, idevice::IdeviceError> = run_sync_local(async {
+        let apps = unsafe { &mut *client }.0.get_apps(None, Some(vec![bundle.clone()])).await?;
+        Ok(apps.get(&bundle).map(|app| {
+            let application_identifier = app.as_dictionary()
+                .and_then(|app| app.get("Entitlements"))
+                .and_then(|entitlements| entitlements.as_dictionary())
+                .and_then(|entitlements| entitlements.get("application-identifier"))
+                .and_then(|identifier| identifier.as_string());
+            serde_json::json!({
+                "bundleIdentifier": bundle,
+                "applicationIdentifier": application_identifier,
+            }).to_string()
+        }))
+    });
+    match result {
+        Ok(Some(value)) => match CString::new(value) {
+            Ok(value) => { unsafe { *out_identity = value.into_raw(); } std::ptr::null_mut() }
+            Err(_) => ffi_err!(idevice::IdeviceError::FfiInvalidString),
+        },
+        Ok(None) => std::ptr::null_mut(),
+        Err(error) => ffi_err!(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

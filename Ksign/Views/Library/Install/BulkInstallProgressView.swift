@@ -19,6 +19,7 @@ import NimbleExtensions
 // and recreated freely without disturbing anything.
 struct BulkInstallProgressView: View {
 	@ObservedObject var job: InstallJob
+	@State private var showsSkipReason = false
 
 	// Which dot this row gets.
 	//
@@ -65,6 +66,10 @@ struct BulkInstallProgressView: View {
 				Text(.localized("Failed"))
 					.font(.caption2.weight(.medium))
 					.nbThemeForeground(.danger)
+			} else if job.phase == .skipped {
+				Text("Skipped")
+					.font(.caption2.weight(.medium))
+					.nbThemeForeground(.warning)
 			}
 		}
 		// Finish the progress fill, then fade only this icon before retirement.
@@ -84,6 +89,11 @@ struct BulkInstallProgressView: View {
 			// reason the pill label is: both String and LocalizedStringKey
 			// offer it, and Section's init is overloaded on exactly that.
 			Section(job.app.name ?? String.localized("Unknown App")) {
+                if job.skipReason != nil {
+                    Button { showsSkipReason = true } label: {
+                        Label("Why skipped?", systemImage: "info.circle")
+                    }
+                }
                 if let metrics = job.viewModel.uploadMetrics {
                     Text("Upload: \(metrics.summary)")
                 }
@@ -99,6 +109,11 @@ struct BulkInstallProgressView: View {
 					Label(.localized("Remove"), systemImage: "minus.circle")
 				}
 			}
+		}
+		.alert("Installation Skipped", isPresented: $showsSkipReason) {
+			Button("OK", role: .cancel) { }
+		} message: {
+			Text(job.skipReason ?? "")
 		}
 	}
 }

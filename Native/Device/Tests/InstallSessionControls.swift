@@ -113,7 +113,8 @@ final class PackagingAttempt {
 @MainActor final class InstallJob {
     let id = UUID()
     let app: AppInfoPresentable
-    enum Phase { case queued, running, completed, failed }
+    enum Phase { case queued, running, completed, failed, skipped }
+    var isTerminal: Bool { phase == .completed || phase == .failed || phase == .skipped }
     enum BatchRole { case none, pending, awaiting, host, member }
     // PRODUCTION_JOB_PHASE
     var batchRole: BatchRole = .none
@@ -457,6 +458,32 @@ extension InstallSession {
         session.cancelAndSelectInstalled()
         precondition(session.installedSelectionRequest?.appIDs.isEmpty == true)
         precondition(!InstallQueueCoordinator.shared.isPaused && !session.isActive)
-        print("Passed static 1,000-app queue, active-only foreground sampling, install pause/drain/cancel, success tracking, retirement, and Signed selection scenarios")
+        // Local skips settle independently, preserve the remaining work and are
+        // excluded from installed selection. Retrying a skip restores its count.
+        defaults.set(1, forKey: "Feather.installationMethod")
+        session.start(apps: [TestApp(uuid: "valid"), TestApp(uuid: "wrong-platform"), TestApp(uuid: "conflict")])
+        let valid = session.jobs[0], wrong = session.jobs[1], conflict = session.jobs[2]
+        for job in [valid, wrong, conflict] { job.begin() }
+        wrong.deliver(.broken(IDeviceInstallSkip(reason: "tvOS app")))
+        precondition(wrong.phase == .skipped && session.skippedCount == 1 && session.completedCount == 0)
+        precondition(!session.isFinished && BackgroundTaskManager.shared.claimed)
+        conflict.deliver(.broken(IDeviceInstallSkip(reason: "Installed identity conflict")))
+        precondition(session.skippedCount == 2 && session.installedAppIDs.isEmpty)
+        session.jobDidFinish(conflict)
+        precondition(session.skippedCount == 2, "Repeated terminal delivery cannot double-count skips")
+        valid.deliver(.completed(.success(())))
+        precondition(session.isFinished && session.completedCount == 1 && session.skippedCount == 2)
+        precondition(session.installedAppIDs == ["valid"])
+        session.retry(wrong)
+        precondition(!session.isFinished && session.skippedCount == 1 && wrong.phase == .queued)
+        wrong.begin()
+        wrong.deliver(.completed(.success(())))
+        precondition(session.isFinished && session.completedCount == 2 && session.skippedCount == 1)
+        session.remove(conflict)
+        precondition(session.skippedCount == 0)
+        session.cancelAndSelectInstalled()
+        precondition(session.installedSelectionRequest?.appIDs == ["valid", "wrong-platform"])
+        precondition(session.skippedCount == 0 && !BackgroundTaskManager.shared.claimed)
+        print("Passed static 1,000-app queue, active-only foreground sampling, install pause/drain/cancel, skip accounting/retry, success tracking, retirement, and Signed selection scenarios")
     }
 }

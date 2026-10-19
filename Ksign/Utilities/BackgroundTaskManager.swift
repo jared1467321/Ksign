@@ -1107,7 +1107,7 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
         // The owner title already communicates the active phase. Keep ordinary
         // subtitles compact ("67% · Apollo.ipa"), but preserve terminal/error
         // state when it adds information the percentage cannot.
-        if report.detail == "Error" || report.detail == "Cancelled" || report.detail == "Paused" {
+        if report.detail == "Error" || report.detail == "Cancelled" || report.detail == "Paused" || report.detail == "Finished with Skips" {
             pieces.append(report.detail!)
         } else if pieces.isEmpty, let detail = report.detail, !detail.isEmpty {
             pieces.append(detail)

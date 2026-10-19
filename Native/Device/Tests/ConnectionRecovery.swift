@@ -83,11 +83,18 @@ enum DevicePairingStore {
 final class InstallerStatusViewModel {}
 @MainActor final class InstallationProxy {
     static var calls = 0
+    static var validationCalls = 0
     static var failure: Error?
     static var holdInstalls = false
     static var pending: [String: CheckedContinuation<Void, Error>] = [:]
     init(viewModel: InstallerStatusViewModel) {}
-    func install(at url: URL, suspend: Bool, isCurrent: @escaping () -> Bool) async throws {
+    func validate(_ preflight: IDeviceInstallPreflight) async throws {
+        Self.validationCalls += 1
+        if let failure = Self.failure { throw failure }
+        try Task.checkCancellation()
+    }
+    func install(at url: URL, suspend: Bool, preflight: IDeviceInstallPreflight? = nil,
+                 isCurrent: @escaping () -> Bool) async throws {
         Self.calls += 1
         if let failure = Self.failure { throw failure }
         if Self.holdInstalls {
@@ -111,6 +118,7 @@ final class InstallerStatusViewModel {}
         HeartbeatManager.shared.outcomes = []
         HeartbeatManager.shared.attempts = []
         InstallationProxy.calls = 0
+        InstallationProxy.validationCalls = 0
         InstallationProxy.failure = nil
         precondition(InstallationProxy.pending.isEmpty)
         InstallationProxy.holdInstalls = false

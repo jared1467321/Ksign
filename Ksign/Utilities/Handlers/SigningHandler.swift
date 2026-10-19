@@ -14,6 +14,7 @@ import ASignArchiveKit
 final class SigningHandler: NSObject {
 	private let _fileManager = FileManager.default
 	private let _uuid = UUID().uuidString
+	var signedAppID: String { _uuid }
 	private var _movedAppPath: URL?
 	private var _archiveSourceURL: URL?
 	private var _archiveRootAppPath: String?
