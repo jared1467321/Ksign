@@ -27,6 +27,15 @@ public enum ASignArchiveError: LocalizedError, Sendable {
     case overlayRebuildFailed(code: Int32)
 
     public var errorDescription: String? {
+        let code: Int32
+        switch self {
+        case .extractionFailed(let status), .creationFailed(let status),
+             .materializationFailed(let status), .entryAccessFailed(let status),
+             .overlayRebuildFailed(let status): code = status
+        }
+        if code == ASIGN_ARCHIVE_SOURCE_CHANGED {
+            return "The source IPA changed after it was opened. Please start signing again."
+        }
         switch self {
         case .extractionFailed(let code):
             return "minizip-ng failed to extract the archive (error \(code))."

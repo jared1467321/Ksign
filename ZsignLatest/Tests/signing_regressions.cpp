@@ -26,6 +26,98 @@ static bool countExtraction = false;
 static atomic<size_t> extractionReaderOpens(0);
 static set<thread::id> extractionThreads;
 
+// Fail after consuming bytes, so recovery must restart the member on a new
+// reader rather than continue a partially consumed stream.
+static string failedEntry;
+static atomic<int> remainingReadFailures(0);
+static int32_t injectedReadError = MZ_READ_ERROR;
+static int32_t minimumInjectedReadSize = 0;
+static string changedSource;
+extern "C" int32_t __real_mz_zip_entry_read(void*, void*, int32_t);
+extern "C" int32_t __wrap_mz_zip_entry_read(void* zip, void* data, int32_t size) {
+    int32_t result = __real_mz_zip_entry_read(zip, data, size);
+    mz_zip_file* info = nullptr;
+    if (result > 0 && size >= minimumInjectedReadSize && mz_zip_entry_get_info(zip, &info) == MZ_OK && info &&
+        info->filename && failedEntry == info->filename) {
+        int remaining = remainingReadFailures.load();
+        while (remaining > 0) {
+            if (remainingReadFailures.compare_exchange_weak(remaining, remaining - 1)) {
+                if (!changedSource.empty()) {
+                    FILE* file = fopen(changedSource.c_str(), "ab");
+                    assert(file && fputc(0, file) != EOF && fclose(file) == 0);
+                }
+                return injectedReadError;
+            }
+        }
+    }
+    return result;
+}
+
+static void CheckReadRecovery(const string& source, const string& output) {
+    asign_archive_index* index = nullptr;
+    assert(asign_archive_index_open(source.c_str(), &index) == MZ_OK);
+    const string root = "Payload/Test.app";
+    const string info = root + "/Info.plist";
+    uint8_t* bytes = nullptr; int64_t size = 0;
+    assert(asign_archive_index_read(index, info.c_str(), 1024 * 1024, &bytes, &size) == MZ_OK);
+    const string expected((char*)bytes, size);
+    asign_archive_free_buffer(bytes);
+    failedEntry = info;
+    remainingReadFailures = 1;
+    assert(asign_archive_index_read(index, info.c_str(), 1024 * 1024, &bytes, &size) == MZ_OK);
+    assert(string((char*)bytes, size) == expected && remainingReadFailures == 0);
+    asign_archive_free_buffer(bytes);
+    remainingReadFailures = 2;
+    assert(asign_archive_index_read(index, info.c_str(), 1024 * 1024, &bytes, &size) == MZ_READ_ERROR);
+    assert(!bytes && size == 0 && remainingReadFailures == 0);
+    injectedReadError = MZ_CRC_ERROR; remainingReadFailures = 2;
+    assert(asign_archive_index_read(index, info.c_str(), 1024 * 1024, &bytes, &size) == MZ_CRC_ERROR);
+    assert(!bytes && size == 0 && remainingReadFailures == 1);
+    injectedReadError = MZ_READ_ERROR; remainingReadFailures = 0;
+
+    // Compare recovered classification hashes and extracted executables with an
+    // uninterrupted operation, including concurrent worker lanes.
+    string expectedDigests;
+    for (int workers : {1, 4, 6}) for (const string& target : {string(""), root + "/root.dat", root + "/Main"}) {
+        failedEntry = target; remainingReadFailures = target.empty() ? 0 : 1;
+        minimumInjectedReadSize = target == root + "/Main" ? 5 : 0;
+        const string destination = output + "/" + to_string(workers) + "-" +
+            (target.empty() ? "baseline" : target.substr(target.find_last_of('/') + 1));
+        uint8_t* digests = nullptr; size_t digestSize = 0;
+        assert(asign_archive_index_materialize_with_digests(index, root.c_str(), destination.c_str(),
+            0, workers, nullptr, &digests, &digestSize) == MZ_OK);
+        assert(remainingReadFailures == 0);
+        string actual((char*)digests, digestSize);
+        asign_archive_free_buffer(digests);
+        if (expectedDigests.empty()) expectedDigests = actual;
+        assert(expectedDigests == actual);
+    }
+    minimumInjectedReadSize = 0;
+    for (int32_t failure : {MZ_READ_ERROR, MZ_CRC_ERROR}) {
+        failedEntry = root + "/root.dat"; remainingReadFailures = 2; injectedReadError = failure;
+        const string destination = output + "/failed-" + to_string(failure);
+        uint8_t* digests = nullptr; size_t digestSize = 0;
+        assert(asign_archive_index_materialize_with_digests(index, root.c_str(), destination.c_str(),
+            0, 4, nullptr, &digests, &digestSize) == failure);
+        assert(!digests && digestSize == 0);
+        assert(remainingReadFailures == (failure == MZ_READ_ERROR ? 0 : 1));
+    }
+    injectedReadError = MZ_READ_ERROR;
+    failedEntry = info; remainingReadFailures = 1;
+    const string destination = output + "/recovered-Info.plist";
+    assert(asign_archive_index_extract(index, info.c_str(), destination.c_str()) == MZ_OK);
+    assert(remainingReadFailures == 0);
+    string extracted;
+    assert(ZFile::ReadFile(destination.c_str(), extracted) && extracted == expected);
+
+    failedEntry = info; remainingReadFailures = 2; changedSource = source;
+    assert(asign_archive_index_read(index, info.c_str(), 1024 * 1024, &bytes, &size) == ASIGN_ARCHIVE_SOURCE_CHANGED);
+    assert(!bytes && size == 0 && remainingReadFailures == 1);
+    assert(asign_archive_index_validate(index) == ASIGN_ARCHIVE_SOURCE_CHANGED);
+    changedSource.clear(); remainingReadFailures = 0; failedEntry.clear();
+    asign_archive_index_close(index);
+}
+
 extern "C" int __real_lstat(const char*, struct stat*);
 extern "C" int __wrap_lstat(const char* path, struct stat* st)
 {
@@ -332,6 +424,9 @@ static void CheckPool()
 int main(int argc, char** argv)
 {
     CheckPreparedMetadata();
+    if (argc == 4 && string(argv[1]) == "--read-recovery") {
+        CheckReadRecovery(argv[2], argv[3]); return 0;
+    }
     if (argc == 3 && string(argv[1]) == "--reject-binary") {
         ZMachO macho; assert(!macho.Init(argv[2])); return 0;
     }

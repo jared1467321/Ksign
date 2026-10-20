@@ -791,9 +791,7 @@ int32_t asign_archive_index_open(const char *path, asign_archive_index **out_ind
     if (err == MZ_OK) err = mz_zip_reader_open_file(reader, path);
     if (err == MZ_OK) err = asign_entry_index_build(reader, &index->names, &zip);
     if (reader != NULL) mz_zip_reader_delete(&reader);
-    struct stat final_identity;
-    if (err == MZ_OK && (stat(path, &final_identity) != 0 ||
-        !asign_index_identity_matches(&index->identity, &final_identity))) err = MZ_READ_ERROR;
+    if (err == MZ_OK) err = asign_archive_index_validate(index);
     if (err == MZ_OK && index->names.count > SIZE_MAX / sizeof(*index->ordered)) err = MZ_MEM_ERROR;
     if (err == MZ_OK && index->names.count > 0) {
         index->ordered = malloc(index->names.count * sizeof(*index->ordered));
@@ -839,9 +837,27 @@ int32_t asign_archive_index_open(const char *path, asign_archive_index **out_ind
 int32_t asign_archive_index_validate(const asign_archive_index *index) {
     if (index == NULL) return MZ_PARAM_ERROR;
     struct stat st;
-    if (stat(index->path, &st) != 0 || !asign_index_identity_matches(&index->identity, &st))
-        return MZ_READ_ERROR;
+    if (stat(index->path, &st) != 0) {
+        int saved_errno = errno;
+        printf("[ASignArchive] Source stat failed: %s (errno %d)\n", index->path, saved_errno);
+        return MZ_OPEN_ERROR;
+    }
+    if (!asign_index_identity_matches(&index->identity, &st)) {
+        const char *reason = index->identity.st_dev != st.st_dev || index->identity.st_ino != st.st_ino
+            ? "file replaced" : (index->identity.st_size != st.st_size ? "size changed" : "timestamps changed");
+        printf("[ASignArchive] Indexed source changed (%s): %s\n", reason, index->path);
+        return ASIGN_ARCHIVE_SOURCE_CHANGED;
+    }
     return MZ_OK;
+}
+
+// Retry only actual read failures against the same immutable source. CRC,
+// format and changed-source failures retain their original errors.
+static int32_t asign_index_check_read_retry(const asign_archive_index *index, const char *entry) {
+    int32_t status = asign_archive_index_validate(index);
+    if (status == MZ_OK)
+        printf("[ASignArchive] Retrying read with a fresh reader: %s :: %s\n", index->path, entry);
+    return status;
 }
 
 static int32_t asign_index_open_reader(const asign_archive_index *index, void **reader) {
@@ -886,7 +902,7 @@ const uint8_t *asign_archive_index_manifest(const asign_archive_index *index, si
     return index->manifest;
 }
 
-int32_t asign_archive_index_read(const asign_archive_index *index, const char *path,
+static int32_t asign_archive_index_read_once(const asign_archive_index *index, const char *path,
     int64_t maximum, uint8_t **data, int64_t *size) {
     if (index == NULL || path == NULL || maximum < 0 || data == NULL || size == NULL)
         return MZ_PARAM_ERROR;
@@ -918,10 +934,19 @@ int32_t asign_archive_index_read(const asign_archive_index *index, const char *p
         if (err == MZ_OK) err = closed;
     }
     if (reader != NULL) mz_zip_reader_delete(&reader);
+    if (err == MZ_OK) err = asign_archive_index_validate(index);
     if (err != MZ_OK) { free(buffer); return err; }
     *data = buffer;
     *size = entry->size;
     return MZ_OK;
+}
+
+int32_t asign_archive_index_read(const asign_archive_index *index, const char *path,
+    int64_t maximum, uint8_t **data, int64_t *size) {
+    int32_t err = asign_archive_index_read_once(index, path, maximum, data, size);
+    if (err != MZ_READ_ERROR) return err;
+    int32_t status = asign_index_check_read_retry(index, path);
+    return status == MZ_OK ? asign_archive_index_read_once(index, path, maximum, data, size) : status;
 }
 
 // CRC mismatches remain fatal. A complete decoded stream alone cannot prove
@@ -1507,6 +1532,18 @@ static int32_t asign_index_save(void *reader, const asign_entry_position *entry,
     return mz_zip_reader_entry_save_file(reader, destination);
 }
 
+static int32_t asign_index_save_with_retry(const asign_archive_index *index, void **reader,
+    const asign_entry_position *entry, const char *relative, const char *destination) {
+    int32_t err = asign_index_save(*reader, entry, relative, destination);
+    if (err != MZ_READ_ERROR) return err;
+    err = asign_index_check_read_retry(index, entry->name);
+    if (err != MZ_OK) return err;
+    mz_zip_reader_delete(reader);
+    err = asign_index_open_reader(index, reader);
+    // save unlinks partial regular files before writing them again.
+    return err == MZ_OK ? asign_index_save(*reader, entry, relative, destination) : err;
+}
+
 int32_t asign_archive_index_extract(const asign_archive_index *index, const char *path, const char *destination) {
     if (index == NULL || path == NULL || destination == NULL) return MZ_PARAM_ERROR;
     const asign_entry_position *entry = asign_index_find(index, path);
@@ -1514,7 +1551,7 @@ int32_t asign_archive_index_extract(const asign_archive_index *index, const char
     void *reader = NULL;
     int32_t err = asign_index_open_reader(index, &reader);
     const char *name = strrchr(path, '/');
-    if (err == MZ_OK) err = asign_index_save(reader, entry, name ? name + 1 : path, destination);
+    if (err == MZ_OK) err = asign_index_save_with_retry(index, &reader, entry, name ? name + 1 : path, destination);
     if (reader != NULL) mz_zip_reader_delete(&reader);
     return err;
 }
@@ -1535,7 +1572,7 @@ int32_t asign_archive_index_extract_prefix(const asign_archive_index *index, con
         if (target == NULL) { err = MZ_MEM_ERROR; break; }
         const char *link_relative = relative;
         if (!*relative) { const char *name = strrchr(prefix, '/'); link_relative = name ? name + 1 : prefix; }
-        err = asign_index_save(reader, entry, link_relative, target);
+        err = asign_index_save_with_retry(index, &reader, entry, link_relative, target);
         free(target);
         found = 1;
     }
@@ -1616,8 +1653,11 @@ static void *asign_materialize_worker(void *context) {
     asign_materialize_job *job = lane->job;
     void **slot = &job->readers[lane->lane];
     int32_t err = *slot != NULL ? MZ_OK : asign_index_open_reader(job->index, slot);
+    if (err == MZ_READ_ERROR) {
+        err = asign_index_check_read_retry(job->index, "opening materialization reader");
+        if (err == MZ_OK) err = asign_index_open_reader(job->index, slot);
+    }
     if (err != MZ_OK) { atomic_store(&job->error, err); return NULL; }
-    void *reader = *slot;
     for (;;) {
         size_t task = atomic_fetch_add(&job->next, 1);
         if (task >= job->index->names.count || atomic_load(&job->error) != MZ_OK) break;
@@ -1631,7 +1671,7 @@ static void *asign_materialize_worker(void *context) {
         if (job->extracting) {
             if (!job->selected[i] || (entry->flags & 2)) continue;
             char *target = asign_join_path(job->destination, relative);
-            err = target ? asign_index_save(reader, entry, relative, target) : MZ_MEM_ERROR;
+            err = target ? asign_index_save_with_retry(job->index, slot, entry, relative, target) : MZ_MEM_ERROR;
             free(target);
         } else {
             if (entry->flags & 2) job->selected[i] = 1;
@@ -1646,8 +1686,17 @@ static void *asign_materialize_worker(void *context) {
                     asign_resource_digest *digest = job->digests != NULL &&
                         !asign_deleted_path_matches(relative, job->excluded_paths) &&
                         !asign_is_code_signature_path(relative) ? &job->digests[i] : NULL;
-                    err = asign_index_seek(reader, entry->position, &info);
-                    if (err == MZ_OK) err = asign_classify_and_hash(reader, &is_macho, digest);
+                    err = asign_index_seek(*slot, entry->position, &info);
+                    if (err == MZ_OK) err = asign_classify_and_hash(*slot, &is_macho, digest);
+                    if (err == MZ_READ_ERROR) {
+                        err = asign_index_check_read_retry(job->index, entry->name);
+                        if (err == MZ_OK) {
+                            mz_zip_reader_delete(slot);
+                            err = asign_index_open_reader(job->index, slot);
+                        }
+                        if (err == MZ_OK) err = asign_index_seek(*slot, entry->position, &info);
+                        if (err == MZ_OK) err = asign_classify_and_hash(*slot, &is_macho, digest);
+                    }
                     job->selected[i] = (uint8_t)is_macho;
                 }
             }
@@ -1734,7 +1783,7 @@ static int32_t asign_materialize_serial_selected(asign_materialize_job *job, int
         const char *relative = NULL;
         asign_entry_relative_to_root(entry->name, job->root, &relative);
         char *target = asign_join_path(job->destination, relative);
-        err = target ? asign_index_save(*reader, entry, relative, target) : MZ_MEM_ERROR;
+        err = target ? asign_index_save_with_retry(job->index, reader, entry, relative, target) : MZ_MEM_ERROR;
         free(target);
     }
     return err;

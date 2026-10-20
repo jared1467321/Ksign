@@ -534,6 +534,7 @@ def main():
                         str(work / "archive.o"), str(args.minizip_build / "libminizip.a"),
                         "-Wl,--wrap=mz_zip_entry_read_open", "-lssl", "-lcrypto", "-lz",
                         "-Wl,--wrap=mz_zip_reader_open_file",
+                        "-Wl,--wrap=mz_zip_entry_read",
                         "-Wl,--wrap=mz_zip_reader_goto_next_entry", "-Wl,--wrap=lstat",
                         "-Wl,--wrap=EVP_DigestUpdate", "-Wl,--wrap=EVP_MD_CTX_new",
                         "-Wl,--wrap=PEM_read_bio_X509", "-Wl,--wrap=mmap",
@@ -541,6 +542,21 @@ def main():
                         "-o", str(executable)], check=True)
         source = work / "source.ipa"
         fixture(source)
+        recovery_source = work / "read-recovery.ipa"
+        recovery_source.write_bytes(source.read_bytes())
+        recovery_output = work / "read-recovery"
+        recovery_output.mkdir()
+        subprocess.run([str(executable), "--read-recovery", str(recovery_source), str(recovery_output)], check=True)
+        for workers in (1, 4, 6):
+            baseline = recovery_output / f"{workers}-baseline"
+            for label in ("root.dat", "Main"):
+                recovered = recovery_output / f"{workers}-{label}"
+                for path in baseline.rglob("*"):
+                    actual = recovered / path.relative_to(baseline)
+                    if path.is_symlink():
+                        assert actual.is_symlink() and os.readlink(actual) == os.readlink(path)
+                    elif path.is_file():
+                        assert actual.read_bytes() == path.read_bytes()
         if args.reference_digests:
             reference = json.loads(args.reference_digests.read_text())
             def verify_reference(*arguments, **keywords):

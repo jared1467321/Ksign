@@ -11,8 +11,10 @@ extern "C" {
 typedef void (*asign_archive_progress_cb)(double progress, void *userdata);
 
 /// Custom non-error result used by exact-entry/prefix helpers when no matching
-/// ZIP member exists. All negative results remain minizip-ng status codes.
+/// ZIP member exists. Other results use minizip-ng codes unless defined here.
 #define ASIGN_ARCHIVE_NOT_FOUND 1
+// The indexed source was replaced or modified; stale offsets must not be reused.
+#define ASIGN_ARCHIVE_SOURCE_CHANGED (-1000)
 
 typedef int32_t (*asign_archive_entry_cb)(
     const char *path,

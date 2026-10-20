@@ -111,12 +111,16 @@ import Foundation
         do {
             try staleIndex.validate()
             preconditionFailure("A review handoff must reject a changed source before reusing cached metadata")
-        } catch is ASignArchiveError { }
+        } catch let error as ASignArchiveError {
+            precondition(error.localizedDescription.contains("source IPA changed"))
+        }
         do {
             _ = try ASignArchive.readEntry(from: stale, path: app.rootAppPath + "/Info.plist",
                                           maximumBytes: 1024 * 1024, index: staleIndex)
             preconditionFailure("An index must reject a changed source archive")
-        } catch is ASignArchiveError { }
+        } catch let error as ASignArchiveError {
+            precondition(error.localizedDescription.contains("source IPA changed"))
+        }
         print("Passed indexed Swift metadata, icon overlays/deletions, read limits and changed-source rejection.")
     }
 }
