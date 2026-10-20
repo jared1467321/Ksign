@@ -813,7 +813,11 @@ private struct NBThemeForegroundModifier: ViewModifier {
         let semantic = nbThemeSemanticColor(themes, role, opacity)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, opacity)
         content
-            .foregroundStyle(resolved.color)
+            .modifier(NBAuroraTextStyleModifier(
+                primary: resolved,
+                adaptsPrimary: role.usesAuroraText && !themes.hasElementOverride(elementID)
+                    && !themes.isPreviewing(role, in: themes.selectedThemeID)
+            ))
             .modifier(NBThemeInspectorTargetModifier(
                 role: role,
                 elementID: elementID,
@@ -978,7 +982,13 @@ private struct NBThemeRowModifier: ViewModifier {
         let secondary = themes.activeColor(for: .textSecondary, elementID: secondaryID)
         let separator = themes.activeColor(for: .separator, elementID: separatorID)
         content
-            .foregroundStyle(primary.color, secondary.color)
+            .modifier(NBAuroraTextStyleModifier(
+                primary: primary, secondary: secondary,
+                adaptsPrimary: !themes.hasElementOverride(primaryID)
+                    && !themes.isPreviewing(.text, in: themes.selectedThemeID),
+                adaptsSecondary: !themes.hasElementOverride(secondaryID)
+                    && !themes.isPreviewing(.textSecondary, in: themes.selectedThemeID)
+            ))
             .listRowSeparatorTint(separator.color)
             .listRowBackground(NBThemePaint(.elevated, elementID: elementID))
             .nbThemeTint(.accent, elementID: elementID + "|tint")
@@ -1019,8 +1029,8 @@ private struct NBThemeCanvasModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let _ = themes.previewRevision
-        let primary = themes.activeColor(for: .text).color
-        let secondary = themes.activeColor(for: .textSecondary).color
+        let primary = themes.activeColor(for: .text)
+        let secondary = themes.activeColor(for: .textSecondary)
         let separator = themes.activeColor(for: .separator).color
         let semantic = themes.activeColor(for: role)
         let resolved = nbThemeResolvedElementColor(themes, role, elementID, 1)
@@ -1030,7 +1040,11 @@ private struct NBThemeCanvasModifier: ViewModifier {
             // Glass drawers explicitly replace their presentation backing and
             // clear their canvases to reveal the presenting screen instead.
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
-            .foregroundStyle(primary, secondary)
+            .modifier(NBAuroraTextStyleModifier(
+                primary: primary, secondary: secondary,
+                adaptsPrimary: !themes.isPreviewing(.text, in: themes.selectedThemeID),
+                adaptsSecondary: !themes.isPreviewing(.textSecondary, in: themes.selectedThemeID)
+            ))
             .listRowSeparatorTint(separator)
             .scrollContentBackground(.hidden)
             .modifier(NBThemeSheetNavigationBackgroundModifier(clear: glassSheet))

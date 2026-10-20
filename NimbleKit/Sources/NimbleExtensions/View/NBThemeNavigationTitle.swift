@@ -31,7 +31,7 @@ private struct NBThemeNavigationTitleModifier: ViewModifier {
                     ToolbarItem(placement: .principal) {
                         Text(title)
                             .font(.headline)
-                            .foregroundStyle(themes.activeColor(for: .navigationText).color)
+                            .nbThemeForeground(.navigationText)
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
                             .padding(.horizontal, 16)

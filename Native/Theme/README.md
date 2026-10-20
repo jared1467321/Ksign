@@ -49,7 +49,31 @@ when picking ends or its window disappears. Shader formulas, sampling, animation
 cadence and glass surface parameters are unchanged.
 
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
-render the original RGB scene and star opacities; text follows the selected theme.
+render the original RGB scene and star opacities. With Adaptive Text Colors
+enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
+use a white difference-blended glyph style. Each glyph pixel takes the RGB
+complement of its composited backing, including the glass, and follows the
+aurora's existing frame cadence. This adds no sampling timer, geometry tracking,
+screen capture or second aurora render. Images and surface paints keep their
+existing rendering; status roles and text on filled buttons keep their colors.
+
+Fine opposing light/dark shadows help define glyph edges where inversion alone
+has poor contrast (notably middle gray). This is a visual treatment, not a
+guarantee of a minimum contrast ratio for every possible background. Disabling
+Adaptive Text Colors or Aurora, enabling Reduce Transparency or Increase
+Contrast, and previewing or overriding an individual text color restore the
+theme's foreground colors. Native UIKit search/tab/large-title text, reports,
+and Live Activities retain their existing theme colors.
+
+Validate on an iOS device with the aurora moving behind a large heading and a
+small caption, including a single letter crossing two colors. Check both
+appearances, scrolling, shuffling, glass sheets, and the iOS 16 fallback. Also
+check the adaptive toggle, solid/accessibility surfaces, Reduce Motion, theme
+previews and saved element overrides. The preview in `NBAuroraTextStyle.swift`
+provides moving saturated bands and fixed black/gray/white backings for checking
+compositor behavior and glyph edges. Swift syntax checks on Linux cannot verify
+SwiftUI's compositor or substitute for this device check.
+
 The removed color-conversion tests enforced obsolete day/night recoloring. The
 removed UIKit hierarchy doubles tested the old sibling glass panel; the inline
 title now owns its glass background in SwiftUI. Device layout and compositor

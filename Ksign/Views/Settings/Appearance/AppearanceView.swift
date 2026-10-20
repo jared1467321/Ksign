@@ -15,6 +15,7 @@ struct AppearanceView: View {
     @AppStorage("Feather.storeCellAppearance") private var _storeCellAppearance: Int = 1
     @AppStorage("Feather.glossySurfaces") private var _glossySurfaces = true
     @AppStorage("Feather.auroraBackground") private var _auroraBackground = true
+    @AppStorage("Feather.auroraAdaptiveText") private var _auroraAdaptiveText = true
 
     @StateObject private var themeManager = NBThemeManager.shared
     @State private var showDeleteConfirmation = false
@@ -39,6 +40,11 @@ struct AppearanceView: View {
             Section(footer: Text(.localized("Give your phone a quick shake to shuffle the aurora. The aurora and clear glass adapt to Light and Dark. Reduce Motion freezes the sky; Reduce Transparency and Increase Contrast use solid surfaces."))) {
                 Toggle(.localized("Aurora Background"), isOn: $_auroraBackground)
                 Toggle(.localized("Liquid Glass Surfaces"), isOn: $_glossySurfaces)
+            }
+
+            Section(footer: Text(.localized("Text takes on the complementary colors beneath each letter as the aurora moves."))) {
+                Toggle(.localized("Adaptive Text Colors"), isOn: $_auroraAdaptiveText)
+                    .disabled(!_auroraBackground)
             }
 
             NBSection(.localized("Theme Profiles")) {
