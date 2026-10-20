@@ -20,6 +20,7 @@ struct FeatherApp: App {
 	let heartbeat = HeartbeatManager.shared
 	@StateObject var downloadManager = DownloadManager.shared
 	@StateObject var themeManager = NBThemeManager.shared
+    @StateObject private var auroraShakeMonitor = AuroraShakeMonitor()
     @AppStorage("Feather.glossySurfaces") private var glossySurfaces = true
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @AppStorage("Feather.userInterfaceStyle") private var userInterfaceStyle = 0
@@ -69,6 +70,7 @@ struct FeatherApp: App {
 			}
 			.onAppear {
 				NBAurora.setActive(scenePhase == .active)
+                auroraShakeMonitor.setEnabled(auroraBackground && scenePhase == .active)
 				HalloweenAppearance.apply(refreshExistingViews: true)
 				if logsManager.isCapturing { logsManager.startCapture() }
 				Task { await VPNReconnectCoordinator.shared.appBecameActive() }
@@ -77,6 +79,7 @@ struct FeatherApp: App {
                 HalloweenAppearance.apply(refreshExistingViews: true)
             }
             .onChange(of: auroraBackground) { _ in
+                auroraShakeMonitor.setEnabled(auroraBackground && scenePhase == .active)
                 HalloweenAppearance.apply(refreshExistingViews: true)
             }
             .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.reduceTransparencyStatusDidChangeNotification)) { _ in
@@ -87,10 +90,14 @@ struct FeatherApp: App {
             }
 			.onChange(of: scenePhase) { phase in
 				NBAurora.setActive(phase == .active)
+                auroraShakeMonitor.setEnabled(auroraBackground && phase == .active)
 				if phase == .active {
 					Task { await VPNReconnectCoordinator.shared.appBecameActive() }
 				}
 			}
+            .onDisappear {
+                auroraShakeMonitor.setEnabled(false)
+            }
 		}
 	}
 	

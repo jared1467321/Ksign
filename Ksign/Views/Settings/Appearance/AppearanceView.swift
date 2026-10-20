@@ -36,15 +36,9 @@ struct AppearanceView: View {
                 .pickerStyle(.segmented)
             }
 
-            Section(footer: Text(.localized("The aurora and clear glass adapt to Light and Dark. Reduce Motion freezes the sky; Reduce Transparency and Increase Contrast use solid surfaces."))) {
+            Section(footer: Text(.localized("Give your phone a quick shake to shuffle the aurora. The aurora and clear glass adapt to Light and Dark. Reduce Motion freezes the sky; Reduce Transparency and Increase Contrast use solid surfaces."))) {
                 Toggle(.localized("Aurora Background"), isOn: $_auroraBackground)
                 Toggle(.localized("Liquid Glass Surfaces"), isOn: $_glossySurfaces)
-                Button {
-                    NBAurora.randomize()
-                } label: {
-                    Label(.localized("Shuffle Aurora"), systemImage: "sparkles")
-                }
-                .disabled(!_auroraBackground)
             }
 
             NBSection(.localized("Theme Profiles")) {

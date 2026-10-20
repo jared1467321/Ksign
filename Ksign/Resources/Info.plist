@@ -209,6 +209,8 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NSMotionUsageDescription</key>
+	<string>Shake your device to shuffle the aurora background.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Ksign uses the local network to pair with this device for app installation and to connect to your private IPA Vault server.</string>
 	<key>NSBonjourServices</key>
