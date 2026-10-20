@@ -26,7 +26,7 @@ ZArchO::ZArchO()
 
 bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 {
-	if (NULL == pBase || uLength <= 0) {
+	if (NULL == pBase || uLength < sizeof(mach_header)) {
 		return false;
 	}
 
@@ -42,10 +42,14 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 	m_b64Bit = (MH_MAGIC_64 == m_pHeader->magic || MH_CIGAM_64 == m_pHeader->magic) ? true : false;
 	m_bBigEndian = (MH_CIGAM == m_pHeader->magic || MH_CIGAM_64 == m_pHeader->magic) ? true : false;
 	m_uHeaderSize = m_b64Bit ? sizeof(mach_header_64) : sizeof(mach_header);
+	if (m_uHeaderSize > uLength || BO(m_pHeader->sizeofcmds) > uLength - m_uHeaderSize) return false;
 
 	uint8_t* pLoadCommand = m_pBase + m_uHeaderSize;
+	uint8_t* pCommandsEnd = pLoadCommand + BO(m_pHeader->sizeofcmds);
 	for (uint32_t i = 0; i < BO(m_pHeader->ncmds); i++) {
+		if ((size_t)(pCommandsEnd - pLoadCommand) < sizeof(load_command)) return false;
 		load_command* plc = (load_command*)pLoadCommand;
+		if (BO(plc->cmdsize) < sizeof(load_command) || BO(plc->cmdsize) > (size_t)(pCommandsEnd - pLoadCommand)) return false;
 		switch (BO(plc->cmd)) {
 		case LC_SEGMENT:
 		{
@@ -98,11 +102,18 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		break;
 		case LC_CODE_SIGNATURE:
 		{
+			if (BO(plc->cmdsize) < sizeof(codesignature_command)) return false;
 			codesignature_command* pcslc = (codesignature_command*)pLoadCommand;
 			m_pCodeSignSegment = pLoadCommand;
 			m_uCodeLength = BO(pcslc->dataoff);
+			uint32_t signatureSize = BO(pcslc->datasize);
+			if (m_uCodeLength > uLength || signatureSize > uLength - m_uCodeLength) {
+				return ZLog::Error(">>> CodeSignature extends past the Mach-O slice!\n");
+			}
 			m_pSignBase = m_pBase + m_uCodeLength;
-			m_uSignLength = ZSign::GetCodeSignatureLength(m_pSignBase);
+			// An empty reserved signature has no superblob to read yet.
+			m_uSignLength = signatureSize >= sizeof(CS_SuperBlob) ? ZSign::GetCodeSignatureLength(m_pSignBase) : 0;
+			if (m_uSignLength > signatureSize) return false;
 		}
 		break;
 		}

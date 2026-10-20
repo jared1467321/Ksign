@@ -63,14 +63,21 @@ bool ZMachO::OpenFile(const char* szPath)
 	m_sSize = 0;
 	m_pBase = (uint8_t*)ZFile::MapFile(szPath, 0, 0, &m_sSize, false);
 	if (NULL != m_pBase) {
+		if (m_sSize < sizeof(uint32_t)) return false;
 		uint32_t magic = *((uint32_t*)m_pBase);
 		if (FAT_CIGAM == magic || FAT_MAGIC == magic) {
+			if (m_sSize < sizeof(fat_header)) return false;
 			fat_header* pFatHeader = (fat_header*)m_pBase;
-			int nFatArch = (FAT_MAGIC == magic) ? pFatHeader->nfat_arch : LE(pFatHeader->nfat_arch);
-			for (int i = 0; i < nFatArch; i++) {
+			uint32_t nFatArch = (FAT_MAGIC == magic) ? pFatHeader->nfat_arch : LE(pFatHeader->nfat_arch);
+			if (nFatArch > (m_sSize - sizeof(fat_header)) / sizeof(fat_arch)) return false;
+			for (uint32_t i = 0; i < nFatArch; i++) {
 				fat_arch* pFatArch = (fat_arch*)(m_pBase + sizeof(fat_header) + sizeof(fat_arch) * i);
-				uint8_t* pArchBase = m_pBase + ((FAT_MAGIC == magic) ? pFatArch->offset : LE(pFatArch->offset));
+				uint32_t uArchOffset = (FAT_MAGIC == magic) ? pFatArch->offset : LE(pFatArch->offset);
 				uint32_t uArchLength = (FAT_MAGIC == magic) ? pFatArch->size : LE(pFatArch->size);
+				if (uArchOffset > m_sSize || uArchLength > m_sSize - uArchOffset) {
+					return ZLog::Error(">>> Mach-O slice extends past the file!\n");
+				}
+				uint8_t* pArchBase = m_pBase + uArchOffset;
 				if (!NewArchO(pArchBase, uArchLength)) {
 					ZLog::ErrorV(">>> Invalid arch file in fat mach-o file!\n");
 					return false;
@@ -198,7 +205,10 @@ bool ZMachO::ReallocCodeSignSpace(const vector<uint32_t>& signatureSizes)
 #endif
 
 #ifndef _WIN32
-	if (m_arrArchOes.size() == 1) {
+	// A fat container may also hold only one architecture. Its slice offsets
+	// are relative to the embedded Mach-O, so extending it as a thin file
+	// truncates the container and leaves signature pointers outside the map.
+	if (m_arrArchOes.size() == 1 && m_arrArchOes[0]->m_pBase == m_pBase) {
 		ZArchO* archo = m_arrArchOes[0];
 		uint32_t newLength = std::max(archo->m_uLength, archo->m_uCodeLength + signatureSizes[0]);
 		// A thin Mach-O can extend its inode, retaining mode, hard links and

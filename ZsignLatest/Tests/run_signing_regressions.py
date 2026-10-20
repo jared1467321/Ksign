@@ -279,10 +279,40 @@ def extraction_checks(executable, work):
 
 
 def growth_and_cms_checks(executable, work):
+    # Reject truncated containers/signature ranges before dereferencing mapped
+    # bytes. These also cover inputs damaged by the former one-slice fast path.
+    invalid = {
+        "short-magic": b"\xca\xfe",
+        "short-fat-header": struct.pack(">I", 0xcafebabe),
+        "short-fat-table": struct.pack(">II", 0xcafebabe, 1),
+    }
+    binary = macho()
+    for label, offset, size in (("fat-offset", 0x10000000, len(binary)),
+                                 ("fat-size", 16384, len(binary) + 1)):
+        header = struct.pack(">II", 0xcafebabe, 1)
+        header += struct.pack(">IIIII", 0x100000c, 0, offset, size, 14)
+        invalid[label] = header.ljust(16384, b"\0") + binary
+    signature_command = 32 + 72 + 72
+    for label, offset, size in (("signature-offset", len(binary) + 4096, 16),
+                                 ("signature-size", 4096, len(binary)),
+                                 ("signature-wrap", 0xfffffff0, 32)):
+        data = bytearray(binary)
+        struct.pack_into("<II", data, signature_command + 8, offset, size)
+        invalid[label] = data
+    data = bytearray(binary)
+    struct.pack_into(">II", data, 4096, 0xFADE0CC0, len(binary))
+    invalid["superblob-size"] = data
+    for label, data in invalid.items():
+        path = work / f"invalid-{label}"
+        path.write_bytes(data)
+        subprocess.run([str(executable), "--reject-binary", str(path)], check=True, stdout=subprocess.PIPE)
+
     # Small existing signatures force growth before the first page-hash pass.
-    for mode in ("dual", "sha256", "large", "fat"):
+    for mode in ("dual", "sha256", "large", "fat", "fat-single", "fat-single-spare", "fat-single-empty"):
         path = work / f"growth-{mode}"
-        data = macho(code_size=1024 * 1024, signature_size=16)
+        single_fat = mode.startswith("fat-single")
+        data = macho(filetype=6 if single_fat else 2, code_size=1024 * 1024,
+                     signature_size=32768 if mode == "fat-single-spare" else (0 if mode == "fat-single-empty" else 16))
         if mode == "fat":
             # One slice requires growth, the other has ample signature capacity.
             second = macho(code_size=1024 * 1024, signature_size=32768)
@@ -293,15 +323,23 @@ def growth_and_cms_checks(executable, work):
             header += struct.pack(">IIIII", 0x100000c, 2, offset2, len(second), 14)
             data = header.ljust(offset, b"\0") + data
             data = data.ljust(offset2, b"\0") + second
+        elif single_fat:
+            # A one-architecture fat container still has a nonzero slice offset.
+            # Growing it as a thin file truncates the container and leaves the
+            # signature read past the mapping, matching the device crash.
+            offset = 16384
+            header = struct.pack(">II", 0xcafebabe, 1)
+            header += struct.pack(">IIIII", 0x100000c, 0, offset, len(data), 14)
+            data = header.ljust(offset, b"\0") + data
         path.write_bytes(data)
         path.chmod(0o751)
         link = work / f"growth-{mode}-link"
         os.link(path, link)
         subprocess.run([str(executable), "--binary", str(path), mode], check=True, stdout=subprocess.PIPE)
-        if mode != "fat": assert link.read_bytes() == path.read_bytes()
+        if mode != "fat" and not single_fat: assert link.read_bytes() == path.read_bytes()
         data = path.read_bytes()
-        if mode == "fat":
-            for index in range(2):
+        if mode == "fat" or mode == "fat-single-spare":
+            for index in range(2 if mode == "fat" else 1):
                 _, _, offset, size, _ = struct.unpack_from(">IIIII", data, 8 + 20 * index)
                 verify_signature(data[offset:offset + size], None, None)
         else:

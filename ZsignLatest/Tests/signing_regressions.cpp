@@ -161,7 +161,7 @@ extern "C" X509* __wrap_PEM_read_bio_X509(BIO* bio, X509** cert, pem_password_cb
     return __real_PEM_read_bio_X509(bio, cert, cb, ctx);
 }
 
-static void SignBinary(const string& path, ZSignAsset& asset, size_t pages) {
+static void SignBinary(const string& path, ZSignAsset& asset, size_t pages, bool growsInPlace = true) {
     struct stat before = {};
     assert(stat(path.c_str(), &before) == 0);
     ZMachO macho;
@@ -176,7 +176,7 @@ static void SignBinary(const string& path, ZSignAsset& asset, size_t pages) {
     assert(stat(path.c_str(), &after) == 0);
     assert((before.st_mode & 07777) == (after.st_mode & 07777));
     // Thin signature growth keeps the existing inode, including hard links.
-    if (pages == 256) assert(before.st_ino == after.st_ino);
+    if (pages == 256 && growsInPlace) assert(before.st_ino == after.st_ino);
 }
 
 static void CheckCMS(const string& p12, const string& provision, const string& binary) {
@@ -332,6 +332,9 @@ static void CheckPool()
 int main(int argc, char** argv)
 {
     CheckPreparedMetadata();
+    if (argc == 3 && string(argv[1]) == "--reject-binary") {
+        ZMachO macho; assert(!macho.Init(argv[2])); return 0;
+    }
     if (argc == 6 && string(argv[1]) == "--concurrent") {
         CheckConcurrentFolders(argv[2], argv[3], argv[4], argv[5]); return 0;
     }
@@ -342,7 +345,7 @@ int main(int argc, char** argv)
         assert(asset.Init("", "", "", "", "", true, string(argv[3]) == "sha256", false));
         if (string(argv[3]) == "large") asset.m_strEntitleData =
             "<plist><dict><key>large</key><string>" + string(70000, 'x') + "</string></dict></plist>";
-        SignBinary(argv[2], asset, string(argv[3]) == "fat" ? 512 : 256);
+        SignBinary(argv[2], asset, string(argv[3]) == "fat" ? 512 : 256, string(argv[3]).find("fat-single") != 0);
         return 0;
     }
 
