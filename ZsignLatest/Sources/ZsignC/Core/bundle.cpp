@@ -1028,31 +1028,104 @@ static bool IsAppExtensionPath(const string& strPath)
 	return (0 == strPath.rfind("PlugIns/", 0) || 0 == strPath.rfind("Extensions/", 0));
 }
 
-bool ZBundle::SignNode(jvalue& jvNode)
+namespace {
+bool RunSigningJobs(vector<function<bool()>>& jobs)
 {
-	if (jvNode.has("files")) {
-		for (size_t i = 0; i < jvNode["files"].size(); i++) {
-			string strFile = jvNode["files"][i];
-			m_resourceDigests.erase(m_strAppFolder + "/" + strFile);
-			ZLog::PrintV(">>> SignFile: \t%s\n", strFile.c_str());
-			ZMachO macho;
-			if (macho.InitV("%s/%s", m_strAppFolder.c_str(), strFile.c_str())) {
-				if (!macho.Sign(m_pSignAsset, m_bForceSign, "", "", "", "")) {
-					return false;
-				}
-			} else {
-				ZLog::WarnV(">>> Warning: Skipping non-Mach-O file: \t%s\n", strFile.c_str());
-			}
-		}
-	}
-	
-	if (jvNode.has("folders")) {
-		for (size_t i = 0; i < jvNode["folders"].size(); i++) {
-			if (!SignNode(jvNode["folders"][i])) {
-				return false;
-			}
-		}
-	}
+    if (jobs.empty()) return true;
+    vector<uint8_t> results(jobs.size(), 0);
+    ZUtil::ParallelFor(jobs.size(), ZUtil::GetWorkerCount(jobs.size()), [&](size_t i, size_t) {
+        results[i] = jobs[i]() ? 1 : 0;
+    });
+    return all_of(results.begin(), results.end(), [](uint8_t result) { return result != 0; });
+}
+
+bool UsesParallelPageHashing(const string& path)
+{
+    struct stat st = {};
+    return stat(path.c_str(), &st) != 0 || st.st_size >= 512 * 1024;
+}
+}
+
+bool ZBundle::CanSignConcurrently(const jvalue& node) const
+{
+#ifdef _WIN32
+    // Windows mapping bookkeeping is process-wide and not synchronized.
+    return false;
+#else
+    if (!m_bForceSign || m_pSignAssets != NULL || ZLog::IsDebug()) return false;
+    for (const auto& file : m_overlayFiles) if (file.second.isSymlink) return false;
+    auto independent = [&](const string& path) {
+        struct stat st = {};
+        return stat(path.c_str(), &st) == 0 && st.st_nlink == 1;
+    };
+    for (size_t i = 0; i < node["files"].size(); i++)
+        if (!independent(m_strAppFolder + "/" + node["files"][i].as_string())) return false;
+    for (size_t i = 0; i < node["folders"].size(); i++) {
+        const auto& folder = node["folders"][i];
+        if (!independent(m_strAppFolder + "/" + folder["path"].as_string() + "/" + folder["bundle_executable"].as_string())) return false;
+    }
+    return true;
+#endif
+}
+
+bool ZBundle::SignNode(jvalue& jvNode, vector<function<bool()>>* deferred)
+{
+    // Leaf nodes have nothing to schedule: don't scan the overlay again for
+    // every framework in the flat discovery list.
+    const bool hasBatch = jvNode["files"].size() > 1 || jvNode["folders"].size() > 1;
+    const bool concurrent = hasBatch && CanSignConcurrently(jvNode);
+    const size_t width = concurrent ? ZUtil::GetWorkerCount(6) : 1;
+    if (jvNode.has("files")) {
+        for (size_t first = 0; first < jvNode["files"].size();) {
+            vector<function<bool()>> jobs;
+            size_t i = first;
+            for (; i < min(first + width, jvNode["files"].size()); i++) {
+                const string file = jvNode["files"][i].as_string();
+                const string path = m_strAppFolder + "/" + file;
+                const bool large = concurrent && UsesParallelPageHashing(path);
+                if (large && !jobs.empty()) break;
+                m_resourceDigests.erase(m_strAppFolder + "/" + file);
+                ZLog::PrintV(">>> SignFile: \t%s\n", file.c_str());
+                auto asset = make_shared<ZSignAsset>();
+                if (!asset->CloneFrom(*m_pSignAsset)) return false;
+                jobs.push_back([asset, path, file, force = m_bForceSign]() {
+                    ZMachO macho;
+                    if (!macho.Init(path.c_str())) {
+                        ZLog::WarnV(">>> Warning: Skipping non-Mach-O file: \t%s\n", file.c_str());
+                        return true;
+                    }
+                    return macho.Sign(asset.get(), force, "", "", "", "");
+                });
+                // Run a large executable directly on the coordinator so its
+                // page batch can use the pool instead of nesting inside it.
+                if (large) { i++; break; }
+            }
+            if (!RunSigningJobs(jobs)) return false;
+            first = i;
+        }
+    }
+
+    if (jvNode.has("folders")) {
+        // Discovery produces a flat, deepest-first list. Each bounded batch
+        // has equal depth, so no parent is sealed before its child has joined.
+        for (size_t first = 0; first < jvNode["folders"].size();) {
+            vector<function<bool()>> jobs;
+            const string path = jvNode["folders"][first]["path"].as_string();
+            const size_t depth = count(path.begin(), path.end(), '/');
+            size_t next = first;
+            for (; next < jvNode["folders"].size() && next - first < width; next++) {
+                const string child = jvNode["folders"][next]["path"].as_string();
+                if (count(child.begin(), child.end(), '/') != depth) break;
+                const string input = m_strAppFolder + "/" + child + "/" + jvNode["folders"][next]["bundle_executable"].as_string();
+                const bool large = concurrent && UsesParallelPageHashing(input);
+                if (large && !jobs.empty()) break;
+                if (!SignNode(jvNode["folders"][next], concurrent && !large ? &jobs : NULL)) return false;
+                if (large) { next++; break; }
+            }
+            if (!RunSigningJobs(jobs)) return false;
+            first = next;
+        }
+    }
 
 	jbase64 b64;
 	string strInfoSHA1;
@@ -1086,7 +1159,8 @@ bool ZBundle::SignNode(jvalue& jvNode)
 	m_resourceDigests.erase(ResolvedExecutablePath(strExePath));
 	ZLog::PrintV(">>> SignFolder: %s, (%s)\n", ("/" == strFolder) ? ZUtil::GetBaseName(m_strAppFolder.c_str()) : strFolder.c_str(), strBundleExe.c_str());
 
-	ZMachO macho;
+    auto executable = make_shared<ZMachO>();
+    ZMachO& macho = *executable;
 	// Grow signatures on the target inode, preserving framework symlink aliases.
 	if (!macho.Init(ResolvedExecutablePath(strExePath).c_str())) {
 		ZLog::ErrorV(">>> Can't parse BundleExecute file! %s\n", strExePath.c_str());
@@ -1199,9 +1273,22 @@ bool ZBundle::SignNode(jvalue& jvNode)
 	}
 	EnsureIndexedFile(strCodeResFile, true);
 
-	if (!macho.Sign(m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData)) {
-		return false;
-	}
+    ZSignAsset::PreparedBlob resourceHashes;
+    ZSHA::SHA(strCodeResData, resourceHashes.sha1, resourceHashes.sha256);
+    jbase64 resourceBase64;
+    m_resourceDigests[strCodeResFile] = {resourceBase64.encode(resourceHashes.sha1), resourceBase64.encode(resourceHashes.sha256)};
+    if (deferred != NULL) {
+        auto asset = make_shared<ZSignAsset>();
+        if (!asset->CloneFrom(*m_pSignAsset)) return false;
+        // All index/cache updates above happen on the coordinator. Worker jobs
+        // own their Mach-O and mutable crypto metadata and only write that file.
+        deferred->push_back([executable, asset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256,
+                             strCodeResData = std::move(strCodeResData), resourceHashes = std::move(resourceHashes)]() {
+            return executable->Sign(asset.get(), bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData, &resourceHashes);
+        });
+    } else if (!macho.Sign(m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData, &resourceHashes)) {
+        return false;
+    }
 
 	return true;
 }

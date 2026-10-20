@@ -301,50 +301,55 @@ extension BulkSigningView {
 				detail: "Signing"
 			)
 
-			// The batch coordinator itself must stay off MainActor. The signing worker
-			// already runs detached; previously the continuation resumed only through
-			// the UI completion callback, so the first app could finish in the
-			// background while the loop remained parked until foreground.
-			for (index, config) in configs.enumerated() {
-				let currentName = config.app.name ?? .localized("Unknown")
-				BackgroundTaskManager.shared.report(
-					.signing,
-					completed: processedCount,
-					total: total,
-					fraction: nil,
-					detail: "Signing",
-					currentItem: currentName
-				)
-
-				do {
-					let signedID = try await Self._signOne(
-						config,
-						certificate: certificate,
-                        archiveApp: archiveApps[index]
-					)
-					signedIDs.append(signedID)
-
-					if config.options.removeApp, !config.app.isSigned {
-						await MainActor.run {
-							Storage.shared.deleteApp(for: config.app)
-						}
-					}
-				} catch let skip as IDeviceInstallSkip {
-					skippedApps.append(.init(name: currentName, reason: skip.reason))
-				} catch {
-					failures.append((currentName, error))
-				}
-
-				processedCount += 1
-				BackgroundTaskManager.shared.report(
-					.signing,
-					completed: processedCount,
-					total: total,
-					fraction: nil,
-					detail: "Signing",
-					currentItem: currentName
-				)
-			}
+            let context = SigningBatchContext()
+            let identities = configs.compactMap { $0.app.uuid }
+            let sources = archiveApps.compactMap { $0?.archiveURL.standardizedFileURL.path }
+            // Duplicate inputs retain serial behavior, including remove-after-sign.
+            let unique = identities.count == configs.count && Set(identities).count == identities.count && Set(sources).count == sources.count
+            let width = min(unique ? 2 : 1, configs.count)
+            var completedIDs: [Int: String] = [:]
+            var indexedFailures: [Int: (String, Error)] = [:]
+            await withTaskGroup(of: (Int, Result<String, Error>).self) { group in
+                var active = Set(0..<width)
+                func reportProgress() {
+                    let names = active.sorted().map { configs[$0].app.name ?? .localized("Unknown") }.joined(separator: ", ")
+                    BackgroundTaskManager.shared.report(.signing, completed: processedCount, total: total,
+                        fraction: nil, detail: "Signing", currentItem: names.isEmpty ? nil : names)
+                }
+                func enqueue(_ index: Int) {
+                    let config = configs[index]
+                    let archive = archiveApps[index]
+                    group.addTask {
+                        do { return (index, .success(try await Self._signOne(config, certificate: certificate,
+                            archiveApp: archive, batchContext: context))) }
+                        catch { return (index, .failure(error)) }
+                    }
+                }
+                for index in 0..<width { enqueue(index) }
+                reportProgress()
+                var next = width
+                while let (index, result) = await group.next() {
+                    let config = configs[index]
+                    let currentName = config.app.name ?? .localized("Unknown")
+                    switch result {
+                    case .success(let signedID):
+                        completedIDs[index] = signedID
+                        if config.options.removeApp, !config.app.isSigned {
+                            await MainActor.run { Storage.shared.deleteApp(for: config.app) }
+                        }
+                    case .failure(let error):
+                        if let skip = error as? IDeviceInstallSkip {
+                            skippedApps.append(.init(name: currentName, reason: skip.reason))
+                        } else { indexedFailures[index] = (currentName, error) }
+                    }
+                    processedCount += 1
+                    active.remove(index)
+                    if next < configs.count { enqueue(next); active.insert(next); next += 1 }
+                    reportProgress()
+                }
+            }
+            signedIDs = configs.indices.compactMap { completedIDs[$0] }
+            failures = configs.indices.compactMap { indexedFailures[$0] }
 
 			let handoff = signAndInstall
 				? await SigningPreflightCoordinator.prepareInstallation(signedIDs)
@@ -382,12 +387,12 @@ extension BulkSigningView {
 		}
 	}
 
-	// Bridges the callback-based FR.signPackageFile into async/await so
-	// each sign can be awaited sequentially in the loop above.
+	// Bridges completion independently of UI delivery, including in background.
 	private static func _signOne(
 		_ config: AppSignConfig,
 		certificate: CertificatePair?,
-        archiveApp: ArchiveBackedApp?
+        archiveApp: ArchiveBackedApp?,
+        batchContext: SigningBatchContext
 	) async throws -> String {
 		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
 			FR.signPackageFile(
@@ -396,6 +401,7 @@ extension BulkSigningView {
 				icon: config.icon,
 				certificate: certificate,
                 archiveApp: archiveApp,
+                batchContext: batchContext,
 				backgroundCompletion: { error, signedID in
 					if let error {
 						continuation.resume(throwing: error)

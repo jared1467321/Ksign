@@ -44,9 +44,13 @@ enum Zsign {
 struct AR {
     struct Member { let name: String; let content: Data }
     static var contents: [String: [Member]] = [:]
+    static var reads = 0
     let url: URL
     init(with url: URL) { self.url = url }
-    func extract() async throws -> [Member] { Self.contents[url.path] ?? [] }
+    func extract() async throws -> [Member] { Self.reads += 1; return Self.contents[url.path] ?? [] }
+}
+func extractDebPayload(_ data: Data, name: String, to directory: URL) throws {
+    try FileManager.default.copyItem(at: URL(fileURLWithPath: String(decoding: data, as: UTF8.self)), to: directory)
 }
 func extractFile(at url: inout URL) throws {
     var directory: ObjCBool = false
@@ -75,6 +79,7 @@ func extractFile(at url: inout URL) throws {
                       input.appendingPathComponent("F.framework"), input.appendingPathComponent("Replace.bundle"),
                       input.appendingPathComponent("tweaks.deb")]
         try write(binary, to: inputs[0]); try write(binary, to: inputs[1])
+        try write(Data("deb fixture".utf8), to: inputs[4])
         try framework(inputs[2], executable: "F", binary: Data("must not replace the existing framework".utf8))
         try write(Data("replacement shared".utf8), to: inputs[3].appendingPathComponent("shared.txt"))
         try write(Data("new resource".utf8), to: inputs[3].appendingPathComponent("new.txt"))
@@ -86,11 +91,13 @@ func extractFile(at url: inout URL) throws {
         try write(Data("deb resource".utf8), to: debRoot.appendingPathComponent("Library/Application Support/DebOnly.bundle/value.txt"))
         AR.contents[inputs[4].path] = [.init(name: "data.tar.gz", content: Data(debRoot.path.utf8))]
         var recordings: [[String: [String]]] = []
+        let packages = TweakPackageCache()
         for sparse in [false, true] {
             let app = work.appendingPathComponent(sparse ? "tweak-handler-sparse.app" : "tweak-handler-full.app")
             if sparse {
                 try ASignArchive.materializeSigningInputs(from: source, rootAppPath: archive.rootAppPath,
-                    to: app, index: archive.archiveIndex)
+                    to: app, index: archive.archiveIndex, removedPaths: ["Replace.bundle"])
+                check(!FileManager.default.fileExists(atPath: app.appendingPathComponent("Replace.bundle/Old.dylib").path))
             } else { try archive.extractRootApp(to: app) }
             try FileManager.default.removeFileIfNeeded(at: app.appendingPathComponent("_CodeSignature"))
             try FileManager.default.removeFileIfNeeded(at: app.appendingPathComponent("embedded.mobileprovision"))
@@ -100,7 +107,7 @@ func extractFile(at url: inout URL) throws {
             let handler = TweakHandler(app: app, with: inputs, options: Options(), prepareDestination: { path, replacing in
                 preparations.append((path, replacing))
                 try workspace?.prepare(path, replacing: replacing)
-            })
+            }, packages: packages)
             try await handler.getInputFiles()
             check(Set(Zsign.patches.map(\.path)).count == Zsign.patches.count)
             let main = Zsign.patches.first { $0.path == app.appendingPathComponent("Main").resolvingSymlinksInPath().path }!
@@ -130,6 +137,14 @@ func extractFile(at url: inout URL) throws {
                 rootAppPath: archive.rootAppPath, overlayAppURL: app, deletedPaths: deleted, index: archive.archiveIndex)
         }
         check(recordings[0] == recordings[1])
+        check(AR.reads == 1, "The same deb is decoded once per batch")
+        let cached = try await packages.roots(for: inputs[4])
+        check(AR.reads == 1)
+        let original = try Data(contentsOf: cached[0].appendingPathComponent("Library/MobileSubstrate/DynamicLibraries/C.dylib"))
+        check(original == binary, "Patching one app must not mutate a prepared package")
+        try write(Data("changed deb fixture".utf8), to: inputs[4])
+        _ = try await packages.roots(for: inputs[4])
+        check(AR.reads == 2, "Changed packages are decoded again")
         // An ordinary signing operation does not materialize a loader merely to
         // decide that no tweaks were requested.
         var destinations = 0

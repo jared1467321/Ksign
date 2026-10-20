@@ -15,6 +15,8 @@ bool UninstallDylibs(NSString *filePath, NSArray<NSString *> *dylibPathsArray);
 NSArray<NSString *> *ListDylibs(NSString *filePath);
 bool ChangeDylibPath(NSString *filePath, NSString *oldPath, NSString *newPath);
 bool PatchMachODylibs(NSString *filePath, NSDictionary<NSString *, NSString *> *rewrites, NSArray<NSString *> *injections, bool weak);
+void * _Nullable ZsignCreateSession(void);
+void ZsignFreeSession(void *session);
 
 int zsign(
     NSString *app,
@@ -32,6 +34,7 @@ int zsign(
     NSArray<NSString *> *archiveDeletedPaths,
     NSData * _Nullable archiveManifest,
     NSData * _Nullable archiveResourceDigests,
+    void * _Nullable session,
     void (^ _Nullable completionHandler)(BOOL success)
 );
 

@@ -13,6 +13,12 @@ import Foundation
         precondition(digests?.prefix(8) == Data("ASHSH001".utf8))
         precondition(!FileManager.default.fileExists(atPath: sparse.appendingPathComponent("root.dat").path))
         precondition(!app.supportsSparseTweakMutations, "Symlink aliases retain the broad tweak fallback")
+        precondition(app.supportsSparseTweakMutations(at: ["Replace.bundle"]), "Unrelated file aliases do not require full extraction")
+        precondition(!app.supportsSparseTweakMutations(at: ["Frameworks/V.framework"]), "An affected versioned framework retains the fallback")
+        for label in ["unrelated", "case", "dot", "unicode-target", "link-ancestor", "link-target", "unrelated-case", "unrelated-dot", "unicode-normalization"] {
+            let candidate = try ArchiveBackedApp(archiveURL: work.appendingPathComponent("mutation-\(label).ipa"))
+            precondition(candidate.supportsSparseTweakMutations(at: ["Target.bundle"]) == (label == "unrelated"), label)
+        }
         let tweakSource = URL(fileURLWithPath: CommandLine.arguments[3])
         let tweakApp = try ArchiveBackedApp(archiveURL: tweakSource)
         precondition(tweakApp.supportsSparseTweakMutations)

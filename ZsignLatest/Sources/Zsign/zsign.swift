@@ -1,6 +1,12 @@
 import Foundation
 import ZsignC
 
+public final class ZsignSigningSession {
+    fileprivate let handle = ZsignCreateSession()
+    public init() {}
+    deinit { if let handle { ZsignFreeSession(handle) } }
+}
+
 public enum Zsign {
     public static func checkSigned(appExecutable: String) -> Bool {
         CheckIfSigned(appExecutable)
@@ -42,9 +48,10 @@ public enum Zsign {
         archiveDeletedPaths: [String] = [],
         archiveManifest: Data? = nil,
         archiveResourceDigests: Data? = nil,
+        session: ZsignSigningSession? = nil,
         completion: ((Bool) -> Void)? = nil
     ) -> Bool {
-        zsign(
+        withExtendedLifetime(session) { zsign(
             appPath,
             provisionPath,
             p12Path,
@@ -60,10 +67,11 @@ public enum Zsign {
             archiveDeletedPaths,
             archiveManifest,
             archiveResourceDigests,
+            session?.handle,
             completion.map { callback in
                 { success in callback(success) }
             }
-        ) == 0
+        ) == 0 }
     }
 
     public static func checkRevokage(

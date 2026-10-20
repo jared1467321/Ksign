@@ -608,7 +608,8 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 					const string& strBundleId, 
 					const string& strInfoSHA1, 
 					const string& strInfoSHA256, 
-					const string& strCodeResourcesData)
+					const string& strCodeResourcesData,
+                    const ZSignAsset::PreparedBlob* resourceHashes)
 {
 	if (NULL == m_pSignBase) {
 		m_bEnoughSpace = false;
@@ -623,6 +624,11 @@ bool ZArchO::Sign(ZSignAsset* pSignAsset,
 			strCodeResourcesSHA1.append(20, 0);
 		}
 		strCodeResourcesSHA256.append(32, 0);
+	} else if (resourceHashes != NULL) {
+        strCodeResourcesSHA1 = resourceHashes->sha1;
+        strCodeResourcesSHA256 = resourceHashes->sha256;
+        if (strCodeResourcesSHA256.size() != 32 ||
+            (!pSignAsset->m_bSHA256Only && strCodeResourcesSHA1.size() != 20)) return false;
 	} else if (pSignAsset->m_bSHA256Only) {
 		ZSHA::SHA256(strCodeResourcesData, strCodeResourcesSHA256);
 	} else {

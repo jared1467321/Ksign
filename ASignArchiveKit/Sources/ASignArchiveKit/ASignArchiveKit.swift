@@ -276,13 +276,14 @@ public enum ASignArchive {
         index: ASignArchiveIndex? = nil,
         workers: UInt32 = 0,
         hashResources: Bool = false,
-        excludedResourcePaths: Set<String> = []
+        excludedResourcePaths: Set<String> = [],
+        removedPaths: Set<String> = []
     ) throws -> Data? {
-        if hashResources, index == nil {
+        if index == nil && (hashResources || !removedPaths.isEmpty) {
             return try materializeSigningInputs(from: archiveURL, rootAppPath: rootAppPath,
                 to: destinationAppURL, includeInfoPlistStrings: includeInfoPlistStrings,
                 index: ASignArchiveIndex(archiveURL: archiveURL), workers: workers,
-                hashResources: true, excludedResourcePaths: excludedResourcePaths)
+                hashResources: hashResources, excludedResourcePaths: excludedResourcePaths, removedPaths: removedPaths)
         }
         let fileManager = FileManager.default
         try fileManager.createDirectory(
@@ -294,14 +295,21 @@ public enum ASignArchive {
         var digestSize = 0
         defer { if let digestBytes { asign_archive_free_buffer(digestBytes) } }
         let exclusions = excludedResourcePaths.sorted().joined(separator: "\n")
+        let removals = removedPaths.sorted().joined(separator: "\n")
         let status: Int32 = archiveURL.path.withCString { archivePath in
             rootAppPath.withCString { rootPath in
                 destinationAppURL.path.withCString { destinationPath in
                     if let index {
-                        if hashResources {
+                        if hashResources || !removedPaths.isEmpty {
                             return exclusions.withCString { excluded in
-                                asign_archive_index_materialize_with_digests(index.handle, rootPath, destinationPath,
-                                    includeInfoPlistStrings ? 1 : 0, workers, excluded, &digestBytes, &digestSize)
+                                removals.withCString { removed in
+                                    if hashResources {
+                                        return asign_archive_index_materialize_with_plan(index.handle, rootPath, destinationPath,
+                                            includeInfoPlistStrings ? 1 : 0, workers, excluded, removed, &digestBytes, &digestSize)
+                                    }
+                                    return asign_archive_index_materialize_with_plan(index.handle, rootPath, destinationPath,
+                                        includeInfoPlistStrings ? 1 : 0, workers, excluded, removed, nil, nil)
+                                }
                             }
                         }
                         return asign_archive_index_materialize(index.handle, rootPath, destinationPath,

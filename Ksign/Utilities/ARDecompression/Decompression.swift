@@ -10,6 +10,36 @@ import Foundation
 import SWCompression
 import Compression
 
+// Decode the payload directly into its private prepared tree. The compressed
+// member and intermediate tar no longer need a write/read round trip on disk.
+func extractDebPayload(_ data: Data, name: String, to directory: URL) throws {
+    let tar: Data
+    switch name {
+    case "data.tar.xz": tar = try XZArchive.unarchive(data)
+    case "data.tar.lzma": tar = try LZMA.decompress(data)
+    case "data.tar.bz2": tar = try BZip2.decompress(data)
+    case "data.tar.gz": tar = try GzipArchive.unarchive(data)
+    case "data.tar": tar = data
+    default: throw TweakHandlerError.unsupportedFileExtension(name)
+    }
+    let manager = FileManager.default
+    try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    for entry in try TarContainer.open(container: tar) {
+        let name = entry.info.name
+        guard !name.hasPrefix("/"), !name.contains("\\"),
+              !name.split(separator: "/").contains("..") else {
+            throw TweakHandlerError.decompressionFailed("Unsafe package path: \(name)")
+        }
+        let destination = directory.appendingPathComponent(name)
+        if entry.info.type == .directory {
+            try manager.createDirectory(at: destination, withIntermediateDirectories: true)
+        } else if entry.info.type == .regular, let contents = entry.data {
+            try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try contents.write(to: destination)
+        }
+    }
+}
+
 func extractFile(at fileURL: inout URL) throws {
 	let fileExtension = fileURL.pathExtension.lowercased()
 	let fileManager = FileManager.default

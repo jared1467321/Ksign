@@ -104,6 +104,7 @@ enum FR {
 		icon: UIImage?,
 		certificate: CertificatePair?,
         archiveApp suppliedArchiveApp: ArchiveBackedApp? = nil,
+        batchContext: SigningBatchContext? = nil,
 		backgroundCompletion: ((Error?, String?) -> Void)? = nil,
 		completion: @escaping (Error?, String?) -> Void
 	) {
@@ -117,7 +118,8 @@ enum FR {
 			var backgroundSucceeded = false
 			defer { BackgroundTaskManager.shared.end(.signing, success: backgroundSucceeded) }
 
-			let handler = SigningHandler(app: app, options: options)
+            let context = batchContext ?? SigningBatchContext()
+			let handler = SigningHandler(app: app, options: options, packages: context.packages, signingSession: context.session)
 			if !options.onlyModify {
 				handler.appCertificate = certificate
 			}
@@ -132,9 +134,14 @@ enum FR {
                     return try ArchiveBackedApp(archiveURL: url)
                 }
 				try SigningPreflight.checkPlatform(for: app, archiveApp: archiveApp)
-				try await handler.copy(archiveApp: archiveApp)
-
-				try await handler.modify()
+                try await context.signing.run {
+                    try await handler.copy(archiveApp: archiveApp)
+                    try await handler.modify(finish: false)
+                }
+                try await context.archiving.run {
+                    try await handler.move()
+                    try await handler.addToDatabase()
+                }
 
 				try? await handler.clean()
 

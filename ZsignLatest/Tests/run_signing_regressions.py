@@ -38,7 +38,7 @@ def macho(filetype=2, code_size=4096, signature_size=32768):
     return (header + commands).ljust(code_size, b"\0") + bytes(signature_size)
 
 
-def fixture(path, aliases=False):
+def fixture(path, aliases=False, canonical=False):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         def add(name, data, symlink=False):
             entry = zipfile.ZipInfo(APP + "/" + name)
@@ -48,7 +48,7 @@ def fixture(path, aliases=False):
             entry.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(entry, data)
 
-        def bundle(folder, executable, identifier, versioned=False):
+        def bundle(folder, executable, identifier, versioned=False, large=False):
             prefix = folder + "/" if folder else ""
             physical = prefix + "Versions/A/" if versioned else prefix
             add(physical + "Info.plist", plistlib.dumps({
@@ -57,7 +57,7 @@ def fixture(path, aliases=False):
             }))
             # Force signature growth through a framework executable symlink.
             add(physical + executable, macho(6 if folder.endswith(".framework") else 2,
-                                            1024 * 1024 if not folder else 4096,
+                                            4 * 1024 * 1024 if large else (1024 * 1024 if not folder else 4096),
                                             16 if versioned else 32768))
             for index in range(12):
                 add(physical + f"resource-{index}.dat", bytes([index]) * 10000)
@@ -70,7 +70,9 @@ def fixture(path, aliases=False):
         bundle("Frameworks/F.framework", "F", "test.framework")
         bundle("PlugIns/E.appex", "Ext", "test.extension")
         bundle("PlugIns/E.appex/Frameworks/N.framework", "N", "test.nested")
-        bundle("Frameworks/V.framework", "V", "test.versioned", True)
+        bundle("Frameworks/V.framework", "V", "test.versioned", not canonical)
+        if canonical:
+            bundle("Frameworks/Large.framework", "Large", "test.large", large=True)
         add("Standalone.dylib", macho(6))
         if aliases:
             add("AliasFiles/Code", macho(6))
@@ -78,8 +80,11 @@ def fixture(path, aliases=False):
             add("AliasLink/Code", macho(6))
         add("root.dat", b"root resource")
         add("OriginalIcon@3x.png", b"original icon")
-        add("alias", b"root.dat", True)
+        if not canonical:
+            add("alias", b"root.dat", True)
         add("Deleted/old.dat", b"must not reappear")
+        if canonical:
+            add("Deleted/Old.dylib", macho(6))
         add("embedded.mobileprovision", b"old profile")
         add("_CodeSignature/obsolete", b"old signature")
         # Exercise rehashing of the archive membership set across many entries.
@@ -127,7 +132,7 @@ def verify_signature(data, info, resources, expected_directories=2):
     assert directories == expected_directories
 
 
-def verify_archive(path, profiles=False, edited_resource=False):
+def verify_archive(path, profiles=False, edited_resource=False, canonical=False):
     with zipfile.ZipFile(path) as archive:
         assert archive.testzip() is None
         names = archive.namelist()
@@ -139,8 +144,9 @@ def verify_archive(path, profiles=False, edited_resource=False):
             provisions = [archive.read(name) for name in names if name.endswith("/embedded.mobileprovision")]
             assert sorted(provisions) == sorted(b"profile:" + name.encode() for name in
                 ("test.main", "test.framework", "test.extension", "test.nested", "test.versioned"))
-        assert archive.read(APP + "/Frameworks/V.framework/V") == b"Versions/Current/V"
-        assert stat.S_ISLNK(archive.getinfo(APP + "/Frameworks/V.framework/V").external_attr >> 16)
+        if not canonical:
+            assert archive.read(APP + "/Frameworks/V.framework/V") == b"Versions/Current/V"
+            assert stat.S_ISLNK(archive.getinfo(APP + "/Frameworks/V.framework/V").external_attr >> 16)
         for name in names:
             if not name.endswith("/_CodeSignature/CodeResources"):
                 continue
@@ -172,6 +178,34 @@ def verify_archive(path, profiles=False, edited_resource=False):
 
 def extraction_checks(executable, work):
     binary = struct.pack("<I", 0xFEEDFACF) + bytes(100)
+
+    # A digest exclusion is not a removal. Actual removals skip even Mach-O
+    # materialization, but ambiguous aliases retain their prior extraction.
+    for label in ("canonical", "case-parent", "unicode", "symlink"):
+        source = work / f"plan-{label}.ipa"
+        with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(APP + "/Info.plist", b"metadata")
+            archive.writestr(APP + "/Removed/Code", binary)
+            archive.writestr(APP + "/Removed/Info.plist", b"unused metadata")
+            archive.writestr(APP + "/RemovedBackup/Code", binary)
+            archive.writestr(APP + "/kept.dat", b"kept")
+            if label == "case-parent": archive.writestr(APP + "/removed/Other", binary)
+            if label == "unicode": archive.writestr(APP + "/日本語.txt", b"resource")
+            if label == "symlink":
+                entry = zipfile.ZipInfo(APP + "/Alias")
+                entry.create_system = 3; entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(entry, b"Removed")
+        outputs = []
+        for workers in ("1", "4"):
+            overlay = work / f"plan-{label}-{workers}"
+            overlay.mkdir()
+            subprocess.run([str(executable), "--plan", str(source), str(overlay), workers, "Removed"], check=True)
+            assert (overlay / "Removed/Code").exists() == (label != "canonical")
+            assert (overlay / "Removed/Info.plist").exists() == (label != "canonical")
+            assert (overlay / "RemovedBackup/Code").exists()
+            assert (overlay / "Info.plist").exists()
+            outputs.append((overlay / "digests.bin").read_bytes())
+        assert outputs[0] == outputs[1]
 
     def snapshot(directory):
         result = {}
@@ -310,6 +344,22 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
     shim = work / "autorelease.swift"
     shim.write_text("#if os(Linux)\nfunc autoreleasepool<T>(invoking body: () throws -> T) rethrows -> T { try body() }\n#endif\n")
     app_source = (ROOT.parent / "Ksign/Backend/Storage/Storage+Shared.swift").read_text()
+    signing_source = (ROOT.parent / "Ksign/Utilities/Handlers/SigningHandler.swift").read_text()
+    gate = work / "signing-stage-gate.swift"
+    gate.write_text("import Foundation\nactor SigningStageGate {" + signing_source.split("actor SigningStageGate {", 1)[1]
+                    .split("\nfinal class SigningBatchContext", 1)[0])
+    pipeline = work / "pipeline-regressions"
+    subprocess.run([str(compiler), "-swift-version", "5", "-parse-as-library",
+                    "-module-cache-path", str(work / "swift-cache"), str(gate),
+                    str(ROOT / "Tests/signing_pipeline_regressions.swift"), "-o", str(pipeline)], check=True)
+    subprocess.run([str(pipeline)], check=True, timeout=30)
+    ar_test = work / "ar-regressions"
+    subprocess.run([str(compiler), "-swift-version", "5", "-parse-as-library",
+                    "-module-cache-path", str(work / "swift-cache"),
+                    str(ROOT.parent / "Ksign/Utilities/ARDecompression/AR.swift"),
+                    str(ROOT.parent / "Ksign/Utilities/ARDecompression/Models/ARFileModel.swift"),
+                    str(ROOT / "Tests/ar_regressions.swift"), "-o", str(ar_test)], check=True)
+    subprocess.run([str(ar_test)], check=True, timeout=30)
     start = app_source.index("struct ArchiveBackedAppMetadata")
     end = app_source.index("// MARK: - Helpers", start)
     app = work / "archive-app.swift"
@@ -332,8 +382,34 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
                     warnings.simplefilter("ignore", UserWarning)
                     output.writestr(entry, original.read(entry))
         output.writestr(APP + "/Replace.bundle/old.txt", b"old")
+        output.writestr(APP + "/Replace.bundle/Old.dylib", macho(6))
         output.writestr(APP + "/Replace.bundle/shared.txt", b"original shared")
         output.writestr(APP + "/Replace.bundle.extra/untouched.txt", b"untouched")
+    for label in ("unrelated", "case", "dot", "unicode-target", "link-ancestor", "link-target", "unrelated-case", "unrelated-dot", "unicode-normalization"):
+        with zipfile.ZipFile(work / f"mutation-{label}.ipa", "w", zipfile.ZIP_DEFLATED) as output:
+            output.writestr(APP + "/Info.plist", plistlib.dumps({"CFBundleExecutable": "Main", "CFBundleIdentifier": "test.mutation"}))
+            output.writestr(APP + "/Main", macho())
+            output.writestr(APP + "/Target.bundle/first.txt", b"first")
+            if label == "unrelated":
+                output.writestr(APP + "/Other/日本語.txt", b"unrelated")
+            if label == "case": output.writestr(APP + "/target.bundle/second.txt", b"alias")
+            if label == "dot": output.writestr(APP + "/Target.bundle/./second.txt", b"alias")
+            if label == "unicode-target": output.writestr(APP + "/Tárget.bundle/second.txt", b"alias")
+            if label == "unrelated-case":
+                output.writestr(APP + "/Other/first.txt", b"first")
+                output.writestr(APP + "/other/second.txt", b"second")
+            if label == "unrelated-dot": output.writestr(APP + "/Other/./first.txt", b"dot")
+            if label == "unicode-normalization":
+                output.writestr(APP + "/Other/caf\u00e9.txt", b"NFC")
+                output.writestr(APP + "/Other/cafe\u0301.txt", b"NFD")
+            if label in ("unrelated", "link-ancestor", "link-target"):
+                entry = zipfile.ZipInfo(APP + ("/Target.bundle" if label == "link-target" else "/Alias"))
+                entry.create_system = 3; entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                output.writestr(entry, b"Target.bundle" if label != "link-target" else b"Other")
+                if label == "link-ancestor": output.writestr(APP + "/Alias/second.txt", b"redirected")
+            outside = zipfile.ZipInfo("Outside/Link")
+            outside.create_system = 3; outside.external_attr = (stat.S_IFLNK | 0o777) << 16
+            output.writestr(outside, b"../Payload/Test.app")
     subprocess.run([str(executable), str(source), str(work), str(tweak_source)], check=True)
     handler = work / "TweakHandler.swift"
     handler.write_text((ROOT.parent / "Ksign/Utilities/Handlers/TweakHandler.swift").read_text()
@@ -386,6 +462,7 @@ def main():
                         "-Wl,--wrap=mz_zip_reader_goto_next_entry", "-Wl,--wrap=lstat",
                         "-Wl,--wrap=EVP_DigestUpdate", "-Wl,--wrap=EVP_MD_CTX_new",
                         "-Wl,--wrap=PEM_read_bio_X509", "-Wl,--wrap=mmap",
+                        "-Wl,--wrap=PKCS12_parse",
                         "-o", str(executable)], check=True)
         source = work / "source.ipa"
         fixture(source)
@@ -449,6 +526,16 @@ def main():
         assert results[1] == results[2], "Sparse and filesystem signing must emit identical contents"
         assert results[2] == results[3], "Relative and absolute paths must emit identical contents"
         assert results[0] == results[4] == results[5], "Fused classification/hashing must emit identical signatures/seals"
+        canonical_source = work / "canonical-source.ipa"
+        fixture(canonical_source, canonical=True)
+        canonical_results = []
+        for workers in ("1", "4"):
+            overlay = work / f"canonical-{workers}.app"; overlay.mkdir()
+            destination = work / f"canonical-{workers}.ipa"
+            subprocess.run([str(executable), str(canonical_source), str(destination), str(overlay), APP, "--canonical"],
+                env={**os.environ, "ZSIGN_WORKERS": workers}, check=True, stdout=subprocess.PIPE)
+            canonical_results.append(verify_archive(destination, canonical=True))
+        assert canonical_results[0] == canonical_results[1], "Concurrent small binaries and dependency-ordered bundles must match serial signing"
         edited = []
         for mode in ("--overlay", "--fused-overlay"):
             overlay = work / (mode[2:] + ".app")

@@ -22,17 +22,20 @@ final class ZsignHandler {
 	private var _options: Options
 	private var _certificate: CertificatePair?
 	private var _archiveContext: ArchiveSigningContext?
+    private let _session: ZsignSigningSession?
 	
 	init(
 		appUrl: URL,
 		options: Options = OptionsManager.shared.options,
 		cert: CertificatePair? = nil,
-		archiveContext: ArchiveSigningContext? = nil
+		archiveContext: ArchiveSigningContext? = nil,
+        session: ZsignSigningSession? = nil
 	) {
 		self._appUrl = appUrl
 		self._options = options
 		self._certificate = cert
 		self._archiveContext = archiveContext
+        self._session = session
 	}
 	
 	func disinject() async throws {
@@ -67,7 +70,8 @@ final class ZsignHandler {
             archiveRootPath: _archiveContext?.rootAppPath ?? "",
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
             archiveManifest: _archiveContext?.manifest,
-            archiveResourceDigests: _archiveContext?.resourceDigests
+            archiveResourceDigests: _archiveContext?.resourceDigests,
+            session: _session
         ) else {
             throw SigningFileHandlerError.signFailed
         }
@@ -86,7 +90,8 @@ final class ZsignHandler {
             archiveRootPath: _archiveContext?.rootAppPath ?? "",
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
             archiveManifest: _archiveContext?.manifest,
-            archiveResourceDigests: _archiveContext?.resourceDigests
+            archiveResourceDigests: _archiveContext?.resourceDigests,
+            session: _session
         ) else {
             throw SigningFileHandlerError.signFailed
         }

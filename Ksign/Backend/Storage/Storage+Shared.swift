@@ -170,6 +170,56 @@ final class ArchiveBackedApp {
         return true
     }
 
+    /// Unrelated Unicode names and file links can remain sparse. Aliases that
+    /// collapse resource names still require the filesystem's canonical seal.
+    func supportsSparseTweakMutations(at destinations: Set<String>) -> Bool {
+        guard destinations.allSatisfy({ $0.utf8.allSatisfy { $0 < 128 } }) else { return false }
+        func canonical(_ path: String) -> String {
+            let needsCleaning = path.contains("//") || path.contains("/./") || path.hasPrefix("./") || path.hasSuffix("/.") || path.hasSuffix("/")
+            let clean = needsCleaning ? path.split(separator: "/").filter { $0 != "." }.joined(separator: "/") : path
+            if clean.utf8.allSatisfy({ $0 < 128 }) { return clean.lowercased() }
+            return clean.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        }
+        let root = canonical(rootAppPath) + "/"
+        let targets = destinations.map(canonical)
+        // Swift String dictionary keys equate NFC/NFD spellings. Enumerate the
+        // shared native index so those aliases cannot disappear from this check.
+        guard let entries = try? ASignArchive.entries(in: archiveURL, index: archiveIndex) else { return false }
+        var ancestors = Set<String>()
+        if entries.contains(where: { $0.isSymlink }) {
+            for entry in entries {
+                let components = canonical(entry.path).split(separator: "/")
+                var parent = ""
+                for component in components.dropLast() {
+                    parent += (parent.isEmpty ? "" : "/") + component
+                    ancestors.insert(parent)
+                }
+            }
+        }
+        var spellings: [String: String] = [:]
+        for entry in entries {
+            let normalized = canonical(entry.path)
+            guard normalized.hasPrefix(root) else { continue }
+            let relative = String(normalized.dropFirst(root.count))
+            if entry.path.contains("//") { return false }
+            let components = entry.path.split(separator: "/")
+            if components.contains(".") { return false }
+            var parent = ""
+            for component in components {
+                parent += (parent.isEmpty ? "" : "/") + component
+                let folded = canonical(parent)
+                if let previous = spellings[folded], !previous.utf8.elementsEqual(parent.utf8) { return false }
+                spellings[folded] = parent
+            }
+            // A link with stored descendants can redirect unrelated archive
+            // writes into a destination. Keep that conservative fallback.
+            if entry.isSymlink && ancestors.contains(normalized) { return false }
+            guard targets.contains(where: { relative == $0 || relative.hasPrefix($0 + "/") || $0.hasPrefix(relative + "/") }) else { continue }
+            if entry.isSymlink || !entry.path.utf8.allSatisfy({ $0 < 128 }) { return false }
+        }
+        return true
+    }
+
 	func metadata(overlayAppURL: URL? = nil, deletedPaths: Set<String> = []) throws -> ArchiveBackedAppMetadata {
 		let plistPath = rootAppPath + "/Info.plist"
 		guard let entry = entriesByPath[plistPath] else {

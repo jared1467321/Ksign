@@ -124,7 +124,7 @@ bool ZMachO::CheckSignature() const
 	);
 }
 
-bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, string strInfoSHA1, string strInfoSHA256, const string& strCodeResourcesData)
+bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, string strInfoSHA1, string strInfoSHA256, const string& strCodeResourcesData, const ZSignAsset::PreparedBlob* resourceHashes)
 {
 	if (NULL == pSignAsset || NULL == m_pBase || m_arrArchOes.empty()) {
 		return false;
@@ -151,6 +151,12 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 		bForce = true;
 	}
 
+	ZSignAsset::PreparedBlob computedResources;
+    if (resourceHashes == NULL && !strCodeResourcesData.empty()) {
+        if (pSignAsset->m_bSHA256Only) ZSHA::SHA256(strCodeResourcesData, computedResources.sha256);
+        else ZSHA::SHA(strCodeResourcesData, computedResources.sha1, computedResources.sha256);
+        resourceHashes = &computedResources;
+    }
 	for (size_t i = 0; i < m_arrArchOes.size(); i++) {
 		ZArchO* archo = m_arrArchOes[i];
 		if (strInfoSHA1.empty() || strInfoSHA256.empty()) {
@@ -162,7 +168,7 @@ bool ZMachO::Sign(ZSignAsset* pSignAsset, bool bForce, string strBundleId, strin
 			}
 		}
 
-		if (!archo->Sign(pSignAsset, bForce, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResourcesData)) {
+		if (!archo->Sign(pSignAsset, bForce, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResourcesData, resourceHashes)) {
 			return false;
 		}
 	}

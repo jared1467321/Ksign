@@ -1598,6 +1598,8 @@ typedef struct asign_materialize_job_s {
     uint8_t *selected;
     asign_resource_digest *digests;
     const char *excluded_paths;
+    const char *removed_paths;
+    size_t *work_order;
     atomic_size_t next;
     atomic_int error;
     int extracting;
@@ -1617,11 +1619,15 @@ static void *asign_materialize_worker(void *context) {
     if (err != MZ_OK) { atomic_store(&job->error, err); return NULL; }
     void *reader = *slot;
     for (;;) {
-        size_t i = atomic_fetch_add(&job->next, 1);
-        if (i >= job->index->names.count || atomic_load(&job->error) != MZ_OK) break;
+        size_t task = atomic_fetch_add(&job->next, 1);
+        if (task >= job->index->names.count || atomic_load(&job->error) != MZ_OK) break;
+        size_t i = job->work_order != NULL ? job->work_order[task] : task;
         const asign_entry_position *entry = job->index->ordered[i];
         const char *relative = NULL;
         if (!asign_entry_relative_to_root(entry->name, job->root, &relative) || !*relative) continue;
+        // Keep root metadata so invalid root removals retain their prior errors.
+        if (job->removed_paths != NULL && strcmp(relative, "Info.plist") != 0 &&
+            asign_deleted_path_matches(relative, job->removed_paths)) continue;
         if (job->extracting) {
             if (!job->selected[i] || (entry->flags & 2)) continue;
             char *target = asign_join_path(job->destination, relative);
@@ -1743,6 +1749,51 @@ int32_t asign_archive_index_materialize(const asign_archive_index *index, const 
 int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *index, const char *root_path,
     const char *destination, uint8_t include_strings, uint32_t workers,
     const char *excluded_paths, uint8_t **out_digests, size_t *out_size) {
+    return asign_archive_index_materialize_with_plan(index, root_path, destination,
+        include_strings, workers, excluded_paths, NULL, out_digests, out_size);
+}
+
+// Pruning must never change writes through an alias. Check every component,
+// including directory spelling collisions, before skipping source entries.
+static int asign_materialize_removals_safe(const asign_archive_index *index, const char *root) {
+    asign_string_set exact = {0}, folded = {0};
+    int safe = 1;
+    for (size_t i = 0; safe && i < index->names.count; i++) {
+        const asign_entry_position *entry = index->ordered[i];
+        const char *relative = NULL;
+        if (!asign_entry_relative_to_root(entry->name, root, &relative) || !*relative) continue;
+        if (entry->flags & 2) { safe = 0; break; }
+        char *path = strdup(relative), *key = strdup(relative);
+        if (path == NULL || key == NULL) safe = 0;
+        if (safe) for (size_t p = 0, start = 0;; p++) {
+            unsigned char value = (unsigned char)path[p];
+            if (value >= 128) { safe = 0; break; }
+            key[p] = (char)asign_fold_ascii(value);
+            if (value != '/' && value != '\0') continue;
+            if ((p == start && value != '\0') || (p - start == 1 && path[start] == '.')) { safe = 0; break; }
+            path[p] = key[p] = '\0';
+            if (p > start && ((asign_string_set_contains(&folded, key) && !asign_string_set_contains(&exact, path)) ||
+                asign_string_set_add(&exact, path) != MZ_OK || asign_string_set_add(&folded, key) != MZ_OK)) safe = 0;
+            path[p] = (char)value; key[p] = (char)value;
+            if (!safe || value == '\0') break;
+            start = p + 1;
+        }
+        free(path); free(key);
+    }
+    asign_string_set_free(&exact); asign_string_set_free(&folded);
+    return safe;
+}
+
+typedef struct asign_materialize_cost_s { size_t index; int64_t size; } asign_materialize_cost;
+static int asign_materialize_cost_compare(const void *a, const void *b) {
+    const asign_materialize_cost *lhs = a, *rhs = b;
+    if (lhs->size != rhs->size) return lhs->size > rhs->size ? -1 : 1;
+    return (lhs->index > rhs->index) - (lhs->index < rhs->index);
+}
+
+int32_t asign_archive_index_materialize_with_plan(const asign_archive_index *index, const char *root_path,
+    const char *destination, uint8_t include_strings, uint32_t workers,
+    const char *excluded_paths, const char *removed_paths, uint8_t **out_digests, size_t *out_size) {
     if (index == NULL || destination == NULL || ((out_digests == NULL) != (out_size == NULL))) return MZ_PARAM_ERROR;
     if (out_digests != NULL) { *out_digests = NULL; *out_size = 0; }
     char *root = asign_trimmed_root_copy(root_path);
@@ -1764,6 +1815,38 @@ int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *
         workers = processors > 0 && processors < maximum_workers ? (uint32_t)processors : maximum_workers;
     }
     if (workers > maximum_workers) workers = maximum_workers;
+    if (removed_paths != NULL && *removed_paths) {
+        int has_removals = 0;
+        for (size_t i = 0; i < index->names.count && !has_removals; i++) {
+            const char *relative = NULL;
+            has_removals = asign_entry_relative_to_root(index->ordered[i]->name, root, &relative) &&
+                *relative && asign_deleted_path_matches(relative, removed_paths);
+        }
+        if (has_removals && asign_materialize_removals_safe(index, root)) job.removed_paths = removed_paths;
+    }
+    // Results remain in original entry slots. Only independent read work moves;
+    // aliased extraction below continues to use source order.
+    if (digests != NULL && workers > 1 && index->names.count >= 8) {
+        const int64_t large_resource = 1024 * 1024;
+        size_t large_count = 0;
+        for (size_t i = 0; i < index->names.count; i++) large_count += index->ordered[i]->size >= large_resource;
+        // Small members keep source locality, with no full-index sort. Only
+        // costly members need priority to avoid a single-worker tail.
+        if (large_count != 0 && large_count <= SIZE_MAX / sizeof(asign_materialize_cost)) {
+            asign_materialize_cost *costs = malloc(large_count * sizeof(*costs));
+            job.work_order = malloc(index->names.count * sizeof(*job.work_order));
+            if (costs != NULL && job.work_order != NULL) {
+                size_t next = 0;
+                for (size_t i = 0; i < index->names.count; i++) if (index->ordered[i]->size >= large_resource)
+                    costs[next++] = (asign_materialize_cost){i, index->ordered[i]->size};
+                qsort(costs, large_count, sizeof(*costs), asign_materialize_cost_compare);
+                for (size_t i = 0; i < large_count; i++) job.work_order[i] = costs[i].index;
+                for (size_t i = 0; i < index->names.count; i++) if (index->ordered[i]->size < large_resource)
+                    job.work_order[next++] = i;
+            } else { free(job.work_order); job.work_order = NULL; }
+            free(costs);
+        }
+    }
     int32_t err = asign_materialize_run(&job, workers);
     if (err == MZ_OK && !asign_materialize_parallel_paths_safe(&job)) {
         // Ambiguous aliases retain the old serial order, including symlink order.
@@ -1798,6 +1881,7 @@ int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *
         }
     }
     free(digests);
+    free(job.work_order);
     free(selected);
     free(root);
     return err;

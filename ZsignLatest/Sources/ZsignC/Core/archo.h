@@ -16,7 +16,8 @@ public:
 				const string& strBundleId, 
 				const string& strInfoSHA1, 
 				const string& strInfoSHA256, 
-				const string& strCodeResourcesData);
+				const string& strCodeResourcesData,
+                const ZSignAsset::PreparedBlob* resourceHashes = NULL);
 
 	void PrintInfo();
 	bool IsExecute();

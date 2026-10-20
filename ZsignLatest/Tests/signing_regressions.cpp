@@ -9,6 +9,7 @@
 #include "signing.h"
 #include <openssl/cms.h>
 #include <openssl/pem.h>
+#include <openssl/pkcs12.h>
 
 // Test-only linker wrappers count archive reads without instrumenting the app.
 static mutex readMutex;
@@ -17,6 +18,8 @@ static bool countReads = false;
 static atomic<size_t> readerOpens(0);
 static atomic<size_t> directorySteps(0);
 static atomic<size_t> resourceStats(0);
+static atomic<size_t> sealMaps(0);
+static set<thread::id> binaryMapThreads;
 static bool countExtraction = false;
 static atomic<size_t> extractionReaderOpens(0);
 static set<thread::id> extractionThreads;
@@ -85,7 +88,25 @@ static bool countPatchMaps = false;
 extern "C" void* __real_mmap(void*, size_t, int, int, int, off_t);
 extern "C" void* __wrap_mmap(void* address, size_t length, int prot, int flags, int fd, off_t offset) {
     if (countPatchMaps) patchMaps++;
+    if (countReads) {
+        char path[4096] = {};
+        const string link = "/proc/self/fd/" + to_string(fd);
+        if (readlink(link.c_str(), path, sizeof(path) - 1) > 0) {
+            if (ZFile::IsPathSuffix(path, "/_CodeSignature/CodeResources")) sealMaps++;
+            if (ZFile::IsPathSuffix(path, ".dylib")) {
+                lock_guard<mutex> lock(readMutex);
+                binaryMapThreads.insert(this_thread::get_id());
+            }
+        }
+    }
     return __real_mmap(address, length, prot, flags, fd, offset);
+}
+
+static atomic<size_t> p12Parses(0);
+extern "C" int __real_PKCS12_parse(PKCS12*, const char*, EVP_PKEY**, X509**, STACK_OF(X509)**);
+extern "C" int __wrap_PKCS12_parse(PKCS12* p12, const char* password, EVP_PKEY** key, X509** cert, STACK_OF(X509)** chain) {
+    p12Parses++;
+    return __real_PKCS12_parse(p12, password, key, cert, chain);
 }
 
 static void CheckPreparedMetadata() {
@@ -177,6 +198,51 @@ static void CheckCMS(const string& p12, const string& provision, const string& b
     assert(rootParses == 2); // chain parsed once across all signatures
     SignBinary(binary, asset, 256);
     assert(rootParses == 2);
+    p12Parses = 0;
+    ZSignAsset retained;
+    {
+        ZSignSession session;
+        for (int i = 0; i < 8; i++) {
+            ZSignAsset copy;
+            assert(session.InitAsset(copy, p12, provision, "", "test", false));
+            assert(copy.m_strTeamId == asset.m_strTeamId && copy.m_strEntitleData == asset.m_strEntitleData);
+            copy.m_strEntitleData = "<plist><dict/></plist>";
+        }
+        assert(p12Parses == 1);
+        assert(session.InitAsset(retained, p12, provision, "", "test", false));
+        assert(retained.m_strEntitleData == asset.m_strEntitleData);
+        ZSignAsset invalid;
+        assert(!session.InitAsset(invalid, p12, provision, "", "wrong password", false));
+        string original;
+        assert(ZFile::ReadFile(provision.c_str(), original));
+        assert(ZFile::WriteFile(provision.c_str(), "changed provision"));
+        assert(!session.InitAsset(invalid, p12, provision, "", "test", false));
+        assert(ZFile::WriteFile(provision.c_str(), original));
+        assert(session.InitAsset(retained, p12, provision, "", "test", false));
+        assert(p12Parses == 3); // original, wrong password, restored input
+    }
+    // Ref-counted credentials survive the batch and maintain a valid CMS.
+    assert(retained.GenerateCMS(data, "<plist><dict/></plist>", cd1, cd256, cms));
+    const unsigned char* cursor = (const unsigned char*)cms.data();
+    CMS_ContentInfo* parsed = d2i_CMS_ContentInfo(NULL, &cursor, cms.size());
+    BIO* content = BIO_new_mem_buf(data.data(), data.size());
+    assert(parsed && content && CMS_verify(parsed, NULL, NULL, content, NULL, CMS_NO_SIGNER_CERT_VERIFY | CMS_BINARY) == 1);
+    CMS_ContentInfo_free(parsed); BIO_free(content);
+    vector<shared_ptr<ZSignAsset>> lanes;
+    for (size_t i = 0; i < ZUtil::GetWorkerCount(6); i++) {
+        auto copy = make_shared<ZSignAsset>();
+        assert(copy->CloneFrom(retained));
+        lanes.push_back(copy);
+    }
+    ZUtil::ParallelFor(24, lanes.size(), [&](size_t, size_t lane) {
+        string output;
+        assert(lanes[lane]->GenerateCMS(data, "<plist><dict/></plist>", cd1, cd256, output));
+        const unsigned char* bytes = (const unsigned char*)output.data();
+        CMS_ContentInfo* signedCMS = d2i_CMS_ContentInfo(NULL, &bytes, output.size());
+        BIO* input = BIO_new_mem_buf(data.data(), data.size());
+        assert(signedCMS && input && CMS_verify(signedCMS, NULL, NULL, input, NULL, CMS_NO_SIGNER_CERT_VERIFY | CMS_BINARY) == 1);
+        CMS_ContentInfo_free(signedCMS); BIO_free(input);
+    });
     // Reinitializing must release/reset the previous credentials and chain.
     assert(asset.Init("", "", "", "", "", true, true, false));
     assert(asset.CMSSignatureSizeBound() == 0);
@@ -229,12 +295,16 @@ int main(int argc, char** argv)
         return 0;
     }
 
-	if ((argc == 5 || argc == 6) && string(argv[1]) == "--extract") {
+	if ((argc == 5 || argc == 6) && (string(argv[1]) == "--extract" || string(argv[1]) == "--plan")) {
 		asign_archive_index* index = nullptr;
 		int32_t result = asign_archive_index_open(argv[2], &index);
         uint8_t* digests = nullptr; size_t digestSize = 0;
-		if (result == MZ_OK) result = asign_archive_index_materialize_with_digests(index, "Payload/Test.app", argv[3],
-			argc == 6 ? 1 : 0, (uint32_t)strtoul(argv[4], nullptr, 10), nullptr, &digests, &digestSize);
+		if (result == MZ_OK) result = asign_archive_index_materialize_with_plan(index, "Payload/Test.app", argv[3],
+			argc == 6 && string(argv[1]) == "--extract" ? 1 : 0, (uint32_t)strtoul(argv[4], nullptr, 10),
+            argc == 6 && string(argv[1]) == "--plan" ? argv[5] : nullptr,
+            argc == 6 && string(argv[1]) == "--plan" ? argv[5] : nullptr, &digests, &digestSize);
+        if (result == MZ_OK && string(argv[1]) == "--plan")
+            assert(ZFile::WriteFile((string(argv[3]) + "/digests.bin").c_str(), (const char*)digests, digestSize));
         asign_archive_free_buffer(digests);
 		asign_archive_index_close(index);
 		return result == MZ_OK ? 0 : 1;
@@ -244,7 +314,7 @@ int main(int argc, char** argv)
 	const string source = argv[1], destination = argv[2], overlay = argv[3], root = argv[4];
 	const bool filesystem = argc == 6 && string(argv[5]) == "--filesystem";
     const string mode = argc == 6 ? argv[5] : "";
-    const bool fused = mode == "--fused" || mode == "--fused-overlay";
+    const bool fused = mode == "--fused" || mode == "--fused-overlay" || mode == "--canonical";
     const bool overlayResource = mode == "--overlay" || mode == "--fused-overlay";
 	const bool profiles = argc == 6 && string(argv[5]) == "--profiles";
 	asign_archive_index* index = nullptr;
@@ -257,9 +327,11 @@ int main(int argc, char** argv)
 	if (!filesystem) {
 		countExtraction = true;
         uint8_t* digests = nullptr; size_t digestSize = 0;
-		assert(MZ_OK == asign_archive_index_materialize_with_digests(index, root.c_str(), overlay.c_str(), 0,
+		assert(MZ_OK == asign_archive_index_materialize_with_plan(index, root.c_str(), overlay.c_str(), 0,
 			(uint32_t)ZUtil::GetWorkerCount(4), "Deleted\nembedded.mobileprovision",
+            "Deleted",
             fused ? &digests : nullptr, fused ? &digestSize : nullptr));
+        if (mode == "--canonical") assert(!ZFile::IsFileExists((overlay + "/Deleted/Old.dylib").c_str()));
         if (digests) resourceDigests.assign((const char*)digests, digestSize);
         asign_archive_free_buffer(digests);
 		countExtraction = false;
@@ -294,10 +366,17 @@ int main(int argc, char** argv)
 		readerOpens = 0;
 		directorySteps = 0;
 		resourceStats = 0;
+        sealMaps = 0; binaryMapThreads.clear();
 		countReads = true;
 		assert(profiles ? bundle.SignFolder(&assets, overlay, "", "", "", {}, {}, true, false, false, false) :
 			bundle.SignFolder(&asset, overlay, "", "", "", {}, {}, true, false, false, false));
 		countReads = false;
+        assert(sealMaps == 0); // Generated resource seals reuse their in-memory digests.
+        if (mode == "--canonical" && ZUtil::GetWorkerCount(6) > 1) {
+            // Parent sealing may mmap signed dylibs on the coordinator too.
+            // At least one additional thread must have mapped the signing input.
+            assert(binaryMapThreads.size() > 1);
+        }
 		assert(resourceReads.empty() == (filesystem || fused));
 		for (const auto& resource : resourceReads) assert(resource.second == 1);
 		// One index reader plus at most one retained reader per hashing lane.

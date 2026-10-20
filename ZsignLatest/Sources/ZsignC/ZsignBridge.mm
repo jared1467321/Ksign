@@ -232,6 +232,9 @@ bool PatchMachODylibs(NSString *filePath, NSDictionary<NSString *, NSString *> *
     }
 }
 
+void *ZsignCreateSession(void) { return new ZSignSession(); }
+void ZsignFreeSession(void *session) { delete (ZSignSession*)session; }
+
 int zsign(
     NSString *app,
     NSString *prov,
@@ -248,6 +251,7 @@ int zsign(
     NSArray<NSString *> *archiveDeletedPaths,
     NSData *archiveManifest,
     NSData *archiveResourceDigests,
+    void *session,
     void (^ _Nullable completionHandler)(BOOL success)
 ) {
     @autoreleasepool {
@@ -270,7 +274,8 @@ int zsign(
         const string displayName = ToString(displayname);
         const string bundleVersion = ToString(bundleversion);
 
-        if (!asset.Init(
+        const bool initialized = session != NULL ?
+            ((ZSignSession*)session)->InitAsset(asset, keyFile, provisionFile, entitlementsFile, password, adhoc) : asset.Init(
             certFile,
             keyFile,
             provisionFile,
@@ -279,7 +284,8 @@ int zsign(
             adhoc,
             false,
             false
-        )) {
+        );
+        if (!initialized) {
             if (completionHandler != nil) {
                 completionHandler(NO);
             }

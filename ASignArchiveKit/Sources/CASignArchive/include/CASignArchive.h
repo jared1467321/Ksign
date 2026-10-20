@@ -46,6 +46,11 @@ int32_t asign_archive_index_materialize(const asign_archive_index *index, const 
 int32_t asign_archive_index_materialize_with_digests(const asign_archive_index *index, const char *root,
     const char *destination, uint8_t include_info_plist_strings, uint32_t workers,
     const char *excluded_paths, uint8_t **digests, size_t *digests_size);
+// Actual removals are distinct from digest exclusions. Ambiguous filesystem
+// aliases retain complete classification/extraction before the caller removes them.
+int32_t asign_archive_index_materialize_with_plan(const asign_archive_index *index, const char *root,
+    const char *destination, uint8_t include_info_plist_strings, uint32_t workers,
+    const char *excluded_paths, const char *removed_paths, uint8_t **digests, size_t *digests_size);
 int32_t asign_archive_index_rebuild(const asign_archive_index *index, const char *destination,
     const char *root, const char *overlay, const char *deleted, uint8_t omit_signatures,
     int16_t compression, asign_archive_progress_cb progress, void *context);

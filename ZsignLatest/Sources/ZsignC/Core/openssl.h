@@ -1,5 +1,7 @@
 #pragma once
 #include "json.h"
+#include <memory>
+#include <mutex>
 
 class ZSignAsset
 {
@@ -8,6 +10,9 @@ public:
 	~ZSignAsset();
 	ZSignAsset(const ZSignAsset&) = delete;
 	ZSignAsset& operator=(const ZSignAsset&) = delete;
+    // Independent mutable signing metadata, with ref-counted immutable credentials.
+    // Called by the coordinator before worker jobs are published.
+    bool CloneFrom(ZSignAsset& source);
 	// Includes the blob wrapper and a conservative bound for CMS attributes.
 	size_t CMSSignatureSizeBound();
 
@@ -96,4 +101,15 @@ public:
 		OpenSSLInit();
 	};
 	static OpenSSLInit s_OpenSSLInit;
+};
+
+// Owned by one UI signing operation/batch, never a process-wide credential cache.
+class ZSignSession {
+public:
+    bool InitAsset(ZSignAsset& destination, const string& key, const string& provision,
+                   const string& entitlements, const string& password, bool adhoc);
+private:
+    mutex m_mutex;
+    unique_ptr<ZSignAsset> m_asset;
+    string m_keyIdentity, m_profileIdentity, m_password;
 };

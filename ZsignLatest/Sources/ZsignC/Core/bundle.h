@@ -49,7 +49,8 @@ public:
 					bool bRemoveProvision = false);
 
 private:
-	bool SignNode(jvalue& jvNode);
+	bool SignNode(jvalue& jvNode, vector<function<bool()>>* deferred = NULL);
+    bool CanSignConcurrently(const jvalue& node) const;
 	void GetNodeChangedFiles(jvalue& jvNode);
 	void GetChangedFiles(jvalue& jvNode, vector<string>& arrChangedFiles);
 	bool ModifyPluginsBundleId(const string& strOldBundleId, const string& strNewBundleId);

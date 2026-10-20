@@ -11,6 +11,31 @@ import UIKit
 import OSLog
 import ASignArchiveKit
 
+actor SigningStageGate {
+    private var occupied = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func run<T>(_ operation: () async throws -> T) async rethrows -> T {
+        if occupied {
+            await withCheckedContinuation { waiting.append($0) }
+        } else { occupied = true }
+        defer {
+            if waiting.isEmpty { occupied = false }
+            else { waiting.removeFirst().resume() }
+        }
+        return try await operation()
+    }
+}
+
+final class SigningBatchContext {
+    let packages = TweakPackageCache()
+    let session = ZsignSigningSession()
+    // At most one CPU preparation/signing stage and one archive writer.
+    // BulkSigningView admits at most two apps, bounding workspace memory too.
+    let signing = SigningStageGate()
+    let archiving = SigningStageGate()
+}
+
 final class SigningHandler: NSObject {
 	private let _fileManager = FileManager.default
 	private let _uuid = UUID().uuidString
@@ -33,6 +58,8 @@ final class SigningHandler: NSObject {
 	// type of app it is
 	private var _app: AppInfoPresentable
 	private var _options: Options
+    private let _packages: TweakPackageCache
+    private let _signingSession: ZsignSigningSession?
 	private let _uniqueWorkDir: URL
 	// the options struct is not gonna decode these so
 	// we're just going to do this. If appicon is not
@@ -43,9 +70,12 @@ final class SigningHandler: NSObject {
 	var appIcon: UIImage?
 	var appCertificate: CertificatePair?
 	
-	init(app: AppInfoPresentable, options: Options = OptionsManager.shared.options) {
+	init(app: AppInfoPresentable, options: Options = OptionsManager.shared.options,
+         packages: TweakPackageCache = TweakPackageCache(), signingSession: ZsignSigningSession? = nil) {
 		self._app = app
 		self._options = options
+        self._packages = packages
+        self._signingSession = signingSession
 		self._uniqueWorkDir = _fileManager.temporaryDirectory
 			.appendingPathComponent("FeatherSigning_\(_uuid)", isDirectory: true)
 		super.init()
@@ -68,7 +98,15 @@ final class SigningHandler: NSObject {
 			let hasBroadTweakMutations = _options.injectionFiles.contains {
 				$0.pathExtension.lowercased() != "dylib"
 			} || _options.experiment_replaceSubstrateWithEllekit
-            let needsFullTreeForTweaks = hasBroadTweakMutations && !archiveApp.supportsSparseTweakMutations
+            var needsFullTreeForTweaks = false
+            if hasBroadTweakMutations {
+                var inputs = _options.injectionFiles
+                if (_options.experiment_replaceSubstrateWithEllekit || archiveApp.paths(relativePrefix: "Frameworks/CydiaSubstrate.framework").isEmpty),
+                   let loader = Bundle.main.url(forResource: "ellekit", withExtension: "deb") { inputs.append(loader) }
+                var mutations = try await TweakHandler.mutationPaths(for: inputs, options: _options, packages: _packages)
+                if let executable = try archiveApp.metadata().executable { mutations.insert(executable) }
+                needsFullTreeForTweaks = !archiveApp.supportsSparseTweakMutations(at: mutations)
+            }
 			if needsFullTreeForTweaks {
 				_archiveUsesFullExtractionFallback = true
 				_archiveOriginalRelativePaths = Set(archiveApp.paths())
@@ -82,6 +120,14 @@ final class SigningHandler: NSObject {
                 var hashExclusions = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
                 hashExclusions.insert("embedded.mobileprovision")
                 if _options.removeWatchPlaceholder { hashExclusions.insert("com.apple.WatchPlaceholder") }
+				var removals = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
+                if _options.removeWatchPlaceholder { removals.insert("com.apple.WatchPlaceholder") }
+                // Direct bundles replace their whole destination. Neither old
+                // resource hashes nor old executable inputs can survive that edit.
+                let replacements = try _options.injectionFiles.filter { $0.pathExtension.lowercased() == "bundle" }
+                    .map { try _normalizedArchiveRelativePath($0.lastPathComponent) }
+                hashExclusions.formUnion(replacements)
+                removals.formUnion(replacements)
 				_archiveResourceDigests = try ASignArchive.materializeSigningInputs(
 					from: archiveURL,
 					rootAppPath: archiveApp.rootAppPath,
@@ -89,7 +135,8 @@ final class SigningHandler: NSObject {
 					includeInfoPlistStrings: _options.appName != nil,
                     index: archiveApp.archiveIndex,
                     hashResources: !_options.onlyModify,
-                    excludedResourcePaths: hashExclusions
+                    excludedResourcePaths: hashExclusions,
+                    removedPaths: removals
 				)
 
 				_movedAppPath = movedAppURL
@@ -111,7 +158,7 @@ final class SigningHandler: NSObject {
 		print("[\(_uuid)] Cloned legacy app to: \(movedAppURL.path)")
 	}
 
-	func modify() async throws {
+	func modify(finish: Bool = true) async throws {
 		guard let movedAppPath = _movedAppPath else {
 			throw SigningFileHandlerError.appNotFound
 		}
@@ -171,7 +218,8 @@ final class SigningHandler: NSObject {
             appUrl: movedAppPath,
             options: _options,
             cert: appCertificate,
-            archiveContext: archiveContext
+            archiveContext: archiveContext,
+            session: _signingSession
         )
         try await handler.disinject()
 		
@@ -180,7 +228,8 @@ final class SigningHandler: NSObject {
                 appUrl: movedAppPath,
                 options: _options,
                 cert: appCertificate,
-                archiveContext: archiveContext
+                archiveContext: archiveContext,
+                session: _signingSession
             )
 			
 			if _options.doAdhocSigning {
@@ -191,8 +240,10 @@ final class SigningHandler: NSObject {
 				throw SigningFileHandlerError.missingCertifcate
 			}
 		}
-        try await self.move()
-        try await self.addToDatabase()
+        if finish {
+            try await self.move()
+            try await self.addToDatabase()
+        }
 
 	}
 	
@@ -493,7 +544,7 @@ extension SigningHandler {
         let handler = TweakHandler(app: app, with: tweaks, options: options,
             prepareDestination: workspace.map { workspace in
                 { path, replacing in try workspace.prepare(path, replacing: replacing) }
-            })
+            }, packages: _packages)
 		do {
 			try await handler.getInputFiles()
             _archiveTweakWorkspace = workspace

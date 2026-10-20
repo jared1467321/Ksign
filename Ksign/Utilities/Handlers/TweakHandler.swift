@@ -10,7 +10,76 @@ import Foundation
 import Zsign
 import OSLog
 
+// The owner is one signing operation/batch. Prepared packages are read-only;
+// injection always copies their files before patching any load commands.
+actor TweakPackageCache {
+    private struct Identity: Hashable {
+        let path: String
+        let size: UInt64
+        let modified: Date?
+        let created: Date?
+        let inode: UInt64
+    }
+    private let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FeatherPreparedTweaks_" + UUID().uuidString)
+    private var packages: [Identity: Task<[URL], Error>] = [:]
+    deinit { try? FileManager.default.removeItem(at: directory) }
+
+    func roots(for url: URL) async throws -> [URL] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let key = Identity(path: url.standardizedFileURL.resolvingSymlinksInPath().path,
+            size: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+            modified: attributes[.modificationDate] as? Date, created: attributes[.creationDate] as? Date,
+            inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)
+        if let existing = packages[key] { return try await existing.value }
+        let destination = directory.appendingPathComponent(UUID().uuidString)
+        let task = Task.detached { () throws -> [URL] in
+            do {
+                var roots: [URL] = []
+                let members = try await AR(with: url).extract()
+                for member in members where ["data.tar", "data.tar.lzma", "data.tar.gz", "data.tar.xz", "data.tar.bz2"].contains(member.name) {
+                    let root = destination.appendingPathComponent(UUID().uuidString)
+                    try autoreleasepool { try extractDebPayload(member.content, name: member.name, to: root) }
+                    roots.append(root)
+                }
+                return roots
+            } catch {
+                try? FileManager.default.removeItem(at: destination)
+                throw error
+            }
+        }
+        packages[key] = task
+        do { return try await task.value }
+        catch { packages.removeValue(forKey: key); throw error }
+    }
+}
+
 class TweakHandler {
+    static func mutationPaths(for urls: [URL], options: Options, packages: TweakPackageCache) async throws -> Set<String> {
+        var paths: Set<String> = ["Frameworks/CydiaSubstrate.framework"]
+        if options.injectIntoExtensions { paths.formUnion(["PlugIns", "Extensions"]) }
+        func add(_ url: URL) {
+            switch url.pathExtension.lowercased() {
+            case "framework": paths.insert("Frameworks/" + url.lastPathComponent)
+            case "bundle": paths.insert(url.lastPathComponent)
+            case "dylib": paths.insert((options.injectFolder == .frameworks ? "Frameworks/" : "") + url.lastPathComponent)
+            default: break
+            }
+        }
+        for url in urls {
+            if url.pathExtension.lowercased() != "deb" { add(url); continue }
+            for root in try await packages.roots(for: url) {
+                guard let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
+                for case let candidate as URL in entries {
+                    if (try candidate.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink == true {
+                        entries.skipDescendants(); continue
+                    }
+                    add(candidate)
+                    if ["framework", "bundle"].contains(candidate.pathExtension.lowercased()) { entries.skipDescendants() }
+                }
+            }
+        }
+        return paths
+    }
 	private let _fileManager = FileManager.default
 	private var _urlsToInject: [URL] = []
 	private var _directoriesToCheck: [URL] = []
@@ -20,6 +89,7 @@ class TweakHandler {
 	private let _app: URL
     private var _options: Options
     private let _prepareDestination: ((String, Bool) throws -> Void)?
+    private let _packages: TweakPackageCache
     private lazy var _mainExecutable = Bundle(url: _app)?.executableURL
     private struct MachOPatch {
         var rewrites: [String: String] = [:]
@@ -49,11 +119,13 @@ class TweakHandler {
     }
     
     init(app: URL, with urls: [URL], options: Options = OptionsManager.shared.options,
-         prepareDestination: ((String, Bool) throws -> Void)? = nil) {
+         prepareDestination: ((String, Bool) throws -> Void)? = nil,
+         packages: TweakPackageCache = TweakPackageCache()) {
 		self._app = app
 		self._urls = urls
         self._options = options
         self._prepareDestination = prepareDestination
+        self._packages = packages
 	}
     
     private func _checkEllekit() async throws {
@@ -102,16 +174,6 @@ class TweakHandler {
 		let frameworksDir = _app.appendingPathComponent("Frameworks")
 		try _fileManager.createDirectoryIfNeeded(at: frameworksDir)
 		
-		let baseTmpDir = _fileManager.temporaryDirectory.appendingPathComponent("FeatherTweak_\(UUID().uuidString)")
-		try _fileManager.createDirectoryIfNeeded(at: baseTmpDir)
-		
-		// Everything extracted in here gets copied into the app bundle before
-		// this function returns, so the scratch copy is disposable. It was
-		// never removed, which left a FeatherTweak_* directory behind for every
-		// signing run that touched a .deb. Deferred so a failure part-way
-		// through cleans up too.
-		defer { try? _fileManager.removeItem(at: baseTmpDir) }
-		
 		// check for appropriate files, if theres debs
 		// it will extract then add a url, if theres no url, i.e.
 		// you haven't added a deb, it will skip
@@ -120,7 +182,7 @@ class TweakHandler {
 			case "dylib":
 				try await _handleDylib(at: url)
 			case "deb":
-				try await _handleDeb(at: url, baseTmpDir: baseTmpDir)
+				_directoriesToCheck.append(contentsOf: try await _packages.roots(for: url))
 			case "framework":
 				try await _handleFramework(at: url)
 			case "bundle":
@@ -208,31 +270,7 @@ class TweakHandler {
 		_injectedDylibNames.append(destinationURL.lastPathComponent)
 	}
 	
-	// Extracy imported deb file
-	private func _handleDeb(at url: URL, baseTmpDir: URL) async throws {
-		let uniqueSubDir = baseTmpDir.appendingPathComponent(UUID().uuidString)
-		try _fileManager.createDirectoryIfNeeded(at: uniqueSubDir)
-		
-		// I don't particularly like this code
-		// but it somehow works well enough,
-		// do note large lzma's are slow as hell
-		
-		let handler = AR(with: url)
-		let arFiles = try await handler.extract()
-		
-		for arFile in arFiles {
-			let outputPath = uniqueSubDir.appendingPathComponent(arFile.name)
-			try arFile.content.write(to: outputPath)
-			
-			if ["data.tar.lzma", "data.tar.gz", "data.tar.xz", "data.tar.bz2"].contains(arFile.name) {
-				var fileToProcess = outputPath
-				try extractFile(at: &fileToProcess)
-				try extractFile(at: &fileToProcess)
-				_directoriesToCheck.append(fileToProcess)
-			}
-		}
-	}
-	
+
 	private func _handleFramework(at url: URL) async throws {
         try _prepareDestination?("Frameworks/" + url.lastPathComponent, false)
 		let destinationURL = _app.appendingPathComponent("Frameworks").appendingPathComponent(url.lastPathComponent)

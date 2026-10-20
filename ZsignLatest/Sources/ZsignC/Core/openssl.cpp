@@ -909,6 +909,73 @@ ZSignAsset::ZSignAsset()
 
 ZSignAsset::~ZSignAsset() { Reset(); }
 
+bool ZSignAsset::CloneFrom(ZSignAsset& source)
+{
+    if (&source == this) return true;
+    if (!source.m_bAdhoc && source.CMSSignatureSizeBound() == 0) return false;
+    // Preserve the operation-wide entitlement preparation optimization when
+    // giving each signing lane its own mutable metadata/cache container.
+    source.PreparedEntitlements(false);
+    source.PreparedEntitlements(true);
+    Reset();
+    m_bAdhoc = source.m_bAdhoc; m_bSHA256Only = source.m_bSHA256Only;
+    m_bSingleBinary = source.m_bSingleBinary;
+    m_strTeamId = source.m_strTeamId; m_strSubjectCN = source.m_strSubjectCN;
+    m_strProvData = source.m_strProvData; m_strEntitleData = source.m_strEntitleData;
+    m_strApplicationId = source.m_strApplicationId;
+    if (source.m_evpPKey) {
+        if (!EVP_PKEY_up_ref((EVP_PKEY*)source.m_evpPKey)) return false;
+        m_evpPKey = source.m_evpPKey;
+    }
+    if (source.m_x509Cert) {
+        if (!X509_up_ref((X509*)source.m_x509Cert)) { Reset(); return false; }
+        m_x509Cert = source.m_x509Cert;
+    }
+    if (source.m_caCerts) m_caCerts = X509_chain_up_ref((STACK_OF(X509)*)source.m_caCerts);
+    if (source.m_cmsChain) m_cmsChain = X509_chain_up_ref((STACK_OF(X509)*)source.m_cmsChain);
+    if ((source.m_caCerts && !m_caCerts) || (source.m_cmsChain && !m_cmsChain)) { Reset(); return false; }
+    m_cmsSizeBound = source.m_cmsSizeBound;
+    m_requirements = source.m_requirements;
+    m_entitlements[0] = source.m_entitlements[0]; m_entitlements[1] = source.m_entitlements[1];
+    return true;
+}
+
+static string SigningFileIdentity(const string& path)
+{
+    struct stat st = {};
+    if (stat(path.c_str(), &st) != 0) return "";
+    string result = path + "\n" + to_string(st.st_dev) + ":" + to_string(st.st_ino) + ":" +
+        to_string(st.st_size) + ":" + to_string(st.st_mtime) + ":" + to_string(st.st_ctime);
+#if defined(__APPLE__)
+    result += ":" + to_string(st.st_mtimespec.tv_nsec) + ":" + to_string(st.st_ctimespec.tv_nsec);
+#elif !defined(_WIN32)
+    result += ":" + to_string(st.st_mtim.tv_nsec) + ":" + to_string(st.st_ctim.tv_nsec);
+#endif
+    return result;
+}
+
+bool ZSignSession::InitAsset(ZSignAsset& destination, const string& key, const string& provision,
+                           const string& entitlements, const string& password, bool adhoc)
+{
+    if (adhoc) return destination.Init("", key, provision, entitlements, password, true, false, false);
+    lock_guard<mutex> lock(m_mutex);
+    const string keyIdentity = SigningFileIdentity(key), profileIdentity = SigningFileIdentity(provision);
+    if (keyIdentity.empty() || profileIdentity.empty()) return false;
+    if (!m_asset || keyIdentity != m_keyIdentity || profileIdentity != m_profileIdentity || password != m_password) {
+        auto asset = make_unique<ZSignAsset>();
+        if (!asset->Init("", key, provision, "", password, false, false, false)) return false;
+        if (SigningFileIdentity(key) != keyIdentity || SigningFileIdentity(provision) != profileIdentity) return false;
+        m_asset = std::move(asset);
+        m_keyIdentity = keyIdentity; m_profileIdentity = profileIdentity; m_password = password;
+    }
+    if (!destination.CloneFrom(*m_asset)) return false;
+    if (!entitlements.empty()) {
+        string data;
+        if (ZFile::ReadFile(entitlements.c_str(), data) && !data.empty()) destination.m_strEntitleData = std::move(data);
+    }
+    return true;
+}
+
 void ZSignAsset::Reset()
 {
 	sk_X509_pop_free((STACK_OF(X509)*)m_cmsChain, X509_free);

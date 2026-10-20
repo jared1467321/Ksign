@@ -18,7 +18,8 @@ public:
 				string strBundleId, 
 				string strInfoSHA1, 
 				string strInfoSHA256, 
-				const string& strCodeResourcesData);
+				const string& strCodeResourcesData,
+                const ZSignAsset::PreparedBlob* resourceHashes = NULL);
 	bool InjectDylib(bool bWeakInject, const char* szDylibFile);
 	bool ChangeDylibPath(const char* oldPath, const char* newPath);
 	bool PatchDylibs(const vector<pair<string, string>>& rewrites, const vector<string>& injections, bool weak);
