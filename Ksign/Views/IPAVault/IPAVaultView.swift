@@ -46,12 +46,14 @@ struct IPAVaultDrawerView: View {
     @ObservedObject private var installSession = InstallSession.shared
 
     private let _tabBarInset: CGFloat = 58
+    private let _pillHitPadding: CGFloat = 8
 
     var body: some View {
         ZStack(alignment: .bottom) {
             if session.isActive, !session.isPresented {
                 _pill
-                    .padding(.bottom, _pillBottomInset)
+                    // Keep the visible capsule in place while its tap target grows.
+                    .padding(.bottom, _pillBottomInset - _pillHitPadding)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -100,6 +102,10 @@ struct IPAVaultDrawerView: View {
                     .nbThemeStroke(.text, opacity: 0.08, lineWidth: 0.5)
             )
             .nbThemeShadow(.shadow, radius: 10, y: 3)
+            // Plain buttons need an explicit shape so gaps and transparent
+            // padding restore the Vault instead of tapping a download behind it.
+            .padding(_pillHitPadding)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Restore IPA Vault")
