@@ -143,6 +143,16 @@ enum FR {
                     try await handler.addToDatabase()
                 }
 
+                // Source cleanup is part of the operation, before either
+                // completion callback. UI delivery can be delayed in background.
+                if options.removeApp {
+                    await MainActor.run {
+                        if !app.isSigned {
+                            Storage.shared.deleteApp(for: app)
+                        }
+                    }
+                }
+
 				try? await handler.clean()
 
 				await TempMaintenance.shared.endOperation()

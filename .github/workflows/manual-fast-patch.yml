@@ -82,6 +82,9 @@ jobs:
       - name: Verify adaptive themes
         run: python3 .github/scripts/test_themes.py
 
+      - name: Verify signing cleanup
+        run: python3 .github/scripts/test_signing_cleanup.py
+
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays, tests and documentation
       # must not force both native targets to rebuild.

@@ -370,11 +370,6 @@ extension SigningView {
 					actions: [ok]
 				)
 			} else {
-				// Remove app after signed option thing
-				if options.removeApp && !app.isSigned {
-					Storage.shared.deleteApp(for: app)
-				}
-                
 				Task { @MainActor in
 					if signAndInstall, let signedID {
 						let handoff = await SigningPreflightCoordinator.prepareInstallation([signedID])

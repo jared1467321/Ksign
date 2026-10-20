@@ -334,9 +334,6 @@ extension BulkSigningView {
                     switch result {
                     case .success(let signedID):
                         completedIDs[index] = signedID
-                        if config.options.removeApp, !config.app.isSigned {
-                            await MainActor.run { Storage.shared.deleteApp(for: config.app) }
-                        }
                     case .failure(let error):
                         if let skip = error as? IDeviceInstallSkip {
                             skippedApps.append(.init(name: currentName, reason: skip.reason))
