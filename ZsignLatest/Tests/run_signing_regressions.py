@@ -335,6 +335,40 @@ def growth_and_cms_checks(executable, work):
     # The CMS signature is checked in C++; independently verify the final page hashes.
     verify_signature(binary.read_bytes(), None, None)
 
+    concurrent_source = work / "concurrent-source.ipa"
+    fixture(concurrent_source, canonical=True)
+    concurrent = work / "concurrent"
+    concurrent.mkdir()
+    before = hashlib.sha256(concurrent_source.read_bytes()).digest()
+    subprocess.run([str(executable), "--concurrent", str(concurrent_source), str(concurrent), str(p12), str(provision)],
+                   check=True, stdout=subprocess.PIPE, timeout=60)
+    for lane in range(5):
+        contents = verify_archive(concurrent / str(lane) / "signed.ipa", canonical=True)
+        info = plistlib.loads(contents[APP + "/Info.plist"])
+        assert info["CFBundleIdentifier"] == f"test.concurrent.{lane}"
+        assert contents[APP + "/lane.txt"] == str(lane).encode()
+        data = contents[APP + "/Main"]
+        command = 32
+        for _ in range(struct.unpack_from("<I", data, 16)[0]):
+            kind, size = struct.unpack_from("<II", data, command)
+            if kind == 0x1D:
+                signature = struct.unpack_from("<I", data, command + 8)[0]
+                break
+            command += size
+        blobs = {}
+        for index in range(struct.unpack_from(">I", data, signature + 8)[0]):
+            kind, offset = struct.unpack_from(">II", data, signature + 12 + index * 8)
+            base = signature + offset
+            length = struct.unpack_from(">I", data, base + 4)[0]
+            blobs[kind] = data[base:base + length]
+        signed_content, cms = concurrent / "directory.bin", concurrent / "signature.der"
+        signed_content.write_bytes(blobs[0])
+        cms.write_bytes(blobs[0x10000][8:])
+        openssl("cms", "-verify", "-binary", "-inform", "DER", "-noverify", "-in", cms,
+                "-content", signed_content, "-out", os.devnull)
+    assert hashlib.sha256(concurrent_source.read_bytes()).digest() == before
+    print("Passed five simultaneous native app signers with shared credentials, identical filenames, distinct IDs/resources, verified CMS and unchanged source IPA.")
+
 
 def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
     module = work / "c-module"
@@ -343,6 +377,9 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
         'module CASignArchive { header "' + str(archive / "include/CASignArchive.h") + '" export * }')
     shim = work / "autorelease.swift"
     shim.write_text("#if os(Linux)\nfunc autoreleasepool<T>(invoking body: () throws -> T) rethrows -> T { try body() }\n#endif\n")
+    memory_types = (ROOT.parent / "Ksign/Utilities/Handlers/ArchiveMemoryCoordinator.swift").read_text().split("// Archive work can be synchronous.", 1)[0]
+    workspace_type = (ROOT.parent / "Ksign/Utilities/Handlers/SigningWorkspace.swift").read_text().split("/// Core Data records", 1)[0]
+    shim.write_text(shim.read_text() + memory_types.replace("import Darwin\n", "").replace("import OSLog\n", "") + workspace_type)
     app_source = (ROOT.parent / "Ksign/Backend/Storage/Storage+Shared.swift").read_text()
     signing_source = (ROOT.parent / "Ksign/Utilities/Handlers/SigningHandler.swift").read_text()
     gate = work / "signing-stage-gate.swift"
@@ -417,7 +454,7 @@ def swift_metadata_checks(compiler, work, archive, includes, minizip, source):
     subprocess.run([str(compiler), "-swift-version", "5", "-parse-as-library",
                     "-module-cache-path", str(work / "swift-cache"), "-I", str(module),
                     str(ROOT.parent / "ASignArchiveKit/Sources/ASignArchiveKit/ASignArchiveKit.swift"),
-                    str(shim), str(app), str(handler), str(ROOT / "Tests/tweak_workspace_regressions.swift"),
+                    str(shim), str(app), str(gate), str(handler), str(ROOT / "Tests/tweak_workspace_regressions.swift"),
                     str(obj), str(minizip), "-Xlinker", "-lz", "-Xlinker", "-lpthread", "-Xlinker", "-lcrypto",
                     "-o", str(executable)], check=True)
     subprocess.run([str(executable), str(tweak_source), str(work)], check=True)

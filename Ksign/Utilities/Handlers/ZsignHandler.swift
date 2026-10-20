@@ -17,25 +17,40 @@ struct ArchiveSigningContext {
     let resourceDigests: Data?
 }
 
+struct SigningCredentials {
+    let provisionPath: String
+    let certificatePath: String
+    let password: String
+
+    init(_ certificate: CertificatePair?) {
+        provisionPath = certificate.flatMap { Storage.shared.getFile(.provision, from: $0)?.path } ?? ""
+        certificatePath = certificate.flatMap { Storage.shared.getFile(.certificate, from: $0)?.path } ?? ""
+        password = certificate?.password ?? ""
+    }
+}
+
 final class ZsignHandler {
 	private var _appUrl: URL
 	private var _options: Options
 	private var _certificate: CertificatePair?
 	private var _archiveContext: ArchiveSigningContext?
     private let _session: ZsignSigningSession?
+    private let _credentials: SigningCredentials?
 	
 	init(
 		appUrl: URL,
 		options: Options = OptionsManager.shared.options,
 		cert: CertificatePair? = nil,
 		archiveContext: ArchiveSigningContext? = nil,
-        session: ZsignSigningSession? = nil
+        session: ZsignSigningSession? = nil,
+        credentials: SigningCredentials? = nil
 	) {
 		self._appUrl = appUrl
 		self._options = options
 		self._certificate = cert
 		self._archiveContext = archiveContext
         self._session = session
+        self._credentials = credentials
 	}
 	
 	func disinject() async throws {
@@ -56,11 +71,12 @@ final class ZsignHandler {
 			throw SigningFileHandlerError.missingCertifcate
 		}
 		
+        let credentials = _credentials ?? SigningCredentials(cert)
         guard Zsign.sign(
             appPath: _appUrl.relativePath,
-            provisionPath: Storage.shared.getFile(.provision, from: cert)?.path ?? "",
-            p12Path: Storage.shared.getFile(.certificate, from: cert)?.path ?? "",
-            p12Password: cert.password ?? "",
+            provisionPath: credentials.provisionPath,
+            p12Path: credentials.certificatePath,
+            p12Password: credentials.password,
             entitlementsPath: _options.appEntitlementsFile?.path ?? "",
             customIdentifier: _options.appIdentifier ?? "",
             customName: _options.appName ?? "",

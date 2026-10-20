@@ -151,6 +151,28 @@ func extractFile(at url: inout URL) throws {
         try await TweakHandler(app: work.appendingPathComponent("tweak-handler-sparse.app"), with: [],
             prepareDestination: { _, _ in destinations += 1 }).getInputFiles()
         check(destinations == 0)
+
+        // Reject an imported framework that redirects an executable into a
+        // different operation before the queued load-command edits run.
+        let isolated = SigningWorkspace(root: work)
+        try isolated.create()
+        defer { try? isolated.clean() }
+        let isolatedApp = isolated.directory.appendingPathComponent("Same.app")
+        try framework(isolatedApp, executable: "Main", binary: binary)
+        let foreign = work.appendingPathComponent("foreign-binary")
+        try write(binary, to: foreign)
+        let escapingFramework = input.appendingPathComponent("Escape.framework")
+        try framework(escapingFramework, executable: "Escape", binary: binary)
+        try FileManager.default.removeItem(at: escapingFramework.appendingPathComponent("Escape"))
+        try FileManager.default.createSymbolicLink(at: escapingFramework.appendingPathComponent("Escape"), withDestinationURL: foreign)
+        let patchCount = Zsign.patches.count
+        do {
+            try await TweakHandler(app: isolatedApp, with: [escapingFramework],
+                validateWorkspace: { try isolated.sanitize(isolatedApp) }).getInputFiles()
+            preconditionFailure("An external framework executable must not be patched")
+        } catch is SigningWorkspace.Failure {}
+        check(Zsign.patches.count == patchCount, "No queued edits may run before workspace validation")
+        check(try Data(contentsOf: foreign) == binary, "Foreign signing inputs must remain unchanged")
         print("Passed batched tweak orchestration, deb/framework/bundle destinations and sparse/full mutation equivalence.")
     }
 }

@@ -13,6 +13,10 @@ import OSLog
 // The owner is one signing operation/batch. Prepared packages are read-only;
 // injection always copies their files before patching any load commands.
 actor TweakPackageCache {
+    // A compressed deb can expand far beyond its file size. Coalescing shared
+    // packages avoids duplicate work; this process-wide gate also prevents
+    // unrelated batches decoding several unbounded in-memory payloads together.
+    private static let decoding = SigningStageGate()
     private struct Identity: Hashable {
         let path: String
         let size: UInt64
@@ -33,18 +37,20 @@ actor TweakPackageCache {
         if let existing = packages[key] { return try await existing.value }
         let destination = directory.appendingPathComponent(UUID().uuidString)
         let task = Task.detached { () throws -> [URL] in
-            do {
-                var roots: [URL] = []
-                let members = try await AR(with: url).extract()
-                for member in members where ["data.tar", "data.tar.lzma", "data.tar.gz", "data.tar.xz", "data.tar.bz2"].contains(member.name) {
-                    let root = destination.appendingPathComponent(UUID().uuidString)
-                    try autoreleasepool { try extractDebPayload(member.content, name: member.name, to: root) }
-                    roots.append(root)
+            try await Self.decoding.run {
+                do {
+                    var roots: [URL] = []
+                    let members = try await AR(with: url).extract()
+                    for member in members where ["data.tar", "data.tar.lzma", "data.tar.gz", "data.tar.xz", "data.tar.bz2"].contains(member.name) {
+                        let root = destination.appendingPathComponent(UUID().uuidString)
+                        try autoreleasepool { try extractDebPayload(member.content, name: member.name, to: root) }
+                        roots.append(root)
+                    }
+                    return roots
+                } catch {
+                    try? FileManager.default.removeItem(at: destination)
+                    throw error
                 }
-                return roots
-            } catch {
-                try? FileManager.default.removeItem(at: destination)
-                throw error
             }
         }
         packages[key] = task
@@ -90,6 +96,7 @@ class TweakHandler {
     private var _options: Options
     private let _prepareDestination: ((String, Bool) throws -> Void)?
     private let _packages: TweakPackageCache
+    private let _validateWorkspace: (() throws -> Void)?
     private lazy var _mainExecutable = Bundle(url: _app)?.executableURL
     private struct MachOPatch {
         var rewrites: [String: String] = [:]
@@ -120,12 +127,14 @@ class TweakHandler {
     
     init(app: URL, with urls: [URL], options: Options = OptionsManager.shared.options,
          prepareDestination: ((String, Bool) throws -> Void)? = nil,
-         packages: TweakPackageCache = TweakPackageCache()) {
+         packages: TweakPackageCache = TweakPackageCache(),
+         validateWorkspace: (() throws -> Void)? = nil) {
 		self._app = app
 		self._urls = urls
         self._options = options
         self._prepareDestination = prepareDestination
         self._packages = packages
+        self._validateWorkspace = validateWorkspace
 	}
     
     private func _checkEllekit() async throws {
@@ -204,6 +213,9 @@ class TweakHandler {
 		if _options.injectIntoExtensions && !_injectedDylibNames.isEmpty {
 			_injectIntoAllExtensions(dylibNames: _injectedDylibNames)
 		}
+        // Imported frameworks can contain symlinks. Validate all destinations
+        // before applying any queued edits, including paths resolved above.
+        try _validateWorkspace?()
         _applyPatches()
 	}
 	

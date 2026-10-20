@@ -152,6 +152,23 @@ final class ArchiveBackedApp {
 		entriesByPath = index
 	}
 
+    var signingMemoryWorkload: ArchiveWorkload {
+        var workload = ArchiveWorkload(operation: .signing)
+        var largestExecutable: Double = 0
+        for entry in entriesByPath.values {
+            workload.entries += 1
+            workload.pathBytes += Double(entry.path.utf8.count)
+            workload.uncompressedBytes += Double(max(0, entry.uncompressedSize))
+            guard !entry.isDirectory, !entry.isSymlink else { continue }
+            let name = entry.path.split(separator: "/").last ?? ""
+            if !name.contains(".") || name.hasSuffix(".dylib") {
+                largestExecutable = max(largestExecutable, Double(max(0, entry.uncompressedSize)))
+            }
+        }
+        workload.residentBytes = largestExecutable * 1.25
+        return workload
+    }
+
     /// Ambiguous filesystem aliases retain the complete-tree tweak fallback.
     /// Canonical trees can materialize just the destinations the injector uses.
     var supportsSparseTweakMutations: Bool {

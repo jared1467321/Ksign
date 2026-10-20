@@ -7,6 +7,7 @@ enum ArchiveOperation: Int, Sendable {
 	case creation
 	case miniZipExtraction
 	case zipFoundationExtraction
+	case signing
 }
 
 struct ArchiveWorkload: Sendable {
@@ -16,6 +17,8 @@ struct ArchiveWorkload: Sendable {
 	var compression: Int = 0
 	var complete = true
 	var operation: ArchiveOperation = .creation
+	// Signing includes mutable Mach-O mappings and resource-seal metadata.
+	var residentBytes: Double = 0
 
 	func covers(_ other: Self) -> Bool {
 		complete && other.complete && operation == other.operation && compression == other.compression
@@ -45,10 +48,12 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	private struct Request {
 		let id: UUID
 		let job: UUID
-		let workload: ArchiveWorkload
+		var workload: ArchiveWorkload
+		var source: String? = nil
 	}
 	private struct Observation {
-		let request: Request
+		var request: Request
+		let admittedAt: TimeInterval
 		let start: Snapshot
 		var latest: Snapshot
 		var peak: Double
@@ -81,8 +86,11 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	private var lastHold: [UUID: String] = [:]
 	private var lastPeriodic: TimeInterval = 0
 	private var buildCount = 0
+	private var lastSigningAdmission: TimeInterval = -.infinity
+	private var signingPeak: Double = 0
+	private var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 	private let ceiling = ArchiveMemoryCoordinator.admissionCeiling
-	private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+	private var now: TimeInterval { clock() }
 
 	private init(monitorPressure: Bool = true) {
 		guard monitorPressure else { return }
@@ -120,9 +128,20 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		queue.async { self.buildCount = count }
 	}
 
-	func acquire(job: UUID, attempt: UUID, workload: ArchiveWorkload) async throws -> Lease {
+	func noteAppMemoryWarning() {
+		queue.async {
+			self.concurrency = 1
+			self.successfulObservations = 0
+			self.recoveryUntil = max(self.recoveryUntil, self.now + 3)
+			self.recent.removeAll()
+			for id in Array(self.active.keys) { self.active[id]?.pressured = true }
+			self.log("UIKit memory warning", snapshot: self.sample())
+		}
+	}
+
+	func acquire(job: UUID, attempt: UUID, workload: ArchiveWorkload, source: String? = nil) async throws -> Lease {
 		try Task.checkCancellation()
-		let request = Request(id: attempt, job: job, workload: workload)
+		let request = Request(id: attempt, job: job, workload: workload, source: source)
 		queue.sync {
 			precondition(!waiting.contains { $0.id == attempt } && active[attempt] == nil)
 			waiting.append(request)
@@ -152,6 +171,39 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		}
 	}
 
+	// The timer keeps sampling during synchronous native work. At phase boundaries
+	// workers also cooperate: under pressure only the oldest signer advances, so
+	// reservations cannot deadlock every worker waiting for another to finish.
+	func signingCheckpoint(_ lease: Lease, _ stage: String, workload: ArchiveWorkload? = nil) async throws {
+		try Task.checkCancellation()
+		queue.sync {
+			if stage == "before native signing" { active[lease.id]?.nativeStarted = true }
+			if stage == "before archive rebuild" { active[lease.id]?.nativeReturned = true }
+			if let workload, let snapshot = sample(), var observation = active[lease.id] {
+				observation.request.workload = workload
+				observation.reservation = max(observation.reservation, allowance(observation.request, snapshot))
+				active[lease.id] = observation
+			}
+			log(stage, id: lease.id, snapshot: sample())
+		}
+		while true {
+			try Task.checkCancellation()
+			let proceed = queue.sync { () -> Bool in
+				guard active[lease.id] != nil else { return true }
+				let snapshot = sample()
+				let oldest = active.values.filter { $0.request.workload.operation == .signing }
+					.min { $0.admittedAt < $1.admittedAt }?.request.id
+				// Drain one operation even when telemetry is unavailable or pressure
+				// persists. Never cancel native code while it owns mutable mappings.
+				if oldest == lease.id { return true }
+				guard pressure == "normal", now >= recoveryUntil, let snapshot else { return false }
+				return snapshot.available > reserve(snapshot) + reservations
+			}
+			if proceed { return }
+			try await Task.sleep(nanoseconds: 100_000_000)
+		}
+	}
+
 	// Observe after the writer and autorelease pool are gone. Cancellation must
 	// NOT skip settling; the owner still cleans failed/cancelled output before
 	// finish() relinquishes its reservation.
@@ -168,7 +220,16 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 				assertionFailure("Archive lease released twice")
 				return
 			}
-			self.observedPeak = max(self.observedPeak, observation.cost)
+			if observation.request.workload.operation == .signing {
+				if observation.isolated && observation.reliable {
+					let cost = observation.pressured ? max(0, observation.peak - observation.start.footprint) : observation.cost
+					signingPeak = max(signingPeak, cost)
+				}
+				log("signing finished success=\(succeeded)", id: lease.id, snapshot: settled, job: observation.request.job)
+				stopSamplingIfIdle()
+				return
+			}
+			if observation.reliable { self.observedPeak = max(self.observedPeak, observation.cost) }
 			if observation.isolated && observation.reliable && observation.nativeStarted && observation.nativeReturned {
 				// Never average away a dangerous high-water observation. Keeping
 				// session high-water marks is intentionally conservative in v1.
@@ -199,6 +260,10 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 
 	private var reservations: Double { active.values.reduce(0) { $0 + $1.reservation } }
 	private func allowance(_ request: Request, _ snapshot: Snapshot) -> Double {
+		if request.workload.operation == .signing {
+			return max(snapshot.budget * 0.04, 1.25 * signingPeak,
+				request.workload.residentBytes + 3 * request.workload.metadataAllowance)
+		}
 		let bootstrap = history.isEmpty ? snapshot.budget / 6 : snapshot.budget * 0.03
 		return max(bootstrap, 1.5 * max(learnedIsolatedPeak, observedPeak), request.workload.metadataAllowance)
 	}
@@ -216,6 +281,7 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 
 	private func admit(_ request: Request) -> Bool {
 		let snapshot = sample()
+		if request.workload.operation == .signing { return admitSigning(request, snapshot) }
 		var reason: String?
 		if waiting.first?.id != request.id { reason = "FIFO predecessor" }
 		else if pressure != "normal" { reason = "memory pressure" }
@@ -245,12 +311,67 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		let outstanding = reservations
 		let isolated = active.isEmpty
 		for id in Array(active.keys) { active[id]?.isolated = false }
-		active[request.id] = Observation(request: request, start: snapshot, latest: snapshot,
+		active[request.id] = Observation(request: request, admittedAt: now, start: snapshot, latest: snapshot,
 			peak: snapshot.footprint, minimum: snapshot.available, reservation: cost, isolated: isolated)
 		waiting.removeAll { $0.id == request.id }
 		let mode = history.isEmpty ? "isolated bootstrap" :
 			(history.contains { $0.covers(request.workload) } ? "measured headroom" : "isolated unfamiliar workload")
 		log("admit: \(mode); priorReservations=\(mb(outstanding)); candidate + prior reservations + reserve fit", id: request.id, snapshot: snapshot, candidate: cost, job: request.job)
+		return true
+	}
+
+	private func admitSigning(_ request: Request, _ snapshot: Snapshot?) -> Bool {
+		// Governed archive and signing work shares this queue and budget.
+		var reason: String?
+		let signing = active.values.filter { $0.request.workload.operation == .signing }
+		let recentRamp = recent.filter { $0.time >= now - 0.4 }
+		let stable = recentRamp.first.flatMap { first in recentRamp.last.map { last in
+			last.time - first.time >= 0.2 &&
+			first.snapshot.available - last.snapshot.available < last.snapshot.budget * 0.01 &&
+			first.snapshot.budget - last.snapshot.budget < last.snapshot.budget * 0.01
+		} } ?? false
+		if waiting.first?.id != request.id { reason = "FIFO predecessor" }
+		else if pressure != "normal" { reason = "memory pressure" }
+		else if now < recoveryUntil { reason = "recovery cooldown" }
+		else if snapshot == nil { reason = "telemetry unavailable" }
+		else if let source = request.source, active.values.contains(where: { $0.request.source == source }) {
+			reason = "signing source already in use"
+		}
+		else if active.count >= ceiling { reason = "signing concurrency ceiling" }
+		else if !active.isEmpty && (!stable || now - lastSigningAdmission < 0.25) { reason = "observing signing ramp" }
+		else if !active.isEmpty && (!request.workload.complete || signing.contains { !$0.request.workload.complete }) {
+			reason = "unknown signing workload requires isolation"
+		}
+		if let snapshot, reason == nil {
+			// An oversized/unknown app still gets a serial attempt. Its uncapped
+			// reservation still applies to subsequent admissions; estimates are not
+			// a reason to leave a previously signable app queued forever.
+			let candidate = active.isEmpty ? min(allowance(request, snapshot), snapshot.budget * 0.5) : allowance(request, snapshot)
+			if snapshot.available <= candidate + reservations + reserve(snapshot) {
+				reason = "signing reservations + reserve exceed headroom"
+			}
+		}
+		if let reason {
+			if lastHold[request.id] != reason {
+				lastHold[request.id] = reason
+				log("signing hold: \(reason)", id: request.id, snapshot: snapshot, job: request.job)
+			}
+			return false
+		}
+		guard let snapshot else { return false }
+		let isolated = active.isEmpty
+		for id in Array(active.keys) {
+			active[id]?.isolated = false
+			// The archive learner cannot attribute a concurrent signer's growth
+			// to its writer. Keep the reservation, but exclude this observation
+			// from archive peak learning instead of permanently poisoning it.
+			if active[id]?.request.workload.operation != .signing { active[id]?.reliable = false }
+		}
+		active[request.id] = Observation(request: request, admittedAt: now, start: snapshot, latest: snapshot,
+			peak: snapshot.footprint, minimum: snapshot.available, reservation: allowance(request, snapshot), isolated: isolated)
+		waiting.removeAll { $0.id == request.id }
+		lastSigningAdmission = now
+		log("signing admitted", id: request.id, snapshot: snapshot, job: request.job)
 		return true
 	}
 
@@ -287,8 +408,21 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 			observation.latest = snapshot
 			observation.peak = max(observation.peak, snapshot.footprint)
 			observation.minimum = min(observation.minimum, snapshot.available)
-			observedPeak = max(observedPeak, observation.cost)
-			observation.reservation = max(observation.reservation, observation.cost * 1.5)
+			if observation.request.workload.operation == .signing {
+				// Concurrent process growth cannot be attributed to every signer.
+				// Learn isolated peaks; retain each job's predicted reservation.
+				if observation.isolated && observation.reliable {
+					// A reduced process limit is not an allocation by this job.
+					// During pressure retain actual footprint growth, but do not
+					// teach the learner that the lost allowance was resident work.
+					let cost = observation.pressured ? max(0, observation.peak - observation.start.footprint) : observation.cost
+					signingPeak = max(signingPeak, cost)
+					observation.reservation = max(observation.reservation, cost * 1.25)
+				}
+			} else if observation.reliable {
+				observedPeak = max(observedPeak, observation.cost)
+				observation.reservation = max(observation.reservation, observation.cost * 1.5)
+			}
 			active[id] = observation
 		}
 		// A newly observed high-water mark applies to every outstanding worker,
@@ -296,7 +430,9 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		// memory. Never shrink reservations when an archive makes progress.
 		for id in Array(active.keys) {
 			guard var observation = active[id] else { continue }
-			observation.reservation = max(observation.reservation, observedPeak * 1.5)
+			if observation.request.workload.operation != .signing {
+				observation.reservation = max(observation.reservation, observedPeak * 1.5)
+			}
 			active[id] = observation
 		}
 		return snapshot
@@ -333,7 +469,7 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	private func mb(_ bytes: Double) -> Int { Int(bytes / 1_048_576) }
 	private func log(_ reason: String, id: UUID? = nil, snapshot: Snapshot?, candidate: Double = 0, job: UUID? = nil) {
 		let jobID = job ?? id.flatMap { active[$0]?.request.job }
-		let message = "Archive gate \(reason); job=\(jobID?.uuidString ?? "-") attempt=\(id?.uuidString ?? "-") builds=\(buildCount) archives=\(active.count)/\(concurrency) queued=\(waiting.count) footprint=\(snapshot.map { mb($0.footprint) } ?? -1) available=\(snapshot.map { mb($0.available) } ?? -1) budget=\(snapshot.map { mb($0.budget) } ?? -1) candidate=\(mb(candidate)) learnedIsolated=\(mb(learnedIsolatedPeak)) observedPeak=\(mb(observedPeak)) reservations=\(mb(reservations)) reserve=\(snapshot.map { mb(reserve($0)) } ?? -1) pressure=\(pressure) recovering=\(now < recoveryUntil) [MiB]"
+		let message = "Archive gate \(reason); job=\(jobID?.uuidString ?? "-") attempt=\(id?.uuidString ?? "-") builds=\(buildCount) operations=\(active.count) signers=\(active.values.filter { $0.request.workload.operation == .signing }.count)/\(ceiling) archiveLimit=\(concurrency) queued=\(waiting.count) footprint=\(snapshot.map { mb($0.footprint) } ?? -1) available=\(snapshot.map { mb($0.available) } ?? -1) budget=\(snapshot.map { mb($0.budget) } ?? -1) candidate=\(mb(candidate)) learnedIsolated=\(mb(learnedIsolatedPeak)) observedPeak=\(mb(observedPeak)) reservations=\(mb(reservations)) reserve=\(snapshot.map { mb(reserve($0)) } ?? -1) pressure=\(pressure) recovering=\(now < recoveryUntil) [MiB]"
 		Logger.misc.info("\(message, privacy: .public)")
 	}
 
@@ -344,6 +480,9 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		self.init(monitorPressure: false)
 		memoryProbe = { probe().map { Snapshot(footprint: $0.footprint, available: $0.available) } }
 	}
+
+	func testClock(_ clock: @escaping () -> TimeInterval) { queue.sync { self.clock = clock } }
+	func testSample() { queue.sync { _ = sample() } }
 
 	func testPressure(_ event: DispatchSource.MemoryPressureEvent) {
 		queue.sync { handlePressure(event) }

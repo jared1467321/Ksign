@@ -446,8 +446,7 @@ const char* ZFile::GetTempFolder()
 {
 	static once_flag s_flag;
 	static string s_strTempFolder;
-	if (s_strTempFolder.empty()) {
-		call_once(s_flag, [&]() {
+	call_once(s_flag, [&]() {
 #ifdef _WIN32
 			char szTempPath[PATH_MAX] = { 0 };
 			if (0 != ::GetTempPathA(PATH_MAX, szTempPath)) {
@@ -461,8 +460,7 @@ const char* ZFile::GetTempFolder()
 #else
 			s_strTempFolder = "/tmp";
 #endif
-		});
-	}
+	});
 	return s_strTempFolder.c_str();
 }
 

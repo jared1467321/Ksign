@@ -30,15 +30,17 @@ actor SigningStageGate {
 final class SigningBatchContext {
     let packages = TweakPackageCache()
     let session = ZsignSigningSession()
-    // At most one CPU preparation/signing stage and one archive writer.
-    // BulkSigningView admits at most two apps, bounding workspace memory too.
-    let signing = SigningStageGate()
-    let archiving = SigningStageGate()
+    private static let memoryWarnings = NotificationCenter.default.addObserver(
+        forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
+    ) { _ in ArchiveMemoryCoordinator.shared.noteAppMemoryWarning() }
+
+    init() { _ = Self.memoryWarnings }
 }
 
 final class SigningHandler: NSObject {
 	private let _fileManager = FileManager.default
-	private let _uuid = UUID().uuidString
+	private let _workspace: SigningWorkspace
+	private var _uuid: String { _workspace.id.uuidString }
 	var signedAppID: String { _uuid }
 	private var _movedAppPath: URL?
 	private var _archiveApp: ArchiveBackedApp?
@@ -53,6 +55,7 @@ final class SigningHandler: NSObject {
 	private var _archiveExplicitDeletedPaths = Set<String>()
 	private var _archiveSigningHiddenPaths = Set<String>()
 	private var _signedArchiveURL: URL?
+    private var _published = false
 	// using uuid string is the best way to find the
 	// app we want to sign, it does not matter what
 	// type of app it is
@@ -61,6 +64,8 @@ final class SigningHandler: NSObject {
     private let _packages: TweakPackageCache
     private let _signingSession: ZsignSigningSession?
 	private let _uniqueWorkDir: URL
+    var memoryCheckpoint: ((String) async throws -> Void)?
+    var credentials: SigningCredentials?
 	// the options struct is not gonna decode these so
 	// we're just going to do this. If appicon is not
 	// specified, we're not going to modify the app
@@ -76,13 +81,14 @@ final class SigningHandler: NSObject {
 		self._options = options
         self._packages = packages
         self._signingSession = signingSession
-		self._uniqueWorkDir = _fileManager.temporaryDirectory
-			.appendingPathComponent("FeatherSigning_\(_uuid)", isDirectory: true)
+        let workspace = SigningWorkspace()
+        self._workspace = workspace
+		self._uniqueWorkDir = workspace.directory
 		super.init()
 	}
 	
 	func copy(archiveApp suppliedArchiveApp: ArchiveBackedApp? = nil) async throws {
-		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
+		try _workspace.create()
 
 		if let archiveURL = Storage.shared.getArchiveURL(for: _app) {
 			let archiveApp = try suppliedArchiveApp ?? ArchiveBackedApp(archiveURL: archiveURL)
@@ -162,6 +168,9 @@ final class SigningHandler: NSObject {
 		guard let movedAppPath = _movedAppPath else {
 			throw SigningFileHandlerError.appNotFound
 		}
+
+        try _workspace.sanitize(movedAppPath)
+        try await memoryCheckpoint?("before app modifications")
 		
 		guard
 			let infoDictionary = NSDictionary(
@@ -203,7 +212,9 @@ final class SigningHandler: NSObject {
         // Mach-O. TweakHandler.getInputFiles() runs _checkEllekit() at the top
         // regardless of the list, so the Substrate→ElleKit path is still
         // covered by a single call.
+        try await memoryCheckpoint?("before tweak preparation")
         try await _inject(for: movedAppPath, with: _options.injectionFiles, with: _options)
+        try _workspace.sanitize(movedAppPath)
         
         if _options.experiment_supportLiquidGlass {
             try await _locateMachosAndChangeToSDK26(for: movedAppPath)
@@ -213,13 +224,15 @@ final class SigningHandler: NSObject {
             try await _locateMachosAndFixupArm64eSlice(for: movedAppPath)
         }
 		
+        try await memoryCheckpoint?("before native signing")
         let archiveContext = _zsignArchiveContext()
         let handler = ZsignHandler(
             appUrl: movedAppPath,
             options: _options,
             cert: appCertificate,
             archiveContext: archiveContext,
-            session: _signingSession
+            session: _signingSession,
+            credentials: credentials
         )
         try await handler.disinject()
 		
@@ -229,7 +242,8 @@ final class SigningHandler: NSObject {
                 options: _options,
                 cert: appCertificate,
                 archiveContext: archiveContext,
-                session: _signingSession
+                session: _signingSession,
+                credentials: credentials
             )
 			
 			if _options.doAdhocSigning {
@@ -251,6 +265,8 @@ final class SigningHandler: NSObject {
 		guard let movedAppPath = _movedAppPath else {
 			throw SigningFileHandlerError.appNotFound
 		}
+        try await memoryCheckpoint?("before archive rebuild")
+        try _workspace.sanitize(movedAppPath)
 
 		var destinationURL = try await _directory()
 		try _fileManager.createDirectoryIfNeeded(at: destinationURL)
@@ -330,12 +346,13 @@ final class SigningHandler: NSObject {
 					continuation.resume()
 				}
 			}
+            _published = true
 			return
 		}
 
 		let app = try await _directory()
 		guard let appUrl = _fileManager.getPath(in: app, for: "app") else {
-			return
+			throw SigningFileHandlerError.appNotFound
 		}
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -353,6 +370,7 @@ final class SigningHandler: NSObject {
                 continuation.resume()
             }
 		}
+        _published = true
 	}
 
 	private func _zsignArchiveContext() -> ArchiveSigningContext? {
@@ -382,7 +400,16 @@ final class SigningHandler: NSObject {
 	}
 	
 	func clean() async throws {
-		try _fileManager.removeFileIfNeeded(at: _uniqueWorkDir)
+        _archiveResourceDigests = nil
+        _archiveApp = nil
+        _archiveTweakWorkspace = nil
+        _archiveOriginalRelativePaths.removeAll()
+        _archiveExplicitDeletedPaths.removeAll()
+        _archiveSigningHiddenPaths.removeAll()
+		try _workspace.clean()
+        if !_published {
+            try _fileManager.removeFileIfNeeded(at: _fileManager.signed(_uuid))
+        }
 	}
 }
 
@@ -544,7 +571,7 @@ extension SigningHandler {
         let handler = TweakHandler(app: app, with: tweaks, options: options,
             prepareDestination: workspace.map { workspace in
                 { path, replacing in try workspace.prepare(path, replacing: replacing) }
-            }, packages: _packages)
+            }, packages: _packages, validateWorkspace: { try self._workspace.sanitize(app) })
 		do {
 			try await handler.getInputFiles()
             _archiveTweakWorkspace = workspace

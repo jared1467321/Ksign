@@ -341,6 +341,7 @@ extension SigningView {
 			currentItem: app.name
 		)
 
+		let signingName = app.name
 		FR.signPackageFile(
 			app,
 			using: options,
@@ -354,7 +355,7 @@ extension SigningView {
 					total: 1,
 					fraction: nil,
 					detail: error == nil ? "Completed" : (error is IDeviceInstallSkip ? "Finished with Skips" : "Error"),
-					currentItem: app.name
+					currentItem: signingName
 				)
 			}
 		) { [self] error, signedID in

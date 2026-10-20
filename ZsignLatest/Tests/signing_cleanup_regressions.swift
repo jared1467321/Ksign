@@ -10,6 +10,24 @@ struct TestApp: AppInfoPresentable {
     var name: String? { uuid }
     let isSigned: Bool
     let failAt: String?
+    init(uuid: String?, isSigned: Bool, failAt: String?) {
+        self.uuid = uuid; self.isSigned = isSigned; self.failAt = failAt
+    }
+    init(_ app: AppInfoPresentable) { self = app as! TestApp }
+}
+typealias SigningAppSnapshot = TestApp
+struct SigningCredentials { init(_ certificate: CertificatePair?) {} }
+enum UIApplication { static let didReceiveMemoryWarningNotification = Notification.Name("memory-warning") }
+enum ArchiveOperation { case signing }
+struct ArchiveWorkload { var complete = true; var operation = ArchiveOperation.signing }
+final class ArchiveMemoryCoordinator {
+    static let shared = ArchiveMemoryCoordinator()
+    static let admissionCeiling = 5
+    struct Lease {}
+    func acquire(job: UUID, attempt: UUID, workload: ArchiveWorkload, source: String? = nil) async throws -> Lease { Lease() }
+    func signingCheckpoint(_ lease: Lease, _ stage: String, workload: ArchiveWorkload? = nil) async throws {}
+    func finish(_ lease: Lease, succeeded: Bool) {}
+    func noteAppMemoryWarning() {}
 }
 struct Options { var removeApp: Bool; var onlyModify = false }
 struct UIImage {}
@@ -48,6 +66,7 @@ final class Storage {
     var deleted: [String] = []
     func file(_ id: String) -> URL { directory.appendingPathComponent(id) }
     func getArchiveURL(for app: AppInfoPresentable) -> URL? { nil }
+    func getAppDirectory(for app: AppInfoPresentable) -> URL? { nil }
     @MainActor func deleteApp(for app: AppInfoPresentable) {
         MainActor.preconditionIsolated()
         precondition(FileManager.default.fileExists(atPath: file("signed-" + app.uuid!).path),
@@ -61,6 +80,7 @@ struct ArchiveBackedApp {
     var archiveIndex: ArchiveBackedApp { self }
     init(archiveURL: URL) throws { self.archiveURL = archiveURL }
     func validate() throws {}
+    var signingMemoryWorkload: ArchiveWorkload { ArchiveWorkload() }
 }
 enum ArchiveBackedAppError: Error { case invalidArchive }
 enum SigningPreflight {
@@ -92,13 +112,23 @@ actor TempMaintenance {
     func beginOperation() {}
     func endOperation() {}
 }
+final class HandlerLifetime {
+    static let shared = HandlerLifetime()
+    private let lock = NSLock()
+    private weak var latest: SigningHandler?
+    func record(_ handler: SigningHandler) { lock.lock(); latest = handler; lock.unlock() }
+    func released() -> Bool { lock.lock(); defer { lock.unlock() }; return latest == nil }
+}
 final class SigningHandler {
     let app: TestApp
     var signedAppID: String { "signed-" + app.uuid! }
     var appCertificate: CertificatePair?
     var appIcon: UIImage?
+    var memoryCheckpoint: ((String) async throws -> Void)?
+    var credentials: SigningCredentials?
     init(app: AppInfoPresentable, options: Options, packages: TweakPackageCache, signingSession: ZsignSigningSession) {
         self.app = app as! TestApp
+        HandlerLifetime.shared.record(self)
     }
     func stage(_ name: String) throws { if app.failAt == name { throw TestError.expected } }
     func copy(archiveApp: ArchiveBackedApp?) async throws { try stage("copy") }
@@ -125,11 +155,7 @@ enum UIAlertController {
     init(wrappedValue: T) { box = Box(wrappedValue) }
     var wrappedValue: T { get { box.value } nonmutating set { box.value = newValue } }
 }
-struct AppSignConfig {
-    let app: AppInfoPresentable
-    let options: Options
-    var icon: UIImage? { nil }
-}
+// PRODUCTION_CONFIG
 
 // PRODUCTION_GATES
 enum FR {
@@ -153,6 +179,15 @@ enum FR {
 @main struct SigningCleanupRegressions {
     @MainActor static func main() async throws {
         let storage = Storage.shared
+        final class MutableIdentity: AppInfoPresentable {
+            var uuid: String? = "stable-row"
+            var name: String? { "Row" }
+            var isSigned: Bool { false }
+        }
+        let row = MutableIdentity()
+        let configIdentity = AppSignConfig(app: row, options: Options(removeApp: true))
+        row.uuid = nil
+        precondition(configIdentity.id == "stable-row", "Deleting a source must not change the identity of its bulk signing row")
         try FileManager.default.createDirectory(at: storage.directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: storage.directory) }
         func config(_ id: String, remove: Bool = true, signed: Bool = false, fail: String? = nil) throws -> AppSignConfig {
@@ -170,6 +205,11 @@ enum FR {
         }
         precondition(result.0 == nil && result.1 == "signed-worker")
         precondition(!exists("worker") && exists("signed-worker"), "Worker success must include source removal")
+        let releaseDeadline = Date().addingTimeInterval(5)
+        while !HandlerLifetime.shared.released() {
+            precondition(Date() < releaseDeadline, "Deferred UI delivery must not retain a finished signing workspace")
+            await Task.yield()
+        }
         // Drop this test callback; bulk UI callbacks below are no-ops.
         DispatchQueue.discard()
 

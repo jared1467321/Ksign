@@ -17,6 +17,7 @@ def main():
     handler = (ROOT / "Ksign/Utilities/Handlers/SigningHandler.swift").read_text()
     bulk = (ROOT / "Ksign/Views/Signing/BulkSigningView.swift").read_text()
     source = (ROOT / "ZsignLatest/Tests/signing_cleanup_regressions.swift").read_text()
+    source = source.replace("// PRODUCTION_CONFIG", swift_block(bulk, "struct AppSignConfig:"))
     source = source.replace("// PRODUCTION_GATES", "\n".join(swift_block(handler, name) for name in (
         "actor SigningStageGate", "final class SigningBatchContext")))
     source = source.replace("// PRODUCTION_SIGN", swift_block(

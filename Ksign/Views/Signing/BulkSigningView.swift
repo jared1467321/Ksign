@@ -12,10 +12,15 @@ import PhotosUI
 import IDeviceSwift
 
 struct AppSignConfig: Identifiable {
-    var id: String? { app.uuid }
+    let id: String
     var app: AppInfoPresentable
     var options: Options
     var icon: UIImage?
+
+    init(app: AppInfoPresentable, options: Options, icon: UIImage? = nil) {
+        id = app.uuid ?? UUID().uuidString
+        self.app = app; self.options = options; self.icon = icon
+    }
 }
 
 struct BulkSigningView: View {
@@ -281,6 +286,12 @@ extension BulkSigningView {
 		generator.impactOccurred()
 		_isSigning = true
 
+        // Read Core Data-backed display/identity fields on the UI context's
+        // queue once; worker progress must not fault records during deletion.
+        let names = configs.map { $0.app.name ?? .localized("Unknown") }
+        let identities = configs.compactMap { $0.app.uuid }
+        let sources = archiveApps.compactMap { $0?.archiveURL.standardizedFileURL.path }
+
 		Task.detached(priority: .userInitiated) {
 			var failures: [(name: String, error: Error)] = []
 			var signedIDs: [String] = []
@@ -302,19 +313,19 @@ extension BulkSigningView {
 			)
 
             let context = SigningBatchContext()
-            let identities = configs.compactMap { $0.app.uuid }
-            let sources = archiveApps.compactMap { $0?.archiveURL.standardizedFileURL.path }
             // Duplicate inputs retain serial behavior, including remove-after-sign.
             let unique = identities.count == configs.count && Set(identities).count == identities.count && Set(sources).count == sources.count
-            let width = min(unique ? 2 : 1, configs.count)
+            // Workers wait on one process-wide memory governor. It ramps actual
+            // admissions every 250 ms when stable, up to five live operations.
+            let width = min(unique ? ArchiveMemoryCoordinator.admissionCeiling : 1, configs.count)
             var completedIDs: [Int: String] = [:]
             var indexedFailures: [Int: (String, Error)] = [:]
             await withTaskGroup(of: (Int, Result<String, Error>).self) { group in
                 var active = Set(0..<width)
                 func reportProgress() {
-                    let names = active.sorted().map { configs[$0].app.name ?? .localized("Unknown") }.joined(separator: ", ")
+                    let activeNames = active.sorted().map { names[$0] }.joined(separator: ", ")
                     BackgroundTaskManager.shared.report(.signing, completed: processedCount, total: total,
-                        fraction: nil, detail: "Signing", currentItem: names.isEmpty ? nil : names)
+                        fraction: nil, detail: "Signing", currentItem: activeNames.isEmpty ? nil : activeNames)
                 }
                 func enqueue(_ index: Int) {
                     let config = configs[index]
@@ -329,8 +340,7 @@ extension BulkSigningView {
                 reportProgress()
                 var next = width
                 while let (index, result) = await group.next() {
-                    let config = configs[index]
-                    let currentName = config.app.name ?? .localized("Unknown")
+                    let currentName = names[index]
                     switch result {
                     case .success(let signedID):
                         completedIDs[index] = signedID

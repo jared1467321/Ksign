@@ -4,6 +4,8 @@
 #include "mz.h"
 #include "mz_zip.h"
 #include <stdexcept>
+#include <future>
+#include <condition_variable>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 #include "signing.h"
@@ -248,6 +250,52 @@ static void CheckCMS(const string& p12, const string& provision, const string& b
     assert(asset.CMSSignatureSizeBound() == 0);
 }
 
+static void CheckConcurrentFolders(const string& source, const string& output, const string& p12, const string& provision)
+{
+    ZSignSession session;
+    vector<future<void>> jobs;
+    mutex startMutex;
+    condition_variable start;
+    size_t ready = 0;
+    for (size_t lane = 0; lane < 5; lane++) {
+        jobs.push_back(async(launch::async, [&, lane] {
+            const string directory = output + "/" + to_string(lane);
+            const string app = directory + "/Same.app";
+            assert(ZFile::CreateFolder(directory.c_str()) && ZFile::CreateFolder(app.c_str()));
+            asign_archive_index* index = nullptr;
+            assert(MZ_OK == asign_archive_index_open(source.c_str(), &index));
+            size_t manifestSize = 0;
+            const uint8_t* manifestBytes = asign_archive_index_manifest(index, &manifestSize);
+            assert(manifestBytes);
+            const string manifest((const char*)manifestBytes, manifestSize);
+            uint8_t* digests = nullptr; size_t digestSize = 0;
+            assert(MZ_OK == asign_archive_index_materialize_with_plan(index, "Payload/Test.app", app.c_str(), 0, 4,
+                "Deleted\nembedded.mobileprovision", "Deleted", &digests, &digestSize));
+            const string hashes((const char*)digests, digestSize);
+            asign_archive_free_buffer(digests);
+            string injected;
+            assert(ZFile::ReadFile((app + "/Standalone.dylib").c_str(), injected));
+            assert(ZFile::WriteFile((app + "/Injected.dylib").c_str(), injected));
+            assert(ZFile::WriteFile((app + "/lane.txt").c_str(), to_string(lane)));
+            ZSignAsset asset;
+            assert(session.InitAsset(asset, p12, provision, "", "test", false));
+            ZBundle bundle;
+            bundle.SetArchiveBacking(source, "Payload/Test.app", {"Deleted", "embedded.mobileprovision"}, manifest, hashes);
+            {
+                unique_lock<mutex> lock(startMutex);
+                ready++;
+                start.notify_all();
+                start.wait(lock, [&] { return ready == 5; });
+            }
+            assert(bundle.SignFolder(&asset, app, "test.concurrent." + to_string(lane), "", "", {}, {}, true, false, false, true));
+            assert(MZ_OK == asign_archive_index_rebuild(index, (directory + "/signed.ipa").c_str(), "Payload/Test.app",
+                app.c_str(), "Deleted\nembedded.mobileprovision", 1, 0, nullptr, nullptr));
+            asign_archive_index_close(index);
+        }));
+    }
+    for (auto& job : jobs) job.get();
+}
+
 static void CheckPool()
 {
 	auto checkBatch = []() {
@@ -284,6 +332,9 @@ static void CheckPool()
 int main(int argc, char** argv)
 {
     CheckPreparedMetadata();
+    if (argc == 6 && string(argv[1]) == "--concurrent") {
+        CheckConcurrentFolders(argv[2], argv[3], argv[4], argv[5]); return 0;
+    }
     if (argc == 4 && string(argv[1]) == "--patches") { CheckPatches(argv[2], argv[3]); return 0; }
     if (argc == 5 && string(argv[1]) == "--cms") { CheckCMS(argv[2], argv[3], argv[4]); return 0; }
     if (argc == 4 && string(argv[1]) == "--binary") {

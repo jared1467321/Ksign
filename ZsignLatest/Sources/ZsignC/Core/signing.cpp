@@ -114,18 +114,28 @@ bool ZSign::SlotParseRequirements(uint8_t* pSlotBase, CS_BlobIndex* pbi)
 
 #ifndef _WIN32
 	if (ZFile::IsFileExists("/usr/bin/csreq")) {
-		string strTempFile;
-		ZUtil::StringFormatV(strTempFile, "/tmp/Requirements_%llu.blob", ZUtil::GetMicroSecond());
-		ZFile::WriteFile(strTempFile.c_str(), (const char*)pSlotBase, uSlotLength);
+		string pattern = string(ZFile::GetTempFolder()) + "/Requirements_XXXXXX";
+		vector<char> temporary(pattern.begin(), pattern.end());
+		temporary.push_back('\0');
+		int descriptor = mkstemp(temporary.data());
+		if (descriptor < 0) return false;
+		size_t written = 0;
+		while (written < uSlotLength) {
+			ssize_t amount = write(descriptor, pSlotBase + written, uSlotLength - written);
+			if (amount <= 0) { close(descriptor); unlink(temporary.data()); return false; }
+			written += (size_t)amount;
+		}
+		close(descriptor);
+		const string strTempFile(temporary.data());
 
 		string strCommand;
 		ZUtil::StringFormatV(strCommand, "/usr/bin/csreq -r '%s' -t ", strTempFile.c_str());
 		char result[1024] = { 0 };
 		FILE* cmd = popen(strCommand.c_str(), "r");
-		while (NULL != fgets(result, sizeof(result), cmd)) {
+		while (cmd != NULL && NULL != fgets(result, sizeof(result), cmd)) {
 			printf("\treqtext: \t%s", result);
 		}
-		pclose(cmd);
+		if (cmd != NULL) pclose(cmd);
 		ZFile::RemoveFile(strTempFile.c_str());
 	}
 #endif

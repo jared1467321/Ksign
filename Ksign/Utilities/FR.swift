@@ -119,29 +119,40 @@ enum FR {
 			defer { BackgroundTaskManager.shared.end(.signing, success: backgroundSucceeded) }
 
             let context = batchContext ?? SigningBatchContext()
-			let handler = SigningHandler(app: app, options: options, packages: context.packages, signingSession: context.session)
+            let (source, credentials) = await MainActor.run {
+                (SigningAppSnapshot(app), SigningCredentials(certificate))
+            }
+			let handler = SigningHandler(app: source, options: options, packages: context.packages, signingSession: context.session)
+            handler.credentials = credentials
+            let memory = ArchiveMemoryCoordinator.shared
+            let signingID = UUID(uuidString: handler.signedAppID) ?? UUID()
+            var lease: ArchiveMemoryCoordinator.Lease?
 			if !options.onlyModify {
 				handler.appCertificate = certificate
 			}
 			handler.appIcon = icon
 
 			do {
-                let archiveApp = try Storage.shared.getArchiveURL(for: app).map { url in
+                let sourceURL = Storage.shared.getArchiveURL(for: source) ?? Storage.shared.getAppDirectory(for: source)
+                let admitted = try await memory.acquire(job: signingID, attempt: signingID,
+                    workload: suppliedArchiveApp?.signingMemoryWorkload ?? ArchiveWorkload(complete: false, operation: .signing),
+                    source: sourceURL?.resolvingSymlinksInPath().standardizedFileURL.path)
+                lease = admitted
+                handler.memoryCheckpoint = { stage in try await memory.signingCheckpoint(admitted, stage) }
+                let archiveApp = try Storage.shared.getArchiveURL(for: source).map { url in
                     if let suppliedArchiveApp, suppliedArchiveApp.archiveURL.standardizedFileURL == url.standardizedFileURL {
                         try suppliedArchiveApp.archiveIndex.validate()
                         return suppliedArchiveApp
                     }
                     return try ArchiveBackedApp(archiveURL: url)
                 }
-				try SigningPreflight.checkPlatform(for: app, archiveApp: archiveApp)
-                try await context.signing.run {
-                    try await handler.copy(archiveApp: archiveApp)
-                    try await handler.modify(finish: false)
-                }
-                try await context.archiving.run {
-                    try await handler.move()
-                    try await handler.addToDatabase()
-                }
+				try SigningPreflight.checkPlatform(for: source, archiveApp: archiveApp)
+                try await memory.signingCheckpoint(admitted, "before materialization", workload: archiveApp?.signingMemoryWorkload)
+                try await handler.copy(archiveApp: archiveApp)
+                try await handler.modify(finish: false)
+                try await handler.move()
+                try await memory.signingCheckpoint(admitted, "before database publication")
+                try await handler.addToDatabase()
 
                 // Source cleanup is part of the operation, before either
                 // completion callback. UI delivery can be delayed in background.
@@ -154,18 +165,22 @@ enum FR {
                 }
 
 				try? await handler.clean()
+                memory.finish(admitted, succeeded: true)
+                lease = nil
 
 				await TempMaintenance.shared.endOperation()
 
 				// Batch count reporting happens before the UI callback so it cannot
 				// be delayed until the app returns to the foreground.
 				backgroundSucceeded = true
-				backgroundCompletion?(nil, handler.signedAppID)
+                let signedID = handler.signedAppID
+				backgroundCompletion?(nil, signedID)
 				DispatchQueue.main.async {
-					completion(nil, handler.signedAppID)
+					completion(nil, signedID)
 				}
 			} catch {
 				try? await handler.clean()
+                if let lease { memory.finish(lease, succeeded: false) }
 				await TempMaintenance.shared.endOperation()
 				if error is IDeviceInstallSkip { backgroundSucceeded = true }
 				backgroundCompletion?(error, nil)
