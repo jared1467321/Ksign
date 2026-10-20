@@ -15,10 +15,10 @@ import Compression
 func extractDebPayload(_ data: Data, name: String, to directory: URL) throws {
     let tar: Data
     switch name {
-    case "data.tar.xz": tar = try XZArchive.unarchive(data)
-    case "data.tar.lzma": tar = try LZMA.decompress(data)
-    case "data.tar.bz2": tar = try BZip2.decompress(data)
-    case "data.tar.gz": tar = try GzipArchive.unarchive(data)
+    case "data.tar.xz": tar = try XZArchive.unarchive(archive: data)
+    case "data.tar.lzma": tar = try LZMA.decompress(data: data)
+    case "data.tar.bz2": tar = try BZip2.decompress(data: data)
+    case "data.tar.gz": tar = try GzipArchive.unarchive(archive: data)
     case "data.tar": tar = data
     default: throw TweakHandlerError.unsupportedFileExtension(name)
     }
