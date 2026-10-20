@@ -412,8 +412,17 @@ final class InstallJob: ObservableObject, Identifiable {
 		// the job even when no install view is currently being rendered.
 		let liveActivityJobID = id
 		let statusEpoch = _statusEpoch
+		let nativeInstall = isDeviceInstall
 		viewModel.$status
 			.sink { status in
+				// Native worker events deliver these phases before their progress.
+				// A delayed main-queue echo must not move ActivityKit backwards.
+				if nativeInstall {
+					switch status {
+					case .sendingPayload, .installing: return
+					default: break
+					}
+				}
 				let epoch = statusEpoch.current
 				BulkInstallLiveActivityReporter.shared.updateStatus(
 					jobID: liveActivityJobID,
@@ -427,15 +436,17 @@ final class InstallJob: ObservableObject, Identifiable {
 		// back into that reporter could replace a newer worker value with an old
 		// one, and would lose the attempt's cancellation guard.
 
-		viewModel.$installProgress
-			.removeDuplicates()
-			.sink { progress in
-				BulkInstallLiveActivityReporter.shared.updateInstall(
-					jobID: liveActivityJobID,
-					progress: progress
-				)
-			}
-			.store(in: &_cancellables)
+		if !isDeviceInstall {
+			viewModel.$installProgress
+				.removeDuplicates()
+				.sink { progress in
+					BulkInstallLiveActivityReporter.shared.updateInstall(
+						jobID: liveActivityJobID,
+						progress: progress
+					)
+				}
+				.store(in: &_cancellables)
+		}
 
 		// UI state and queue coordination still belong on MainActor.
 		viewModel.$status
@@ -827,6 +838,25 @@ final class InstallJob: ObservableObject, Identifiable {
 		let attempt = PackagingAttempt()
 		_packagingAttempt = attempt
 		if method == 1 {
+			// Snapshot the epoch for this attempt before launching its worker.
+			// Late callbacks retain their original guard across cancellation/retry.
+			let statusEpoch = _statusEpoch
+			let epoch = statusEpoch.current
+			viewModel.nativeInstallObserver = { event in
+				let isCurrent = { attempt.isCurrent && statusEpoch.matches(epoch) }
+				switch event {
+				case .uploading, .installing:
+					BulkInstallLiveActivityReporter.shared.updateStatus(
+						jobID: jobID,
+						status: event == .uploading ? .sendingPayload : .installing,
+						isCurrent: isCurrent
+					)
+				case .progress(let progress):
+					BulkInstallLiveActivityReporter.shared.updateInstall(
+						jobID: jobID, progress: progress, isCurrent: isCurrent
+					)
+				}
+			}
 			InstallQueueCoordinator.shared.beginDeviceWork(jobID)
 		}
 

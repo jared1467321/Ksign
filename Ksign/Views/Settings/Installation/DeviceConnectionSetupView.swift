@@ -6,14 +6,15 @@ import IDeviceSwift
 struct DeviceConnectionSettingsView: View {
     @AppStorage(NativeInstallLimit.preferenceKey) private var activeAppLimit = NativeInstallLimit.defaultValue
     @ObservedObject private var manager = DeviceInstallationManager.shared
-    @ObservedObject private var session = InstallSession.shared
+    private let session = InstallSession.shared
+    @State private var isSessionActive = InstallSession.shared.isActive
     @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var confirmReset = false
     @State private var showsGuide = false
     @State private var hasSavedPairing = false
 
-    private var controlsDisabled: Bool { manager.isBusy || session.isActive }
+    private var controlsDisabled: Bool { manager.isBusy || isSessionActive }
     private var columns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 12), count: typeSize.isAccessibilitySize ? 1 : 2)
     }
@@ -49,7 +50,7 @@ struct DeviceConnectionSettingsView: View {
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!manager.canReconnectVPN || session.isActive)
+                    .disabled(!manager.canReconnectVPN || isSessionActive)
                 }
                 DeviceUploadPerformanceView()
                 connectionStatus
@@ -78,6 +79,7 @@ struct DeviceConnectionSettingsView: View {
         .nbThemeForeground(.text)
         .nbThemeTint(.accent)
         .buttonStyle(.plain)
+        .onReceive(session.isActivePublisher) { isSessionActive = $0 }
         .task { refreshPairingStatus() }
         .onChange(of: manager.phase) { _ in refreshPairingStatus() }
         .confirmationDialog("Forget this device's saved pairing?", isPresented: $confirmReset, titleVisibility: .visible) {
@@ -355,10 +357,11 @@ private struct VPNReconnectPreferencesView: View {
     @AppStorage(VPNReconnectCoordinator.presentationKey) private var presentation = VPNReconnectPresentation.shareSheet.rawValue
     @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @ObservedObject private var manager = DeviceInstallationManager.shared
-    @ObservedObject private var session = InstallSession.shared
+    private let session = InstallSession.shared
+    @State private var isSessionActive = InstallSession.shared.isActive
 
     private var canTest: Bool {
-        manager.canReconnectVPN && !session.isActive &&
+        manager.canReconnectVPN && !isSessionActive &&
             !shortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -402,7 +405,7 @@ private struct VPNReconnectPreferencesView: View {
                     .disabled(!canTest)
                     if reconnect.pendingShortcutName != nil {
                         Button("Reconnect VPN") { Task { await reconnect.runPendingShortcut() } }
-                            .disabled(!manager.canReconnectVPN || session.isActive)
+                            .disabled(!manager.canReconnectVPN || isSessionActive)
                     }
                     if let notice = reconnect.notice {
                         Text(notice).font(.footnote).nbThemeForeground(.textSecondary)
@@ -411,6 +414,7 @@ private struct VPNReconnectPreferencesView: View {
             }
         }
         .buttonStyle(.automatic)
+        .onReceive(session.isActivePublisher) { isSessionActive = $0 }
         .onChange(of: enabled) { enabled in
             if enabled { Task { await reconnect.requestNotificationPermission() } }
             else { reconnect.disable() }
@@ -421,81 +425,85 @@ private struct VPNReconnectPreferencesView: View {
 struct DeviceConnectionSetupView: View {
     @ObservedObject private var manager = DeviceInstallationManager.shared
     @ObservedObject private var pairing = DevicePairingService.shared
-    @ObservedObject private var session = InstallSession.shared
+    private let session = InstallSession.shared
+    @State private var isSessionActive = InstallSession.shared.isActive
     var alwaysVisible = false
 
     var body: some View {
-        if alwaysVisible || manager.showsSetup {
-            VStack(alignment: .leading, spacing: 16) {
-                Label("Device setup", systemImage: "iphone.and.arrow.forward")
-                    .font(.headline)
-                if let notice = manager.setupNotice {
-                    Text(notice).font(.callout).nbThemeForeground(.textSecondary)
-                }
-                switch manager.phase {
-                case .pairing:
-                    DevicePairingInstructions(isPairing: true)
-                    if let pin = pairing.pin {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("YOUR PAIRING CODE")
-                                .font(.caption2.weight(.bold))
-                                .tracking(1.2)
-                                .nbThemeForeground(.textSecondary)
-                            Text(pin)
-                                .font(.system(.largeTitle, design: .monospaced).bold())
-                                .textSelection(.enabled)
-                                .accessibilityLabel("Pairing code")
-                                .accessibilityValue(pin.map { String($0) }.joined(separator: " "))
-                            Text("Enter this code in Settings, then return to Ksign. It also appears in the system progress activity when available.")
-                                .font(.caption)
-                                .nbThemeForeground(.textSecondary)
-                        }
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .nbThemeBackground(.controlFill, in: RoundedRectangle(cornerRadius: 16))
-                    } else {
-                        ProgressView("Waiting for Pair with Ksign…")
-                            .font(.subheadline)
+        Group {
+            if alwaysVisible || manager.showsSetup {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("Device setup", systemImage: "iphone.and.arrow.forward")
+                        .font(.headline)
+                    if let notice = manager.setupNotice {
+                        Text(notice).font(.callout).nbThemeForeground(.textSecondary)
                     }
-                    cancelButton
-                case .connecting:
-                    ProgressView("Preparing your connection…")
-                    Text("Allow Ksign to add its VPN configuration if iOS asks.")
-                        .font(.subheadline)
-                        .nbThemeForeground(.textSecondary)
-                    cancelButton
-                case .failed(let message):
-                    Label("Couldn't finish setup", systemImage: "exclamationmark.triangle")
-                        .font(.subheadline.weight(.semibold))
-                        .nbThemeForeground(.danger)
-                    Text(message).font(.callout).textSelection(.enabled)
-                    Button("Retry Setup") { Task { await manager.setUp() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(manager.isBusy)
-                    Text("Once connected, retry failed apps in the install drawer.")
-                        .font(.caption)
-                        .nbThemeForeground(.textSecondary)
-                case .ready:
-                    Label("Connected", systemImage: "checkmark.circle.fill")
-                        .nbThemeForeground(.success)
-                case .configured:
-                    Label("Setup complete", systemImage: "checkmark.circle.fill")
-                        .nbThemeForeground(.success)
-                    Text("Ksign reconnects automatically when you install apps.")
-                        .font(.subheadline)
-                        .nbThemeForeground(.textSecondary)
-                case .idle:
-                    Text("Pair your device and configure the local VPN to get started.")
-                        .font(.subheadline)
-                        .nbThemeForeground(.textSecondary)
-                    Button("Set Up Connection") { Task { await manager.setUp() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(manager.isBusy || session.isActive)
+                    switch manager.phase {
+                    case .pairing:
+                        DevicePairingInstructions(isPairing: true)
+                        if let pin = pairing.pin {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("YOUR PAIRING CODE")
+                                    .font(.caption2.weight(.bold))
+                                    .tracking(1.2)
+                                    .nbThemeForeground(.textSecondary)
+                                Text(pin)
+                                    .font(.system(.largeTitle, design: .monospaced).bold())
+                                    .textSelection(.enabled)
+                                    .accessibilityLabel("Pairing code")
+                                    .accessibilityValue(pin.map { String($0) }.joined(separator: " "))
+                                Text("Enter this code in Settings, then return to Ksign. It also appears in the system progress activity when available.")
+                                    .font(.caption)
+                                    .nbThemeForeground(.textSecondary)
+                            }
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .nbThemeBackground(.controlFill, in: RoundedRectangle(cornerRadius: 16))
+                        } else {
+                            ProgressView("Waiting for Pair with Ksign…")
+                                .font(.subheadline)
+                        }
+                        cancelButton
+                    case .connecting:
+                        ProgressView("Preparing your connection…")
+                        Text("Allow Ksign to add its VPN configuration if iOS asks.")
+                            .font(.subheadline)
+                            .nbThemeForeground(.textSecondary)
+                        cancelButton
+                    case .failed(let message):
+                        Label("Couldn't finish setup", systemImage: "exclamationmark.triangle")
+                            .font(.subheadline.weight(.semibold))
+                            .nbThemeForeground(.danger)
+                        Text(message).font(.callout).textSelection(.enabled)
+                        Button("Retry Setup") { Task { await manager.setUp() } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(manager.isBusy)
+                        Text("Once connected, retry failed apps in the install drawer.")
+                            .font(.caption)
+                            .nbThemeForeground(.textSecondary)
+                    case .ready:
+                        Label("Connected", systemImage: "checkmark.circle.fill")
+                            .nbThemeForeground(.success)
+                    case .configured:
+                        Label("Setup complete", systemImage: "checkmark.circle.fill")
+                            .nbThemeForeground(.success)
+                        Text("Ksign reconnects automatically when you install apps.")
+                            .font(.subheadline)
+                            .nbThemeForeground(.textSecondary)
+                    case .idle:
+                        Text("Pair your device and configure the local VPN to get started.")
+                            .font(.subheadline)
+                            .nbThemeForeground(.textSecondary)
+                        Button("Set Up Connection") { Task { await manager.setUp() } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(manager.isBusy || isSessionActive)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .nbThemeForeground(.text)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .nbThemeForeground(.text)
         }
+        .onReceive(session.isActivePublisher) { isSessionActive = $0 }
     }
 
     private var cancelButton: some View {

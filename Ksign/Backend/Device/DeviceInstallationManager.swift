@@ -17,7 +17,9 @@ final class DeviceInstallationManager: ObservableObject {
     @Published var mode: DeviceConnectionMode {
         didSet { defaults.set(mode.rawValue, forKey: "Ksign.deviceConnectionMode") }
     }
-    @Published private(set) var pendingOperations = 0
+    private(set) var pendingOperations = 0 {
+        didSet { updateAvailability() }
+    }
     private let vpn: LocalDeviceVPN
     private let vpnReconnect: VPNReconnectCoordinator
     private let defaults: UserDefaults
@@ -29,8 +31,17 @@ final class DeviceInstallationManager: ObservableObject {
     private var tail: Task<Void, Never>?
     private var activeOperation: Task<Void, Error>?
     private var operations: [UUID: Task<Void, Error>] = [:]
-    @Published private var workflows: Set<UUID> = []
-    @Published private var cleanupTask: Task<Void, Never>?
+    private var workflows: Set<UUID> = [] {
+        didSet { updateAvailability() }
+    }
+    private var cleanupTask: Task<Void, Never>? {
+        didSet { updateAvailability() }
+    }
+    private struct Availability: Equatable {
+        var isBusy = false
+        var canReconnectVPN = true
+    }
+    @Published private var availability = Availability()
     private var activeInstallations: Set<UUID> = []
     private var installingBundles: [String: UUID] = [:]
     private var exclusiveInstallation: UUID?
@@ -63,7 +74,7 @@ final class DeviceInstallationManager: ObservableObject {
             .appendingPathComponent("pairingFile.plist").path
     }
 
-    var isBusy: Bool { pendingOperations > 0 }
+    var isBusy: Bool { availability.isBusy }
     var showsSetup: Bool {
         switch phase { case .connecting, .pairing, .failed: return true; default: return false }
     }
@@ -73,7 +84,13 @@ final class DeviceInstallationManager: ObservableObject {
         workflows.insert(id)
     }
     func releaseWorkflow(_ id: UUID) { workflows.remove(id); cleanUpIfIdle() }
-    var canReconnectVPN: Bool { pendingOperations == 0 && workflows.isEmpty && cleanupTask == nil }
+    var canReconnectVPN: Bool { availability.canReconnectVPN }
+
+    private func updateAvailability() {
+        let next = Availability(isBusy: pendingOperations > 0,
+                                canReconnectVPN: pendingOperations == 0 && workflows.isEmpty && cleanupTask == nil)
+        if next != availability { availability = next }
+    }
 
     func testVPNReconnectShortcut() async {
         guard canReconnectVPN else { return }

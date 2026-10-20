@@ -340,7 +340,6 @@ private struct ThemeEditingOverlayWindowView: View {
     @State private var geometryRevision: UInt64 = 0
     @State private var inspectionRequest = UUID()
     @State private var presentationID: ObjectIdentifier?
-    private let geometryTimer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         // Scrolling, UIKit presentations and animations do not necessarily
@@ -419,8 +418,14 @@ private struct ThemeEditingOverlayWindowView: View {
             .ignoresSafeArea()
         }
         .ignoresSafeArea()
-        .onReceive(geometryTimer) { _ in
-            if coordinator.isPicking {
+        .task(id: coordinator.isPicking) {
+            guard coordinator.isPicking else { return }
+            // Poll only while picking. Changing the task ID or removing this
+            // window cancels the sleep, leaving no idle timer subscription.
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 200_000_000) }
+                catch { return }
+                guard !Task.isCancelled else { return }
                 let currentID = currentPresentationRoot(in: baseWindow).map(ObjectIdentifier.init)
                 if presentationID != currentID {
                     presentationID = currentID

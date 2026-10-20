@@ -28,6 +28,9 @@ public class InstallerStatusViewModel: ObservableObject {
 	// Set before launching an attempt; copied by its upload worker. Never
 	// publishes SwiftUI invalidations and never requires a main-queue hop.
 	public var uploadObserver: ((IDeviceUploadEvent) -> Void)?
+	// Native install telemetry remains live while presentation is suspended.
+	// Set before launching an attempt, just like uploadObserver.
+	public var nativeInstallObserver: ((IDeviceInstallEvent) -> Void)?
 	
 	public var isIDevice: Bool
 	

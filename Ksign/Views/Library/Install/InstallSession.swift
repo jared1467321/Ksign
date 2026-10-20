@@ -145,6 +145,17 @@ final class InstallSession: ObservableObject {
 	}
 
 	var isActive: Bool { !jobs.isEmpty }
+	// Controls and other drawer hosts do not consume numeric progress. Keep
+	// their subscriptions on the discrete values they actually display.
+	var isActivePublisher: AnyPublisher<Bool, Never> {
+		$jobs.map { !$0.isEmpty }.removeDuplicates().eraseToAnyPublisher()
+	}
+	var isMinimizedPublisher: AnyPublisher<Bool, Never> {
+		Publishers.CombineLatest($jobs.map { !$0.isEmpty }, $isDrawerPresented)
+			.map { active, presented in active && !presented }
+			.removeDuplicates()
+			.eraseToAnyPublisher()
+	}
 	var isDrawerAvailable: Bool { isActive || isFinished }
 	func containsJob(_ id: UUID) -> Bool { _trackedJobs[id] != nil }
 	var usesNativeInstallLimit: Bool { _isNativeInstallSession }
@@ -920,8 +931,9 @@ final class BulkInstallLiveActivityReporter {
 		self._publish()
 	}
 
-	func updateInstall(jobID: UUID, progress: Double) {
+	func updateInstall(jobID: UUID, progress: Double, isCurrent: @escaping () -> Bool = { true }) {
 		_queue.async {
+			guard isCurrent() else { return }
 			guard var job = self._jobs[jobID], !job.isTerminal else { return }
 			let value = min(1, max(0, progress))
 

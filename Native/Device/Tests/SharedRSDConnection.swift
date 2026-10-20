@@ -19,9 +19,15 @@ public final class InstallerStatusViewModel {
     var installPublications = 0
     var installProgress = 0.0 { didSet { installPublications += 1 } }
     var uploadObserver: ((IDeviceUploadEvent) -> Void)?
+    var nativeInstallObserver: ((IDeviceInstallEvent) -> Void)?
 }
 final class UIApplication {
     static let shared = UIApplication()
+    enum State { case active, inactive, background }
+    var applicationState = State.active
+    static let willResignActiveNotification = Notification.Name("inactive")
+    static let didEnterBackgroundNotification = Notification.Name("background")
+    static let didBecomeActiveNotification = Notification.Name("active")
     func perform(_ selector: String) {}
 }
 struct IdeviceFfiError { var code: Int32 = 0; var sub_code: Int32 = 0 }
@@ -362,7 +368,9 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
         try Data(repeating: 42, count: byteCount).write(to: ipa)
         let model = InstallerStatusViewModel()
         let uploadEvents = UploadEventRecorder()
+        let installEvents = InstallEventRecorder()
         model.uploadObserver = { uploadEvents.record($0) }
+        model.nativeInstallObserver = { installEvents.record($0) }
         try await InstallationProxy(viewModel: model).install(at: ipa)
         precondition(NativeCalls.shared.takeWriteCounts() == [chunkBytes, chunkBytes, 123],
                      "Upload must preserve the final partial chunk")
@@ -381,6 +389,7 @@ func installation_proxy_install_with_callback(_ client: OpaquePointer?, _ path: 
             precondition(persisted.bytes == metrics.bytes && persisted.duration == metrics.duration)
         }
         uploadEvents.expectSuccessfulUpload(bytes: UInt64(byteCount))
+        installEvents.expect([.uploading, .installing, .progress(1)])
         let publications = await MainActor.run { (model.uploadPublications, model.installPublications) }
         try await Task.sleep(nanoseconds: 250_000_000)
         await MainActor.run {
@@ -458,5 +467,21 @@ final class UploadEventRecorder {
         defer { lock.unlock() }
         precondition(started && finished && bytes == expected,
                      "Worker telemetry must count useful bytes independently of UI progress")
+    }
+}
+
+final class InstallEventRecorder {
+    private let lock = NSLock()
+    private var events: [IDeviceInstallEvent] = []
+    func record(_ event: IDeviceInstallEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+    }
+    func expect(_ expected: [IDeviceInstallEvent]) {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(events == expected,
+                     "Worker phase and progress telemetry must remain ordered independently of UI delivery")
     }
 }

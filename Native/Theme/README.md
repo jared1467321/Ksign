@@ -40,6 +40,14 @@ Disabled Aurora backdrops do not install a viewport observer. These changes
 reduce temporary allocations and retention risk; device memory and frame-time
 improvements have not been measured by this test harness.
 
+Pane geometry now feeds `backgroundPreferenceValue` directly instead of state
+on the foreground canvas modifier. An equality check on the backdrop's base and
+selected panes avoids updates when only unselected panes move; the backdrop's
+own clock, quality, accessibility and appearance dependencies remain live. The
+theme editor's geometry polling task exists only while picking and is cancelled
+when picking ends or its window disappears. Shader formulas, sampling, animation
+cadence and glass surface parameters are unchanged.
+
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities; text follows the selected theme.
 The removed color-conversion tests enforced obsolete day/night recoloring. The

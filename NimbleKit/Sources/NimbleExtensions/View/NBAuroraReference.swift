@@ -107,7 +107,7 @@ private final class AuroraViewportView: UIView {
 }
 
 /// Render the sky separately from foreground content so optics never bend text.
-struct NBThemeBackdrop: View {
+struct NBThemeBackdrop: View, Equatable {
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -120,6 +120,10 @@ struct NBThemeBackdrop: View {
 
     let base: NBThemeColor
     var panes: [CGRect] = []
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.base == rhs.base && lhs.panes == rhs.panes
+    }
 
     private var enabled: Bool { auroraBackground && !reduceTransparency && contrast != .increased }
     private var animating: Bool { isVisible && enabled && !reduceMotion && scenePhase == .active }

@@ -43,7 +43,7 @@ final class IPAVaultPresentationSession: ObservableObject {
 // pill above the tab bar to bring it back. Closing is explicit.
 struct IPAVaultDrawerView: View {
     @ObservedObject private var session = IPAVaultPresentationSession.shared
-    @ObservedObject private var installSession = InstallSession.shared
+    @State private var installPillVisible = InstallSession.shared.isActive && !InstallSession.shared.isDrawerPresented
 
     private let _tabBarInset: CGFloat = 58
     private let _pillHitPadding: CGFloat = 8
@@ -59,6 +59,7 @@ struct IPAVaultDrawerView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: session.isPresented)
         .animation(.easeInOut(duration: 0.25), value: session.isActive)
+        .onReceive(InstallSession.shared.isMinimizedPublisher) { installPillVisible = $0 }
         .sheet(isPresented: $session.isPresented, onDismiss: {
             session.minimize()
         }) {
@@ -72,7 +73,7 @@ struct IPAVaultDrawerView: View {
     // If the install drawer is minimized at the same time, stack the Vault pill
     // above it instead of letting the two controls occupy the same hit target.
     private var _pillBottomInset: CGFloat {
-        installSession.isActive && !installSession.isDrawerPresented
+        installPillVisible
             ? _tabBarInset + 52
             : _tabBarInset
     }

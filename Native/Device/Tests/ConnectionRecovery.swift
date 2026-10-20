@@ -5,6 +5,22 @@ import Foundation
 @propertyWrapper struct Published<Value> {
     var wrappedValue: Value
     init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
+    static subscript<Owner: AnyObject>(
+        _enclosingInstance owner: Owner,
+        wrapped wrappedKeyPath: ReferenceWritableKeyPath<Owner, Value>,
+        storage storageKeyPath: ReferenceWritableKeyPath<Owner, Self>
+    ) -> Value {
+        get { owner[keyPath: storageKeyPath].wrappedValue }
+        set {
+            PublicationMetrics.record(owner)
+            owner[keyPath: storageKeyPath].wrappedValue = newValue
+        }
+    }
+}
+enum PublicationMetrics {
+    private static var counts: [ObjectIdentifier: Int] = [:]
+    static func record(_ owner: AnyObject) { counts[ObjectIdentifier(owner), default: 0] += 1 }
+    static func count(_ owner: AnyObject) -> Int { counts[ObjectIdentifier(owner), default: 0] }
 }
 protocol ObservableObject {}
 enum NEVPNStatus { case invalid, disconnected, connecting, connected, reasserting, disconnecting }
@@ -289,6 +305,7 @@ final class InstallerStatusViewModel {}
         print("Passed 16 device connection recovery scenarios")
         await settle()
         try await runConcurrencyTests()
+        await runAvailabilityTests()
         try await runVPNReconnectTests()
         defaults.removePersistentDomain(forName: "Ksign.ConnectionRecoveryTests")
     }

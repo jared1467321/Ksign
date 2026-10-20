@@ -25,6 +25,11 @@ public enum IDeviceUploadEvent: Sendable {
     case finished(success: Bool)
 }
 
+public enum IDeviceInstallEvent: Equatable, Sendable {
+    case uploading, installing
+    case progress(Double)
+}
+
 // A completed error response from iOS's installer means the app was rejected,
 // rather than the transport failing. Keep its original message for the row.
 public struct IDeviceInstallationRejection: LocalizedError {
@@ -43,27 +48,86 @@ final class IDeviceInstallProgress {
     private var deliveryQueued = false
     private var finished = false
 
-    func submit(upload: Double? = nil, install: Double? = nil) -> Bool {
+    func submit(upload: Double? = nil, install: Double? = nil, allowsDelivery: Bool = true) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard !finished else { return false }
         if let upload { self.upload = upload }
         if let install { self.install = install }
-        guard !deliveryQueued else { return false }
+        guard allowsDelivery, !deliveryQueued else { return false }
         deliveryQueued = true
         return true
     }
 
-    func drain(finishing: Bool = false, scheduled: Bool = false) -> (upload: Double?, install: Double?) {
+    func drain(finishing: Bool = false, scheduled: Bool = false,
+               delivering: Bool = true) -> (upload: Double?, install: Double?) {
         lock.lock()
         defer { lock.unlock() }
         if finishing { finished = true }
         // A phase-boundary flush must retain the outstanding delivery's slot.
         if scheduled { deliveryQueued = false }
+        // Retain the newest samples while inactive, but release an expired
+        // delivery slot so foreground updates can schedule normally again.
+        guard delivering || finishing else { return (nil, nil) }
         let pending = (upload: upload, install: install)
         upload = nil
         install = nil
         return pending
+    }
+}
+
+// One lifecycle observer for all native attempts. Numeric presentation sleeps
+// while inactive; worker telemetry and phase/terminal statuses stay immediate.
+final class IDeviceInstallPresentation {
+    static let shared = IDeviceInstallPresentation()
+    private let lock = NSLock()
+    private var active = false
+    private var deliveries: [UUID: () -> Void] = [:]
+    private var observers: [NSObjectProtocol] = []
+
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+
+    private init() {
+        let center = NotificationCenter.default
+        for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.setActive(false)
+            })
+        }
+        observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            self?.setActive(true)
+        })
+        DispatchQueue.main.async { [weak self] in
+            self?.setActive(UIApplication.shared.applicationState == .active)
+        }
+    }
+
+    func observe(_ delivery: @escaping () -> Void) -> UUID {
+        let id = UUID()
+        lock.lock()
+        deliveries[id] = delivery
+        lock.unlock()
+        return id
+    }
+
+    func remove(_ id: UUID) {
+        lock.lock()
+        deliveries.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    private func setActive(_ value: Bool) {
+        lock.lock()
+        let resuming = value && !active
+        active = value
+        let pending = resuming ? Array(deliveries.values) : []
+        lock.unlock()
+        for delivery in pending { delivery() }
     }
 }
 
@@ -72,8 +136,16 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     private let cancellation = IDeviceInstallCancellation()
     private let progress = IDeviceInstallProgress()
     private var isCurrent: () -> Bool = { true }
+    private var installObserver: ((IDeviceInstallEvent) -> Void)?
+    private var presentationID: UUID?
 
-    public init(viewModel: InstallerStatusViewModel) { self.viewModel = viewModel }
+    public init(viewModel: InstallerStatusViewModel) {
+        self.viewModel = viewModel
+    }
+
+    deinit {
+        if let presentationID { IDeviceInstallPresentation.shared.remove(presentationID) }
+    }
 
     /// Read-only validation for the signing-to-installation handoff. No AFC
     /// client, staging file or install command is created by this operation.
@@ -98,6 +170,10 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                         preflight: IDeviceInstallPreflight? = nil,
                         isCurrent: @escaping () -> Bool = { true }) async throws {
         self.isCurrent = isCurrent
+        installObserver = viewModel.nativeInstallObserver
+        presentationID = IDeviceInstallPresentation.shared.observe { [weak self] in
+            self?.flushProgress()
+        }
         update { $0.uploadMetrics = nil }
         try await withTaskCancellationHandler {
             do {
@@ -131,7 +207,10 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     }
 
     private func updateProgress(upload: Double? = nil, install: Double? = nil) {
-        guard progress.submit(upload: upload, install: install) else { return }
+        guard !cancellation.isCancelled, isCurrent() else { return }
+        if let install { installObserver?(.progress(install)) }
+        guard progress.submit(upload: upload, install: install,
+                              allowsDelivery: IDeviceInstallPresentation.shared.isActive) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
             flushProgress(scheduled: true)
         }
@@ -140,7 +219,8 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     // Main queue only. Flush final values before publishing a phase/terminal
     // status, and discard samples belonging to a cancelled or replaced attempt.
     private func flushProgress(finishing: Bool = false, scheduled: Bool = false) {
-        let pending = progress.drain(finishing: finishing, scheduled: scheduled)
+        let pending = progress.drain(finishing: finishing, scheduled: scheduled,
+                                     delivering: IDeviceInstallPresentation.shared.isActive)
         guard !cancellation.isCancelled, isCurrent() else { return }
         if let upload = pending.upload, upload != viewModel.uploadProgress {
             viewModel.uploadProgress = upload
@@ -233,6 +313,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         let byteCount = try input.seekToEnd()
         try input.seek(toOffset: 0)
         guard byteCount > 0 else { throw IDeviceSwiftError(message: "The IPA is empty.") }
+        installObserver?(.uploading)
         update { $0.packageProgress = 1; $0.status = .sendingPayload }
         let startedAt = ProcessInfo.processInfo.systemUptime
         let reportUpload = viewModel.uploadObserver
@@ -280,6 +361,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         } else {
             try check(installation_proxy_connect(provider, &proxy))
         }
+        installObserver?(.installing)
         update {
             self.flushProgress()
             $0.status = .installing

@@ -1,6 +1,25 @@
 import Foundation
 
 extension ConnectionRecoveryTests {
+    @MainActor static func runAvailabilityTests() async {
+        let (manager, _, _) = fixture()
+        let first = UUID(), second = UUID()
+        expect(!manager.isBusy && manager.canReconnectVPN, "Idle manager must allow reconnect")
+        manager.retainWorkflow(first)
+        expect(!manager.canReconnectVPN, "Retained native work must disable reconnect")
+        let publications = PublicationMetrics.count(manager)
+        manager.retainWorkflow(first)
+        manager.retainWorkflow(second)
+        manager.releaseWorkflow(first)
+        expect(PublicationMetrics.count(manager) == publications,
+               "Workflow membership changes must not publish unchanged UI availability")
+        expect(!manager.canReconnectVPN && !manager.isBusy, "Remaining workflow still owns the connection")
+        manager.releaseWorkflow(second)
+        await settle()
+        expect(manager.canReconnectVPN && !manager.isBusy, "Cleanup must restore reconnect availability")
+        print("Passed native UI availability deduplication across overlapping workflows and cleanup")
+    }
+
     @MainActor static func waitUntil(_ message: String, _ predicate: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(3)
         while !predicate() {

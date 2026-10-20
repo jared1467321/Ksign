@@ -104,7 +104,12 @@ source trees from the chunk-size experiment.
   reservations, pause/drain checks and Ksign's exclusive self-update remain
   enforced.
   Numeric drawer progress is coalesced to at most five deliveries per second
-  per attempt, with immediate final values at phase boundaries and completion.
+  per attempt while active, with immediate final values at completion. Inactive
+  attempts retain their latest numeric samples without scheduling UI deliveries;
+  foreground activation flushes them. Native worker phase/progress events feed
+  Live Activity independently, with attempt guards preventing cancelled/retried
+  work from updating a newer attempt. Foreground phase boundaries keep the same
+  immediate numeric flushes.
   Waiting apps suspend on one shared admission sampler instead of each polling
   the main actor. Installation cleanup and pause/resume wake that sampler
   directly; the timer remains for memory measurements and eligibility changes.
@@ -115,6 +120,10 @@ source trees from the chunk-size experiment.
   into or out of foreground sampling, and the grid subscribes to membership
   changes independently of the header. Settled progress remains cached, while
   native cleanup stays tracked until cancellation/selection is safe.
+  Setup cards and native limit controls subscribe only to the session values
+  they display. Workflow membership and operation counts publish manager updates
+  only when busy/reconnect availability changes, reducing repeated view work
+  during concurrent installs without changing admission or control behavior.
 - Uploads use bounded 1 MiB chunks. The experimental chunk-size picker has
   been removed; previously saved sizes no longer affect uploads. **Settings →
   Installation → iDevice → Upload performance** retains the latest completed

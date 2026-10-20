@@ -13,7 +13,8 @@ import NimbleViews
 struct InstallationView: View {
     @AppStorage("Feather.installationMethod") private var _installationMethod: Int = 0
     @ObservedObject private var manager = DeviceInstallationManager.shared
-    @ObservedObject private var session = InstallSession.shared
+    private let session = InstallSession.shared
+    @State private var isSessionActive = InstallSession.shared.isActive
     
     // MARK: Body
     var body: some View {
@@ -38,6 +39,7 @@ struct InstallationView: View {
             }
         }
         .nbThemeCanvas()
+        .onReceive(session.isActivePublisher) { isSessionActive = $0 }
         .navigationTitle(.localized("Installation"))
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -51,7 +53,7 @@ struct InstallationView: View {
                 Text("Native · iDevice").tag(1)
             }
             .pickerStyle(.segmented)
-            .disabled(manager.isBusy || session.isActive)
+            .disabled(manager.isBusy || isSessionActive)
             Text(_installationMethod == 0
                  ? "Install through a local web server."
                  : "Install directly on this device, with progress for every app.")

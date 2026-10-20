@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import Combine
 import NimbleExtensions
 import IDeviceSwift
 import NimbleViews
@@ -249,7 +250,8 @@ struct InstallDrawerSheet: View {
 }
 
 private struct NativeInstallLimitControl: View {
-	@ObservedObject private var session = InstallSession.shared
+	private let session = InstallSession.shared
+	@State private var nativeInstallLimit = InstallSession.shared.nativeInstallLimit
 	@State private var text = ""
 	@FocusState private var isEditing: Bool
 
@@ -276,20 +278,21 @@ private struct NativeInstallLimitControl: View {
 						.frame(width: 32, height: 22)
 						.contentShape(Rectangle())
 				}
-				.disabled(session.nativeInstallLimit >= NativeInstallLimit.allowedValues.upperBound)
+				.disabled(nativeInstallLimit >= NativeInstallLimit.allowedValues.upperBound)
 				.accessibilityLabel("Increase active app limit")
 				Button { adjust(by: -1) } label: {
 					Image(systemName: "chevron.down")
 						.frame(width: 32, height: 22)
 						.contentShape(Rectangle())
 				}
-				.disabled(session.nativeInstallLimit <= NativeInstallLimit.allowedValues.lowerBound)
+				.disabled(nativeInstallLimit <= NativeInstallLimit.allowedValues.lowerBound)
 				.accessibilityLabel("Decrease active app limit")
 			}
 			.font(.caption.weight(.semibold))
 			.buttonStyle(.plain)
 			.nbThemeForeground(.accent)
 		}
+		.onReceive(session.$nativeInstallLimit.removeDuplicates()) { nativeInstallLimit = $0 }
 		.onAppear { text = String(session.nativeInstallLimit) }
 		.onChange(of: text) { value in
 			if let limit = NativeInstallLimit.enteredValue(value) {
@@ -297,7 +300,7 @@ private struct NativeInstallLimitControl: View {
 				if value != String(limit) { text = String(limit) }
 			}
 		}
-		.onChange(of: session.nativeInstallLimit) { value in
+		.onChange(of: nativeInstallLimit) { value in
 			if !isEditing { text = String(value) }
 		}
 		.onChange(of: isEditing) { editing in

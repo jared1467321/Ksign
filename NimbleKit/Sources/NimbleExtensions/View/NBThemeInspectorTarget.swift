@@ -1005,7 +1005,6 @@ private struct NBThemeCanvasModifier: ViewModifier {
     @Environment(\.colorSchemeContrast) private var contrast
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @State private var ownerID = UUID()
-    @State private var panes: [CGRect] = []
     let role: NBThemeRole
     let elementID: String
 
@@ -1030,17 +1029,12 @@ private struct NBThemeCanvasModifier: ViewModifier {
             // Normal screens own their sky inside the navigation container.
             // Glass drawers explicitly replace their presentation backing and
             // clear their canvases to reveal the presenting screen instead.
-            .onPreferenceChange(NBGlassPanePreferenceKey.self) { frames in
-                guard rendersAurora && !glassSheet && role == .background else { return }
-                let nextPanes = NBGlassPaneSelection.largest(frames.values.lazy.map(\.rect))
-                if nextPanes != panes { panes = nextPanes }
-            }
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .foregroundStyle(primary, secondary)
             .listRowSeparatorTint(separator)
             .scrollContentBackground(.hidden)
             .modifier(NBThemeSheetNavigationBackgroundModifier(clear: glassSheet))
-            .background {
+            .backgroundPreferenceValue(NBGlassPanePreferenceKey.self) { frames in
                 if !glassSheet {
                     // Register the paint's bounds, including its safe-area
                     // extent, rather than the smaller content rectangle.
@@ -1051,7 +1045,10 @@ private struct NBThemeCanvasModifier: ViewModifier {
                                 // coordinates, including the title/search area.
                                 Color.clear
                             } else {
-                                NBThemeBackdrop(base: resolved, panes: panes)
+                                // Geometry changes invalidate only this backing
+                                // view, rather than state on the content modifier.
+                                NBThemeBackdrop(base: resolved, panes: NBGlassPaneSelection.largest(frames.values.lazy.map(\.rect)))
+                                    .equatable()
                             }
                         } else {
                             resolved.color
