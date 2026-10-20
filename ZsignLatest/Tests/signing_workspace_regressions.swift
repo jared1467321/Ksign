@@ -144,6 +144,13 @@ import Foundation
         catch let error as CocoaError {
             precondition(error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile)
         }
+        catch SigningWorkspace.Failure.escaped(let path) {
+            // Darwin may leave /var unresolved for a dangling target and reject
+            // the link during containment checks, before opening Info.plist.
+            // Both outcomes must reject this nested input, never skip it as a
+            // missing optional import root.
+            precondition(URL(fileURLWithPath: path).lastPathComponent == "Info.plist")
+        }
         print("Passed eight simultaneous private workspaces, identical filenames, hard-link separation, symlink escape rejection, source preservation and isolated cleanup.")
         print("Passed scoped import validation, hard-link separation, executable/link escape rejection and zero rescans of unchanged resources.")
     }
