@@ -11,8 +11,8 @@ and adaptive quality controller. The optimized renderer retains all 128 identity
 bits and all 41 random streams, including 2–6 independently generated curtains,
 their geometry/detail/palette/motion, and 0–2 coronas.
 
-Run `python3 .github/scripts/test_themes.py` with Swift 6 and Clang available.
-The differential tests compare the production shader directly with the original:
+The pre-build theme test runner has been removed. Its differential tests
+compared the production shader directly with the original:
 
 - 15,908 exact identity values across 388 identities, including every identity bit.
 - 82,944 exact sky pixels across multiple identities, times and viewport origins;

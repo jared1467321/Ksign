@@ -4,7 +4,7 @@ import CoreGraphics
 #endif
 
 // UIKit/Combine doubles only. The registry, visibility calculation and anchor
-// lifecycle are extracted from production by test_themes.py.
+// lifecycle use production source placeholders.
 public protocol ObservableObject {}
 @propertyWrapper public struct Published<Value> {
     public var wrappedValue: Value

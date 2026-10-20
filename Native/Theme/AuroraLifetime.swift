@@ -2,7 +2,7 @@ import Foundation
 import CoreFoundation
 
 // Only UIKit/Combine/ProcessInfo interfaces are doubled. The controller and
-// weak display-link target below are copied verbatim by test_themes.py.
+// weak display-link target below use production source placeholders.
 private protocol ObservableObject {}
 @propertyWrapper private struct Published<Value> {
     var wrappedValue: Value

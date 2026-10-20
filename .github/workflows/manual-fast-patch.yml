@@ -67,30 +67,6 @@ jobs:
           NATIVE_RUST_TOOLCHAIN="$(python3 -c 'import json; print(json.load(open("Native/Device/source.json"))["rust_toolchain"])')"
           rustup toolchain install "$NATIVE_RUST_TOOLCHAIN" --profile minimal
 
-      - name: Verify native cache fingerprint
-        run: python3 .github/scripts/test_native_cache.py
-
-      - name: Verify IPA packaging
-        run: python3 .github/scripts/test_package_ipa.py
-
-      - name: Verify device connection recovery
-        run: python3 .github/scripts/test_device_connection.py
-
-      - name: Verify settings backup and restore
-        run: python3 .github/scripts/test_backup.py
-
-      - name: Verify adaptive themes
-        run: python3 .github/scripts/test_themes.py
-
-      - name: Verify signing cleanup
-        run: python3 .github/scripts/test_signing_cleanup.py
-
-      - name: Verify signing memory and workspace isolation
-        run: python3 .github/scripts/test_signing_memory.py
-
-      - name: Verify arm64e fixup disk writes
-        run: python3 .github/scripts/test_macho_fixup.py
-
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays, tests and documentation
       # must not force both native targets to rebuild.

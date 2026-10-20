@@ -22,8 +22,7 @@ and Rust versions. Swift overlay, test, and documentation edits reuse it.
 The workflow also separates caches by runner OS and architecture. The first
 build with a new fingerprint compiles both native targets and saves the cache;
 later builds reuse it. Selecting **Ignore caches and build from scratch**
-still bypasses all caches. Run `python3 .github/scripts/test_native_cache.py`
-to verify invalidation and the cached build path without Xcode or Rust.
+still bypasses all caches.
 
 The native builder enables `aes` 0.8.4's ARMv8 backend with `--cfg aes_armv8`
 for both Apple ARM64 targets. The pinned `cpufeatures` recognizes AES support
@@ -201,9 +200,9 @@ cleanup from running and still requires a manual reconnect.
 
 ## Verification status
 
-Run `python3 .github/scripts/test_device_connection.py` on a machine with Swift
-to exercise production connection recovery against VPN and pairing doubles.
-The manual build runs these regression checks before building the IPA.
+The pre-build regression scripts have been removed. The following describes
+their historical coverage of production connection recovery against VPN and
+pairing doubles.
 The shared-tunnel check runs the production proxy against native FFI doubles,
 holds three uploads open concurrently, verifies one tunnel is used for all
 upload and installation clients, and checks lease cleanup after a cache reset.
