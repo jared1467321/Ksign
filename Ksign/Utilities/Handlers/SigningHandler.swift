@@ -214,7 +214,6 @@ final class SigningHandler: NSObject {
         // covered by a single call.
         try await memoryCheckpoint?("before tweak preparation")
         try await _inject(for: movedAppPath, with: _options.injectionFiles, with: _options)
-        try _workspace.sanitize(movedAppPath)
         
         if _options.experiment_supportLiquidGlass {
             try await _locateMachosAndChangeToSDK26(for: movedAppPath)
@@ -266,7 +265,6 @@ final class SigningHandler: NSObject {
 			throw SigningFileHandlerError.appNotFound
 		}
         try await memoryCheckpoint?("before archive rebuild")
-        try _workspace.sanitize(movedAppPath)
 
 		var destinationURL = try await _directory()
 		try _fileManager.createDirectoryIfNeeded(at: destinationURL)
@@ -571,7 +569,7 @@ extension SigningHandler {
         let handler = TweakHandler(app: app, with: tweaks, options: options,
             prepareDestination: workspace.map { workspace in
                 { path, replacing in try workspace.prepare(path, replacing: replacing) }
-            }, packages: _packages, validateWorkspace: { try self._workspace.sanitize(app) })
+            }, packages: _packages, validateWorkspace: { try self._workspace.sanitizeAdditions($0) })
 		do {
 			try await handler.getInputFiles()
             _archiveTweakWorkspace = workspace

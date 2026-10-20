@@ -104,11 +104,15 @@ func extractFile(at url: inout URL) throws {
             let workspace = sparse ? ArchiveTweakWorkspace(archive: archive, appURL: app, excluded: ["_CodeSignature", "embedded.mobileprovision"]) : nil
             Zsign.patches = []
             var preparations: [(String, Bool)] = []
+            var validationPaths: Set<String> = []
             let handler = TweakHandler(app: app, with: inputs, options: Options(), prepareDestination: { path, replacing in
                 preparations.append((path, replacing))
                 try workspace?.prepare(path, replacing: replacing)
-            }, packages: packages)
+            }, packages: packages, validateWorkspace: { paths in
+                validationPaths.formUnion(paths.map { String($0.path.dropFirst(app.path.count + 1)) })
+            })
             try await handler.getInputFiles()
+            check(validationPaths == Set(preparations.map(\.0)), "Every copied or materialized tweak destination must be validated")
             check(Set(Zsign.patches.map(\.path)).count == Zsign.patches.count)
             let main = Zsign.patches.first { $0.path == app.appendingPathComponent("Main").resolvingSymlinksInPath().path }!
             check(main.injections.count == 5, "Three dylibs and two frameworks share one main-executable patch")
@@ -148,9 +152,11 @@ func extractFile(at url: inout URL) throws {
         // An ordinary signing operation does not materialize a loader merely to
         // decide that no tweaks were requested.
         var destinations = 0
+        var validations = 0
         try await TweakHandler(app: work.appendingPathComponent("tweak-handler-sparse.app"), with: [],
-            prepareDestination: { _, _ in destinations += 1 }).getInputFiles()
-        check(destinations == 0)
+            prepareDestination: { _, _ in destinations += 1 },
+            validateWorkspace: { _ in validations += 1 }).getInputFiles()
+        check(destinations == 0 && validations == 0)
 
         // Reject an imported framework that redirects an executable into a
         // different operation before the queued load-command edits run.
@@ -166,9 +172,10 @@ func extractFile(at url: inout URL) throws {
         try FileManager.default.removeItem(at: escapingFramework.appendingPathComponent("Escape"))
         try FileManager.default.createSymbolicLink(at: escapingFramework.appendingPathComponent("Escape"), withDestinationURL: foreign)
         let patchCount = Zsign.patches.count
+        try isolated.sanitize(isolatedApp)
         do {
             try await TweakHandler(app: isolatedApp, with: [escapingFramework],
-                validateWorkspace: { try isolated.sanitize(isolatedApp) }).getInputFiles()
+                validateWorkspace: { try isolated.sanitizeAdditions($0) }).getInputFiles()
             preconditionFailure("An external framework executable must not be patched")
         } catch is SigningWorkspace.Failure {}
         check(Zsign.patches.count == patchCount, "No queued edits may run before workspace validation")

@@ -22,6 +22,26 @@ final class SigningWorkspace {
     }
 
     func sanitize(_ app: URL) throws {
+        try sanitizeContents(at: app)
+    }
+
+    // After the initial scan, only imported/materialized destinations can add
+    // links or executable metadata. Existing files stay private to this job;
+    // our plist edits, Mach-O patches and signer only change their contents.
+    func sanitizeAdditions(_ paths: [URL]) throws {
+        var checked: [String] = []
+        for path in Set(paths.map { $0.standardizedFileURL }).sorted(by: { $0.path < $1.path }) {
+            if checked.contains(where: { path.path.hasPrefix($0 + "/") }) { continue }
+            try sanitizeContents(at: path, allowMissing: true)
+            checked.append(path.path)
+        }
+    }
+
+#if ARCHIVE_MEMORY_TESTING
+    var didValidateFile: ((URL) -> Void)?
+#endif
+
+    private func sanitizeContents(at path: URL, allowMissing: Bool = false) throws {
         let manager = FileManager.default
         let root = directory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
         let lexicalRoot = directory.standardizedFileURL.path + "/"
@@ -32,11 +52,10 @@ final class SigningWorkspace {
         func contains(_ url: URL) -> Bool {
             url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root)
         }
-        var enumerationError: Error?
-        guard contains(app), let entries = manager.enumerator(at: app, includingPropertiesForKeys: nil,
-            options: [], errorHandler: { _, error in enumerationError = error; return false }) else { throw Failure.escaped(app.path) }
-        for case let file as URL in entries {
-            let attributes = try manager.attributesOfItem(atPath: file.path)
+        func validate(_ file: URL, attributes: [FileAttributeKey: Any]) throws -> FileAttributeType? {
+#if ARCHIVE_MEMORY_TESTING
+            didValidateFile?(file)
+#endif
             let type = attributes[.type] as? FileAttributeType
             if type == .typeSymbolicLink {
                 // Framework Versions/Current links are fine if they stay inside
@@ -49,7 +68,6 @@ final class SigningWorkspace {
                 guard lexicallyContains(targetURL), contains(targetURL) else {
                     throw Failure.escaped(file.path)
                 }
-                entries.skipDescendants()
             } else if type == .typeRegular, ((attributes[.referenceCount] as? NSNumber)?.intValue ?? 1) > 1 {
                 let copy = file.deletingLastPathComponent().appendingPathComponent(".FeatherPrivate_" + UUID().uuidString)
                 defer { try? manager.removeItem(at: copy) }
@@ -71,6 +89,32 @@ final class SigningWorkspace {
                     }
                 }
             }
+            return type
+        }
+        guard contains(path) else { throw Failure.escaped(path.path) }
+        let attributes: [FileAttributeKey: Any]
+        do { attributes = try manager.attributesOfItem(atPath: path.path) }
+        catch let error as CocoaError where allowMissing && (error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile) {
+            // Preparing a destination can remove it without installing a replacement.
+            return
+        }
+        let type = try validate(path, attributes: attributes)
+        if type == .typeSymbolicLink {
+            // A requested root can itself be a framework alias. Inspect its
+            // target directory too; enumeration below only skips child links.
+            let target = path.resolvingSymlinksInPath()
+            var isDirectory: ObjCBool = false
+            if manager.fileExists(atPath: target.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                try sanitizeContents(at: target)
+            }
+            return
+        }
+        guard type == .typeDirectory else { return }
+        var enumerationError: Error?
+        guard let entries = manager.enumerator(at: path, includingPropertiesForKeys: nil,
+            options: [], errorHandler: { _, error in enumerationError = error; return false }) else { throw Failure.escaped(path.path) }
+        for case let file as URL in entries {
+            if try validate(file, attributes: manager.attributesOfItem(atPath: file.path)) == .typeSymbolicLink { entries.skipDescendants() }
         }
         if let enumerationError { throw enumerationError }
     }

@@ -17,7 +17,10 @@ NSString *LCPatchMachOFixupARM64eSlice(const char *path) {
 		return [NSString stringWithFormat:@"Failed to open %s: %s", path, strerror(errno)];
 	}
 	struct stat s = {0};
-	fstat(fd, &s);
+	if (fstat(fd, &s) != 0 || s.st_size < sizeof(uint32_t)) {
+		close(fd);
+		return [NSString stringWithFormat:@"Invalid or truncated Mach-O: %s", path];
+	}
 	void *map = mmap(NULL, s.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if(map == MAP_FAILED) {
 		close(fd);
@@ -25,25 +28,48 @@ NSString *LCPatchMachOFixupARM64eSlice(const char *path) {
 	}
 	
 	uint32_t magic = *(uint32_t *)map;
+	BOOL modified = NO;
+	NSString *result = nil;
 	if(magic == FAT_CIGAM) {
 		// Find arm64e slice without CPU_SUBTYPE_LIB64
 		struct fat_header *header = (struct fat_header *)map;
+		if ((size_t)s.st_size < sizeof(struct fat_header) ||
+			OSSwapInt32(header->nfat_arch) > ((size_t)s.st_size - sizeof(struct fat_header)) / sizeof(struct fat_arch)) {
+			munmap(map, s.st_size);
+			close(fd);
+			return [NSString stringWithFormat:@"Invalid or truncated fat Mach-O: %s", path];
+		}
 		struct fat_arch *arch = (struct fat_arch *)(map + sizeof(struct fat_header));
 		for(int i = 0; i < OSSwapInt32(header->nfat_arch); i++) {
 			if(OSSwapInt32(arch->cputype) == CPU_TYPE_ARM64 && OSSwapInt32(arch->cpusubtype) == CPU_SUBTYPE_ARM64E) {
-				struct mach_header_64 *header = (struct mach_header_64 *)(map + OSSwapInt32(arch->offset));
-				header->cpusubtype |= CPU_SUBTYPE_LIB64;
-				arch->cpusubtype = htonl(header->cpusubtype);
+				uint32_t offset = OSSwapInt32(arch->offset), size = OSSwapInt32(arch->size);
+				if (offset > (size_t)s.st_size || size > (size_t)s.st_size - offset || size < sizeof(struct mach_header_64)) {
+					result = [NSString stringWithFormat:@"Invalid or truncated arm64e slice: %s", path];
+					break;
+				}
+				struct mach_header_64 *slice = (struct mach_header_64 *)((uint8_t *)map + offset);
+				if (slice->magic != MH_MAGIC_64 || slice->cputype != CPU_TYPE_ARM64 ||
+					(slice->cpusubtype & ~CPU_SUBTYPE_LIB64) != CPU_SUBTYPE_ARM64E) {
+					result = [NSString stringWithFormat:@"Invalid arm64e Mach-O header: %s", path];
+					break;
+				}
+				slice->cpusubtype |= CPU_SUBTYPE_LIB64;
+				arch->cpusubtype = htonl(slice->cpusubtype);
+				modified = YES;
 				break;
 			}
 			arch = (struct fat_arch *)((void *)arch + sizeof(struct fat_arch));
 		}
 	}
 	
-	msync(map, s.st_size, MS_SYNC);
+	// Most frameworks need no fixup. Avoid a synchronous disk flush unless
+	// this pass actually changed the architecture header.
+	if (modified && msync(map, s.st_size, MS_SYNC) != 0) {
+		result = [NSString stringWithFormat:@"Failed to sync %s: %s", path, strerror(errno)];
+	}
 	munmap(map, s.st_size);
 	close(fd);
-	return nil;
+	return result;
 }
 
 static NSString *PatchMachOAtOffset(void *mapped, size_t fileSize, off_t offset, uint32_t index) {

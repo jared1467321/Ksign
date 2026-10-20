@@ -85,7 +85,66 @@ import Foundation
         try Data().write(to: aliasedApp.appendingPathComponent("Main"))
         try manager.createSymbolicLink(atPath: aliasedApp.appendingPathComponent("Alias").path, withDestinationPath: "Main")
         try aliased.sanitize(aliasedApp)
+        let appAlias = aliased.directory.appendingPathComponent("AppAlias")
+        try manager.createSymbolicLink(at: appAlias, withDestinationURL: aliasedApp)
+        try aliased.sanitize(appAlias)
         try aliased.clean()
+        // The initial tree is checked once. Later imports must be checked in
+        // full without revisiting the hundreds of unchanged resource files.
+        let incremental = SigningWorkspace(root: root)
+        try incremental.create()
+        defer { try? incremental.clean() }
+        let incrementalApp = incremental.directory.appendingPathComponent("App.app")
+        let resources = incrementalApp.appendingPathComponent("Resources")
+        try manager.createDirectory(at: resources, withIntermediateDirectories: true)
+        for index in 0..<256 {
+            try Data("resource".utf8).write(to: resources.appendingPathComponent("\(index).dat"))
+        }
+        var visited: [URL] = []
+        incremental.didValidateFile = { visited.append($0) }
+        try incremental.sanitize(incrementalApp)
+        precondition(visited.count >= 258)
+        visited.removeAll()
+        let added = incrementalApp.appendingPathComponent("Added.dylib")
+        try manager.linkItem(at: source, to: added)
+        let bundle = incrementalApp.appendingPathComponent("Added.bundle")
+        try manager.createDirectory(at: bundle, withIntermediateDirectories: true)
+        let info = bundle.appendingPathComponent("Info.plist")
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": "Main"], format: .xml, options: 0).write(to: info)
+        try Data("imported".utf8).write(to: bundle.appendingPathComponent("Main"))
+        try incremental.sanitizeAdditions([added, bundle, info, added])
+        precondition(visited.count == 4, "Only the imported file and three bundle entries need validation")
+        precondition(!visited.contains { $0.path.hasPrefix(resources.path) })
+        let writer = try FileHandle(forWritingTo: added)
+        try writer.truncate(atOffset: 0)
+        try writer.write(contentsOf: Data("private import".utf8))
+        try writer.close()
+        let untouchedSource = try Data(contentsOf: source)
+        precondition(untouchedSource == original, "An imported hard link must be separated before patching")
+        visited.removeAll()
+        try incremental.sanitizeAdditions([])
+        try incremental.sanitizeAdditions([incrementalApp.appendingPathComponent("Removed.framework")])
+        precondition(visited.isEmpty)
+
+        let importedLink = incrementalApp.appendingPathComponent("Escape.dylib")
+        try manager.createSymbolicLink(at: importedLink, withDestinationURL: source)
+        do { try incremental.sanitizeAdditions([importedLink]); preconditionFailure("Imported external links must be rejected") }
+        catch is SigningWorkspace.Failure {}
+        try manager.removeItem(at: importedLink)
+        try escapedExecutable.write(to: info)
+        do { try incremental.sanitizeAdditions([bundle]); preconditionFailure("Imported executable metadata must remain inside this job") }
+        catch is SigningWorkspace.Failure {}
+        let bundleAlias = incrementalApp.appendingPathComponent("Alias.bundle")
+        try manager.createSymbolicLink(at: bundleAlias, withDestinationURL: bundle)
+        do { try incremental.sanitizeAdditions([bundleAlias]); preconditionFailure("An imported directory alias must not hide unsafe metadata") }
+        catch is SigningWorkspace.Failure {}
+        try manager.removeItem(at: info)
+        try manager.createSymbolicLink(atPath: info.path, withDestinationPath: "Missing.plist")
+        do { try incremental.sanitizeAdditions([bundle]); preconditionFailure("A missing imported Info.plist target must not hide a validation failure") }
+        catch let error as CocoaError {
+            precondition(error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile)
+        }
         print("Passed eight simultaneous private workspaces, identical filenames, hard-link separation, symlink escape rejection, source preservation and isolated cleanup.")
+        print("Passed scoped import validation, hard-link separation, executable/link escape rejection and zero rescans of unchanged resources.")
     }
 }

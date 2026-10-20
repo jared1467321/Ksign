@@ -88,6 +88,9 @@ jobs:
       - name: Verify signing memory and workspace isolation
         run: python3 .github/scripts/test_signing_memory.py
 
+      - name: Verify arm64e fixup disk writes
+        run: python3 .github/scripts/test_macho_fixup.py
+
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays, tests and documentation
       # must not force both native targets to rebuild.

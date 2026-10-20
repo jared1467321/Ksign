@@ -96,7 +96,8 @@ class TweakHandler {
     private var _options: Options
     private let _prepareDestination: ((String, Bool) throws -> Void)?
     private let _packages: TweakPackageCache
-    private let _validateWorkspace: (() throws -> Void)?
+    private let _validateWorkspace: (([URL]) throws -> Void)?
+    private var _validationPaths = Set<URL>()
     private lazy var _mainExecutable = Bundle(url: _app)?.executableURL
     private struct MachOPatch {
         var rewrites: [String: String] = [:]
@@ -104,6 +105,11 @@ class TweakHandler {
     }
     private var _patches: [URL: MachOPatch] = [:]
     private var _patchOrder: [URL] = []
+
+    private func _prepare(_ relativePath: String, replacing: Bool = false) throws {
+        try _prepareDestination?(relativePath, replacing)
+        _validationPaths.insert(_app.appendingPathComponent(relativePath))
+    }
 
     private func _queuePatch(for executable: URL, rewriteSubstrate: Bool = false, injection: String? = nil) {
         let executable = executable.resolvingSymlinksInPath().standardizedFileURL
@@ -128,7 +134,7 @@ class TweakHandler {
     init(app: URL, with urls: [URL], options: Options = OptionsManager.shared.options,
          prepareDestination: ((String, Bool) throws -> Void)? = nil,
          packages: TweakPackageCache = TweakPackageCache(),
-         validateWorkspace: (() throws -> Void)? = nil) {
+         validateWorkspace: (([URL]) throws -> Void)? = nil) {
 		self._app = app
 		self._urls = urls
         self._options = options
@@ -139,7 +145,7 @@ class TweakHandler {
     
     private func _checkEllekit() async throws {
         if !_urls.isEmpty || _options.experiment_replaceSubstrateWithEllekit {
-            try _prepareDestination?("Frameworks/CydiaSubstrate.framework", false)
+            try _prepare("Frameworks/CydiaSubstrate.framework")
         }
         let frameworksPath = _app.appendingPathComponent("Frameworks").appendingPathComponent("CydiaSubstrate.framework")
 
@@ -215,7 +221,7 @@ class TweakHandler {
 		}
         // Imported frameworks can contain symlinks. Validate all destinations
         // before applying any queued edits, including paths resolved above.
-        try _validateWorkspace?()
+        try _validateWorkspace?(Array(_validationPaths))
         _applyPatches()
 	}
 	
@@ -228,7 +234,7 @@ class TweakHandler {
 			case "framework":
 				try await _handleFramework(at: url)
 			case "bundle":
-                try _prepareDestination?(url.lastPathComponent, false)
+                try _prepare(url.lastPathComponent)
 				let destinationURL = _app.appendingPathComponent(url.lastPathComponent)
 				
 				// Use copyItem instead of moveFileIfNeeded to preserve the original file
@@ -262,7 +268,7 @@ class TweakHandler {
 
 		destinationURL = destinationURL.appendingPathComponent(url.lastPathComponent)
         let relative = (_options.injectFolder == .frameworks ? "Frameworks/" : "") + url.lastPathComponent
-        try _prepareDestination?(relative, false)
+        try _prepare(relative)
 
 		if !_fileManager.fileExists(atPath: destinationURL.path) {
 			try _fileManager.copyItem(at: url, to: destinationURL)
@@ -284,7 +290,7 @@ class TweakHandler {
 	
 
 	private func _handleFramework(at url: URL) async throws {
-        try _prepareDestination?("Frameworks/" + url.lastPathComponent, false)
+        try _prepare("Frameworks/" + url.lastPathComponent)
 		let destinationURL = _app.appendingPathComponent("Frameworks").appendingPathComponent(url.lastPathComponent)
 
 		if !_fileManager.fileExists(atPath: destinationURL.path) {
@@ -308,7 +314,7 @@ class TweakHandler {
 	}
 
 	private func _handleBundle(at url: URL) async throws {
-        try _prepareDestination?(url.lastPathComponent, true)
+        try _prepare(url.lastPathComponent, replacing: true)
 		let destinationURL = _app.appendingPathComponent(url.lastPathComponent)
 
 		if _fileManager.fileExists(atPath: destinationURL.path) {
