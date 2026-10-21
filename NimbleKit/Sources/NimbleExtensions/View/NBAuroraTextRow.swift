@@ -61,10 +61,10 @@ private struct NBAuroraTextRowModifier: ViewModifier {
                 }
                 return NBAuroraTextRowGeometry(frame: frame, size: proxy.size)
             } action: { row.move(to: $0) }
-            .onAppear { appeared = true; configure() }
+            .onAppear { appeared = true; configure(refresh: true) }
             .onDisappear { appeared = false; configure() }
             .onChange(of: viewport) { _ in configure() }
-            .onChange(of: scenePhase) { _ in configure() }
+            .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in configure() }
             .onChange(of: session.identity.shaderIdentity) { _ in configure(refresh: true) }
     }

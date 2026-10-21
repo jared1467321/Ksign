@@ -77,6 +77,86 @@ extension NBAuroraInkPaint {
 @main
 enum InkMapLifetimeTests {
     @MainActor
+    static func transientFailure() async {
+        let map = NBAuroraInkMap(), scope = NBAuroraInkLease()
+        map.update(scope, active: true, reduceMotion: false)
+        NBAuroraInkWorker.complete(nil)
+        await settle { !NBAuroraInkWorker.pending.isEmpty }
+        assert(NBAuroraInkWorker.pending.count == 1,
+               "A temporary render failure should get one bounded retry")
+        NBAuroraInkWorker.complete(Data([21]))
+        await settle { !map.busyForTest }
+        assert(scope.paint.frame?.argument.bytes == Data([21]))
+        map.update(scope, active: false, reduceMotion: false)
+        assert(CADisplayLink.active.isEmpty)
+    }
+
+    @MainActor
+    static func activityRecovery() async {
+        let map = NBAuroraInkMap(), scope = NBAuroraInkLease()
+        map.update(scope, active: true, reduceMotion: false)
+        map.setActive(false)
+        assert(CADisplayLink.active.isEmpty)
+        // A late GPU failure from before backgrounding cannot poison recovery.
+        map.setActive(true)
+        assert(NBAuroraInkWorker.pending.count == 1, "Resume cannot overlap in-flight work")
+        NBAuroraInkWorker.complete(nil)
+        await settle { !NBAuroraInkWorker.pending.isEmpty }
+        NBAuroraInkWorker.complete(Data([22]))
+        await settle { !map.busyForTest }
+        assert(scope.paint.frame?.argument.bytes == Data([22]))
+
+        let paintID = scope.paint.frame!.id
+        let notifications = scope.paint.notificationsForTest
+        CADisplayLink.active[0].tick()
+        map.setActive(false)
+        NBAuroraInkWorker.complete(Data([23]))
+        await settle { !map.busyForTest }
+        assert(scope.paint.frame?.id == paintID && scope.paint.notificationsForTest == notifications,
+               "Suspended work must neither replace nor clear existing paint")
+        map.update(scope, active: false, reduceMotion: false)
+        map.update(scope, active: true, reduceMotion: false)
+        assert(NBAuroraInkWorker.pending.isEmpty && CADisplayLink.active.isEmpty,
+               "Late label registration cannot restart GPU work while inactive")
+
+        map.setActive(true)
+        assert(NBAuroraInkWorker.pending.count == 1, "Resume refreshes even with a matching cached identity")
+        map.setActive(true)
+        assert(NBAuroraInkWorker.pending.count == 1)
+        NBAuroraInkWorker.complete(nil)
+        await settle { !NBAuroraInkWorker.pending.isEmpty }
+        NBAuroraInkWorker.complete(nil)
+        await settle { !map.busyForTest }
+        for _ in 0..<100 { map.update(scope, active: true, reduceMotion: false) }
+        assert(NBAuroraInkWorker.pending.isEmpty && CADisplayLink.active.isEmpty,
+               "Persistent failures must stop after one retry")
+        assert(scope.paint.frame?.id == paintID, "A failed refresh must preserve valid paint")
+
+        map.setActive(false)
+        map.setActive(true)
+        assert(NBAuroraInkWorker.pending.count == 1, "Foregrounding renews the bounded recovery budget")
+        NBAuroraInkWorker.complete(Data([24]))
+        await settle { !map.busyForTest }
+        assert(scope.paint.frame?.argument.bytes == Data([24]))
+        map.update(scope, active: false, reduceMotion: false)
+        assert(CADisplayLink.active.isEmpty)
+
+        // Reduce Motion must recover too, without relying on display-link ticks.
+        let frozenMap = NBAuroraInkMap(), frozenScope = NBAuroraInkLease()
+        frozenMap.update(frozenScope, active: true, reduceMotion: true)
+        NBAuroraInkWorker.complete(nil)
+        await settle { !NBAuroraInkWorker.pending.isEmpty }
+        NBAuroraInkWorker.complete(Data([25]))
+        await settle { !frozenMap.busyForTest }
+        assert(frozenScope.paint.frame?.argument.bytes == Data([25]) && CADisplayLink.active.isEmpty)
+        frozenMap.setActive(false)
+        frozenMap.setActive(true)
+        assert(NBAuroraInkWorker.pending.isEmpty, "Frozen ink needs no redundant resume render")
+        frozenMap.update(frozenScope, active: false, reduceMotion: true)
+        print("Ink recovery passed: transient failure, stale suspension results, fresh resume, bounded retries and Reduce Motion.")
+    }
+
+    @MainActor
     static func rowTracking() async {
         let row = NBAuroraTextRowTracker()
         let window = CGRect(x: 10, y: 20, width: 400, height: 900)
@@ -187,6 +267,8 @@ enum InkMapLifetimeTests {
 
     @MainActor
     static func main() async {
+        await transientFailure()
+        await activityRecovery()
         await rowTracking()
         let map = NBAuroraInkMap()
         let scopes = (0..<100).map { _ in NBAuroraInkLease() }
@@ -332,9 +414,18 @@ enum InkMapLifetimeTests {
         let failedMap = NBAuroraInkMap()
         failedMap.update(shuffleScope, active: true, reduceMotion: false)
         NBAuroraInkWorker.complete(nil)
+        await settle { !NBAuroraInkWorker.pending.isEmpty }
+        NBAuroraInkWorker.complete(nil)
         await settle { !failedMap.busyForTest }
         for _ in 0..<100 { failedMap.update(shuffleScope, active: true, reduceMotion: false) }
         assert(failedMap.animated == nil && CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.isEmpty)
+        failedMap.update(shuffleScope, active: false, reduceMotion: false)
+        failedMap.update(shuffleScope, active: true, reduceMotion: false)
+        assert(NBAuroraInkWorker.pending.count == 1, "Returning to a presentation can recover failed ink")
+        NBAuroraInkWorker.complete(Data([26]))
+        await settle { !failedMap.busyForTest }
+        assert(shuffleScope.paint.frame?.argument.bytes == Data([26]))
+        failedMap.update(shuffleScope, active: false, reduceMotion: false)
         print("Shared ink-map lifecycle tests passed: 100 scopes share one clock/render; 103 retained rows deliver only to eight visible paints, reenter with the latest map, and release offscreen buffers; clipping, no backlog/redundant frames, stale rejection, frozen/mixed motion, weak ownership, and bounded failure.")
     }
 }

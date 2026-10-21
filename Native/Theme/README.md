@@ -117,8 +117,15 @@ Weak scope leases stop the shared clock when no animated text is visible. A
 weak clock target also cleans up a discarded owner. Reduce Motion uses a
 separately cached frame at time 1.8, matching the backdrop. Shuffling discards
 old in-flight identities. Until a matching map arrives, or if Metal setup fails,
-text retains a visible white-difference fallback. Failures stop further requests
-rather than retrying every frame. iOS 16 retains its difference-blended text.
+text retains a visible white-difference fallback. A render failure gets one
+immediate retry with rebuilt Metal resources; two consecutive failures stop
+requests until the app becomes active again or all clients leave and return.
+Existing valid paint survives failed refreshes. The app's Aurora activity hook
+also suspends the map clock, rejects pre-suspension results (including failures),
+and requests fresh animated ink on resume. Text scopes revalidate their leases
+on appearance and scene activation. The scheduler inspects weak leases in one
+pass without rebuilding client collections each tick. Map size, color math and
+30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
 
 The cached grid approximates the per-pixel source, especially around very sharp
 hue boundaries. The fixed CPU corpus measures average maximum-channel error
@@ -199,7 +206,8 @@ and 103 retained rows with eight visible: only visible paint gets notifications,
 scrolling transfers delivery immediately, and offscreen paints release buffers.
 It also checks window/viewport clipping and partial rows,
 stale-frame rejection, offscreen cleanup, frozen/mixed-motion clients, orphaned
-lease/owner cleanup, and bounded failure. The Metal driver and SwiftUI buffer
+lease/owner cleanup, transient failure recovery, suspended-result rejection,
+foreground/presentation recovery and bounded retries. The Metal driver and SwiftUI buffer
 upload still require an iOS build and device rendering check.
 
 The map suite also executes the production row tracker with three labels per

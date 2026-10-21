@@ -115,9 +115,9 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                     .accessibilityHidden(true)
                 }
             }
-            .onAppear { isVisible = true; updateLease() }
+            .onAppear { isVisible = true; updateLease(refresh: true) }
             .onDisappear { isVisible = false; updateLease() }
-            .onChange(of: scenePhase) { _ in updateLease() }
+            .onChange(of: scenePhase) { phase in updateLease(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in updateLease() }
             .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
             .onChange(of: scrollViewport) { _ in updateLease() }

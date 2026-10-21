@@ -54,9 +54,30 @@ final class NBAuroraInkMap {
     private var inFlight = false
     private var refreshPending = false
     private var unavailable = false
+    private var consecutiveFailures = 0
+    private var isActive = true
+    private var generation: UInt64 = 0
     private let worker = NBAuroraInkWorker()
 
+    func setActive(_ active: Bool) {
+        guard isActive != active else { return }
+        isActive = active
+        generation &+= 1
+        if active {
+            // A failure while suspending must not disable ink for the session.
+            unavailable = false
+            consecutiveFailures = 0
+        }
+        refresh(advancing: active)
+    }
+
     func update(_ lease: NBAuroraInkLease, active: Bool, reduceMotion: Bool) {
+        if active && unavailable && !leases.values.contains(where: { $0.value?.active == true }) {
+            // Give a returning presentation a fresh attempt, once, rather
+            // than retrying for every label joining an already visible list.
+            unavailable = false
+            consecutiveFailures = 0
+        }
         lease.active = active
         lease.reduceMotion = reduceMotion
         if active {
@@ -78,19 +99,30 @@ final class NBAuroraInkMap {
     }
 
     fileprivate func refresh(advancing: Bool = true) {
-        leases = leases.filter { $0.value.value != nil }
-        let clients = leases.values.compactMap(\.value).filter(\.active)
-        let animates = clients.contains { !$0.reduceMotion }
-        if animates && !unavailable {
+        // Inspect weak leases without rebuilding a dictionary and two client
+        // arrays on every frame and every label's visibility transition.
+        var hasClients = false
+        var animates = false
+        var needsStill = false
+        for (key, entry) in leases {
+            guard let client = entry.value else {
+                leases.removeValue(forKey: key)
+                continue
+            }
+            guard client.active else { continue }
+            hasClients = true
+            if client.reduceMotion { needsStill = true } else { animates = true }
+        }
+        if isActive && animates && !unavailable {
             startClock()
         } else {
             displayLink?.invalidate()
             displayLink = nil
         }
-        guard !clients.isEmpty, !unavailable else { return }
+        guard isActive, hasClients, !unavailable else { return }
         let session = AuroraSession.shared
         let identity = session.identity.shaderIdentity
-        let frozen = clients.contains { $0.reduceMotion } && still?.identity != identity
+        let frozen = needsStill && still?.identity != identity
         guard frozen || (animates && (advancing || animated?.identity != identity)) else { return }
         guard !inFlight else {
             refreshPending = true
@@ -99,22 +131,37 @@ final class NBAuroraInkMap {
         let time = Float(session.time(at: Date(), reduceMotion: frozen))
         inFlight = true
         refreshPending = false
+        let generation = generation
         worker.render(identity: identity.values, time: time) { [weak self] bytes in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.inFlight = false
+                guard generation == self.generation else {
+                    // Discard work from before suspension, including failures.
+                    // If already resumed, immediately sample the current sky.
+                    self.refresh(advancing: true)
+                    return
+                }
                 // A shuffle during GPU work must not publish the previous sky.
                 if let bytes, identity == AuroraSession.shared.identity.shaderIdentity,
                    self.leases.values.contains(where: { $0.value?.active == true }) {
                     let frame = Frame(identity: identity, argument: .data(bytes))
+                    self.consecutiveFailures = 0
                     if frozen { self.still = frame } else { self.animated = frame }
                     for lease in self.leases.values {
                         guard let client = lease.value, client.active,
                               client.reduceMotion == frozen else { continue }
                         client.paint.receive(frame)
                     }
-                } else if bytes == nil {
-                    // The foreground keeps its visible difference fallback.
+                } else if bytes == nil, identity == AuroraSession.shared.identity.shaderIdentity,
+                          self.leases.values.contains(where: { $0.value?.active == true }) {
+                    self.consecutiveFailures += 1
+                    if self.consecutiveFailures < 2 {
+                        self.refresh(advancing: true)
+                        return
+                    }
+                    // Keep existing paint and stop after one retry. Another
+                    // foreground/presentation return can try again.
                     self.unavailable = true
                     self.displayLink?.invalidate()
                     self.displayLink = nil
@@ -163,6 +210,11 @@ private final class NBAuroraInkWorker: @unchecked Sendable {
     func render(identity: [Float], time: Float, completion: @escaping @Sendable (Data?) -> Void) {
         queue.async {
             let image = autoreleasepool { self.render(identity: identity, time: time) }
+            if image == nil {
+                // Recreate failed Metal resources on the next bounded attempt.
+                self.backend = nil
+                self.attemptedSetup = false
+            }
             completion(image)
         }
     }

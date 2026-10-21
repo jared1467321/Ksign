@@ -38,7 +38,12 @@ final class AuroraSession: ObservableObject {
 @MainActor
 public enum NBAurora {
     public static func randomize() { AuroraSession.shared.randomize() }
-    public static func setActive(_ active: Bool) { AuroraSession.shared.setActive(active) }
+    public static func setActive(_ active: Bool) {
+        AuroraSession.shared.setActive(active)
+        if #available(iOS 17.0, tvOS 17.0, *) {
+            NBAuroraInkMap.shared.setActive(active)
+        }
+    }
 }
 
 struct NBGlassPaneFrame: Equatable, Sendable {
