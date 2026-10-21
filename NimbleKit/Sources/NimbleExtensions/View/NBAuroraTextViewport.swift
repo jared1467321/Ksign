@@ -37,7 +37,14 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
             .environment(\.nbAuroraTextViewport,
                          NBAuroraTextViewport(clipping: clipping, window: window ?? parent?.window))
             .onGeometryChange(for: Geometry.self) { proxy in
-                measure(proxy)
+                // GeometryProxy stays inside the measurement callback.
+                let frame = proxy.frame(in: .global)
+                let insets = proxy.safeAreaInsets
+                return Geometry(frame: frame,
+                                clipping: CGRect(x: frame.minX + insets.leading,
+                                                 y: frame.minY + insets.top,
+                                                 width: max(0, frame.width - insets.leading - insets.trailing),
+                                                 height: max(0, frame.height - insets.top - insets.bottom)))
             } action: {
                 geometry = $0
                 if window == nil, let pendingViewport { updateWindow(pendingViewport) }

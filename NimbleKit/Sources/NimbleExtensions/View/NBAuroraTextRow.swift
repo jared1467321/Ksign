@@ -55,8 +55,15 @@ private struct NBAuroraTextRowModifier: ViewModifier {
             .background {
                 GeometryReader { proxy in
                     Color.clear
-                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { measure($0) }
-                            action: { row.move(to: $0) }
+                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { geometry in
+                            // GeometryProxy stays inside the measurement callback.
+                            let frame = geometry.frame(in: .global)
+                            if let viewport, let window = viewport.window,
+                               !NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) {
+                                return NBAuroraTextRowGeometry(frame: .null, size: .zero)
+                            }
+                            return NBAuroraTextRowGeometry(frame: frame, size: geometry.size)
+                        } action: { row.move(to: $0) }
                         .onChange(of: viewport) { _ in
                             row.move(to: measure(proxy))
                         }
