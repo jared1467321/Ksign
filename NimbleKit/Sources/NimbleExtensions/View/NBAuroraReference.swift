@@ -321,7 +321,8 @@ private enum AuroraIdentityGenerator {
 
 @MainActor
 enum AuroraNoiseCache {
-    static let image: Image = {
+    // The compute map and SwiftUI backdrop use the very same lattice bytes.
+    nonisolated static let bytes: [UInt8] = {
         let dimension = 256
         var bytes = [UInt8](repeating: 0, count: dimension * dimension)
 
@@ -345,6 +346,11 @@ enum AuroraNoiseCache {
             }
         }
 
+        return bytes
+    }()
+
+    static let image: Image = {
+        let dimension = 256
         let data = Data(bytes) as CFData
         let provider = CGDataProvider(data: data)!
         let colorSpace = CGColorSpaceCreateDeviceGray()

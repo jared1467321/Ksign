@@ -38,7 +38,12 @@ def main():
         source = folder / "AuroraText.cpp"
         source.write_text(fixture.replace("// SHADER_SUPPORT", adapters).replace("// PRODUCTION_SHADER", shader))
         binary = folder / "AuroraText"
-        subprocess.run(["clang++", "-std=c++17", "-O2", "-ffp-contract=off", str(source), "-o", str(binary)], check=True)
+        renderer = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraInkMap.swift").read_text()
+        width = re.search(r"static let width = (\d+)", renderer).group(1)
+        height = re.search(r"static let height = (\d+)", renderer).group(1)
+        subprocess.run(["clang++", "-std=c++17", "-O2", "-ffp-contract=off",
+                        f"-DINK_MAP_WIDTH={width}", f"-DINK_MAP_HEIGHT={height}",
+                        str(source), "-o", str(binary)], check=True)
         command = [str(binary), str(identities)]
         if args.preview_dir:
             args.preview_dir.mkdir(parents=True, exist_ok=True)

@@ -842,19 +842,56 @@ static float3 auroraComplementaryInk(float3 sky) {
     return mix(ink, float3(1.0), lift);
 }
 
+static float3 auroraInkFieldColor(
+    float2 uv,
+    float time,
+    device const float *identityValues,
+    texture2d<half> noiseTexture
+) {
+    float3 sky = auroraSceneColor(uv, time, identityValues, 1.34, noiseTexture);
+    return auroraComplementaryInk(sky);
+}
+
+// Only this small shared map evaluates the procedural sky for text. Glyph
+// fragments below only interpolate cached RGB, independent of text count.
+#if defined(__METAL_VERSION__)
+kernel void auroraBuildInkMap(
+    texture2d<half, access::write> output [[texture(0)]],
+    texture2d<half> noiseTexture [[texture(1)]],
+    device const float *identityValues [[buffer(0)]],
+    constant float &time [[buffer(1)]],
+    uint2 pixel [[thread_position_in_grid]]
+) {
+    if (pixel.x >= output.get_width() || pixel.y >= output.get_height()) { return; }
+    float2 size = float2(output.get_width(), output.get_height());
+    float2 uv = (float2(pixel) + 0.5) / size;
+    float3 ink = auroraInkFieldColor(uv, time, identityValues, noiseTexture);
+    output.write(half4(half3(ink), half(1.0)), pixel);
+}
+#endif
+
 [[ stitchable ]] half4 auroraTextInk(
     float2 position,
     float4 bounds,
-    float time,
-    device const float *identityValues,
-    int identityValueCount,
-    texture2d<half> noiseTexture,
+    float2 mapSize,
+    device const void *mapBytes,
+    int byteCount,
     float opacity
 ) {
-    if (identityValueCount != 41) { return half4(half3(opacity), half(opacity)); }
+    int width = max(int(mapSize.x), 1), height = max(int(mapSize.y), 1);
+    if (byteCount != width * height * 4) { return half4(half3(opacity), half(opacity)); }
+    device const uchar4 *pixels = reinterpret_cast<device const uchar4 *>(mapBytes);
     float2 uv = (position - bounds.xy) / max(bounds.zw, float2(1.0));
-    float3 sky = auroraSceneColor(uv, time, identityValues, 1.34, noiseTexture);
-    float3 ink = auroraComplementaryInk(sky);
+    float2 point = uv * mapSize - 0.5;
+    int x = int(floor(point.x)), y = int(floor(point.y));
+    int x0 = clamp(x, 0, width - 1), x1 = clamp(x + 1, 0, width - 1);
+    int y0 = clamp(y, 0, height - 1), y1 = clamp(y + 1, 0, height - 1);
+    float2 fraction = fract(point);
+    float3 top = mix(float4(pixels[y0 * width + x0]).rgb,
+                     float4(pixels[y0 * width + x1]).rgb, fraction.x);
+    float3 bottom = mix(float4(pixels[y1 * width + x0]).rgb,
+                        float4(pixels[y1 * width + x1]).rgb, fraction.x);
+    float3 ink = mix(top, bottom, fraction.y) / 255.0;
     return half4(half3(ink * opacity), half(opacity));
 }
 

@@ -69,7 +69,12 @@ private struct NBAuroraHeaderModifier: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if installed && aurora && adaptive && !reduceTransparency && contrast != .increased {
+        if #available(iOS 17.0, tvOS 17.0, *) {
+            // Shader ink samples the shared sky itself. Keep supplementary
+            // text in its native header instead of hiding it in favor of a
+            // relocated ViewModifier.Content proxy.
+            content.nbThemeForeground(role, elementID: elementID)
+        } else if installed && aurora && adaptive && !reduceTransparency && contrast != .increased {
             content
                 // The original retains its accessibility and layout. Never
                 // hide it until an overlay actually consumes its preference.

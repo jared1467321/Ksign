@@ -51,9 +51,10 @@ cadence and glass surface parameters are unchanged.
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities. With Adaptive Text Colors
 enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
-use a procedural Metal glyph fill on iOS 17+. Each text pixel evaluates the
-same sky function as the backdrop, with the same 128-bit identity, cached noise,
-window coordinates, intensity and elapsed time. The fill normalizes the sky's
+use a shared procedural color map on iOS 17+. A single 192 × 384 Metal compute
+pass evaluates the same sky function as the backdrop, with the same 128-bit
+identity, cached noise, intensity and elapsed-time calculation. Each glyph
+pixel interpolates four neighboring cached colors at its window position. The fill normalizes the sky's
 chromatic component before taking its RGB complement: green gives magenta,
 blue gives yellow, and red gives cyan, including in dark skies. Saturation is
 independent of sky exposure; the strongest ink channel stays at 1. Only colors
@@ -63,18 +64,35 @@ This is deliberately different from raw inversion, which becomes dim over
 bright sky, and the rejected hard-light treatment, which compressed all colors
 into a narrow pastel-blue range.
 
-The fill samples the procedural sky before pane refraction, glass highlights
-and stars. It does not capture the composited screen. Each active foreground
-scope has a 30 Hz timeline, paused offscreen, when inactive or under Reduce
-Motion. Its geometry tracks the window position, including scrolling and
-presentation offsets; the shader's fill bounds span that window so inherited
-row/canvas paint does not normalize the sky to a word's own bounds. This adds
-sky evaluation for glyph pixels rather than a second full-screen sky renderer.
-Device GPU cost and inherited-style alignment still require device validation.
-The shared elapsed-time calculation keeps Reduce Motion at the same fixed time
-(1.8) for text and backdrop. iOS 16 retains full-strength white difference
-blending over the fallback sky. Images and surface paints retain their existing
-rendering; status roles and text on filled buttons keep their semantic colors.
+The map samples the procedural sky before pane refraction, glass highlights
+and stars. It does not capture the composited screen. One shared 30 Hz clock
+serves every visible text scope. The serial worker allows only one GPU request
+in flight, copies the small generated map into immutable RGBA data off the main
+thread, and publishes a single shared shader argument. Raw bytes avoid image
+color-space conversions. The glyph shader interpolates these bytes without
+running the sky or reading the procedural noise texture. Render work is bounded
+at 73,728 sky evaluations per map, independent of glyph count or display scale.
+The map is 294,912 bytes (about 8.4 MiB/s at 30 Hz before uploads/copies).
+
+Map-frame observation is isolated from scope geometry, so color updates do not
+poll UIKit geometry or rebuild an enclosing screen. Geometry still follows
+scrolling and presentation offsets; the window mapping is unchanged from the
+per-glyph shader. Weak scope leases stop the shared clock when no animated text
+is visible. A weak clock target also cleans up a discarded owner. Reduce Motion
+uses a separately cached frame at time 1.8, matching the backdrop; paused clients
+cannot accidentally receive another client's animated map. Shuffling discards
+old in-flight identities. Until a matching map arrives, or if Metal setup fails,
+text retains a visible white-difference fallback. Failures stop further requests
+rather than retrying every frame. iOS 16 retains its difference-blended text.
+
+The cached grid approximates the per-pixel source, especially around very sharp
+hue boundaries. The fixed CPU corpus measures average maximum-channel error
+about 0.00263, 95th-percentile error about 0.00683, and comparable variation across
+8-point spans (5,536 cached versus 5,517 direct samples above a 0.015 threshold).
+These are shader-reference results, not iOS frame-time or visual measurements.
+Device checks still need to confirm performance, buffer binding and inherited
+foreground alignment. Images and surfaces retain their existing rendering;
+status roles and text on filled buttons keep their semantic colors.
 
 The app installs `nbThemeAdaptiveChrome()` outside its tab/navigation containers
 to cover native large titles, toolbar glyphs, search text/placeholders and tab
@@ -121,9 +139,18 @@ for this device check.
 Run `python3 Native/Theme/run_text_tests.py --swiftc PATH` to execute production
 Metal color/scene math through the existing C++ vector adapters. It tests
 complementary hue, saturation/brightness, exposure independence, neutral colors,
-premultiplied alpha, offset continuity, and variation across actual auroras.
+premultiplied alpha, offset continuity, raw-byte interpolation/orientation,
+clamped edges, invalid-map fallback, zero glyph noise reads, and cached-map
+fidelity/letter-scale variation across actual auroras.
 `--preview-dir DIR` exports four matching sky/ink PPM pairs for inspecting the
 color field. These are CPU shader references, not SwiftUI screenshots.
+
+Run `python3 Native/Theme/run_map_tests.py --swiftc PATH` to execute the production
+map coordinator and weak clock with platform/GPU boundary doubles. It checks
+sharing across 100 scopes, bounded in-flight work, no redundant setup renders,
+stale-frame rejection, offscreen cleanup, frozen/mixed-motion clients, orphaned
+lease/owner cleanup, and bounded failure. The Metal driver and SwiftUI buffer
+upload still require an iOS build and device rendering check.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
 production glyph caching, original-mask restoration, search-attribute restoration,

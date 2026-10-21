@@ -28,6 +28,7 @@ using half = float;
 using float2 = float __attribute__((ext_vector_type(2)));
 using float3 = float __attribute__((ext_vector_type(3)));
 using float4 = float __attribute__((ext_vector_type(4)));
+using uchar4 = uint8_t __attribute__((ext_vector_type(4)));
 using uint4 = uint __attribute__((ext_vector_type(4)));
 using int2 = int __attribute__((ext_vector_type(2)));
 using half3 = float3;
@@ -37,6 +38,7 @@ float2 make2(float x, float y) { return {x, y}; }
 float3 make3(float x) { return {x, x, x}; }
 float3 make3(float3 x) { return x; }
 float3 make3(float x, float y, float z) { return {x, y, z}; }
+float4 make4(uchar4 x) { return __builtin_convertvector(x, float4); }
 float4 make4(float3 rgb, float a) { return {rgb.x, rgb.y, rgb.z, a}; }
 float4 make4(float x, float y, float z, float w) { return {x, y, z, w}; }
 uint4 makeU4(uint x, uint y, uint z, uint w) { return {x, y, z, w}; }
@@ -47,6 +49,8 @@ uint4 makeU4(uint x, uint y, uint z, uint w) { return {x, y, z, w}; }
 #define half3(...) make3(__VA_ARGS__)
 #define half4(...) make4(__VA_ARGS__)
 #define device
+int max(int a, int b) { return std::max(a,b); }
+template<class T> T clamp(T x,T a,T b) { return std::clamp(x,a,b); }
 float min(float a, float b) { return std::min(a, b); }
 float max(float a, float b) { return std::max(a, b); }
 uint max(uint a, uint b) { return std::max(a, b); }

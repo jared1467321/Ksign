@@ -53,6 +53,7 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     @ObservedObject private var session = AuroraSession.shared
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var lease = NBAuroraInkLease()
     @State private var frame = CGRect.zero
     @State private var viewport: AuroraViewport?
     @State private var viewportFrame = CGRect.zero
@@ -65,10 +66,6 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     let adaptsSecondary: Bool
 
     var body: some View {
-        // Reuse the backdrop's identity, noise and elapsed-time calculation.
-        // Prepare layout/identity arguments outside the animation callback.
-        let identity = Shader.Argument.floatArray(session.identity.shaderIdentity.values)
-        let noise = Shader.Argument.image(AuroraNoiseCache.image)
         let size = viewport?.size ?? CGSize(width: max(1, frame.width), height: max(1, frame.height))
         // SwiftUI's global origin can be presentation-local. Reconcile it with
         // the UIKit window, while following scroll offsets between reports.
@@ -76,51 +73,78 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
             CGPoint(x: $0.origin.x + frame.minX - viewportFrame.minX,
                     y: $0.origin.y + frame.minY - viewportFrame.minY)
         } ?? frame.origin
-        let windowBounds = CGRect(x: -origin.x, y: -origin.y,
-                                  width: size.width, height: size.height)
-        let shader = ShaderLibrary.bundle(.module).auroraTextInk
+        let bounds = CGRect(x: -origin.x, y: -origin.y, width: size.width, height: size.height)
 
-        TimelineView(.animation(minimumInterval: 1.0 / 30,
-                                paused: !isVisible || reduceMotion || scenePhase != .active)) { timeline in
-            let time = Shader.Argument.float(Float(session.time(at: timeline.date, reduceMotion: reduceMotion)))
-            let primaryInk = ink(primary, adapts: adaptsPrimary, shader: shader,
-                                 time: time, identity: identity, noise: noise,
-                                 bounds: windowBounds)
-            if let secondary {
-                content.foregroundStyle(primaryInk,
-                    ink(secondary, adapts: adaptsSecondary, shader: shader,
-                        time: time, identity: identity, noise: noise,
-                        bounds: windowBounds))
-            } else {
-                content.foregroundStyle(primaryInk)
+        NBAuroraMappedForeground(content: content, primary: primary, secondary: secondary,
+                                 adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
+                                 bounds: bounds, identity: session.identity.shaderIdentity,
+                                 reduceMotion: reduceMotion)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
+            .background {
+                AuroraViewportReader {
+                    viewport = $0
+                    viewportFrame = frame
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
-        }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
-        .background {
-            AuroraViewportReader {
-                viewport = $0
-                viewportFrame = frame
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
-        .onAppear { isVisible = true }
-        .onDisappear { isVisible = false }
+            .onAppear { isVisible = true; updateLease() }
+            .onDisappear { isVisible = false; updateLease() }
+            .onChange(of: scenePhase) { _ in updateLease() }
+            .onChange(of: reduceMotion) { _ in updateLease() }
+            .onChange(of: session.identity.shaderIdentity) { _ in updateLease() }
     }
 
-    private func ink(_ fallback: NBThemeColor, adapts: Bool, shader: ShaderFunction,
-                     time: Shader.Argument,
-                     identity: Shader.Argument, noise: Shader.Argument,
-                     bounds: CGRect) -> AnyShapeStyle {
+    private func updateLease() {
+        NBAuroraInkMap.shared.update(lease, active: isVisible && scenePhase == .active,
+                                    reduceMotion: reduceMotion)
+    }
+}
+
+/// Only this small paint wrapper observes map frames. Map updates do not poll
+/// geometry, create per-label clocks, or rebuild the enclosing screen's content.
+@available(iOS 17.0, tvOS 17.0, *)
+private struct NBAuroraMappedForeground<Content: View>: View {
+    @ObservedObject private var map = NBAuroraInkMap.shared
+    let content: Content
+    let primary: NBThemeColor
+    let secondary: NBThemeColor?
+    let adaptsPrimary: Bool
+    let adaptsSecondary: Bool
+    let bounds: CGRect
+    let identity: NBAuroraShaderIdentity
+    let reduceMotion: Bool
+
+    var body: some View {
+        let field = map.frame(for: identity, reduceMotion: reduceMotion)
+        if let secondary {
+            content.foregroundStyle(ink(primary, adapts: adaptsPrimary, field: field),
+                                    ink(secondary, adapts: adaptsSecondary, field: field))
+        } else {
+            content.foregroundStyle(ink(primary, adapts: adaptsPrimary, field: field))
+        }
+    }
+
+    private func ink(_ fallback: NBThemeColor, adapts: Bool,
+                     field: NBAuroraInkMap.Frame?) -> AnyShapeStyle {
         guard adapts && fallback.alpha > 0 else { return AnyShapeStyle(fallback.color) }
+        let fill: AnyShapeStyle
+        if let field {
+            fill = AnyShapeStyle(
+                ShaderLibrary.bundle(.module).auroraTextInk(
+                    .float4(Float(bounds.minX), Float(bounds.minY),
+                            Float(bounds.width), Float(bounds.height)),
+                    .float2(Float(NBAuroraInkMapFormat.width), Float(NBAuroraInkMapFormat.height)),
+                    field.argument, .float(Float(fallback.alpha)))
+                    .in(bounds)
+            )
+        } else {
+            // Keep glyphs visible during initial setup, a shuffle, or a Metal
+            // failure. Never hide controls while waiting for the first map.
+            fill = AnyShapeStyle(Color.white.opacity(fallback.alpha).blendMode(.difference))
+        }
         return AnyShapeStyle(
-            shader(.float4(Float(bounds.minX), Float(bounds.minY),
-                           Float(bounds.width), Float(bounds.height)),
-                   time, identity, noise, .float(Float(fallback.alpha)))
-                // Anchor the field to the window, including inherited row and
-                // canvas foregrounds, rather than restarting it in each word.
-                .in(bounds)
-                .shadow(.drop(color: .black.opacity(0.95), radius: 0.65))
+            fill.shadow(.drop(color: .black.opacity(0.95), radius: 0.65))
                 .shadow(.drop(color: .black.opacity(0.8), radius: 1.2, y: 0.5))
         )
     }
