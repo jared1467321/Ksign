@@ -38,6 +38,7 @@ private struct NBAuroraTextRowModifier: ViewModifier {
     @AppStorage("Feather.auroraBackground") private var aurora = true
     @AppStorage("Feather.auroraAdaptiveText") private var adaptive = true
     @State private var appeared = false
+    @State private var remeasurement: UUID?
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -52,42 +53,34 @@ private struct NBAuroraTextRowModifier: ViewModifier {
         content
             .environment(\.nbAuroraTextRow, row)
             .coordinateSpace(name: row.coordinateSpaceID)
+            .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
+                NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
+                    .clipped(to: viewport)
+            } action: { row.move(to: $0) }
             .background {
-                GeometryReader { proxy in
+                if let request = remeasurement {
+                    // Keep recovery probes out of the normal scrolling path.
                     Color.clear
-                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { geometry in
-                            // GeometryProxy stays inside the measurement callback.
-                            let frame = geometry.frame(in: .global)
-                            if let viewport, let window = viewport.window,
-                               !NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) {
-                                return NBAuroraTextRowGeometry(frame: .null, size: .zero)
-                            }
-                            return NBAuroraTextRowGeometry(frame: frame, size: geometry.size)
-                        } action: { row.move(to: $0) }
-                        .onChange(of: viewport) { _ in
-                            row.move(to: measure(proxy))
+                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
+                            NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
+                                .clipped(to: viewport)
+                        } action: { measured in
+                            guard remeasurement == request else { return }
+                            row.move(to: measured)
+                            remeasurement = nil
                         }
+                        .id(request)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
-                .id(session.measurementRevision)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
             }
             .onAppear { appeared = true; configure(refresh: true) }
             .onDisappear { appeared = false; configure() }
-            .onChange(of: viewport) { _ in configure() }
+            .onChange(of: viewport) { _ in configure(); remeasurement = UUID() }
+            .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
             .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in configure() }
             .onChange(of: session.identity.shaderIdentity) { _ in configure(refresh: true) }
-    }
-
-    private func measure(_ proxy: GeometryProxy) -> NBAuroraTextRowGeometry {
-        let frame = proxy.frame(in: .global)
-        if let viewport, let window = viewport.window,
-           !NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) {
-            // Retained offscreen rows report one stable sentinel.
-            return NBAuroraTextRowGeometry(frame: .null, size: .zero)
-        }
-        return NBAuroraTextRowGeometry(frame: frame, size: proxy.size)
     }
 
     private func configure(refresh: Bool = false) {
@@ -100,6 +93,7 @@ private struct NBAuroraTextRowModifier: ViewModifier {
 struct NBAuroraRowTextShaderScope<Content: View>: View {
     @StateObject private var client = NBAuroraRowTextClient()
     @ObservedObject private var session = AuroraSession.shared
+    @State private var remeasurement: UUID?
     let content: Content
     let primary: NBThemeColor
     let secondary: NBThemeColor?
@@ -114,14 +108,23 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
                                     placement: client.placement, paint: client.lease.paint)
             // These coordinates stay constant while the row scrolls. Changes
             // to wrapping, layout or edit controls still remeasure each label.
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
+                action: { row.measure(client, localFrame: $0) }
             .background {
-                Color.clear
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
-                        action: { row.measure(client, localFrame: $0) }
-                    .id(session.measurementRevision)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                if let request = remeasurement {
+                    Color.clear
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
+                            action: { measured in
+                                guard remeasurement == request else { return }
+                                row.measure(client, localFrame: measured)
+                                remeasurement = nil
+                            }
+                        .id(request)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
+            .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
             .onAppear { row.setVisible(client, true) }
             .onDisappear { row.setVisible(client, false) }
     }

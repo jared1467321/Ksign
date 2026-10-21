@@ -241,6 +241,12 @@ enum InkMapLifetimeTests {
         // the same on-screen geometry again without any scroll displacement.
         let originalGeometry = NBAuroraTextRowGeometry(
             frame: CGRect(x: 20, y: 210, width: 380, height: 70), size: CGSize(width: 380, height: 70))
+        assert(originalGeometry.clipped(to: viewport) == originalGeometry)
+        assert(originalGeometry.clipped(to: nil) == originalGeometry)
+        assert(originalGeometry.clipped(to: NBAuroraTextViewport(clipping: viewport.clipping, window: nil))
+               == originalGeometry, "Keep raw geometry while the window measurement is pending")
+        assert(originalGeometry.clipped(to: NBAuroraTextViewport(clipping: .null, window: window)).frame.isNull,
+               "An unavailable viewport must not register live text")
         row.configure(viewport: viewport, active: false, reduceMotion: false)
         row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
         row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
@@ -305,9 +311,7 @@ enum InkMapLifetimeTests {
         func scroll(_ offset: CGFloat) {
             for (index, tracker) in rows.enumerated() {
                 let frame = CGRect(x: 20, y: 210 + CGFloat(index) * 70 - offset, width: 380, height: 70)
-                let visible = NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping)
-                tracker.move(to: NBAuroraTextRowGeometry(frame: visible ? frame : .null,
-                                                        size: visible ? frame.size : .zero))
+                tracker.move(to: NBAuroraTextRowGeometry(frame: frame, size: frame.size).clipped(to: viewport))
             }
         }
         scroll(0)

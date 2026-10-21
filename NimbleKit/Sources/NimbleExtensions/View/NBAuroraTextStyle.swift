@@ -51,8 +51,7 @@ struct NBAuroraTextStyleModifier: ViewModifier {
         return AnyShapeStyle(
             Color.white.opacity(fallback.alpha)
                 .blendMode(.difference)
-                .shadow(.drop(color: .black.opacity(0.95), radius: 0.65))
-                .shadow(.drop(color: .black.opacity(0.8), radius: 1.2, y: 0.5))
+                .shadow(.drop(color: .black.opacity(0.85), radius: 0.35))
         )
     }
 }
@@ -198,8 +197,7 @@ struct NBAuroraMappedForeground<Content: View>: View {
             fill = AnyShapeStyle(Color.white.opacity(fallback.alpha).blendMode(.difference))
         }
         return AnyShapeStyle(
-            fill.shadow(.drop(color: .black.opacity(0.95), radius: 0.65))
-                .shadow(.drop(color: .black.opacity(0.8), radius: 1.2, y: 0.5))
+            fill.shadow(.drop(color: .black.opacity(0.85), radius: 0.35))
         )
     }
 }

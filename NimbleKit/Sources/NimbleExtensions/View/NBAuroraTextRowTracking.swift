@@ -6,6 +6,14 @@ struct NBAuroraTextRowGeometry: Equatable {
     let frame: CGRect
     let size: CGSize
 
+    func clipped(to viewport: NBAuroraTextViewport?) -> Self {
+        guard let viewport, let window = viewport.window else { return self }
+        guard NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) else {
+            return Self(frame: .null, size: .zero)
+        }
+        return self
+    }
+
     func globalFrame(for local: CGRect) -> CGRect {
         guard !frame.isNull, !frame.isEmpty, size.width > 0, size.height > 0,
               !local.isNull, !local.isEmpty else { return .null }

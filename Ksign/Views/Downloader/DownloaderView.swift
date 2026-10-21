@@ -78,13 +78,14 @@ struct DownloaderView: View {
         }
         .font(.caption)
         .nbThemeForeground(.textSecondary)
+        .nbThemeTextRow()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
     }
 
     var body: some View {
         let _ = themes.previewRevision
-        NBNavigationView(.localized("Downloads")) {
+        NBNavigationView(.localized("Downloads"), adaptsContainerText: false) {
             List {
                 Group {
                 if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
@@ -96,6 +97,7 @@ struct DownloaderView: View {
                                 .font(.title2)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Example.ipa")
+                                    .nbThemeForeground(.text)
                                 Text("62 MB / 100 MB (62%)")
                                     .font(.caption)
                                     .nbThemeForeground(.textSecondary)
@@ -105,6 +107,7 @@ struct DownloaderView: View {
                                 .frame(width: 52)
                                 .nbThemeTint(.warning)
                         }
+                        .nbThemeTextRow()
                         Text("Inspector sample only · no download started")
                             .font(.caption2)
                             .nbThemeForeground(.textSecondary)
@@ -138,6 +141,7 @@ struct DownloaderView: View {
                                 .nbThemeForeground(.textSecondary)
                             Spacer()
                         }
+                        .nbThemeTextRow()
                     }
                 } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
                     NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
@@ -182,10 +186,11 @@ struct DownloaderView: View {
                     }
                 }
                 }
-                .nbThemeRow()
+                .nbThemeRow(adaptsText: false)
             }
             .listStyle(.insetGrouped)
-            .nbThemeCanvas(rendersAurora: false)
+            .nbThemeCanvas(rendersAurora: false, adaptsText: false)
+            .nbThemeTextViewport()
             .nbThemeOverlay {
                 if cryptCheckRunning {
                     ProgressView("Running Crypt Check…")

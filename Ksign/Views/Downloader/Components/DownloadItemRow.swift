@@ -140,6 +140,7 @@ struct DownloadItemRow: View {
                 .accessibilityLabel(activeControlAccessibilityLabel)
             }
         }
+        .nbThemeTextRow()
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -300,6 +301,7 @@ struct AppStoreDownloadItemRow: View {
                     }
                 }
         }
+        .nbThemeTextRow()
         .padding(.vertical, 6)
         .contentShape(Rectangle())
     }

@@ -103,7 +103,13 @@ those individual paints retain their vivid colors. Other screens keep the
 existing default for inherited container text. The row collection and native
 list/grid containers are unchanged.
 
-Library cells also install `nbThemeTextRow()`. One global geometry measurement
+Downloads now follows the same policy for its navigation, list and section
+containers, supplies one shared text viewport, and installs row tracking on
+finished downloads, active downloads and import/status rows. Explicit labels
+retain adaptive colors while inherited container styles stay out of the live
+paint path. The empty-state overlay keeps its independent foreground tracking.
+
+Library and Downloads cells install `nbThemeTextRow()`. One global geometry measurement
 tracks the row's movement; titles, subtitles, chevrons and selection glyphs only
 report their local offsets when their layout changes. The row tracker updates
 small foreground placement objects directly, without publishing movement or
@@ -129,7 +135,11 @@ It leaves content identities and controls intact, makes unchanged positions
 report again, and pairs fresh SwiftUI frames with UIKit window origins. If the
 restored scroll viewport arrives later, text and row probes remeasure against
 it without waiting for a scroll. Offscreen measurements still use the stable
-null sentinel. The scheduler inspects weak leases in one
+null sentinel. Row and local-label recovery probes mount only when a measurement
+is requested and remove themselves after reporting; normal row scrolling uses
+the original content geometry observers without a permanent background
+GeometryReader per row. A newer request supersedes a pending probe's result.
+The scheduler inspects weak leases in one
 pass without rebuilding client collections each tick. Map size, color math and
 30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
 
@@ -171,8 +181,10 @@ overlay, retaining source layout/accessibility and hiding source paint only
 after the overlay actually appears. A container without an overlay draws the
 original foreground.
 
-Two tight dark shadows define glyph edges where bright ink alone has poor
-contrast, especially over pale or white backings. This is a visual treatment,
+One centered black shadow (opacity 0.85, radius 0.35 points) defines glyph edges
+without the previous pair's wider, offset dark halo. Color math and fonts are
+unchanged. Check darker blue/purple strokes and bright strokes over pale glass
+on a device to confirm the tighter shadow's readability. This is a visual treatment,
 not a guarantee of a minimum contrast ratio for every possible background. Disabling
 Adaptive Text Colors or Aurora, enabling Reduce Transparency or Increase
 Contrast, and previewing or overriding an individual text color restore the
