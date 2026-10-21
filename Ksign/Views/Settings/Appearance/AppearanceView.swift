@@ -42,7 +42,7 @@ struct AppearanceView: View {
                 Toggle(.localized("Liquid Glass Surfaces"), isOn: $_glossySurfaces)
             }
 
-            Section(footer: Text(.localized("Text stays bright as its colors respond to the aurora beneath each letter. Dark edges keep it readable over bright areas."))) {
+            Section(footer: Text(.localized("Text takes vivid complementary colors from the aurora beneath each letter. Colors stay bright, with dark edges for readability."))) {
                 Toggle(.localized("Adaptive Text Colors"), isOn: $_auroraAdaptiveText)
                     .disabled(!_auroraBackground)
             }

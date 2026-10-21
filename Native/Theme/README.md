@@ -51,15 +51,30 @@ cadence and glass surface parameters are unchanged.
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities. With Adaptive Text Colors
 enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
-use a pale blue hard-light glyph style. Each glyph pixel reacts to its
-composited backing, including the glass, with bright blue, pink, aqua and
-near-white pastels. The source RGB (0.76, 0.86, 0.96) keeps every channel on
-hard light's screen branch, giving opaque ink a channel floor of
-(0.52, 0.72, 0.92) over SDR backings instead of turning dark over bright areas.
-The foreground still preserves its semantic opacity. This follows the aurora's
-existing frame cadence. Ordinary text adds no sampling timer, geometry tracking,
-screen capture or second aurora render. Images and surface paints keep their
-existing rendering; status roles and text on filled buttons keep their colors.
+use a procedural Metal glyph fill on iOS 17+. Each text pixel evaluates the
+same sky function as the backdrop, with the same 128-bit identity, cached noise,
+window coordinates, intensity and elapsed time. The fill normalizes the sky's
+chromatic component before taking its RGB complement: green gives magenta,
+blue gives yellow, and red gives cyan, including in dark skies. Saturation is
+independent of sky exposure; the strongest ink channel stays at 1. Only colors
+below an encoded RGB brightness of 0.42 receive a white lift, which preserves
+their complementary hue. Near-neutral sky samples transition smoothly to white.
+This is deliberately different from raw inversion, which becomes dim over
+bright sky, and the rejected hard-light treatment, which compressed all colors
+into a narrow pastel-blue range.
+
+The fill samples the procedural sky before pane refraction, glass highlights
+and stars. It does not capture the composited screen. Each active foreground
+scope has a 30 Hz timeline, paused offscreen, when inactive or under Reduce
+Motion. Its geometry tracks the window position, including scrolling and
+presentation offsets; the shader's fill bounds span that window so inherited
+row/canvas paint does not normalize the sky to a word's own bounds. This adds
+sky evaluation for glyph pixels rather than a second full-screen sky renderer.
+Device GPU cost and inherited-style alignment still require device validation.
+The shared elapsed-time calculation keeps Reduce Motion at the same fixed time
+(1.8) for text and backdrop. iOS 16 retains full-strength white difference
+blending over the fallback sky. Images and surface paints retain their existing
+rendering; status roles and text on filled buttons keep their semantic colors.
 
 The app installs `nbThemeAdaptiveChrome()` outside its tab/navigation containers
 to cover native large titles, toolbar glyphs, search text/placeholders and tab
@@ -95,12 +110,20 @@ small caption, including a single letter crossing two colors. Check both
 appearances, scrolling, shuffling, glass sheets, and the iOS 16 fallback. Also
 check the adaptive toggle, solid/accessibility surfaces, Reduce Motion, theme
 previews and saved element overrides. The preview in `NBAuroraTextStyle.swift`
-provides moving saturated bands and fixed black/gray/white backings for checking
-compositor behavior and glyph edges. For native chrome, also check large-title
+uses the actual moving aurora, a shuffle button, and fixed black/gray/white
+surfaces for checking color response and glyph edges. Check that explicit text
+and inherited row/canvas styles sample the same window positions. For native chrome, also check large-title
 collapse, tab switching/reselection, RTL layouts, search typing/selection/long
 queries/clearing, and toggling Adaptive Text while a search field is focused.
 Swift syntax checks on Linux cannot verify SwiftUI's compositor or substitute
 for this device check.
+
+Run `python3 Native/Theme/run_text_tests.py --swiftc PATH` to execute production
+Metal color/scene math through the existing C++ vector adapters. It tests
+complementary hue, saturation/brightness, exposure independence, neutral colors,
+premultiplied alpha, offset continuity, and variation across actual auroras.
+`--preview-dir DIR` exports four matching sky/ink PPM pairs for inspecting the
+color field. These are CPU shader references, not SwiftUI screenshots.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
 production glyph caching, original-mask restoration, search-attribute restoration,

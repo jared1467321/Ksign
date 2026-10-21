@@ -823,6 +823,41 @@ static float3 auroraSceneColor(
     return half4(half3(sky), half(1.0));
 }
 
+// MARK: - Vibrant complementary foreground
+
+static float3 auroraComplementaryInk(float3 sky) {
+    float brightest = max(sky.r, max(sky.g, sky.b));
+    float darkest = min(sky.r, min(sky.g, sky.b));
+    float chroma = brightest - darkest;
+    // Normalize the chromatic component before inversion. Raw 1 - sky loses
+    // nearly all hue in dark skies, and raw difference becomes dark in bright
+    // skies. Exposure must not dictate either ink saturation or brightness.
+    float3 opposite = (brightest - sky) / max(chroma, 0.0001);
+    float saturation = 0.92 * smoothstep(0.015, 0.12, chroma / max(brightest, 0.0001));
+    float3 ink = mix(float3(1.0), opposite, saturation);
+    // Preserve the complementary hue when lifting darker colors (especially
+    // blue and magenta). This only adds as much white as their luminance needs.
+    float luminance = dot(ink, float3(0.2126, 0.7152, 0.0722));
+    float lift = max(0.0, (0.42 - luminance) / max(1.0 - luminance, 0.0001));
+    return mix(ink, float3(1.0), lift);
+}
+
+[[ stitchable ]] half4 auroraTextInk(
+    float2 position,
+    float4 bounds,
+    float time,
+    device const float *identityValues,
+    int identityValueCount,
+    texture2d<half> noiseTexture,
+    float opacity
+) {
+    if (identityValueCount != 41) { return half4(half3(opacity), half(opacity)); }
+    float2 uv = (position - bounds.xy) / max(bounds.zw, float2(1.0));
+    float3 sky = auroraSceneColor(uv, time, identityValues, 1.34, noiseTexture);
+    float3 ink = auroraComplementaryInk(sky);
+    return half4(half3(ink * opacity), half(opacity));
+}
+
 // MARK: - Single-pass glass optics
 
 static bool auroraPaneIsValid(float2 size) {

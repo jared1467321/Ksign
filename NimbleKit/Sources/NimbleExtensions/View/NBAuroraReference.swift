@@ -3,7 +3,7 @@ import UIKit
 
 /// One identity and animation clock for all screens, including presentations.
 @MainActor
-private final class AuroraSession: ObservableObject {
+final class AuroraSession: ObservableObject {
     static let shared = AuroraSession()
     @Published var identity = AuroraIdentityGenerator.next()
     @Published var accumulatedTime: TimeInterval = 0
@@ -28,6 +28,11 @@ private final class AuroraSession: ObservableObject {
         accumulatedTime = 0
         if activeStart != nil { activeStart = Date() }
     }
+
+    func time(at date: Date, reduceMotion: Bool) -> TimeInterval {
+        reduceMotion ? 1.8 : accumulatedTime
+            + (activeStart.map { max(0, date.timeIntervalSince($0)) } ?? 0)
+    }
 }
 
 @MainActor
@@ -47,14 +52,14 @@ struct NBGlassPanePreferenceKey: PreferenceKey {
     }
 }
 
-private struct AuroraViewport: Equatable {
+struct AuroraViewport: Equatable {
     let size: CGSize
     let origin: CGPoint
 }
 
 /// Read-only geometry: each hosting container paints its own sky, but samples
 /// the same window coordinates so nested lists and headers join continuously.
-private struct AuroraViewportReader: UIViewRepresentable {
+struct AuroraViewportReader: UIViewRepresentable {
     let onChange: (AuroraViewport) -> Void
 
     func makeUIView(context: Context) -> AuroraViewportView {
@@ -67,7 +72,7 @@ private struct AuroraViewportReader: UIViewRepresentable {
     }
 }
 
-private final class AuroraViewportView: UIView {
+final class AuroraViewportView: UIView {
     var onChange: ((AuroraViewport) -> Void)?
     private var pending = false
     private var lastReported: AuroraViewport?
@@ -203,8 +208,7 @@ struct NBThemeBackdrop: View, Equatable {
         let gold = session.starfield(stream: 0xA11CE5EED, count: 54)
         let blue = session.starfield(stream: 0x57EE1F1E1D, count: 26)
         return TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animating)) { timeline in
-            let time = reduceMotion ? 1.8 : session.accumulatedTime
-                + (session.activeStart.map { max(0, timeline.date.timeIntervalSince($0)) } ?? 0)
+            let time = session.time(at: timeline.date, reduceMotion: reduceMotion)
             ZStack {
                 Rectangle()
                     .fill(Color.black)
@@ -240,7 +244,7 @@ struct NBThemeBackdrop: View, Equatable {
     }
 }
 
-private struct AuroraIdentity: Equatable, Sendable {
+struct AuroraIdentity: Equatable, Sendable {
     let high: UInt64
     let low: UInt64
     let shaderIdentity: NBAuroraShaderIdentity
@@ -316,7 +320,7 @@ private enum AuroraIdentityGenerator {
 
 
 @MainActor
-private enum AuroraNoiseCache {
+enum AuroraNoiseCache {
     static let image: Image = {
         let dimension = 256
         var bytes = [UInt8](repeating: 0, count: dimension * dimension)
