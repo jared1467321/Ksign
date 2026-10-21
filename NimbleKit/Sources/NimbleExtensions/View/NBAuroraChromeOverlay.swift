@@ -144,7 +144,7 @@ private struct NBAuroraNativeChromeOverlay: View {
         GeometryReader { _ in
             ZStack(alignment: .topLeading) {
                 ForEach(observer.glyphs) { glyph in
-                    let color = themes.activeColor(for: glyph.role, elementID: glyph.elementID)
+                    let color = foregroundColor(for: glyph)
                     // The captured alpha already includes the native color's
                     // opacity. Apply its RGB once, without dimming it twice.
                     let ink = NBThemeColor(red: color.red, green: color.green, blue: color.blue)
@@ -174,6 +174,13 @@ private struct NBAuroraNativeChromeOverlay: View {
         .transaction { $0.animation = nil }
         .onChange(of: enabled) { if !$0 { observer.stop() } }
         .onDisappear { observer.stop() }
+    }
+
+    private func foregroundColor(for glyph: NBAuroraNativeGlyph) -> NBThemeColor {
+        if let elementID = glyph.elementID {
+            return themes.activeColor(for: glyph.role, elementID: elementID)
+        }
+        return themes.activeColor(for: glyph.role)
     }
 }
 
