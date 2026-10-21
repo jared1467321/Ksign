@@ -51,10 +51,13 @@ cadence and glass surface parameters are unchanged.
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities. With Adaptive Text Colors
 enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
-use a white difference-blended glyph style. Each glyph pixel takes the RGB
-complement of its composited backing, including the glass, and follows the
-aurora's existing frame cadence. Ordinary text adds no sampling timer, geometry
-tracking, screen capture or second aurora render. Images and surface paints keep
+use a mint difference-blended glyph style. Each glyph pixel reacts to its
+composited backing, including the glass, with luminous colors over dark areas
+and deeper jewel tones over bright areas. Unequal source RGB channels keep
+neutral backings colorful (mint on black, emerald on middle gray, deep ruby on
+white). This follows the aurora's existing frame cadence. Ordinary text adds no
+sampling timer, geometry tracking, screen capture or second aurora render.
+Images and surface paints keep
 their existing rendering; status roles and text on filled buttons keep their colors.
 
 The app installs `nbThemeAdaptiveChrome()` outside its tab/navigation containers

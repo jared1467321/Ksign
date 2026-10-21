@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Blending the glyph paint (rather than its containing view) keeps images,
-/// glass, and control fills out of the effect. White in difference mode produces
-/// the RGB complement of the actual composited backing at every glyph pixel.
+/// glass, and control fills out of the effect. Mint in difference mode produces
+/// colorful ink from the actual composited backing at every glyph pixel, with
+/// luminous tones over dark backings and deeper jewel tones over bright ones.
 /// The compositor follows the sky without another animation clock, geometry
 /// observer, screen capture, or copy of the aurora shader.
 struct NBAuroraTextStyleModifier: ViewModifier {
@@ -35,12 +36,14 @@ struct NBAuroraTextStyleModifier: ViewModifier {
             return AnyShapeStyle(fallback.color)
         }
 
-        // Inversion alone loses contrast near middle gray and some saturated
-        // colors. Opposing fine light/dark contours preserve glyph edges there.
+        // Difference blending alone loses contrast against some backing colors.
+        // Opposing fine light/dark contours preserve glyph edges there.
         // Keep shadows on the paint, so inherited row/canvas styles never cast
         // a shadow around an entire card or an app icon.
         return AnyShapeStyle(
-            Color.white.opacity(fallback.alpha)
+            // Unequal channels keep neutral backings colorful: mint on black,
+            // emerald on middle gray, and deep ruby on white.
+            Color(.sRGB, red: 0.42, green: 1.0, blue: 0.72, opacity: fallback.alpha)
                 .blendMode(.difference)
                 .shadow(.drop(color: .black.opacity(0.9), radius: 0.75, y: 0.5))
                 .shadow(.drop(color: .white.opacity(0.7), radius: 0.35, y: -0.5))
