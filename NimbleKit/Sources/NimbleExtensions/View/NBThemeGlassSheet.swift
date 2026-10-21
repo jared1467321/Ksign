@@ -32,6 +32,7 @@ private struct NBThemeGlassSheetModifier: ViewModifier {
                     NBThemeSurface(themes.activeColor(for: .background),
                                    in: Rectangle(), tintStrength: 0.005, finish: .sheet)
                 }
+                .nbThemeAdaptiveChrome(inPresentation: true)
         } else {
             // Older sheets cannot replace their system presentation backing.
             content

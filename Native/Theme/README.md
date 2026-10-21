@@ -53,17 +53,38 @@ render the original RGB scene and star opacities. With Adaptive Text Colors
 enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
 use a white difference-blended glyph style. Each glyph pixel takes the RGB
 complement of its composited backing, including the glass, and follows the
-aurora's existing frame cadence. This adds no sampling timer, geometry tracking,
-screen capture or second aurora render. Images and surface paints keep their
-existing rendering; status roles and text on filled buttons keep their colors.
+aurora's existing frame cadence. Ordinary text adds no sampling timer, geometry
+tracking, screen capture or second aurora render. Images and surface paints keep
+their existing rendering; status roles and text on filled buttons keep their colors.
+
+The app installs `nbThemeAdaptiveChrome()` outside its tab/navigation containers
+to cover native large titles, toolbar glyphs, search text/placeholders and tab
+labels/icons. Native controls keep their layout, hit testing, selection, input,
+focus and accessibility. Only their glyph paint moves to a transparent SwiftUI
+overlay above the native compositing containers. Small alpha bitmaps are cached
+until text, selection, font, image, bounds or appearance changes; they never
+capture the aurora or read back the whole screen. A weak display-link target
+tracks known glyph geometry at up to 30 Hz and discovers/recycles native views
+at 4 Hz. It stops while inactive or disabled, restores original masks and search
+attributes, and cleans up orphaned owners on its next callback. Empty glyph
+captures leave native paint visible and retry at most four times per second. Unknown tab
+layouts keep their native paint. Each overlay scans only its own presentation's
+controller hierarchy. Glass sheets install a fresh presentation scope with
+`nbThemeAdaptiveChrome(inPresentation: true)`; separately presented system panels
+are excluded.
+
+`NBSection` uses `nbThemeChromeForeground` to carry header/footer glyphs through
+anchor preferences to the same overlay. Its source retains layout/accessibility
+and is suppressed only after the overlay actually appears. A container without
+an overlay continues drawing the original foreground.
 
 Fine opposing light/dark shadows help define glyph edges where inversion alone
 has poor contrast (notably middle gray). This is a visual treatment, not a
 guarantee of a minimum contrast ratio for every possible background. Disabling
 Adaptive Text Colors or Aurora, enabling Reduce Transparency or Increase
 Contrast, and previewing or overriding an individual text color restore the
-theme's foreground colors. Native UIKit search/tab/large-title text, reports,
-and Live Activities retain their existing theme colors.
+theme's foreground colors. Reports, Live Activities and separately presented
+system interfaces retain their existing theme colors.
 
 Validate on an iOS device with the aurora moving behind a large heading and a
 small caption, including a single letter crossing two colors. Check both
@@ -71,8 +92,17 @@ appearances, scrolling, shuffling, glass sheets, and the iOS 16 fallback. Also
 check the adaptive toggle, solid/accessibility surfaces, Reduce Motion, theme
 previews and saved element overrides. The preview in `NBAuroraTextStyle.swift`
 provides moving saturated bands and fixed black/gray/white backings for checking
-compositor behavior and glyph edges. Swift syntax checks on Linux cannot verify
-SwiftUI's compositor or substitute for this device check.
+compositor behavior and glyph edges. For native chrome, also check large-title
+collapse, tab switching/reselection, RTL layouts, search typing/selection/long
+queries/clearing, and toggling Adaptive Text while a search field is focused.
+Swift syntax checks on Linux cannot verify SwiftUI's compositor or substitute
+for this device check.
+
+Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
+production glyph caching, original-mask restoration, search-attribute restoration,
+view recycling, tab element identity, status tint preservation and orphaned
+display-link cleanup with platform doubles. These tests do not claim to verify
+UIKit drawing or the device compositor and are not part of the app pre-build.
 
 The removed color-conversion tests enforced obsolete day/night recoloring. The
 removed UIKit hierarchy doubles tested the old sibling glass panel; the inline

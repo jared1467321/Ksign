@@ -52,8 +52,10 @@ extension NBThemeRole {
     /// Status colors and text on filled buttons retain their semantic colors.
     var usesAuroraText: Bool {
         switch self {
-        case .text, .textSecondary, .textTertiary, .title, .heading,
-             .navigationTitle, .navigationText:
+        case .text, .textSecondary, .textTertiary, .disabledText, .title, .heading,
+             .accent, .navigationTitle, .navigationText, .navigationTint,
+             .barButtonTint, .tabSelected, .tabUnselected,
+             .searchText, .searchPlaceholder, .searchTint:
             return true
         default:
             return false

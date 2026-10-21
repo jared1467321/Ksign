@@ -52,13 +52,13 @@ where 	Content: View,
 						Image(systemName: _systemName)
 							.font(.system(size: 12))
 							.offset(y: -2)
-							.nbThemeForeground(.heading)
+							.nbThemeChromeForeground(.heading)
 					}
 					
 					Text(_headerText)
 						.fontWeight(.bold)
 						.font(.title2)
-						.nbThemeForeground(.heading)
+						.nbThemeChromeForeground(.heading)
 						.nbThemeInspectorTarget(.heading)
 						
 					
@@ -67,7 +67,7 @@ where 	Content: View,
 					if let _headerTextSecondary {
                             Text(_headerTextSecondary)
                                 .font(.caption)
-                                .nbThemeForeground(.heading)
+                                .nbThemeChromeForeground(.heading)
                                 .contentTransition(.numericText())
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4.4)
@@ -80,7 +80,7 @@ where 	Content: View,
 			,
 			footer: _footer
 				.font(.caption)
-				.nbThemeForeground(.textSecondary)
+				.nbThemeChromeForeground(.textSecondary)
 				.nbThemeInspectorTarget(.textSecondary)
 		) {
 			_content
