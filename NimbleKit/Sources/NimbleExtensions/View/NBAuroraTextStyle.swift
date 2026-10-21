@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Blending the glyph paint (rather than its containing view) keeps images,
-/// glass, and control fills out of the effect. Mint in difference mode produces
-/// colorful ink from the actual composited backing at every glyph pixel, with
-/// luminous tones over dark backings and deeper jewel tones over bright ones.
+/// glass, and control fills out of the effect. A pale blue hard-light source
+/// produces luminous pastels from the composited backing at every glyph pixel.
+/// Dark contours separate the bright ink from even the brightest aurora areas.
 /// The compositor follows the sky without another animation clock, geometry
 /// observer, screen capture, or copy of the aurora shader.
 struct NBAuroraTextStyleModifier: ViewModifier {
@@ -36,17 +36,18 @@ struct NBAuroraTextStyleModifier: ViewModifier {
             return AnyShapeStyle(fallback.color)
         }
 
-        // Difference blending alone loses contrast against some backing colors.
-        // Opposing fine light/dark contours preserve glyph edges there.
+        // Hard light with every source channel above 0.5 keeps the ink bright:
+        // each output channel is 1 - 2 * (1 - backing) * (1 - source).
+        // Opaque ink has a floor of (0.52, 0.72, 0.92), while the backing
+        // shifts the ink through blue, pink, aqua and near-white. A tight dark
+        // contour supplies contrast when the backing itself approaches white.
         // Keep shadows on the paint, so inherited row/canvas styles never cast
         // a shadow around an entire card or an app icon.
         return AnyShapeStyle(
-            // Unequal channels keep neutral backings colorful: mint on black,
-            // emerald on middle gray, and deep ruby on white.
-            Color(.sRGB, red: 0.42, green: 1.0, blue: 0.72, opacity: fallback.alpha)
-                .blendMode(.difference)
-                .shadow(.drop(color: .black.opacity(0.9), radius: 0.75, y: 0.5))
-                .shadow(.drop(color: .white.opacity(0.7), radius: 0.35, y: -0.5))
+            Color(.sRGB, red: 0.76, green: 0.86, blue: 0.96, opacity: fallback.alpha)
+                .blendMode(.hardLight)
+                .shadow(.drop(color: .black.opacity(0.95), radius: 0.65))
+                .shadow(.drop(color: .black.opacity(0.8), radius: 1.2, y: 0.5))
         )
     }
 }
@@ -108,12 +109,17 @@ private struct NBAuroraTextPreview: View {
     }
 
     private func forBackdrop(_ color: Color) -> some View {
-        Text("Aa")
-            .font(.system(size: 36, weight: .bold))
-            .nbThemeForeground(.text)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-            .background(color)
+        VStack(spacing: 8) {
+            Text("Aa")
+                .font(.system(size: 36, weight: .bold))
+                .nbThemeForeground(.text)
+            Text("Small caption")
+                .font(.caption)
+                .nbThemeForeground(.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
+        .background(color)
     }
 }
 
@@ -121,10 +127,10 @@ private struct NBAuroraTextStylePreviews: PreviewProvider {
     static var previews: some View {
         NBAuroraTextPreview()
             .preferredColorScheme(.dark)
-            .previewDisplayName("Complementary text — Dark")
+            .previewDisplayName("Bright adaptive text — Dark")
         NBAuroraTextPreview()
             .preferredColorScheme(.light)
-            .previewDisplayName("Complementary text — Light")
+            .previewDisplayName("Bright adaptive text — Light")
     }
 }
 #endif

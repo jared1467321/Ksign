@@ -3,7 +3,7 @@ import UIKit
 
 // UIKit bars and list supplementary views can composite their foregrounds in
 // separate containers. Paint their glyphs in one overlay above those containers
-// so difference blending can see the same backing as ordinary screen content.
+// so adaptive blending can see the same backing as ordinary screen content.
 // The original controls still own layout, input, focus and accessibility.
 
 private struct NBAuroraChromeInstalledKey: EnvironmentKey {

@@ -51,14 +51,15 @@ cadence and glass surface parameters are unchanged.
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
 render the original RGB scene and star opacities. With Adaptive Text Colors
 enabled, shared SwiftUI text, headings, list foregrounds and inline glass titles
-use a mint difference-blended glyph style. Each glyph pixel reacts to its
-composited backing, including the glass, with luminous colors over dark areas
-and deeper jewel tones over bright areas. Unequal source RGB channels keep
-neutral backings colorful (mint on black, emerald on middle gray, deep ruby on
-white). This follows the aurora's existing frame cadence. Ordinary text adds no
-sampling timer, geometry tracking, screen capture or second aurora render.
-Images and surface paints keep
-their existing rendering; status roles and text on filled buttons keep their colors.
+use a pale blue hard-light glyph style. Each glyph pixel reacts to its
+composited backing, including the glass, with bright blue, pink, aqua and
+near-white pastels. The source RGB (0.76, 0.86, 0.96) keeps every channel on
+hard light's screen branch, giving opaque ink a channel floor of
+(0.52, 0.72, 0.92) over SDR backings instead of turning dark over bright areas.
+The foreground still preserves its semantic opacity. This follows the aurora's
+existing frame cadence. Ordinary text adds no sampling timer, geometry tracking,
+screen capture or second aurora render. Images and surface paints keep their
+existing rendering; status roles and text on filled buttons keep their colors.
 
 The app installs `nbThemeAdaptiveChrome()` outside its tab/navigation containers
 to cover native large titles, toolbar glyphs, search text/placeholders and tab
@@ -81,9 +82,9 @@ anchor preferences to the same overlay. Its source retains layout/accessibility
 and is suppressed only after the overlay actually appears. A container without
 an overlay continues drawing the original foreground.
 
-Fine opposing light/dark shadows help define glyph edges where inversion alone
-has poor contrast (notably middle gray). This is a visual treatment, not a
-guarantee of a minimum contrast ratio for every possible background. Disabling
+Two tight dark shadows define glyph edges where bright ink alone has poor
+contrast, especially over pale or white backings. This is a visual treatment,
+not a guarantee of a minimum contrast ratio for every possible background. Disabling
 Adaptive Text Colors or Aurora, enabling Reduce Transparency or Increase
 Contrast, and previewing or overriding an individual text color restore the
 theme's foreground colors. Reports, Live Activities and separately presented
