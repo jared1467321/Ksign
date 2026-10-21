@@ -20,33 +20,21 @@ public extension View {
 }
 
 private struct NBAuroraTextViewportModifier: ViewModifier {
-    private struct Geometry: Equatable {
-        let frame: CGRect
-        let clipping: CGRect
-    }
-
     @Environment(\.nbAuroraTextViewport) private var parent
     @ObservedObject private var session = AuroraSession.shared
-    @State private var geometry = Geometry(frame: .zero, clipping: .null)
+    @State private var frame = CGRect.zero
     @State private var window: CGRect?
     @State private var pendingViewport: AuroraViewport?
+    @State private var measurementID = UUID()
 
     func body(content: Content) -> some View {
-        let clipping = parent.map { geometry.clipping.intersection($0.clipping) } ?? geometry.clipping
         content
             .environment(\.nbAuroraTextViewport,
-                         NBAuroraTextViewport(clipping: clipping, window: window ?? parent?.window))
-            .onGeometryChange(for: Geometry.self) { proxy in
-                // GeometryProxy stays inside the measurement callback.
-                let frame = proxy.frame(in: .global)
-                let insets = proxy.safeAreaInsets
-                return Geometry(frame: frame,
-                                clipping: CGRect(x: frame.minX + insets.leading,
-                                                 y: frame.minY + insets.top,
-                                                 width: max(0, frame.width - insets.leading - insets.trailing),
-                                                 height: max(0, frame.height - insets.top - insets.bottom)))
+                         NBAuroraTextViewport(frame: frame, window: window, parent: parent))
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
             } action: {
-                geometry = $0
+                frame = $0
                 if window == nil, let pendingViewport { updateWindow(pendingViewport) }
             }
             .background {
@@ -55,31 +43,23 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
                 GeometryReader { proxy in
                     AuroraViewportReader { viewport in
                         // Read both coordinate systems together after return.
-                        geometry = measure(proxy)
+                        frame = proxy.frame(in: .global)
                         pendingViewport = viewport
                         updateWindow(viewport)
                     }
                 }
-                .id(session.measurementRevision)
+                .id(measurementID)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
-    }
-
-    private func measure(_ proxy: GeometryProxy) -> Geometry {
-        let frame = proxy.frame(in: .global)
-        let insets = proxy.safeAreaInsets
-        return Geometry(frame: frame,
-                        clipping: CGRect(x: frame.minX + insets.leading,
-                                         y: frame.minY + insets.top,
-                                         width: max(0, frame.width - insets.leading - insets.trailing),
-                                         height: max(0, frame.height - insets.top - insets.bottom)))
+            .onAppear { measurementID = UUID() }
+            .onChange(of: session.measurementRevision) { _ in measurementID = UUID() }
     }
 
     private func updateWindow(_ viewport: AuroraViewport) {
-        guard !geometry.frame.isEmpty else { return }
-        window = CGRect(x: geometry.frame.minX - viewport.origin.x,
-                        y: geometry.frame.minY - viewport.origin.y,
+        guard !frame.isEmpty else { return }
+        window = CGRect(x: frame.minX - viewport.origin.x,
+                        y: frame.minY - viewport.origin.y,
                         width: viewport.size.width, height: viewport.size.height)
     }
 }

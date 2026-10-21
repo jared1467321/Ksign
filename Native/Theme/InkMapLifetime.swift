@@ -90,6 +90,34 @@ extension NBAuroraInkPaint {
 
 @main
 enum InkMapLifetimeTests {
+    static func viewportEdges() {
+        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
+        let list = CGRect(x: 10, y: 100, width: 380, height: 700)
+        let viewport = NBAuroraTextViewport(frame: list, window: window)
+        assert(viewport.clipping == list)
+        // Safe-area content margins can overlap visible list content under
+        // glass bars. Eligibility follows the actual list edges, including
+        // a single visible point of a partially clipped label.
+        for y in [CGFloat(81), 100, 120, 760, 799] {
+            assert(NBAuroraTextVisibility.intersects(
+                CGRect(x: 20, y: y, width: 200, height: 20), window: window, clipping: viewport.clipping))
+        }
+        for y in [CGFloat(80), 800, 920] {
+            assert(!NBAuroraTextVisibility.intersects(
+                CGRect(x: 20, y: y, width: 200, height: 20), window: window, clipping: viewport.clipping))
+        }
+        let parent = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 140, width: 400, height: 560), window: window)
+        let nested = NBAuroraTextViewport(frame: list, window: nil, parent: parent)
+        assert(nested.clipping == CGRect(x: 10, y: 140, width: 380, height: 560) && nested.window == window,
+               "Nested lists still honor parent clipping and inherit its window")
+        assert(!NBAuroraTextVisibility.intersects(
+            CGRect(x: 20, y: 110, width: 200, height: 20), window: window, clipping: nested.clipping))
+        let outsideWindow = NBAuroraTextViewport(frame: CGRect(x: 0, y: 0, width: 400, height: 1000), window: window)
+        assert(!NBAuroraTextVisibility.intersects(
+            CGRect(x: 20, y: 950, width: 200, height: 20), window: window, clipping: outsideWindow.clipping))
+        print("Viewport edges passed: visible top/bottom strips, partial labels, offscreen exclusion and nested clipping.")
+    }
+
     @MainActor
     static func measurementRecovery() async {
         let session = AuroraSession()
@@ -256,12 +284,34 @@ enum InkMapLifetimeTests {
                "Fresh measurements must restore cached ink without scrolling")
         assert(NBAuroraInkWorker.pending.isEmpty,
                "Remeasuring must not trigger a redundant map render")
+        // Tab entry can retain both a culled row and invalid local label
+        // measurements. The appearance probes refresh both coordinate sets
+        // at the original positions, without a shuffle or a scroll.
+        row.configure(viewport: viewport, active: false, reduceMotion: false)
+        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
+        for client in clients {
+            row.setVisible(client, false)
+            row.measure(client, localFrame: .null)
+        }
+        row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
+        for client in clients { row.setVisible(client, true) }
+        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
+        row.move(to: originalGeometry)
+        assert(clients.allSatisfy { !$0.lease.active }, "The row alone cannot recover invalid label measurements")
+        for (client, frame) in zip(clients, localFrames) { row.measure(client, localFrame: frame) }
+        assert(clients.allSatisfy { $0.lease.active && $0.lease.paint.frame?.id == inkID })
+        assert(NBAuroraInkWorker.pending.isEmpty, "Tab reentry reuses cached ink")
         // No label remeasurement: one row movement updates all three offsets.
         row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 175, width: 380, height: 70),
                                             size: CGSize(width: 380, height: 70)))
         assert(!clients[0].lease.active && clients[1].lease.active && clients[2].lease.active,
                "A partially visible row still clips each label independently")
         assert(clients[1].lease.paint.frame?.id == inkID && NBAuroraInkWorker.pending.isEmpty)
+        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 730, width: 380, height: 70),
+                                            size: CGSize(width: 380, height: 70)))
+        assert(clients[0].lease.active && !clients[1].lease.active && clients[2].lease.active,
+               "The bottom edge keeps visible titles and partial icons active while excluding an offscreen subtitle")
+        assert(clients[0].lease.paint.frame?.id == inkID && clients[2].lease.paint.frame?.id == inkID)
         let counts = clients.map { $0.placement.$bounds.writes }
         row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
         assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
@@ -339,6 +389,7 @@ enum InkMapLifetimeTests {
 
     @MainActor
     static func main() async {
+        viewportEdges()
         await measurementRecovery()
         // Deterministic time input for the map coordinator tests below.
         AuroraSession.shared.activeStart = nil

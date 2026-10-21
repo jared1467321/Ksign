@@ -68,6 +68,7 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     @State private var viewportFrame = CGRect.zero
     @State private var isVisible = false
     @State private var isInViewport = false
+    @State private var measurementID = UUID()
 
     let content: Content
     let primary: NBThemeColor
@@ -109,15 +110,16 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                     }
                 }
                 // Recreate the probes, never the text or its controls.
-                .id(session.measurementRevision)
+                .id(measurementID)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
-            .onAppear { isVisible = true; updateLease(refresh: true) }
+            .onAppear { isVisible = true; updateLease(refresh: true); measurementID = UUID() }
             .onDisappear { isVisible = false; updateLease() }
             .onChange(of: scenePhase) { phase in updateLease(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in updateLease() }
             .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
+            .onChange(of: session.measurementRevision) { _ in measurementID = UUID() }
             .onChange(of: scrollViewport) { _ in updateLease() }
     }
 

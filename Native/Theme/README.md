@@ -85,8 +85,11 @@ the latest matching cached frame. Reduce Motion clients receive only the frozen
 cache, including when animated clients are also active.
 
 `NBListAdaptable` supplies a shared text viewport outside the row builder. This
-measures the scroll container's safe-area clipping and window conversion once;
-descendant labels need no individual UIKit window anchor. Their geometry
+measures the scroll container's full bounds and window conversion once;
+safe-area content margins are not subtracted from visible glass-backed content.
+Nested viewports still intersect their parent's bounds, and window clipping
+excludes content outside the screen.
+Descendant labels need no individual UIKit window anchor. Their geometry
 transform returns a constant null rectangle outside the viewport, avoiding
 state writes for every offscreen scroll offset. A positive intersection with
 both viewport and window is required, in addition to onAppear and active scene
@@ -131,6 +134,8 @@ also suspends the map clock, rejects pre-suspension results (including failures)
 and requests fresh animated ink on resume. Text scopes revalidate their leases
 on appearance and scene activation. A deferred, coalesced session revision also
 recreates only invisible text/row/window measurement probes after foregrounding.
+Appearance requests fresh list-window, row and local-label measurements as well,
+so entering a tab does not depend on a shuffle or changed layout coordinates.
 It leaves content identities and controls intact, makes unchanged positions
 report again, and pairs fresh SwiftUI frames with UIKit window origins. If the
 restored scroll viewport arrives later, text and row probes remeasure against
@@ -234,8 +239,10 @@ cached reentry, scaled coordinate continuity, changed local layout, scene
 activity and Reduce Motion, including 103 retained rows with eight visible.
 It executes the production session to check deferred foreground measurements,
 rapid-return coalescing and cancellation when inactive, and models a culled
-row recovering at its original coordinates without scrolling or rendering a
-redundant map. SwiftUI probe remounting and the reported iPhone appearance
+row and its invalid local label measurements recovering at their original
+coordinates without scrolling or rendering a redundant map. Viewport cases
+include the top and bottom visible strips, partial labels, parent clipping and
+the window boundary. SwiftUI probe remounting and the reported iPhone appearance
 still require a device check.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check

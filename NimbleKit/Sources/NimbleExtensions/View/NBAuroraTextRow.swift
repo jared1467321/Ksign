@@ -74,8 +74,8 @@ private struct NBAuroraTextRowModifier: ViewModifier {
                         .accessibilityHidden(true)
                 }
             }
-            .onAppear { appeared = true; configure(refresh: true) }
-            .onDisappear { appeared = false; configure() }
+            .onAppear { appeared = true; configure(refresh: true); remeasurement = UUID() }
+            .onDisappear { appeared = false; configure(); remeasurement = nil }
             .onChange(of: viewport) { _ in configure(); remeasurement = UUID() }
             .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
             .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
@@ -125,8 +125,8 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
                 }
             }
             .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
-            .onAppear { row.setVisible(client, true) }
-            .onDisappear { row.setVisible(client, false) }
+            .onAppear { row.setVisible(client, true); remeasurement = UUID() }
+            .onDisappear { row.setVisible(client, false); remeasurement = nil }
     }
 }
 
