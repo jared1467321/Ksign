@@ -20,14 +20,28 @@ struct Shader {
     }
 }
 
-@MainActor
-final class AuroraSession {
-    struct Identity { let shaderIdentity: NBAuroraShaderIdentity }
-    static let shared = AuroraSession()
-    var identity = Identity(shaderIdentity: NBAuroraShaderIdentity(high: 0, low: 0))
-    func time(at: Date, reduceMotion: Bool) -> TimeInterval { reduceMotion ? 1.8 : 12 }
+// Identity generation and star drawing remain boundaries; the production
+// session's foreground clock and measurement refresh scheduling run below.
+struct AuroraTestIdentity {
+    let shaderIdentity: NBAuroraShaderIdentity
+    func starfieldSeed(stream: UInt64) -> UInt64 { stream }
+}
+enum AuroraIdentityGenerator {
+    static func next() -> AuroraTestIdentity {
+        AuroraTestIdentity(shaderIdentity: NBAuroraShaderIdentity(high: 0, low: 0))
+    }
+}
+final class NBAuroraStarfield {}
+struct NBAuroraStarfieldCache {
+    func field(stream: UInt64, seed: UInt64, count: Int) -> NBAuroraStarfield { NBAuroraStarfield() }
+}
+
+// PRODUCTION_SESSION
+
+extension AuroraSession {
+    fileprivate var measurementRefreshPendingForTest: Bool { measurementRefreshPending }
     func shuffle(_ low: UInt64) {
-        identity = Identity(shaderIdentity: NBAuroraShaderIdentity(high: 0, low: low))
+        identity = AuroraTestIdentity(shaderIdentity: NBAuroraShaderIdentity(high: 0, low: low))
     }
 }
 
@@ -76,6 +90,46 @@ extension NBAuroraInkPaint {
 
 @main
 enum InkMapLifetimeTests {
+    @MainActor
+    static func measurementRecovery() async {
+        let session = AuroraSession()
+        let identity = session.identity.shaderIdentity
+        session.setActive(true)
+        assert(session.measurementRevision == 0 && !session.measurementRefreshPendingForTest,
+               "Initial appearance must not schedule redundant measurements")
+        session.setActive(false)
+        session.setActive(false)
+        session.setActive(true)
+        session.setActive(true)
+        assert(session.measurementRevision == 0 && session.measurementRefreshPendingForTest,
+               "Remeasure only after the foreground transition has settled")
+        await settle { session.measurementRevision == 1 }
+        assert(!session.measurementRefreshPendingForTest && session.identity.shaderIdentity == identity,
+               "One return must refresh probes without shuffling the sky")
+        let pausedTime = session.accumulatedTime
+        assert(session.time(at: Date(), reduceMotion: false) >= pausedTime)
+        assert(session.time(at: Date(), reduceMotion: true) == 1.8)
+
+        session.setActive(false)
+        session.setActive(true)
+        session.setActive(false)
+        await settle { !session.measurementRefreshPendingForTest }
+        assert(session.measurementRevision == 1,
+               "Going inactive again must cancel the queued measurement refresh")
+
+        session.setActive(true)
+        session.setActive(false)
+        session.setActive(true)
+        await settle { session.measurementRevision == 2 }
+        assert(!session.measurementRefreshPendingForTest,
+               "Rapid returns coalesce into one refresh of the currently active scene")
+        session.randomize()
+        session.setActive(true)
+        assert(session.measurementRevision == 2 && !session.measurementRefreshPendingForTest,
+               "Shuffling and duplicate activation must not rebuild probes")
+        print("Measurement recovery passed: deferred foreground refresh, coalescing, cancelled inactive refresh and unchanged animation clock.")
+    }
+
     @MainActor
     static func transientFailure() async {
         let map = NBAuroraInkMap(), scope = NBAuroraInkLease()
@@ -182,6 +236,20 @@ enum InkMapLifetimeTests {
                                                      width: 400, height: 900))
         }
         let inkID = clients[0].lease.paint.frame!.id
+        // Model a transition that leaves the measurement probe culled. A
+        // lease-only resume cannot recover; the recreated probe must report
+        // the same on-screen geometry again without any scroll displacement.
+        let originalGeometry = NBAuroraTextRowGeometry(
+            frame: CGRect(x: 20, y: 210, width: 380, height: 70), size: CGSize(width: 380, height: 70))
+        row.configure(viewport: viewport, active: false, reduceMotion: false)
+        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
+        row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
+        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
+        row.move(to: originalGeometry)
+        assert(clients.allSatisfy { $0.lease.active && $0.lease.paint.frame?.id == inkID },
+               "Fresh measurements must restore cached ink without scrolling")
+        assert(NBAuroraInkWorker.pending.isEmpty,
+               "Remeasuring must not trigger a redundant map render")
         // No label remeasurement: one row movement updates all three offsets.
         row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 175, width: 380, height: 70),
                                             size: CGSize(width: 380, height: 70)))
@@ -267,6 +335,10 @@ enum InkMapLifetimeTests {
 
     @MainActor
     static func main() async {
+        await measurementRecovery()
+        // Deterministic time input for the map coordinator tests below.
+        AuroraSession.shared.activeStart = nil
+        AuroraSession.shared.accumulatedTime = 12
         await transientFailure()
         await activityRecovery()
         await rowTracking()

@@ -123,7 +123,13 @@ requests until the app becomes active again or all clients leave and return.
 Existing valid paint survives failed refreshes. The app's Aurora activity hook
 also suspends the map clock, rejects pre-suspension results (including failures),
 and requests fresh animated ink on resume. Text scopes revalidate their leases
-on appearance and scene activation. The scheduler inspects weak leases in one
+on appearance and scene activation. A deferred, coalesced session revision also
+recreates only invisible text/row/window measurement probes after foregrounding.
+It leaves content identities and controls intact, makes unchanged positions
+report again, and pairs fresh SwiftUI frames with UIKit window origins. If the
+restored scroll viewport arrives later, text and row probes remeasure against
+it without waiting for a scroll. Offscreen measurements still use the stable
+null sentinel. The scheduler inspects weak leases in one
 pass without rebuilding client collections each tick. Map size, color math and
 30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
 
@@ -214,6 +220,11 @@ The map suite also executes the production row tracker with three labels per
 row: shared movement, per-label partial clipping, offscreen publication counts,
 cached reentry, scaled coordinate continuity, changed local layout, scene
 activity and Reduce Motion, including 103 retained rows with eight visible.
+It executes the production session to check deferred foreground measurements,
+rapid-return coalescing and cancellation when inactive, and models a culled
+row recovering at its original coordinates without scrolling or rendering a
+redundant map. SwiftUI probe remounting and the reported iPhone appearance
+still require a device check.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
 production glyph caching, original-mask restoration, search-attribute restoration,

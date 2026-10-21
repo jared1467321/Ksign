@@ -52,21 +52,35 @@ private struct NBAuroraTextRowModifier: ViewModifier {
         content
             .environment(\.nbAuroraTextRow, row)
             .coordinateSpace(name: row.coordinateSpaceID)
-            .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
-                let frame = proxy.frame(in: .global)
-                if let viewport, let window = viewport.window,
-                   !NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) {
-                    // Retained offscreen rows report one stable sentinel.
-                    return NBAuroraTextRowGeometry(frame: .null, size: .zero)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { measure($0) }
+                            action: { row.move(to: $0) }
+                        .onChange(of: viewport) { _ in
+                            row.move(to: measure(proxy))
+                        }
                 }
-                return NBAuroraTextRowGeometry(frame: frame, size: proxy.size)
-            } action: { row.move(to: $0) }
+                .id(session.measurementRevision)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
             .onAppear { appeared = true; configure(refresh: true) }
             .onDisappear { appeared = false; configure() }
             .onChange(of: viewport) { _ in configure() }
             .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in configure() }
             .onChange(of: session.identity.shaderIdentity) { _ in configure(refresh: true) }
+    }
+
+    private func measure(_ proxy: GeometryProxy) -> NBAuroraTextRowGeometry {
+        let frame = proxy.frame(in: .global)
+        if let viewport, let window = viewport.window,
+           !NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) {
+            // Retained offscreen rows report one stable sentinel.
+            return NBAuroraTextRowGeometry(frame: .null, size: .zero)
+        }
+        return NBAuroraTextRowGeometry(frame: frame, size: proxy.size)
     }
 
     private func configure(refresh: Bool = false) {
@@ -93,8 +107,14 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
                                     placement: client.placement, paint: client.lease.paint)
             // These coordinates stay constant while the row scrolls. Changes
             // to wrapping, layout or edit controls still remeasure each label.
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
-                action: { row.measure(client, localFrame: $0) }
+            .background {
+                Color.clear
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
+                        action: { row.measure(client, localFrame: $0) }
+                    .id(session.measurementRevision)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
             .onAppear { row.setVisible(client, true) }
             .onDisappear { row.setVisible(client, false) }
     }

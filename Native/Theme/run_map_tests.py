@@ -23,10 +23,15 @@ def main():
     fixture = (root / "Native/Theme/InkMapLifetime.swift").read_text()
     row = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraTextRowTracking.swift").read_text()
     row = row.replace("import SwiftUI\n", "")
+    reference = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraReference.swift").read_text()
+    session = "@MainActor\nfinal class AuroraSession" + reference.split(
+        "@MainActor\nfinal class AuroraSession", 1
+    )[1].split("@MainActor\npublic enum NBAurora", 1)[0]
     with tempfile.TemporaryDirectory(prefix="ksign-ink-map-tests-") as folder:
         folder = Path(folder)
         source = folder / "InkMapTests.swift"
-        source.write_text(fixture.replace("// PRODUCTION_MAP", production).replace("// PRODUCTION_ROW", row))
+        source.write_text(fixture.replace("// PRODUCTION_MAP", production)
+                          .replace("// PRODUCTION_ROW", row).replace("// PRODUCTION_SESSION", session))
         binary = folder / "InkMapTests"
         subprocess.run([args.swiftc, "-swift-version", "6", "-parse-as-library",
                         "-module-cache-path", str(folder / "modules"), str(source),

@@ -8,6 +8,8 @@ final class AuroraSession: ObservableObject {
     @Published var identity = AuroraIdentityGenerator.next()
     @Published var accumulatedTime: TimeInterval = 0
     @Published var activeStart: Date? = Date()
+    @Published private(set) var measurementRevision: UInt64 = 0
+    private var measurementRefreshPending = false
     private var starfields = NBAuroraStarfieldCache()
 
     func starfield(stream: UInt64, count: Int) -> NBAuroraStarfield {
@@ -17,9 +19,23 @@ final class AuroraSession: ObservableObject {
     func setActive(_ active: Bool) {
         if active, activeStart == nil {
             activeStart = Date()
+            refreshMeasurementsAfterReturn()
         } else if !active, let start = activeStart {
             accumulatedTime += max(0, Date().timeIntervalSince(start))
             activeStart = nil
+        }
+    }
+
+    private func refreshMeasurementsAfterReturn() {
+        guard !measurementRefreshPending else { return }
+        measurementRefreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.measurementRefreshPending = false
+            guard self.activeStart != nil else { return }
+            // Let the scene return before replacing only invisible probes.
+            // Unchanged frames must report again without requiring a scroll.
+            self.measurementRevision &+= 1
         }
     }
 

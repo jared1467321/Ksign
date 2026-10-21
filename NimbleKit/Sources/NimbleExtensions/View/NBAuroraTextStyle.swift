@@ -87,33 +87,32 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                                  adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
                                  bounds: bounds, identity: session.identity.shaderIdentity,
                                  paint: lease.paint)
-            .onGeometryChange(for: CGRect.self) { proxy in
-                let rect = proxy.frame(in: .global)
-                guard let scrollViewport else { return rect }
-                guard let window = scrollViewport.window,
-                      NBAuroraTextVisibility.intersects(rect, window: window,
-                                                       clipping: scrollViewport.clipping) else { return .null }
-                return rect
-            } action: { measured in
-                // All offscreen positions resolve to the same value, so cached
-                // rows do not update SwiftUI state on every scroll offset.
-                isInViewport = !measured.isNull
-                if isInViewport {
-                    frame = measured
-                    if viewport != nil && viewportFrame.isEmpty { viewportFrame = measured }
-                }
-                updateLease()
-            }
             .background {
-                if scrollViewport == nil {
-                    AuroraViewportReader {
-                        viewport = $0
-                        viewportFrame = frame
-                        updateLease()
+                GeometryReader { proxy in
+                    Color.clear
+                        .onGeometryChange(for: CGRect.self) { geometry in
+                            clippedFrame(geometry.frame(in: .global))
+                        } action: { receive($0) }
+                        .onChange(of: scrollViewport) { _ in
+                            // A restored viewport can make a culled label
+                            // visible even when its layout never moves.
+                            receive(clippedFrame(proxy.frame(in: .global)))
+                        }
+                    if scrollViewport == nil {
+                        AuroraViewportReader { reported in
+                            // Pair the UIKit origin with a fresh SwiftUI frame,
+                            // not a cached frame from before a layout change.
+                            let measured = proxy.frame(in: .global)
+                            viewport = reported
+                            viewportFrame = measured
+                            receive(measured)
+                        }
                     }
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
                 }
+                // Recreate the probes, never the text or its controls.
+                .id(session.measurementRevision)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
             .onAppear { isVisible = true; updateLease(refresh: true) }
             .onDisappear { isVisible = false; updateLease() }
@@ -121,6 +120,21 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
             .onChange(of: reduceMotion) { _ in updateLease() }
             .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
             .onChange(of: scrollViewport) { _ in updateLease() }
+    }
+
+    private func clippedFrame(_ frame: CGRect) -> CGRect {
+        guard let scrollViewport else { return frame }
+        guard let window = scrollViewport.window,
+              NBAuroraTextVisibility.intersects(frame, window: window,
+                                               clipping: scrollViewport.clipping) else { return .null }
+        return frame
+    }
+
+    private func receive(_ measured: CGRect) {
+        // Offscreen positions still resolve to a stable sentinel while scrolling.
+        isInViewport = !measured.isNull
+        if isInViewport { frame = measured }
+        updateLease()
     }
 
     private var windowFrame: CGRect? {

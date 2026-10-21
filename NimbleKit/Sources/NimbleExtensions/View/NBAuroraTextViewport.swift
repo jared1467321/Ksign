@@ -26,6 +26,7 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
     }
 
     @Environment(\.nbAuroraTextViewport) private var parent
+    @ObservedObject private var session = AuroraSession.shared
     @State private var geometry = Geometry(frame: .zero, clipping: .null)
     @State private var window: CGRect?
     @State private var pendingViewport: AuroraViewport?
@@ -36,13 +37,7 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
             .environment(\.nbAuroraTextViewport,
                          NBAuroraTextViewport(clipping: clipping, window: window ?? parent?.window))
             .onGeometryChange(for: Geometry.self) { proxy in
-                let frame = proxy.frame(in: .global)
-                let insets = proxy.safeAreaInsets
-                return Geometry(frame: frame,
-                                clipping: CGRect(x: frame.minX + insets.leading,
-                                                 y: frame.minY + insets.top,
-                                                 width: max(0, frame.width - insets.leading - insets.trailing),
-                                                 height: max(0, frame.height - insets.top - insets.bottom)))
+                measure(proxy)
             } action: {
                 geometry = $0
                 if window == nil, let pendingViewport { updateWindow(pendingViewport) }
@@ -50,13 +45,28 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
             .background {
                 // One window-coordinate reader for the list, rather than one
                 // UIKit anchor for every title, subtitle and chevron.
-                AuroraViewportReader { viewport in
-                    pendingViewport = viewport
-                    updateWindow(viewport)
+                GeometryReader { proxy in
+                    AuroraViewportReader { viewport in
+                        // Read both coordinate systems together after return.
+                        geometry = measure(proxy)
+                        pendingViewport = viewport
+                        updateWindow(viewport)
+                    }
                 }
+                .id(session.measurementRevision)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
+    }
+
+    private func measure(_ proxy: GeometryProxy) -> Geometry {
+        let frame = proxy.frame(in: .global)
+        let insets = proxy.safeAreaInsets
+        return Geometry(frame: frame,
+                        clipping: CGRect(x: frame.minX + insets.leading,
+                                         y: frame.minY + insets.top,
+                                         width: max(0, frame.width - insets.leading - insets.trailing),
+                                         height: max(0, frame.height - insets.top - insets.bottom)))
     }
 
     private func updateWindow(_ viewport: AuroraViewport) {
