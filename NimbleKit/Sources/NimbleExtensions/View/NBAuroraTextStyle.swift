@@ -7,6 +7,7 @@ struct NBAuroraTextStyleModifier: ViewModifier {
     @AppStorage("Feather.auroraAdaptiveText") private var adaptiveText = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.nbAuroraTextRow) private var textRow
 
     let primary: NBThemeColor
     var secondary: NBThemeColor? = nil
@@ -21,10 +22,18 @@ struct NBAuroraTextStyleModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled && (adaptsPrimary || (secondary != nil && adaptsSecondary)),
            #available(iOS 17.0, tvOS 17.0, *) {
-            NBAuroraTextShaderScope(
-                content: content, primary: primary, secondary: secondary,
-                adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary
-            )
+            if let textRow = textRow as? NBAuroraTextRowTracker {
+                NBAuroraRowTextShaderScope(
+                    content: content, primary: primary, secondary: secondary,
+                    adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
+                    row: textRow
+                )
+            } else {
+                NBAuroraTextShaderScope(
+                    content: content, primary: primary, secondary: secondary,
+                    adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary
+                )
+            }
         } else if let secondary {
             content.foregroundStyle(legacyInk(primary, adapts: adaptsPrimary),
                                     legacyInk(secondary, adapts: adaptsSecondary))
@@ -136,7 +145,7 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
 /// Observe only this scope's paint. The map never publishes to inactive paint,
 /// even if List retains the row after it has scrolled out of view.
 @available(iOS 17.0, tvOS 17.0, *)
-private struct NBAuroraMappedForeground<Content: View>: View {
+struct NBAuroraMappedForeground<Content: View>: View {
     let content: Content
     let primary: NBThemeColor
     let secondary: NBThemeColor?

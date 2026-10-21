@@ -82,6 +82,7 @@ struct LibraryCellView: View {
 					.font(.footnote)
 			}
 		}
+        .nbThemeTextRow()
 		.scaleEffect(_isSelected ? 0.98 : 1.0)
 		.contentShape(Rectangle())
 		.onTapGesture {

@@ -1,5 +1,10 @@
 import Foundation
 
+struct NBAuroraTextViewport: Equatable, Sendable {
+    let clipping: CGRect
+    let window: CGRect?
+}
+
 /// Pure geometry policy shared by the text scopes and the scroll viewport.
 enum NBAuroraTextVisibility {
     static func intersects(_ frame: CGRect, window: CGRect, clipping: CGRect? = nil) -> Bool {

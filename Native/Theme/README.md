@@ -103,6 +103,16 @@ those individual paints retain their vivid colors. Other screens keep the
 existing default for inherited container text. The row collection and native
 list/grid containers are unchanged.
 
+Library cells also install `nbThemeTextRow()`. One global geometry measurement
+tracks the row's movement; titles, subtitles, chevrons and selection glyphs only
+report their local offsets when their layout changes. The row tracker updates
+small foreground placement objects directly, without publishing movement or
+ink through the cell's body or environment. Each label still clips independently
+at the viewport edge and retains its own ink lease. The coordinate conversion
+accounts for the row's selection scale. Fully offscreen rows report a stable
+null geometry; disabling adaptive ink or using the iOS 16 fallback bypasses the
+row tracking path.
+
 Weak scope leases stop the shared clock when no animated text is visible. A
 weak clock target also cleans up a discarded owner. Reduce Motion uses a
 separately cached frame at time 1.8, matching the backdrop. Shuffling discards
@@ -134,6 +144,12 @@ layouts keep their native paint. Each overlay scans only its own presentation's
 controller hierarchy. Glass sheets install a fresh presentation scope with
 `nbThemeAdaptiveChrome(inPresentation: true)`; separately presented system panels
 are excluded.
+
+Chrome discovery skips table/collection cell trees, including their retained
+reuse content. It still visits explicit table headers/footers and visible
+collection headers/footers so standalone native search controls there remain
+discoverable. Native navigation and tab bar scanning stays in its existing
+presentation scope.
 
 `NBSection` uses `nbThemeChromeForeground`. On iOS 17+ its shader-based
 header/footer text stays in the original supplementary view. On iOS 16,
@@ -186,11 +202,18 @@ stale-frame rejection, offscreen cleanup, frozen/mixed-motion clients, orphaned
 lease/owner cleanup, and bounded failure. The Metal driver and SwiftUI buffer
 upload still require an iOS build and device rendering check.
 
+The map suite also executes the production row tracker with three labels per
+row: shared movement, per-label partial clipping, offscreen publication counts,
+cached reentry, scaled coordinate continuity, changed local layout, scene
+activity and Reduce Motion, including 103 retained rows with eight visible.
+
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
 production glyph caching, original-mask restoration, search-attribute restoration,
 view recycling, tab element identity, status tint preservation and orphaned
 display-link cleanup with platform doubles. These tests do not claim to verify
 UIKit drawing or the device compositor and are not part of the app pre-build.
+Discovery checks also cover 206 table/grid cells with descendants that reject
+traversal, while retaining navigation glyphs and explicit header search fields.
 
 The removed color-conversion tests enforced obsolete day/night recoloring. The
 removed UIKit hierarchy doubles tested the old sibling glass panel; the inline

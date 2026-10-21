@@ -64,6 +64,7 @@ final class CADisplayLink {
 }
 
 // PRODUCTION_MAP
+// PRODUCTION_ROW
 
 extension NBAuroraInkMap {
     fileprivate var busyForTest: Bool { inFlight }
@@ -76,6 +77,106 @@ extension NBAuroraInkPaint {
 @main
 enum InkMapLifetimeTests {
     @MainActor
+    static func rowTracking() async {
+        let row = NBAuroraTextRowTracker()
+        let window = CGRect(x: 10, y: 20, width: 400, height: 900)
+        let viewport = NBAuroraTextViewport(clipping: CGRect(x: 10, y: 200, width: 400, height: 560),
+                                          window: window)
+        let clients = (0..<3).map { _ in NBAuroraRowTextClient() }
+        let localFrames = [CGRect(x: 70, y: 5, width: 200, height: 20),
+                           CGRect(x: 70, y: 30, width: 200, height: 20),
+                           CGRect(x: 350, y: 20, width: 10, height: 15)]
+        row.configure(viewport: viewport, active: true, reduceMotion: false)
+        for (client, frame) in zip(clients, localFrames) {
+            row.measure(client, localFrame: frame)
+            row.setVisible(client, true)
+        }
+        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 210, width: 380, height: 70),
+                                            size: CGSize(width: 380, height: 70)))
+        assert(clients.allSatisfy { $0.lease.active })
+        assert(NBAuroraInkWorker.pending.count == 1, "One row movement must share one ink render")
+        NBAuroraInkWorker.complete(Data([11]))
+        await settle { clients.allSatisfy { $0.lease.paint.frame != nil } }
+        for (client, local) in zip(clients, localFrames) {
+            assert(client.placement.bounds == CGRect(x: -10 - local.minX, y: -190 - local.minY,
+                                                     width: 400, height: 900))
+        }
+        let inkID = clients[0].lease.paint.frame!.id
+        // No label remeasurement: one row movement updates all three offsets.
+        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 175, width: 380, height: 70),
+                                            size: CGSize(width: 380, height: 70)))
+        assert(!clients[0].lease.active && clients[1].lease.active && clients[2].lease.active,
+               "A partially visible row still clips each label independently")
+        assert(clients[1].lease.paint.frame?.id == inkID && NBAuroraInkWorker.pending.isEmpty)
+        let counts = clients.map { $0.placement.$bounds.writes }
+        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
+        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
+        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
+        assert(clients.map { $0.placement.$bounds.writes } == counts,
+               "Offscreen movement must not publish placement changes")
+        assert(CADisplayLink.active.isEmpty)
+
+        // Selection scales the row by 0.98. Shader bounds must invert that
+        // transform, rather than treating local points as window points.
+        let scaled = NBAuroraTextRowGeometry(frame: CGRect(x: 24, y: 214, width: 372.4, height: 68.6),
+                                             size: CGSize(width: 380, height: 70))
+        row.move(to: scaled)
+        for (client, local) in zip(clients, localFrames) {
+            let bounds = client.placement.bounds
+            let global = scaled.globalFrame(for: local)
+            let p = CGPoint(x: 3, y: 7)
+            let u = (p.x - bounds.minX) / bounds.width
+            let v = (p.y - bounds.minY) / bounds.height
+            assert(abs(u - (global.minX + p.x * 0.98 - window.minX) / window.width) < 0.000001)
+            assert(abs(v - (global.minY + p.y * 0.98 - window.minY) / window.height) < 0.000001)
+            assert(client.lease.paint.frame?.id == inkID, "Reentry must reuse current ink")
+        }
+        let changed = CGRect(x: 90, y: 8, width: 180, height: 40)
+        row.measure(clients[0], localFrame: changed)
+        assert(clients[0].placement.bounds == scaled.inkBounds(for: changed, window: window),
+               "Wrapping/edit layout must update a label's local offset")
+        row.configure(viewport: viewport, active: false, reduceMotion: false)
+        assert(CADisplayLink.active.isEmpty && clients.allSatisfy { !$0.lease.active })
+        row.configure(viewport: viewport, active: true, reduceMotion: true)
+        assert(CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.count == 1)
+        NBAuroraInkWorker.complete(Data([12]))
+        await settle { clients.allSatisfy { $0.lease.paint.frame?.argument.bytes == Data([12]) } }
+        for client in clients { row.setVisible(client, false) }
+        assert(clients.allSatisfy { $0.lease.paint.frame == nil })
+
+        let rows = (0..<103).map { _ in NBAuroraTextRowTracker() }
+        let labels = rows.map { tracker in
+            tracker.configure(viewport: viewport, active: true, reduceMotion: false)
+            return localFrames.map { frame in
+                let client = NBAuroraRowTextClient()
+                tracker.measure(client, localFrame: frame)
+                tracker.setVisible(client, true)
+                return client
+            }
+        }
+        func scroll(_ offset: CGFloat) {
+            for (index, tracker) in rows.enumerated() {
+                let frame = CGRect(x: 20, y: 210 + CGFloat(index) * 70 - offset, width: 380, height: 70)
+                let visible = NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping)
+                tracker.move(to: NBAuroraTextRowGeometry(frame: visible ? frame : .null,
+                                                        size: visible ? frame.size : .zero))
+            }
+        }
+        scroll(0)
+        assert(labels.flatMap { $0 }.filter { $0.lease.active }.count == 24)
+        let offscreenWrites = labels.dropFirst(8).flatMap { $0 }.map { $0.placement.$bounds.writes }
+        scroll(5)
+        assert(labels.dropFirst(8).flatMap { $0 }.map { $0.placement.$bounds.writes } == offscreenWrites)
+        scroll(700)
+        assert(labels.prefix(10).flatMap { $0 }.allSatisfy { !$0.lease.active })
+        assert(labels[10..<18].flatMap { $0 }.allSatisfy { $0.lease.active })
+        assert(labels.dropFirst(18).flatMap { $0 }.allSatisfy { !$0.lease.active })
+        for tracker in rows { tracker.configure(viewport: viewport, active: false, reduceMotion: false) }
+        assert(CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.isEmpty)
+        print("Row tracking passed: shared movement, per-label clipping, offscreen suppression, cached reentry, selection scale, layout changes and Reduce Motion.")
+    }
+
+    @MainActor
     static func settle(_ condition: @MainActor () -> Bool) async {
         for _ in 0..<200 {
             if condition() { return }
@@ -86,6 +187,7 @@ enum InkMapLifetimeTests {
 
     @MainActor
     static func main() async {
+        await rowTracking()
         let map = NBAuroraInkMap()
         let scopes = (0..<100).map { _ in NBAuroraInkLease() }
         for scope in scopes { map.update(scope, active: true, reduceMotion: false) }

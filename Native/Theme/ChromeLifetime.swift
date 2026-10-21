@@ -132,6 +132,24 @@ typealias DrawingContext = CGContext
     var isHighlighted = false
 }
 @MainActor class UIControl: UIView {}
+@MainActor final class UITableView: UIView {
+    var tableHeaderView: UIView?
+    var tableFooterView: UIView?
+}
+@MainActor final class UICollectionView: UIView {
+    static let elementKindSectionHeader = "header", elementKindSectionFooter = "footer"
+    var supplementary: [String: [UIView]] = [:]
+    func visibleSupplementaryViews(ofKind kind: String) -> [UIView] { supplementary[kind] ?? [] }
+}
+@MainActor final class UITableViewCell: UIView {}
+@MainActor final class UICollectionViewCell: UIView {}
+@MainActor final class UITableViewHeaderFooterView: UIView {}
+@MainActor final class UnscannableRowContent: UIView {
+    override var subviews: [UIView] {
+        get { preconditionFailure("Chrome discovery descended into list row content") }
+        set { super.subviews = newValue }
+    }
+}
 struct UITextPosition { let offset: Int }
 struct UITextRange { let start: UITextPosition; let end: UITextPosition }
 @MainActor final class UISearchTextField: UIControl {
@@ -228,7 +246,59 @@ struct NBThemeColor { let uiColor: UIColor }
         searchLifetime()
         discoveryAndOrphanCleanup()
         presentationIsolation()
+        listDiscoveryBoundaries()
         print("Chrome lifecycle tests passed: glyph cache, original masks, input restoration, recycling, tab identity, status preservation and orphan cleanup.")
+    }
+
+    @MainActor static func listDiscoveryBoundaries() {
+        let window = UIWindow()
+        let controller = UIViewController()
+        window.rootViewController = controller
+        window.addSubview(controller.view)
+        let anchor = UIView()
+        controller.view.addSubview(anchor)
+        let bar = UINavigationBar()
+        let title = UILabel()
+        title.text = "Library"
+        bar.addSubview(title)
+        controller.view.addSubview(bar)
+
+        let table = UITableView()
+        controller.view.addSubview(table)
+        let headerSearch = UISearchTextField()
+        headerSearch.placeholder = "Table search"
+        let explicitHeader = UITableViewHeaderFooterView()
+        explicitHeader.addSubview(headerSearch)
+        table.tableHeaderView = explicitHeader
+        table.addSubview(explicitHeader)
+        let collection = UICollectionView()
+        controller.view.addSubview(collection)
+        let supplementarySearch = UISearchTextField()
+        supplementarySearch.placeholder = "Collection search"
+        collection.supplementary[UICollectionView.elementKindSectionHeader] = [supplementarySearch]
+        collection.addSubview(supplementarySearch)
+        for _ in 0..<103 {
+            let cell = UITableViewCell()
+            cell.addSubview(UnscannableRowContent())
+            table.addSubview(cell)
+            let gridCell = UICollectionViewCell()
+            gridCell.addSubview(UnscannableRowContent())
+            collection.addSubview(gridCell)
+        }
+        // Reuse/transition containers may also temporarily host detached cells.
+        let detachedCell = UITableViewCell()
+        detachedCell.addSubview(UnscannableRowContent())
+        controller.view.addSubview(detachedCell)
+        let observer = NBAuroraChromeObserver()
+        observer.start(at: anchor)
+        assert(observer.glyphs.count == 3, "Bars and explicit search headers must remain discoverable")
+        let link = CADisplayLink.lastCreated!
+        let target = link.target as! NBAuroraChromeDisplayTarget
+        link.timestamp = 0.3
+        target.fire(link)
+        assert(observer.glyphs.count == 3, "Repeated discovery must keep skipping all cell trees")
+        observer.stop()
+        print("Chrome discovery passed: 206 list/grid cells skipped; navigation and explicit header search retained.")
     }
 
     @MainActor static func sourceLifetime() {

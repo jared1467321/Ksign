@@ -381,6 +381,23 @@ final class NBAuroraChromeObserver: ObservableObject {
             if let bar = view as? UINavigationBar { navigation(bar); continue }
             if let bar = view as? UITabBar { tabs(bar); continue }
             if let field = view as? UISearchTextField { search(field); continue }
+            // Row text owns its SwiftUI ink. Never descend through the table's
+            // cell/reuse hierarchy just to rediscover navigation/search chrome.
+            // Explicit headers can still contain a standalone native search bar.
+            if let table = view as? UITableView {
+                pending.append(contentsOf: [table.tableHeaderView, table.tableFooterView].compactMap { $0 })
+                continue
+            }
+            if let collection = view as? UICollectionView {
+                pending.append(contentsOf: collection.visibleSupplementaryViews(
+                    ofKind: UICollectionView.elementKindSectionHeader))
+                pending.append(contentsOf: collection.visibleSupplementaryViews(
+                    ofKind: UICollectionView.elementKindSectionFooter))
+                continue
+            }
+            if view is UITableViewCell || view is UICollectionViewCell {
+                continue
+            }
             pending.append(contentsOf: view.subviews)
         }
         for id in Array(sources.keys) where !found.contains(id) {

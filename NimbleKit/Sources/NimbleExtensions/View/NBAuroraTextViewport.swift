@@ -1,10 +1,5 @@
 import SwiftUI
 
-struct NBAuroraTextViewport: Equatable, Sendable {
-    let clipping: CGRect
-    let window: CGRect?
-}
-
 private struct NBAuroraTextViewportKey: EnvironmentKey {
     static let defaultValue: NBAuroraTextViewport? = nil
 }

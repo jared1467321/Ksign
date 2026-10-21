@@ -21,10 +21,12 @@ def main():
     production = production.replace("@objc ", "")
     production = production.replace("#selector(NBAuroraInkClock.fire(_:))", '"fire"')
     fixture = (root / "Native/Theme/InkMapLifetime.swift").read_text()
+    row = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraTextRowTracking.swift").read_text()
+    row = row.replace("import SwiftUI\n", "")
     with tempfile.TemporaryDirectory(prefix="ksign-ink-map-tests-") as folder:
         folder = Path(folder)
         source = folder / "InkMapTests.swift"
-        source.write_text(fixture.replace("// PRODUCTION_MAP", production))
+        source.write_text(fixture.replace("// PRODUCTION_MAP", production).replace("// PRODUCTION_ROW", row))
         binary = folder / "InkMapTests"
         subprocess.run([args.swiftc, "-swift-version", "6", "-parse-as-library",
                         "-module-cache-path", str(folder / "modules"), str(source),
