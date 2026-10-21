@@ -29,6 +29,7 @@ def main():
         subprocess.run([args.swiftc, "-swift-version", "6", "-parse-as-library",
                         "-module-cache-path", str(folder / "modules"), str(source),
                         str(root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraShaderIdentity.swift"),
+                        str(root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraTextVisibility.swift"),
                         "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=30)
 

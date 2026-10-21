@@ -53,11 +53,13 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     @ObservedObject private var session = AuroraSession.shared
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nbAuroraTextViewport) private var scrollViewport
     @StateObject private var lease = NBAuroraInkLease()
     @State private var frame = CGRect.zero
     @State private var viewport: AuroraViewport?
     @State private var viewportFrame = CGRect.zero
     @State private var isVisible = false
+    @State private var isInViewport = false
 
     let content: Content
     let primary: NBThemeColor
@@ -66,46 +68,75 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     let adaptsSecondary: Bool
 
     var body: some View {
-        let size = viewport?.size ?? CGSize(width: max(1, frame.width), height: max(1, frame.height))
-        // SwiftUI's global origin can be presentation-local. Reconcile it with
-        // the UIKit window, while following scroll offsets between reports.
-        let origin = viewport.map {
-            CGPoint(x: $0.origin.x + frame.minX - viewportFrame.minX,
-                    y: $0.origin.y + frame.minY - viewportFrame.minY)
-        } ?? frame.origin
+        let window = windowFrame
+        let size = window?.size ?? CGSize(width: max(1, frame.width), height: max(1, frame.height))
+        let origin = CGPoint(x: frame.minX - (window?.minX ?? 0),
+                             y: frame.minY - (window?.minY ?? 0))
         let bounds = CGRect(x: -origin.x, y: -origin.y, width: size.width, height: size.height)
 
         NBAuroraMappedForeground(content: content, primary: primary, secondary: secondary,
                                  adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
                                  bounds: bounds, identity: session.identity.shaderIdentity,
-                                 reduceMotion: reduceMotion)
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
-            .background {
-                AuroraViewportReader {
-                    viewport = $0
-                    viewportFrame = frame
+                                 paint: lease.paint)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                let rect = proxy.frame(in: .global)
+                guard let scrollViewport else { return rect }
+                guard let window = scrollViewport.window,
+                      NBAuroraTextVisibility.intersects(rect, window: window,
+                                                       clipping: scrollViewport.clipping) else { return .null }
+                return rect
+            } action: { measured in
+                // All offscreen positions resolve to the same value, so cached
+                // rows do not update SwiftUI state on every scroll offset.
+                isInViewport = !measured.isNull
+                if isInViewport {
+                    frame = measured
+                    if viewport != nil && viewportFrame.isEmpty { viewportFrame = measured }
                 }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+                updateLease()
+            }
+            .background {
+                if scrollViewport == nil {
+                    AuroraViewportReader {
+                        viewport = $0
+                        viewportFrame = frame
+                        updateLease()
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
             }
             .onAppear { isVisible = true; updateLease() }
             .onDisappear { isVisible = false; updateLease() }
             .onChange(of: scenePhase) { _ in updateLease() }
             .onChange(of: reduceMotion) { _ in updateLease() }
-            .onChange(of: session.identity.shaderIdentity) { _ in updateLease() }
+            .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
+            .onChange(of: scrollViewport) { _ in updateLease() }
     }
 
-    private func updateLease() {
-        NBAuroraInkMap.shared.update(lease, active: isVisible && scenePhase == .active,
+    private var windowFrame: CGRect? {
+        if let scrollViewport { return scrollViewport.window }
+        return viewport.map {
+            CGRect(x: viewportFrame.minX - $0.origin.x, y: viewportFrame.minY - $0.origin.y,
+                   width: $0.size.width, height: $0.size.height)
+        }
+    }
+
+    private func updateLease(refresh: Bool = false) {
+        let intersects = windowFrame.map {
+            NBAuroraTextVisibility.intersects(frame, window: $0, clipping: scrollViewport?.clipping)
+        } ?? false
+        let active = isVisible && isInViewport && intersects && scenePhase == .active
+        guard lease.active != active || lease.reduceMotion != reduceMotion || (refresh && active) else { return }
+        NBAuroraInkMap.shared.update(lease, active: active,
                                     reduceMotion: reduceMotion)
     }
 }
 
-/// Only this small paint wrapper observes map frames. Map updates do not poll
-/// geometry, create per-label clocks, or rebuild the enclosing screen's content.
+/// Observe only this scope's paint. The map never publishes to inactive paint,
+/// even if List retains the row after it has scrolled out of view.
 @available(iOS 17.0, tvOS 17.0, *)
 private struct NBAuroraMappedForeground<Content: View>: View {
-    @ObservedObject private var map = NBAuroraInkMap.shared
     let content: Content
     let primary: NBThemeColor
     let secondary: NBThemeColor?
@@ -113,10 +144,10 @@ private struct NBAuroraMappedForeground<Content: View>: View {
     let adaptsSecondary: Bool
     let bounds: CGRect
     let identity: NBAuroraShaderIdentity
-    let reduceMotion: Bool
+    @ObservedObject var paint: NBAuroraInkPaint
 
     var body: some View {
-        let field = map.frame(for: identity, reduceMotion: reduceMotion)
+        let field = paint.frame.flatMap { $0.identity == identity ? $0 : nil }
         if let secondary {
             content.foregroundStyle(ink(primary, adapts: adaptsPrimary, field: field),
                                     ink(secondary, adapts: adaptsSecondary, field: field))

@@ -68,19 +68,44 @@ The map samples the procedural sky before pane refraction, glass highlights
 and stars. It does not capture the composited screen. One shared 30 Hz clock
 serves every visible text scope. The serial worker allows only one GPU request
 in flight, copies the small generated map into immutable RGBA data off the main
-thread, and publishes a single shared shader argument. Raw bytes avoid image
+thread, and caches a single shared shader argument. Raw bytes avoid image
 color-space conversions. The glyph shader interpolates these bytes without
 running the sky or reading the procedural noise texture. Render work is bounded
 at 73,728 sky evaluations per map, independent of glyph count or display scale.
 The map is 294,912 bytes (about 8.4 MiB/s at 30 Hz before uploads/copies).
 
-Map-frame observation is isolated from scope geometry, so color updates do not
-poll UIKit geometry or rebuild an enclosing screen. Geometry still follows
-scrolling and presentation offsets; the window mapping is unchanged from the
-per-glyph shader. Weak scope leases stop the shared clock when no animated text
-is visible. A weak clock target also cleans up a discarded owner. Reduce Motion
-uses a separately cached frame at time 1.8, matching the backdrop; paused clients
-cannot accidentally receive another client's animated map. Shuffling discards
+The map cache is not an ObservableObject and does not broadcast frames to
+retained views. Each scope owns a lease and a separate observable paint object;
+only active leases receive frames. The scope observes its lease, while its
+small foreground view observes paint, so color delivery does not trigger scope
+geometry work. A frame ID suppresses duplicate delivery when a scope registers
+again. Offscreen scopes clear their paint once, releasing the shader buffer,
+and receive no further frame notifications. On reentry they immediately receive
+the latest matching cached frame. Reduce Motion clients receive only the frozen
+cache, including when animated clients are also active.
+
+`NBListAdaptable` supplies a shared text viewport outside the row builder. This
+measures the scroll container's safe-area clipping and window conversion once;
+descendant labels need no individual UIKit window anchor. Their geometry
+transform returns a constant null rectangle outside the viewport, avoiding
+state writes for every offscreen scroll offset. A positive intersection with
+both viewport and window is required, in addition to onAppear and active scene
+state: prefetched but offscreen rows cannot register for live paint. Visible
+geometry changes update shader coordinates without re-registering an unchanged
+lease. Text outside a supplied viewport retains its own window reader and is
+clipped against that window.
+
+The Library's navigation canvas, list canvas and section-level inherited text
+styles use `adaptsContainerText: false`. They retain their theme foregrounds but
+no longer receive animated paint around the app collection. Titles, subtitles,
+chevrons, selection icons and headers already have explicit foreground roles;
+those individual paints retain their vivid colors. Other screens keep the
+existing default for inherited container text. The row collection and native
+list/grid containers are unchanged.
+
+Weak scope leases stop the shared clock when no animated text is visible. A
+weak clock target also cleans up a discarded owner. Reduce Motion uses a
+separately cached frame at time 1.8, matching the backdrop. Shuffling discards
 old in-flight identities. Until a matching map arrives, or if Metal setup fails,
 text retains a visible white-difference fallback. Failures stop further requests
 rather than retrying every frame. iOS 16 retains its difference-blended text.
@@ -110,10 +135,12 @@ controller hierarchy. Glass sheets install a fresh presentation scope with
 `nbThemeAdaptiveChrome(inPresentation: true)`; separately presented system panels
 are excluded.
 
-`NBSection` uses `nbThemeChromeForeground` to carry header/footer glyphs through
-anchor preferences to the same overlay. Its source retains layout/accessibility
-and is suppressed only after the overlay actually appears. A container without
-an overlay continues drawing the original foreground.
+`NBSection` uses `nbThemeChromeForeground`. On iOS 17+ its shader-based
+header/footer text stays in the original supplementary view. On iOS 16,
+difference blending still carries glyphs through anchor preferences to the
+overlay, retaining source layout/accessibility and hiding source paint only
+after the overlay actually appears. A container without an overlay draws the
+original foreground.
 
 Two tight dark shadows define glyph edges where bright ink alone has poor
 contrast, especially over pale or white backings. This is a visual treatment,
@@ -130,7 +157,11 @@ check the adaptive toggle, solid/accessibility surfaces, Reduce Motion, theme
 previews and saved element overrides. The preview in `NBAuroraTextStyle.swift`
 uses the actual moving aurora, a shuffle button, and fixed black/gray/white
 surfaces for checking color response and glyph edges. Check that explicit text
-and inherited row/canvas styles sample the same window positions. For native chrome, also check large-title
+and inherited row/canvas styles sample the same window positions. For a large Library, also check 103 apps, rapid scrolling in both directions,
+search, switching Signed/Downloaded, edit selection, rotation/grid layout and
+returning from a presentation. Confirm that colors still line up as rows enter,
+headers stay visible, and Instruments shows work scaling with visible labels.
+For native chrome, also check large-title
 collapse, tab switching/reselection, RTL layouts, search typing/selection/long
 queries/clearing, and toggling Adaptive Text while a search field is focused.
 Swift syntax checks on Linux cannot verify SwiftUI's compositor or substitute
@@ -148,6 +179,9 @@ color field. These are CPU shader references, not SwiftUI screenshots.
 Run `python3 Native/Theme/run_map_tests.py --swiftc PATH` to execute the production
 map coordinator and weak clock with platform/GPU boundary doubles. It checks
 sharing across 100 scopes, bounded in-flight work, no redundant setup renders,
+and 103 retained rows with eight visible: only visible paint gets notifications,
+scrolling transfers delivery immediately, and offscreen paints release buffers.
+It also checks window/viewport clipping and partial rows,
 stale-frame rejection, offscreen cleanup, frozen/mixed-motion clients, orphaned
 lease/owner cleanup, and bounded failure. The Metal driver and SwiftUI buffer
 upload still require an iOS build and device rendering check.

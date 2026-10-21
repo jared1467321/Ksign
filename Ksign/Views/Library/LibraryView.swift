@@ -182,7 +182,7 @@ struct LibraryView: View {
 	
 	// MARK: Body
     var body: some View {
-		NBNavigationView(.localized("Library")) {
+		NBNavigationView(.localized("Library"), adaptsContainerText: false) {
 			VStack(spacing: 0) {
 				Picker("", selection: $_selectedTab) {
 					Text(.localized("Downloaded Apps")).tag(0)
@@ -194,7 +194,9 @@ struct LibraryView: View {
 				.padding(.horizontal)
 				.padding(.vertical, 8)
 				
-				NBListAdaptable(rendersAurora: false) {
+                // Each cell's labels own their adaptive paint. Keep the list
+                // and section foregrounds out of the frame-update path.
+				NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
 					if _selectedTab == 0 {
 						NBSection(
 							.localized("Downloaded Apps"),

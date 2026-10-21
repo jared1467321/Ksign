@@ -14,10 +14,13 @@ public struct NBListAdaptable<Content>: View where Content: View {
 	
 	private var _content: Content
 	private let rendersAurora: Bool
+	private let adaptsContainerText: Bool
 	
-	public init(rendersAurora: Bool = true, @ViewBuilder content: () -> Content) {
+	public init(rendersAurora: Bool = true, adaptsContainerText: Bool = true,
+                @ViewBuilder content: () -> Content) {
 		self.rendersAurora = rendersAurora
 		self._content = content()
+		self.adaptsContainerText = adaptsContainerText
 	}
 	
 	public var body: some View {
@@ -25,15 +28,17 @@ public struct NBListAdaptable<Content>: View where Content: View {
 			if horizontalSizeClass == .compact {
 				List {
 					_content
-						.nbThemeRow()
+						.nbThemeRow(adaptsText: adaptsContainerText)
 				}
 				.listStyle(.insetGrouped)
-				.nbThemeCanvas(rendersAurora: rendersAurora)
+				.nbThemeCanvas(rendersAurora: rendersAurora, adaptsText: adaptsContainerText)
+				.nbThemeTextViewport()
 			} else {
 				NBGrid {
 					_content
 				}
-				.nbThemeCanvas(rendersAurora: rendersAurora)
+				.nbThemeCanvas(rendersAurora: rendersAurora, adaptsText: adaptsContainerText)
+				.nbThemeTextViewport()
 			}
 		}
 	}

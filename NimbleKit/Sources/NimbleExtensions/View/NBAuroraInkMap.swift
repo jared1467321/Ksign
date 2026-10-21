@@ -13,22 +13,37 @@ enum NBAuroraInkMapFormat {
 @available(iOS 17.0, tvOS 17.0, *)
 @MainActor
 final class NBAuroraInkLease: ObservableObject {
+    // The scope owns the lease without observing paint changes. Only the
+    // small foreground view observes this separate paint object.
+    let paint = NBAuroraInkPaint()
     var active = false
     var reduceMotion = false
 }
 
 @available(iOS 17.0, tvOS 17.0, *)
 @MainActor
-final class NBAuroraInkMap: ObservableObject {
+final class NBAuroraInkPaint: ObservableObject {
+    @Published private(set) var frame: NBAuroraInkMap.Frame?
+
+    fileprivate func receive(_ frame: NBAuroraInkMap.Frame?) {
+        guard self.frame?.id != frame?.id else { return }
+        self.frame = frame
+    }
+}
+
+@available(iOS 17.0, tvOS 17.0, *)
+@MainActor
+final class NBAuroraInkMap {
     static let shared = NBAuroraInkMap()
 
     struct Frame {
+        let id = UUID()
         let identity: NBAuroraShaderIdentity
         let argument: Shader.Argument
     }
 
-    @Published private(set) var animated: Frame?
-    @Published private(set) var still: Frame?
+    private(set) var animated: Frame?
+    private(set) var still: Frame?
 
     private struct WeakLease {
         weak var value: NBAuroraInkLease?
@@ -46,8 +61,13 @@ final class NBAuroraInkMap: ObservableObject {
         lease.reduceMotion = reduceMotion
         if active {
             leases[ObjectIdentifier(lease)] = WeakLease(value: lease)
+            lease.paint.receive(frame(for: AuroraSession.shared.identity.shaderIdentity,
+                                      reduceMotion: reduceMotion))
         } else {
             leases.removeValue(forKey: ObjectIdentifier(lease))
+            // Retained offscreen views release the live map and stop receiving
+            // frames. Returning views get the current cached frame above.
+            lease.paint.receive(nil)
         }
         refresh(advancing: false)
     }
@@ -88,6 +108,11 @@ final class NBAuroraInkMap: ObservableObject {
                    self.leases.values.contains(where: { $0.value?.active == true }) {
                     let frame = Frame(identity: identity, argument: .data(bytes))
                     if frozen { self.still = frame } else { self.animated = frame }
+                    for lease in self.leases.values {
+                        guard let client = lease.value, client.active,
+                              client.reduceMotion == frozen else { continue }
+                        client.paint.receive(frame)
+                    }
                 } else if bytes == nil {
                     // The foreground keeps its visible difference fallback.
                     self.unavailable = true

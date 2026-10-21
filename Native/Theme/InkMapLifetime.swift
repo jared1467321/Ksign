@@ -3,7 +3,16 @@ import Foundation
 // GPU work and platform drawing are boundary doubles. The shared map owner,
 // lease management, weak clock and request scheduling run production source.
 protocol ObservableObject {}
-@propertyWrapper struct Published<Value> { var wrappedValue: Value }
+final class PublishCount { var writes = 0 }
+@propertyWrapper struct Published<Value> {
+    private var value: Value
+    let projectedValue = PublishCount()
+    init(wrappedValue: Value) { value = wrappedValue }
+    var wrappedValue: Value {
+        get { value }
+        set { projectedValue.writes += 1; value = newValue }
+    }
+}
 struct Shader {
     struct Argument {
         let bytes: Data
@@ -60,6 +69,10 @@ extension NBAuroraInkMap {
     fileprivate var busyForTest: Bool { inFlight }
 }
 
+extension NBAuroraInkPaint {
+    fileprivate var notificationsForTest: Int { $frame.writes }
+}
+
 @main
 enum InkMapLifetimeTests {
     @MainActor
@@ -83,15 +96,77 @@ enum InkMapLifetimeTests {
         NBAuroraInkWorker.complete()
         await settle { !map.busyForTest }
         assert(map.animated?.argument.bytes == Data([1]))
+        assert(scopes.allSatisfy { $0.paint.frame?.id == map.animated?.id })
         assert(NBAuroraInkWorker.pending.isEmpty, "Client registration must not cause redundant renders")
         for scope in scopes { map.update(scope, active: true, reduceMotion: false) }
         assert(NBAuroraInkWorker.pending.isEmpty)
         CADisplayLink.active[0].tick()
         for scope in scopes { map.update(scope, active: false, reduceMotion: false) }
         assert(CADisplayLink.active.isEmpty)
+        assert(scopes.allSatisfy { $0.paint.frame == nil })
         NBAuroraInkWorker.complete(Data([2]))
         await settle { !map.busyForTest }
         assert(map.animated?.argument.bytes == Data([1]), "Offscreen work must not publish")
+
+        // Model 103 retained List rows with only eight intersecting its actual
+        // scroll viewport. Use production clipping and production delivery.
+        let listMap = NBAuroraInkMap()
+        let rows = (0..<103).map { _ in NBAuroraInkLease() }
+        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
+        let clipping = CGRect(x: 0, y: 200, width: 400, height: 560)
+        func updateRows(scroll: CGFloat) {
+            for (index, row) in rows.enumerated() {
+                let rect = CGRect(x: 0, y: 200 + CGFloat(index) * 70 - scroll, width: 400, height: 70)
+                let visible = NBAuroraTextVisibility.intersects(rect, window: window, clipping: clipping)
+                listMap.update(row, active: visible, reduceMotion: false)
+            }
+        }
+        updateRows(scroll: 0)
+        assert(NBAuroraInkWorker.pending.count == 1)
+        NBAuroraInkWorker.complete(Data([7]))
+        await settle { !listMap.busyForTest }
+        assert(rows.filter { $0.paint.frame != nil }.count == 8)
+        let firstID = listMap.animated!.id
+        assert(rows.prefix(8).allSatisfy { $0.paint.frame?.id == firstID })
+        assert(rows.dropFirst(8).allSatisfy { $0.paint.frame == nil })
+        assert(rows.dropFirst(8).allSatisfy { $0.paint.notificationsForTest == 0 })
+        let firstCounts = rows.map { $0.paint.notificationsForTest }
+        CADisplayLink.active[0].tick()
+        NBAuroraInkWorker.complete(Data([8]))
+        await settle { !listMap.busyForTest }
+        assert(rows.prefix(8).allSatisfy { $0.paint.frame?.id == listMap.animated?.id })
+        assert(rows.dropFirst(8).allSatisfy { $0.paint.frame == nil })
+        for index in rows.indices {
+            assert(rows[index].paint.notificationsForTest == firstCounts[index] + (index < 8 ? 1 : 0))
+        }
+        updateRows(scroll: 700)
+        assert(NBAuroraInkWorker.pending.isEmpty, "Entering rows must reuse the current map immediately")
+        assert(rows[10..<18].allSatisfy { $0.paint.frame?.id == listMap.animated?.id })
+        assert(rows.prefix(10).allSatisfy { $0.paint.frame == nil })
+        assert(rows.dropFirst(18).allSatisfy { $0.paint.frame == nil })
+        let scrolledCounts = rows.map { $0.paint.notificationsForTest }
+        CADisplayLink.active[0].tick()
+        NBAuroraInkWorker.complete(Data([9]))
+        await settle { !listMap.busyForTest }
+        assert(rows.filter { $0.paint.frame != nil }.count == 8)
+        assert(rows[10..<18].allSatisfy { $0.paint.frame?.id == listMap.animated?.id })
+        for index in rows.indices {
+            let visible = (10..<18).contains(index)
+            assert(rows[index].paint.notificationsForTest == scrolledCounts[index] + (visible ? 1 : 0))
+        }
+        for row in rows { listMap.update(row, active: false, reduceMotion: false) }
+        assert(CADisplayLink.active.isEmpty && rows.allSatisfy { $0.paint.frame == nil })
+
+        assert(!NBAuroraTextVisibility.intersects(.null, window: window))
+        assert(!NBAuroraTextVisibility.intersects(.zero, window: window))
+        assert(!NBAuroraTextVisibility.intersects(window, window: .zero))
+        assert(!NBAuroraTextVisibility.intersects(window, window: window, clipping: .null))
+        assert(!NBAuroraTextVisibility.intersects(CGRect(x: 0, y: 760, width: 100, height: 40),
+                                                window: window, clipping: clipping))
+        assert(NBAuroraTextVisibility.intersects(CGRect(x: 0, y: 759, width: 100, height: 40),
+                                               window: window, clipping: clipping))
+        assert(!NBAuroraTextVisibility.intersects(CGRect(x: 450, y: 250, width: 100, height: 40),
+                                                window: window, clipping: clipping))
 
         let shuffleMap = NBAuroraInkMap(), shuffleScope = NBAuroraInkLease()
         let oldIdentity = AuroraSession.shared.identity.shaderIdentity
@@ -121,6 +196,8 @@ enum InkMapLifetimeTests {
         NBAuroraInkWorker.complete(Data([5]))
         await settle { !frozenMap.busyForTest }
         assert(frozenMap.still?.argument.bytes == Data([4]), "Motion must not replace the frozen map")
+        assert(frozenScope.paint.frame?.id == frozenMap.still?.id)
+        assert(movingScope.paint.frame?.id == frozenMap.animated?.id)
         frozenMap.update(movingScope, active: false, reduceMotion: false)
         AuroraSession.shared.shuffle(42)
         frozenMap.update(frozenScope, active: true, reduceMotion: true)
@@ -156,6 +233,6 @@ enum InkMapLifetimeTests {
         await settle { !failedMap.busyForTest }
         for _ in 0..<100 { failedMap.update(shuffleScope, active: true, reduceMotion: false) }
         assert(failedMap.animated == nil && CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.isEmpty)
-        print("Shared ink-map lifecycle tests passed: 100 scopes share one clock/render, no backlog or redundant setup frames, stale-frame rejection, inactive cleanup, frozen motion, mixed clients, weak ownership, and bounded failure.")
+        print("Shared ink-map lifecycle tests passed: 100 scopes share one clock/render; 103 retained rows deliver only to eight visible paints, reenter with the latest map, and release offscreen buffers; clipping, no backlog/redundant frames, stale rejection, frozen/mixed motion, weak ownership, and bounded failure.")
     }
 }

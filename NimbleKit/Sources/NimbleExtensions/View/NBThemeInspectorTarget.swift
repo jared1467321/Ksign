@@ -593,12 +593,16 @@ public extension View {
 
     /// Apply inside List/Form builders. Each row exposes independent inherited
     /// primary text, secondary text, separator and control tint overrides.
+    /// Disable adaptsText on grouping containers whose labels already own
+    /// their adaptive foreground, so a frame cannot invalidate every row.
     func nbThemeRow(
+        adaptsText: Bool = true,
         fileID: StaticString = #fileID,
         line: UInt = #line,
         column: UInt = #column
     ) -> some View {
-        modifier(NBThemeRowModifier(elementID: nbThemeSourceID("row", fileID, line, column)))
+        modifier(NBThemeRowModifier(elementID: nbThemeSourceID("row", fileID, line, column),
+                                    adaptsText: adaptsText))
     }
 
     /// Standardizes raw SwiftUI List/Form canvases. System scroll backgrounds
@@ -607,16 +611,20 @@ public extension View {
     /// separators follow the theme as well.
     /// Set rendersAurora to false only when another canvas in this screen
     /// already paints the sky. Solid backgrounds and iOS 16 keep their backing.
+    /// Set adaptsText to false when descendants explicitly style their labels;
+    /// inherited theme colors then stay static while the labels animate.
     func nbThemeCanvas(
         _ role: NBThemeRole = .background,
         elementID explicitElementID: String? = nil,
         rendersAurora: Bool = true,
+        adaptsText: Bool = true,
         fileID: StaticString = #fileID,
         line: UInt = #line,
         column: UInt = #column
     ) -> some View {
         let elementID = explicitElementID ?? nbThemeSourceID("canvas", fileID, line, column)
-        return modifier(NBThemeCanvasModifier(role: role, elementID: elementID, rendersAurora: rendersAurora))
+        return modifier(NBThemeCanvasModifier(role: role, elementID: elementID,
+                                              rendersAurora: rendersAurora, adaptsText: adaptsText))
     }
 }
 
@@ -973,6 +981,7 @@ private struct NBThemeShadowModifier: ViewModifier {
 private struct NBThemeRowModifier: ViewModifier {
     @ObservedObject private var themes = NBThemeManager.shared
     let elementID: String
+    let adaptsText: Bool
 
     func body(content: Content) -> some View {
         let primaryID = elementID + "|text"
@@ -984,9 +993,9 @@ private struct NBThemeRowModifier: ViewModifier {
         content
             .modifier(NBAuroraTextStyleModifier(
                 primary: primary, secondary: secondary,
-                adaptsPrimary: !themes.hasElementOverride(primaryID)
+                adaptsPrimary: adaptsText && !themes.hasElementOverride(primaryID)
                     && !themes.isPreviewing(.text, in: themes.selectedThemeID),
-                adaptsSecondary: !themes.hasElementOverride(secondaryID)
+                adaptsSecondary: adaptsText && !themes.hasElementOverride(secondaryID)
                     && !themes.isPreviewing(.textSecondary, in: themes.selectedThemeID)
             ))
             .listRowSeparatorTint(separator.color)
@@ -1019,6 +1028,7 @@ private struct NBThemeCanvasModifier: ViewModifier {
     let elementID: String
 
     let rendersAurora: Bool
+    let adaptsText: Bool
 
     private var reusesAurora: Bool {
         if #available(iOS 17.0, tvOS 17.0, *) {
@@ -1042,8 +1052,8 @@ private struct NBThemeCanvasModifier: ViewModifier {
             .environment(\.nbPaintAncestry, ancestors + [ownerID])
             .modifier(NBAuroraTextStyleModifier(
                 primary: primary, secondary: secondary,
-                adaptsPrimary: !themes.isPreviewing(.text, in: themes.selectedThemeID),
-                adaptsSecondary: !themes.isPreviewing(.textSecondary, in: themes.selectedThemeID)
+                adaptsPrimary: adaptsText && !themes.isPreviewing(.text, in: themes.selectedThemeID),
+                adaptsSecondary: adaptsText && !themes.isPreviewing(.textSecondary, in: themes.selectedThemeID)
             ))
             .listRowSeparatorTint(separator)
             .scrollContentBackground(.hidden)
