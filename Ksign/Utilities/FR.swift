@@ -146,7 +146,6 @@ enum FR {
                     }
                     return try ArchiveBackedApp(archiveURL: url)
                 }
-				try SigningPreflight.checkPlatform(for: source, archiveApp: archiveApp)
                 try await memory.signingCheckpoint(admitted, "before materialization", workload: archiveApp?.signingMemoryWorkload)
                 try await handler.copy(archiveApp: archiveApp)
                 try await handler.modify(finish: false)

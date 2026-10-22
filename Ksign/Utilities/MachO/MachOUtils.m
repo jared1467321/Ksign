@@ -6,8 +6,50 @@
 //
 
 #import "MachOUtils.h"
+#include "PlatformCompatibility.h"
 
 #define SDK_VERSION_26_0_0 0x1A0000
+
+NSString *KsignPatchMachOForIOS(const char *path, uint32_t minimumOS, uint32_t sdk,
+                               NSUInteger *changedSlices) {
+    *changedSlices = 0;
+    // Probe resources without opening them for writing or mapping their contents.
+    int probe = open(path, O_RDONLY);
+    if (probe < 0) return [NSString stringWithFormat:@"Cannot read %s: %s", path, strerror(errno)];
+    uint8_t magic[4];
+    ssize_t count = read(probe, magic, sizeof(magic));
+    int readError = errno;
+    close(probe);
+    if (count < 0) return [NSString stringWithFormat:@"Cannot read %s: %s", path, strerror(readError)];
+    if (!KsignHasMachOMagic(magic, (size_t)count)) return nil;
+
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return [NSString stringWithFormat:@"Cannot patch %s: %s", path, strerror(errno)];
+    struct stat attributes;
+    if (fstat(fd, &attributes) != 0 || attributes.st_size < 4 || (uint64_t)attributes.st_size > SIZE_MAX) {
+        close(fd);
+        return [NSString stringWithFormat:@"Invalid Mach-O file: %s", path];
+    }
+    size_t size = (size_t)attributes.st_size;
+    void *mapped = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapped == MAP_FAILED) {
+        int mapError = errno;
+        close(fd);
+        return [NSString stringWithFormat:@"Cannot map %s: %s", path, strerror(mapError)];
+    }
+    char detail[256];
+    int result = KsignPatchPlatformMetadata(mapped, size, minimumOS, sdk, detail, sizeof(detail));
+    NSString *error = nil;
+    if (result < 0) error = [NSString stringWithFormat:@"%s: %s", path, detail];
+    else if (result > 0) {
+        if (msync(mapped, size, MS_SYNC) != 0)
+            error = [NSString stringWithFormat:@"Cannot save %s: %s", path, strerror(errno)];
+        else *changedSlices = (NSUInteger)result;
+    }
+    munmap(mapped, size);
+    close(fd);
+    return error;
+}
 
 /// https://github.com/LiveContainer/LiveContainer/commit/3a029b6bb36c11cc05784a8840d41c7e46af1540
 /// this is licensed under Apache-2.0, bundled when compiled.

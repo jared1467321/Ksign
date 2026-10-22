@@ -1,5 +1,4 @@
 import Foundation
-import IDeviceSwift
 
 enum SigningPreflight {
     struct Source {
@@ -54,12 +53,8 @@ enum SigningPreflight {
         var report = Report()
         var installedIDs = Set<String>()
         for (index, candidate) in candidates.enumerated() {
-            do {
-                if let info = candidate.info { try IDeviceInstallPreflight.checkPlatform(info) }
-            } catch {
-                report.skipped.append(Issue(name: candidate.name, reason: error.localizedDescription))
-                continue
-            }
+            // Foreign platforms now get one automatic compatibility attempt in
+            // SigningHandler's private workspace, before the bundle is signed.
             report.eligibleIndices.append(index)
             report.archiveApps[index] = candidate.archiveApp
             if let id = candidate.bundleIdentifier, !id.isEmpty,

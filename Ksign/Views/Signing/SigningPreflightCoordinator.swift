@@ -11,19 +11,6 @@ extension SigningPreflight {
                archiveURL: Storage.shared.getArchiveURL(for: app),
                appDirectory: Storage.shared.getAppDirectory(for: app))
     }
-
-    // Also used by the worker, so no caller can accidentally sign an explicitly
-    // incompatible platform by bypassing the signing screen's review.
-    static func checkPlatform(for app: AppInfoPresentable, archiveApp: ArchiveBackedApp? = nil) throws {
-        if let archiveApp {
-            if let data = try archiveApp.data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024),
-               let info = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
-                try IDeviceInstallPreflight.checkPlatform(info)
-            }
-            return
-        }
-        if let info = readInfo(source(for: app)) { try IDeviceInstallPreflight.checkPlatform(info) }
-    }
 }
 
 @MainActor
@@ -36,12 +23,8 @@ enum SigningPreflightCoordinator {
                 sources.map(SigningPreflight.candidate)
             }.value
             let report = SigningPreflight.evaluate(candidates, isInstalled: UIApplication.isAppInstalled)
-            guard !report.skipped.isEmpty || !report.installed.isEmpty else { onContinue(report); return }
+            guard !report.installed.isEmpty else { onContinue(report); return }
             var sections: [String] = []
-            if !report.skipped.isEmpty {
-                sections.append("These apps target an incompatible platform and will not be signed:\n\n" +
-                    report.skipped.map(\.description).joined(separator: "\n"))
-            }
             if !report.installed.isEmpty {
                 sections.append("These bundle IDs are already installed:\n\n" +
                     report.installed.map(\.description).joined(separator: "\n") +

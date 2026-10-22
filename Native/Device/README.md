@@ -67,11 +67,21 @@ source trees from the chunk-size experiment.
   every eligible app, including installed-ID matches. The warning explains that
   a differently signed copy cannot replace an App Store installation with the
   same bundle identifier; compatible updates remain eligible.
-  Explicit tvOS, watchOS, visionOS, macOS and simulator targets are skipped before
-  copying or signing. iOS and iPadOS apps remain eligible, including iPad-only
-  apps on iPhone; device family 2 is never a reason to skip. Only the main app's
-  declarations are checked, so an embedded Watch companion does not block iOS.
-  Unknown declarations remain eligible. These checks do not rewrite platforms.
+  Explicit tvOS, watchOS, visionOS, macOS and simulator targets automatically get
+  one iOS compatibility attempt during signing, without a toggle or an extra
+  confirmation. The trigger is exactly the main-app declaration check that used
+  to skip these apps. iOS/iPadOS roots, including iPad-only apps on iPhone, mixed
+  or unknown declarations, and iOS apps with a Watch companion bypass the shim.
+  In the private signing workspace, it normalizes the main app and affected code
+  bundles' platform/device-family declarations, removes device/capability filters,
+  and retargets foreign Mach-O platform/version commands before signing. The
+  default version baseline is this device's current iOS version; an explicit
+  signing minimum takes precedence. It covers thin and universal binaries,
+  embedded frameworks/dylibs and retained extensions without extracting resources.
+  Already-iOS binary metadata, CPU types, executable code and original library
+  files stay intact. Malformed or encrypted binaries fail the attempt; changing
+  metadata does not supply missing APIs or translate machine code. Signing and
+  installation report their ordinary success/failure, and launch may still fail.
 - Before native **Sign & Install** hands successful packages to the drawer,
   it inspects their final bundle identifiers and signed executable entitlements.
   For locally detected installed matches, a targeted read-only device lookup
@@ -83,6 +93,8 @@ source trees from the chunk-size experiment.
   Ordinary **Sign** does not need a device connection for these checks.
 - Direct native installs from Signed Apps also inspect each final IPA when its
   queue slot is admitted and repeat the targeted identity lookup before upload.
+  They do not patch an already-signed IPA: older foreign-platform packages must
+  be signed again to receive the compatibility attempt and valid new signatures.
   The executable is streamed to temporary storage only for an installed identity
   match and removed after inspection. Unknown signatures remain eligible.
   The lookup does not upload an IPA or send an installation command. A local skip

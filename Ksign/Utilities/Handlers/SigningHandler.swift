@@ -179,6 +179,10 @@ final class SigningHandler: NSObject {
 		else {
 			throw SigningFileHandlerError.infoPlistNotFound
 		}
+
+        // Capture the ORIGINAL declarations before any signing option edits.
+        // This is the same predicate that previously skipped this app outright.
+        let platformRejection = SigningPlatformCompatibility.rejectionReason(infoDictionary as? [String: Any] ?? [:])
 		
 		try await _modifyDict(using: infoDictionary, with: _options, to: movedAppPath)
 		
@@ -221,6 +225,11 @@ final class SigningHandler: NSObject {
         
         if #available(iOS 19, *) {
             try await _locateMachosAndFixupArm64eSlice(for: movedAppPath)
+        }
+
+        if let platformRejection {
+            Logger.signing.notice("[\(self._uuid)] Attempting iOS compatibility: \(platformRejection)")
+            try _applyPlatformCompatibility(to: movedAppPath)
         }
 		
         try await memoryCheckpoint?("before native signing")
@@ -581,6 +590,52 @@ extension SigningHandler {
     private func _locateMachosAndChangeToSDK26(for app: URL) async throws {
         if let url = Bundle(url: app)?.executableURL {
             LCPatchMachOForSDK26(app.appendingPathComponent(url.relativePath).relativePath)
+        }
+    }
+
+    private func _applyPlatformCompatibility(to app: URL) throws {
+        let target = SigningPlatformCompatibility.Target(system: ProcessInfo.processInfo.operatingSystemVersion,
+            minimumOverride: _options.minimumAppRequirement)
+        var enumerationError: Error?
+        guard let entries = _fileManager.enumerator(at: app, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [], errorHandler: { _, error in enumerationError = error; return false }) else {
+            throw SigningFileHandlerError.appNotFound
+        }
+        var plists: [URL] = []
+        var patchedBinaries = Set<URL>()
+        // Archive-backed signing has already materialized every Mach-O and
+        // Info.plist. Resources remain compressed; no full extraction is needed.
+        for case let file as URL in entries {
+            let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            if file.lastPathComponent == "Info.plist" { plists.append(file); continue }
+            if attributes.isSymbolicLink == true { entries.skipDescendants(); continue }
+            guard attributes.isRegularFile == true else { continue }
+            var changed: UInt = 0
+            if let error = KsignPatchMachOForIOS(file.path, target.minimumOS, target.sdk, &changed) {
+                throw SigningPlatformCompatibility.Failure.patch(error)
+            }
+            if changed > 0 {
+                patchedBinaries.insert(file.resolvingSymlinksInPath().standardizedFileURL)
+                Logger.signing.notice("[\(self._uuid)] iOS compatibility patched \(changed) slice(s): \(file.lastPathComponent)")
+            }
+        }
+        if let enumerationError { throw enumerationError }
+        for plist in plists {
+            var format = PropertyListSerialization.PropertyListFormat.xml
+            let data = try Data(contentsOf: plist)
+            guard var info = try PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any]
+            else { continue }
+            let bundle = plist.deletingLastPathComponent()
+            let isRoot = bundle.standardizedFileURL == app.standardizedFileURL
+            let codeBundle = ["app", "appex", "framework", "bundle"].contains(bundle.pathExtension.lowercased())
+            let patchedExecutable = (info["CFBundleExecutable"] as? String).map {
+                patchedBinaries.contains(bundle.appendingPathComponent($0).resolvingSymlinksInPath().standardizedFileURL)
+            } ?? false
+            guard isRoot || (codeBundle && (patchedExecutable || SigningPlatformCompatibility.rejectionReason(info) != nil)) else { continue }
+            SigningPlatformCompatibility.normalize(&info, target: target,
+                isApplication: isRoot || bundle.pathExtension == "app" || bundle.pathExtension == "appex")
+            let patched = try PropertyListSerialization.data(fromPropertyList: info, format: format, options: 0)
+            try patched.write(to: plist, options: .atomic)
         }
     }
     
