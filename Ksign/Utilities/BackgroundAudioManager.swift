@@ -60,6 +60,7 @@ final class BackgroundAudioManager {
 	enum Owner: String {
 		case bulkInstalls
 		case singleInstall
+        case uninstalling
 		case downloads
 		case bulkExport
 		case importing
@@ -73,6 +74,7 @@ final class BackgroundAudioManager {
 			switch self {
 			case .bulkInstalls:		return "Bulk installs"
 			case .singleInstall:	return "Install"
+            case .uninstalling: return "Uninstall"
 			case .downloads:		return "Downloads"
 			case .bulkExport:		return "Bulk export"
 			case .importing:		return "Import"

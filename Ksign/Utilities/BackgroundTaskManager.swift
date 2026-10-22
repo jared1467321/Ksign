@@ -13,6 +13,7 @@ import UIKit
 enum BackgroundTaskOwner: String {
     case bulkInstalls
     case singleInstall
+    case uninstalling
     case bulkExport
     case importing
     case signing
@@ -26,6 +27,8 @@ enum BackgroundTaskOwner: String {
             return count.map { "Installing \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Installing Apps"
         case .singleInstall:
             return "Installing App"
+        case .uninstalling:
+            return "Uninstalling Apps"
         case .bulkExport:
             return count.map { "Exporting \($0) \($0 == 1 ? "App" : "Apps")" } ?? "Exporting Apps"
         case .importing:
@@ -54,6 +57,7 @@ final class BackgroundTaskManager: ObservableObject {
         switch owner {
         case .bulkInstalls: return .bulkInstalls
         case .singleInstall: return .singleInstall
+        case .uninstalling: return .uninstalling
         case .bulkExport: return .bulkExport
         case .importing: return .importing
         case .signing: return .signing

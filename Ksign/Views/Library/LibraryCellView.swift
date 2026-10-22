@@ -23,6 +23,7 @@ struct LibraryCellView: View {
 	@Binding var selectedInstallAppPresenting: AnyApp?
 	@Binding var selectedAppDylibsPresenting: AnyApp?
     var cryptCheckExtracted: (AppInfoPresentable) -> Void
+    var uninstall: (AppInfoPresentable) -> Void
 	/// Just this row's selection state, not the whole selection set.
 	///
 	/// This used to be `@Binding var selectedApps: Set<String>`, which made
@@ -178,6 +179,9 @@ extension LibraryCellView {
 			Button(.localized("Export"), systemImage: "square.and.arrow.up") {
 				selectedInstallAppPresenting = AnyApp(base: app, archive: true)
 			}
+            Button("Uninstall from Device…", systemImage: "minus.circle", role: .destructive) {
+                uninstall(app)
+            }
 		} else {
 			Button(.localized("Install"), systemImage: "square.and.arrow.down") {
 				selectedInstallAppPresenting = AnyApp(base: app)
@@ -205,6 +209,9 @@ extension LibraryCellView {
 			Button(.localized("Export")) {
 				selectedInstallAppPresenting = AnyApp(base: app, archive: true)
 			}
+            Button("Uninstall from Device…", role: .destructive) {
+                uninstall(app)
+            }
 		} else {
 			Button(.localized("Sign & Install")) {
 				selectedSigningAppPresenting = AnyApp(base: app, signAndInstall: true)

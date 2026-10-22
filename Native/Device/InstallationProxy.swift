@@ -164,6 +164,39 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         } onCancel: { [cancellation] in cancellation.cancel() }
     }
 
+    /// Returns false when already absent. Once the command is sent, await its
+    /// result even if cancelled: removal may already have committed on device.
+    public func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await IDeviceInstallationWorker.performInstallation { [self] in
+                try checkCancellation()
+                let heartbeat = HeartbeatManager.shared
+                let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
+                defer { withExtendedLifetime(connection) {} }
+                let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
+                defer { idevice_provider_free(provider) }
+                var client: OpaquePointer?
+                defer { installation_proxy_client_free(client) }
+                if let connection {
+                    try connection.withServiceConnection { adapter, handshake in
+                        try check(installation_proxy_connect_rsd(adapter, handshake, &client))
+                    }
+                } else {
+                    try check(installation_proxy_connect(provider, &client))
+                }
+                let installed = try lookup(request.bundleIdentifier, client: client)
+                guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
+                try checkCancellation()
+                try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
+                guard try lookup(request.bundleIdentifier, client: client) == nil else {
+                    throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
+                }
+                return true
+            }
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
     // Each proxy is one attempt. Cancellation waits for any native call already
     // in progress to return before releasing resources and its admission slot.
     public func install(at url: URL, suspend: Bool = false,
@@ -253,16 +286,21 @@ public final class InstallationProxy: Identifiable, ObservableObject {
             try check(installation_proxy_connect(provider, &client))
         }
         try checkCancellation()
-        var output: UnsafeMutablePointer<CChar>?
-        defer { ksign_pairing_string_free(output) }
-        try check(ksign_installation_lookup(client, preflight.bundleIdentifier, &output))
+        let result = try lookup(preflight.bundleIdentifier, client: client)
         try checkCancellation()
-        guard let output else { return }
-        let installed = try JSONDecoder().decode(IDeviceInstalledApplication.self,
-            from: Data(String(cString: output).utf8))
+        guard let installed = result else { return }
         guard installed.bundleIdentifier == preflight.bundleIdentifier else { return }
         try preflight.validateInstalledApplication(installed)
         try checkCancellation()
+    }
+
+    private func lookup(_ bundleIdentifier: String, client: OpaquePointer?) throws -> IDeviceInstalledApplication? {
+        var output: UnsafeMutablePointer<CChar>?
+        defer { ksign_pairing_string_free(output) }
+        try check(ksign_installation_lookup(client, bundleIdentifier, &output))
+        guard let output else { return nil }
+        return try JSONDecoder().decode(IDeviceInstalledApplication.self,
+            from: Data(String(cString: output).utf8))
     }
 
     private func installSynchronously(at url: URL, suspend: Bool,

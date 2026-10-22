@@ -125,6 +125,7 @@ struct LibraryView: View {
 	@State private var _selectedInfoAppPresenting: AnyApp?
 	@State private var _selectedSigningAppPresenting: AnyApp?
 	@State private var _selectedInstallAppPresenting: AnyApp?
+    @State private var _uninstallSelection: DeviceUninstallSelection?
 	@State private var _selectedAppDylibsPresenting: AnyApp?
 	@State private var _cryptCheckExtractedReports: CryptCheckExtractedReportCollection?
 	@State private var _cryptCheckExtractedRunning = false
@@ -210,6 +211,7 @@ struct LibraryView: View {
 									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
 									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
 									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
+                                    uninstall: { app in _requestUninstall([app]) },
 									isSelected: _selectedApps.contains(app.uuid ?? ""),
 									onToggleSelection: { _toggleSelection(for: app) }
 								)
@@ -228,6 +230,7 @@ struct LibraryView: View {
 									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
 									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
 									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
+                                    uninstall: { app in _requestUninstall([app]) },
 									isSelected: _selectedApps.contains(app.uuid ?? ""),
 									onToggleSelection: { _toggleSelection(for: app) }
 								)
@@ -298,6 +301,10 @@ struct LibraryView: View {
                             _barButton("square.and.arrow.down", enabled: !_selectedApps.isEmpty) {
                                 InstallSession.shared.start(apps: _resolveSelectedApps())
                             }
+                            _barButton("minus.circle", enabled: !_selectedApps.isEmpty) {
+                                _requestUninstall(_resolveSelectedApps())
+                            }
+                            .accessibilityLabel("Uninstall selected apps from device")
                         }
 
                         _barButton(
@@ -356,6 +363,9 @@ struct LibraryView: View {
 			.sheet(item: $_selectedInfoAppPresenting) { app in
 				LibraryInfoView(app: app.base)
 			}
+            .sheet(item: $_uninstallSelection) { selection in
+                UninstallAppsView(selection: selection)
+            }
 			.sheet(item: $_selectedInstallAppPresenting) { app in
 				InstallPreviewView(app: app.base, isSharing: app.archive)
 					.presentationDetents([.height(200)])
@@ -605,6 +615,12 @@ extension LibraryView {
             (_importedApps.first(where: { $0.uuid == id }) as AppInfoPresentable?)
             ?? (_signedApps.first(where: { $0.uuid == id }) as AppInfoPresentable?)
         }
+    }
+
+    private func _requestUninstall(_ apps: [AppInfoPresentable]) {
+        let selection = DeviceUninstallSelection(apps: apps)
+        guard !selection.apps.isEmpty else { return }
+        _uninstallSelection = selection
     }
 
     private func _runCryptCheckExtracted(_ app: AppInfoPresentable) {

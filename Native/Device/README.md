@@ -157,6 +157,22 @@ source trees from the chunk-size experiment.
 - When the workflow ends, Ksign removes the protected temporary pairing file
   and stops a VPN connection it started. It leaves an already connected VPN
   alone. A new VPN connection may replace another active VPN.
+- In **Library → Signed Apps**, tap or hold an app and choose **Uninstall from
+  Device…**. For a batch, choose **Edit**, select the apps, then tap the minus
+  button. Review the list and confirm **Uninstall**. This uses the selected
+  iDevice connection (Built-in or Manual), even if the apps were installed with
+  Server. The same pairing/VPN requirements apply. This paired-device command
+  can remove an app without a separate iOS Delete prompt; Ksign's confirmation
+  explicitly warns that the installed apps and their data will be deleted.
+  Signed files remain in the library. Only matching signing identities are
+  eligible; a different App Store copy, an unknown identity, or Ksign itself
+  cannot be removed by this action. Keep the signed artifact in the library;
+  this is not a persistent history of apps whose library files were deleted.
+  Duplicate bundle identifiers in a selection are removed once. The installation
+  queue must finish or be cancelled first. Removal runs sequentially, waits for
+  iOS completion, verifies absence, and shows a result per app. **Stop After
+  Current App** leaves the remaining apps untouched. Connection errors never
+  automatically replay a removal command.
 - **Forget Built-in Pairing** removes Ksign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
 - If the device handshake fails, Built-in Connection refreshes and restarts

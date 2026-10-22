@@ -89,6 +89,7 @@ jobs:
       - name: Build
         run: |
           python3 .github/scripts/test_platform_compatibility.py --require-swift
+          python3 .github/scripts/test_device_uninstall.py --require-swift
           DERIVED_DATA="$PWD/DerivedData" make
 
       - name: Upload IPA

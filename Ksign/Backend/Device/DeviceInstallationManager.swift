@@ -138,6 +138,36 @@ final class DeviceInstallationManager: ObservableObject {
         }
     }
 
+    /// Hold the preparation queue until removal completes. Previously admitted
+    /// installs drain first; no new install can reserve the connection meanwhile.
+    func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {
+        guard request.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            throw IDeviceInstallSkip(reason: "Ksign cannot uninstall itself.")
+        }
+        let selectedMode = mode
+        var removed = false
+        try await enqueue {
+            while !self.activeInstallations.isEmpty {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            try Task.checkCancellation()
+            if self.needsConnectionRecovery {
+                self.configuredMode = nil
+                self.needsConnectionRecovery = false
+            }
+            try await self.prepare(selectedMode)
+            do {
+                removed = try await InstallationProxy(viewModel: InstallerStatusViewModel()).uninstall(request)
+            } catch {
+                if !(error is CancellationError), !(error is IDeviceInstallSkip),
+                   !(error is IDeviceInstallationRejection) { self.needsConnectionRecovery = true }
+                // Never replay an uninstall after an ambiguous transport error.
+                throw error
+            }
+        }
+        return removed
+    }
+
     func resetPairing() async {
         guard !isBusy, workflows.isEmpty else { return }
         if let cleanupTask { await cleanupTask.value }

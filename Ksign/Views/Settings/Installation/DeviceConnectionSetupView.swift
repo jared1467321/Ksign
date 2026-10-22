@@ -428,6 +428,7 @@ struct DeviceConnectionSetupView: View {
     private let session = InstallSession.shared
     @State private var isSessionActive = InstallSession.shared.isActive
     var alwaysVisible = false
+    var failureInstructions = "Once connected, retry failed apps in the install drawer."
 
     var body: some View {
         Group {
@@ -478,7 +479,7 @@ struct DeviceConnectionSetupView: View {
                         Button("Retry Setup") { Task { await manager.setUp() } }
                             .buttonStyle(.borderedProminent)
                             .disabled(manager.isBusy)
-                        Text("Once connected, retry failed apps in the install drawer.")
+                        Text(failureInstructions)
                             .font(.caption)
                             .nbThemeForeground(.textSecondary)
                     case .ready:
