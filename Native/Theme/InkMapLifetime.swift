@@ -245,16 +245,24 @@ enum InkMapLifetimeTests {
     static func measurementRecovery() async {
         let session = AuroraSession()
         let identity = session.identity.shaderIdentity
-        session.setActive(true)
-        assert(session.measurementRevision == 0 && !session.measurementRefreshPendingForTest,
-               "Initial appearance must not schedule redundant measurements")
-        session.setActive(false)
-        session.setActive(false)
+        let launchStart = session.activeStart
         session.setActive(true)
         session.setActive(true)
         assert(session.measurementRevision == 0 && session.measurementRefreshPendingForTest,
-               "Remeasure only after the foreground transition has settled")
+               "The first active launch must request a deferred measurement refresh")
         await settle { session.measurementRevision == 1 }
+        assert(session.activeStart == launchStart && session.identity.shaderIdentity == identity,
+               "The launch refresh must preserve the running Aurora clock and sky")
+        session.setActive(true)
+        assert(!session.measurementRefreshPendingForTest,
+               "Duplicate startup activation must not schedule another refresh")
+        session.setActive(false)
+        session.setActive(false)
+        session.setActive(true)
+        session.setActive(true)
+        assert(session.measurementRevision == 1 && session.measurementRefreshPendingForTest,
+               "Remeasure only after the foreground transition has settled")
+        await settle { session.measurementRevision == 2 }
         assert(!session.measurementRefreshPendingForTest && session.identity.shaderIdentity == identity,
                "One return must refresh probes without shuffling the sky")
         let pausedTime = session.accumulatedTime
@@ -265,20 +273,29 @@ enum InkMapLifetimeTests {
         session.setActive(true)
         session.setActive(false)
         await settle { !session.measurementRefreshPendingForTest }
-        assert(session.measurementRevision == 1,
+        assert(session.measurementRevision == 2,
                "Going inactive again must cancel the queued measurement refresh")
 
         session.setActive(true)
         session.setActive(false)
         session.setActive(true)
-        await settle { session.measurementRevision == 2 }
+        await settle { session.measurementRevision == 3 }
         assert(!session.measurementRefreshPendingForTest,
                "Rapid returns coalesce into one refresh of the currently active scene")
         session.randomize()
         session.setActive(true)
-        assert(session.measurementRevision == 2 && !session.measurementRefreshPendingForTest,
+        assert(session.measurementRevision == 3 && !session.measurementRefreshPendingForTest,
                "Shuffling and duplicate activation must not rebuild probes")
-        print("Measurement recovery passed: deferred foreground refresh, coalescing, cancelled inactive refresh and unchanged animation clock.")
+        // The first startup refresh can also be interrupted before delivery.
+        let interrupted = AuroraSession()
+        interrupted.setActive(true)
+        interrupted.setActive(false)
+        await settle { !interrupted.measurementRefreshPendingForTest }
+        assert(interrupted.measurementRevision == 0)
+        interrupted.setActive(true)
+        await settle { interrupted.measurementRevision == 1 }
+        assert(!interrupted.measurementRefreshPendingForTest)
+        print("Measurement recovery passed: first active launch, duplicate activation, interrupted startup, deferred foreground refresh, coalescing, cancellation and unchanged animation clock.")
     }
 
     @MainActor

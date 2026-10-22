@@ -10,6 +10,7 @@ final class AuroraSession: ObservableObject {
     @Published var activeStart: Date? = Date()
     @Published private(set) var measurementRevision: UInt64 = 0
     private var measurementRefreshPending = false
+    private var hasActivated = false
     private var starfields = NBAuroraStarfieldCache()
 
     func starfield(stream: UInt64, count: Int) -> NBAuroraStarfield {
@@ -17,9 +18,16 @@ final class AuroraSession: ObservableObject {
     }
 
     func setActive(_ active: Bool) {
-        if active, activeStart == nil {
-            activeStart = Date()
-            refreshMeasurementsAfterReturn()
+        if active {
+            let resuming = activeStart == nil
+            if resuming { activeStart = Date() }
+            // The animation clock begins at construction, before the first
+            // scene activation. That first activation still needs a settled
+            // measurement pass, just like a return from the background.
+            if resuming || !hasActivated {
+                hasActivated = true
+                refreshMeasurementsAfterReturn()
+            }
         } else if !active, let start = activeStart {
             accumulatedTime += max(0, Date().timeIntervalSince(start))
             activeStart = nil
@@ -33,7 +41,7 @@ final class AuroraSession: ObservableObject {
             guard let self else { return }
             self.measurementRefreshPending = false
             guard self.activeStart != nil else { return }
-            // Let the scene return before replacing only invisible probes.
+            // Let the scene enter or return before refreshing measurements.
             // Unchanged frames must report again without requiring a scroll.
             self.measurementRevision &+= 1
         }

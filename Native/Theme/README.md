@@ -146,9 +146,13 @@ Existing valid paint survives failed refreshes. The app's Aurora activity hook
 also suspends the map clock, rejects pre-suspension results (including failures),
 and requests fresh animated ink on resume. Text scopes revalidate their leases
 on appearance and scene activation. A deferred, coalesced session revision also
-requests fresh measurements after foregrounding. Each scroll viewport keeps one
-UIKit reader and requests a report on appearance, parent/viewport movement and
-foreground return. Request identities allow unchanged coordinates to report
+requests fresh measurements after foregrounding.
+The first active launch also requests this deferred pass, even though the
+animation clock already started at session construction. Duplicate activation
+does not repeat it, and an interrupted launch cancels delivery until activation
+resumes. The pass preserves the current sky identity and running clock.
+Each scroll viewport keeps one UIKit reader and requests a report on appearance,
+parent/viewport movement and foreground return. Request identities allow unchanged coordinates to report
 again; the reader coalesces queued requests, rejects unattached/zero-size layout,
 and reports bounds changes as well as window/origin changes. It does not poll.
 Completed layout reports propagate a viewport-local measurement identity so
