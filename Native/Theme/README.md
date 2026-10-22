@@ -1,9 +1,8 @@
 # Aurora reference and verification
 
-`AuroraShaderReference.metal` is the original shader from the supplied
-`Tallyapp-Beautiful.zip`, with its SHA-256 recorded in the header. It is a test
-fixture, outside the application and NimbleKit targets. Keep this copy unchanged
-when optimizing the production shader.
+The theme test sources, runners and reference fixtures have been removed.
+The following records their historical coverage and the production behavior
+that still requires device verification.
 
 The source audit confirmed the same installation words, generation counter,
 identity mixing, star seeds, particle generator, ten particle parameter ranges,
@@ -122,11 +121,11 @@ stop until a new presentation or foreground return permits recovery. Existing
 valid paint survives failed refreshes. Application suspension stops both clocks
 and invalidates pre-suspension GPU results.
 
-`run_map_tests.py` compiles the production attachment/clock and map scheduler
-against UIKit/GPU boundary doubles. It verifies a zero-to-valid layout with no
+The removed map tests compiled the production attachment/clock and map scheduler
+against UIKit/GPU boundary doubles. They verified a zero-to-valid layout with no
 layout callbacks, hidden-tab return, stationary drawer expansion, clipping,
 selection scale, unchanged-frame suppression, Reduce Motion/shuffle, foreground
-return, detachment and weak cleanup. A 103-row / 309-label fixture verifies that
+return, detachment and weak cleanup. A 103-row / 309-label fixture verified that
 only the 24 visible labels receive paint and all anchors share one layout clock.
 These checks do not execute UIKit or SwiftUI's actual compositor; verify initial
 colors on an iOS build in Settings, Downloaded, Signed and IPA Vault.
@@ -196,51 +195,51 @@ queries/clearing, and toggling Adaptive Text while a search field is focused.
 Swift syntax checks on Linux cannot verify SwiftUI's compositor or substitute
 for this device check.
 
-Run `python3 Native/Theme/run_text_tests.py --swiftc PATH` to execute production
-Metal color/scene math through the existing C++ vector adapters. It tests
+The removed text tests executed production Metal color/scene math through C++
+vector adapters. They tested
 complementary hue, saturation/brightness, exposure independence, neutral colors,
 premultiplied alpha, offset continuity, raw-byte interpolation/orientation,
 clamped edges, invalid-map fallback, zero glyph noise reads, and cached-map
 fidelity/letter-scale variation across actual auroras.
-`--preview-dir DIR` exports four matching sky/ink PPM pairs for inspecting the
-color field. These are CPU shader references, not SwiftUI screenshots.
+Their previews exported four matching sky/ink PPM pairs for inspecting the
+color field. These were CPU shader references, not SwiftUI screenshots.
 
-Run `python3 Native/Theme/run_map_tests.py --swiftc PATH` to execute the production
-map coordinator and weak clock with platform/GPU boundary doubles. It checks
+The removed map tests executed the production map coordinator and weak clock
+with platform/GPU boundary doubles. They checked
 sharing across 100 scopes, bounded in-flight work, no redundant setup renders,
 and 103 retained rows with eight visible: only visible paint gets notifications,
 scrolling transfers delivery immediately, and offscreen paints release buffers.
-It also checks window/viewport clipping and partial rows,
+They also checked window/viewport clipping and partial rows,
 stale-frame rejection, offscreen cleanup, frozen/mixed-motion clients, orphaned
 lease/owner cleanup, transient failure recovery, suspended-result rejection,
 foreground/presentation recovery and bounded retries. The Metal driver and SwiftUI buffer
 upload still require an iOS build and device rendering check.
 
-The map suite also executes the production row tracker with three labels per
+The map suite also executed the production row tracker with three labels per
 row: shared movement, per-label partial clipping, offscreen publication counts,
 cached reentry, scaled coordinate continuity, changed local layout, scene
 activity and Reduce Motion, including 103 retained rows with eight visible.
-It executes the production session to check deferred foreground measurements,
-rapid-return coalescing and cancellation when inactive, and models a culled
+It executed the production session to check deferred foreground measurements,
+rapid-return coalescing and cancellation when inactive, and modeled a culled
 row and its invalid local label measurements recovering at their original
 coordinates without scrolling or rendering a redundant map. Viewport cases
-include the top and bottom visible strips, partial labels, parent clipping and
-the window boundary. Initial readiness tests cover all 120 orders of row, label,
+included the top and bottom visible strips, partial labels, parent clipping and
+the window boundary. Initial readiness tests covered all 120 orders of row, label,
 appearance, window and clipping measurements without scrolling. The production
-UIKit reader runs with layout/conversion doubles to check late attachment,
+UIKit reader ran with layout/conversion doubles to check late attachment,
 zero-size layout, unchanged-position reports, 100 coalesced requests, drawer
-resizing and reattachment. The production viewport measurement owner is also
+resizing and reattachment. The production viewport measurement owner was also
 tested for both callback orders, preservation of the latest SwiftUI frame,
 deferred window reports, moved/resized drawers and temporary zero-size recovery.
 SwiftUI task scheduling, actual coordinate conversion
 and the reported iPhone appearance still require an iOS build and device check.
 
-Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
-production glyph caching, original-mask restoration, search-attribute restoration,
+The removed chrome tests checked production glyph caching, original-mask
+restoration, search-attribute restoration,
 view recycling, tab element identity, status tint preservation and orphaned
-display-link cleanup with platform doubles. These tests do not claim to verify
-UIKit drawing or the device compositor and are not part of the app pre-build.
-Discovery checks also cover 206 table/grid cells with descendants that reject
+display-link cleanup with platform doubles. These tests did not verify
+UIKit drawing or the device compositor and were not part of the app pre-build.
+Discovery checks also covered 206 table/grid cells with descendants that reject
 traversal, while retaining navigation glyphs and explicit header search fields.
 
 The removed color-conversion tests enforced obsolete day/night recoloring. The

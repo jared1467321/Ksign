@@ -21,6 +21,17 @@ struct AppSignConfig: Identifiable {
         id = app.uuid ?? UUID().uuidString
         self.app = app; self.options = options; self.icon = icon
     }
+
+    func optionsForSigning(certificateRequiresPPQ: Bool) -> Options {
+        // Keep explicit identifier edits; derive automatic protection from the
+        // current certificate so switching certificates or resetting is safe.
+        guard options.ppqProtection, certificateRequiresPPQ,
+              options.appIdentifier == nil, let identifier = app.identifier else { return options }
+        var resolved = options
+        let suffix = ".\(options.ppqString)"
+        resolved.appIdentifier = identifier.hasSuffix(suffix) ? identifier : identifier + suffix
+        return resolved
+    }
 }
 
 struct BulkSigningView: View {
@@ -141,6 +152,7 @@ struct BulkSigningView: View {
 extension BulkSigningView {
 	@ViewBuilder
 	private func _customizationOptions(for config: Binding<AppSignConfig>) -> some View {
+			let signingOptions = config.wrappedValue.optionsForSigning(certificateRequiresPPQ: _selectedCert()?.ppQCheck == true)
 			Menu {
 				Button(.localized("Select Alternative Icon")) {
 					_editingConfigId = config.wrappedValue.id
@@ -171,10 +183,10 @@ extension BulkSigningView {
 					bindingValue: config.options.appName
 				)
 			}
-			_infoCell(.localized("Identifier"), desc: config.options.appIdentifier.wrappedValue ?? config.app.wrappedValue.identifier) {
+			_infoCell(.localized("Identifier"), desc: signingOptions.appIdentifier ?? config.app.wrappedValue.identifier) {
 				SigningPropertiesView(
 					title: .localized("Identifier"),
-					initialValue: config.options.appIdentifier.wrappedValue ?? (config.app.wrappedValue.identifier ?? ""),
+					initialValue: signingOptions.appIdentifier ?? (config.app.wrappedValue.identifier ?? ""),
 					bindingValue: config.options.appIdentifier
 				)
 			}
@@ -272,7 +284,11 @@ extension BulkSigningView {
 
 		_isSigning = true
 		let certificate = _selectedCert()
-		let configs = _configs
+		let configs = _configs.map { config in
+			var resolved = config
+			resolved.options = config.optionsForSigning(certificateRequiresPPQ: certificate?.ppQCheck == true)
+			return resolved
+		}
 		SigningPreflightCoordinator.review(configs.map { SigningPreflight.source(for: $0.app, options: $0.options) }) { report in
 			_runSigning(configs: report.eligibleIndices.map { configs[$0] }, certificate: certificate,
                 skipped: report.skipped, archiveApps: report.eligibleIndices.map { report.archiveApps[$0] })
