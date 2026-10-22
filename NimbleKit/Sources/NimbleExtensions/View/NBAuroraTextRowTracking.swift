@@ -7,8 +7,11 @@ struct NBAuroraTextRowGeometry: Equatable {
     let size: CGSize
 
     func clipped(to viewport: NBAuroraTextViewport?) -> Self {
-        guard let viewport, let window = viewport.window else { return self }
-        guard NBAuroraTextVisibility.intersects(frame, window: window, clipping: viewport.clipping) else {
+        // Initial layout may know the window before the list's clipping frame.
+        // Keep raw positions until both are ready; otherwise a null sentinel
+        // can strand an unchanged visible row until the user scrolls.
+        guard let viewport else { return self }
+        guard !viewport.clippedFrame(frame).isNull else {
             return Self(frame: .null, size: .zero)
         }
         return self

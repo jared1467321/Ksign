@@ -24,36 +24,50 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
     @ObservedObject private var session = AuroraSession.shared
     @State private var frame = CGRect.zero
     @State private var window: CGRect?
-    @State private var pendingViewport: AuroraViewport?
     @State private var measurementID = UUID()
+    @State private var completedMeasurementID: UUID?
+    @State private var appeared = false
 
     func body(content: Content) -> some View {
+        let request = measurementID
         content
             .environment(\.nbAuroraTextViewport,
-                         NBAuroraTextViewport(frame: frame, window: window, parent: parent))
+                         NBAuroraTextViewport(frame: frame, window: window, parent: parent,
+                                              measurementID: completedMeasurementID))
             .onGeometryChange(for: CGRect.self) { proxy in
                 proxy.frame(in: .global)
             } action: {
                 frame = $0
-                if window == nil, let pendingViewport { updateWindow(pendingViewport) }
+                // Pair a changed SwiftUI frame with a fresh window report.
+                // Reusing an old UIKit origin here can produce false clipping.
+                requestMeasurement()
             }
             .background {
                 // One window-coordinate reader for the list, rather than one
                 // UIKit anchor for every title, subtitle and chevron.
                 GeometryReader { proxy in
-                    AuroraViewportReader { viewport in
+                    AuroraViewportReader(reportID: request) { viewport in
+                        guard appeared, measurementID == request else { return }
                         // Read both coordinate systems together after return.
                         frame = proxy.frame(in: .global)
-                        pendingViewport = viewport
                         updateWindow(viewport)
+                        if NBAuroraTextViewport(frame: frame, window: window, parent: parent).isReady {
+                            completedMeasurementID = request
+                        }
                     }
                 }
-                .id(measurementID)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
-            .onAppear { measurementID = UUID() }
-            .onChange(of: session.measurementRevision) { _ in measurementID = UUID() }
+            .onAppear { appeared = true; requestMeasurement() }
+            .onDisappear { appeared = false }
+            .onChange(of: parent) { _ in requestMeasurement() }
+            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
+    }
+
+    private func requestMeasurement() {
+        guard appeared else { return }
+        measurementID = UUID()
     }
 
     private func updateWindow(_ viewport: AuroraViewport) {

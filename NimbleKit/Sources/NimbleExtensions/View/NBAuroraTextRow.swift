@@ -56,28 +56,26 @@ private struct NBAuroraTextRowModifier: ViewModifier {
             .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
                 NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
                     .clipped(to: viewport)
-            } action: { row.move(to: $0) }
+            } action: { receive($0) }
             .background {
                 if let request = remeasurement {
                     // Keep recovery probes out of the normal scrolling path.
-                    Color.clear
-                        .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
-                            NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
-                                .clipped(to: viewport)
-                        } action: { measured in
+                    GeometryReader { proxy in
+                        Color.clear.task(id: request) {
                             guard remeasurement == request else { return }
-                            row.move(to: measured)
-                            remeasurement = nil
+                            receive(NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
+                                .clipped(to: viewport))
                         }
-                        .id(request)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
+                    }
+                    .id(request)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                 }
             }
-            .onAppear { appeared = true; configure(refresh: true); remeasurement = UUID() }
+            .onAppear { appeared = true; configure(refresh: true); requestMeasurement() }
             .onDisappear { appeared = false; configure(); remeasurement = nil }
-            .onChange(of: viewport) { _ in configure(); remeasurement = UUID() }
-            .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
+            .onChange(of: viewport) { _ in configure(); requestMeasurement() }
+            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
             .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in configure() }
             .onChange(of: session.identity.shaderIdentity) { _ in configure(refresh: true) }
@@ -87,12 +85,24 @@ private struct NBAuroraTextRowModifier: ViewModifier {
         row.configure(viewport: viewport, active: appeared && scenePhase == .active,
                       reduceMotion: reduceMotion, refresh: refresh)
     }
+
+    private func requestMeasurement() {
+        remeasurement = appeared && viewport?.isReady == true ? UUID() : nil
+    }
+
+    private func receive(_ geometry: NBAuroraTextRowGeometry) {
+        row.move(to: geometry)
+        if geometry.frame.isNull || (!geometry.frame.isEmpty && geometry.size.width > 0 && geometry.size.height > 0) {
+            remeasurement = nil
+        }
+    }
 }
 
 @available(iOS 17.0, tvOS 17.0, *)
 struct NBAuroraRowTextShaderScope<Content: View>: View {
     @StateObject private var client = NBAuroraRowTextClient()
     @ObservedObject private var session = AuroraSession.shared
+    @Environment(\.nbAuroraTextViewport) private var viewport
     @State private var remeasurement: UUID?
     let content: Content
     let primary: NBThemeColor
@@ -109,24 +119,33 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
             // These coordinates stay constant while the row scrolls. Changes
             // to wrapping, layout or edit controls still remeasure each label.
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
-                action: { row.measure(client, localFrame: $0) }
+                action: { receive($0) }
             .background {
                 if let request = remeasurement {
-                    Color.clear
-                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
-                            action: { measured in
-                                guard remeasurement == request else { return }
-                                row.measure(client, localFrame: measured)
-                                remeasurement = nil
-                            }
-                        .id(request)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
+                    GeometryReader { proxy in
+                        Color.clear.task(id: request) {
+                            guard remeasurement == request else { return }
+                            receive(proxy.frame(in: .named(row.coordinateSpaceID)))
+                        }
+                    }
+                    .id(request)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                 }
             }
-            .onChange(of: session.measurementRevision) { _ in remeasurement = UUID() }
-            .onAppear { row.setVisible(client, true); remeasurement = UUID() }
+            .onChange(of: viewport) { _ in requestMeasurement() }
+            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
+            .onAppear { row.setVisible(client, true); requestMeasurement() }
             .onDisappear { row.setVisible(client, false); remeasurement = nil }
+    }
+
+    private func requestMeasurement() {
+        remeasurement = client.visible && viewport?.isReady == true ? UUID() : nil
+    }
+
+    private func receive(_ frame: CGRect) {
+        row.measure(client, localFrame: frame)
+        if !frame.isNull && !frame.isEmpty { remeasurement = nil }
     }
 }
 

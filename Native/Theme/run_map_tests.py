@@ -27,11 +27,18 @@ def main():
     session = "@MainActor\nfinal class AuroraSession" + reference.split(
         "@MainActor\nfinal class AuroraSession", 1
     )[1].split("@MainActor\npublic enum NBAurora", 1)[0]
+    viewport = "struct AuroraViewport: Equatable" + reference.split(
+        "struct AuroraViewport: Equatable", 1
+    )[1].split("/// Read-only geometry", 1)[0]
+    viewport += "final class AuroraViewportView: UIView" + reference.split(
+        "final class AuroraViewportView: UIView", 1
+    )[1].split("/// Render the sky", 1)[0]
     with tempfile.TemporaryDirectory(prefix="ksign-ink-map-tests-") as folder:
         folder = Path(folder)
         source = folder / "InkMapTests.swift"
         source.write_text(fixture.replace("// PRODUCTION_MAP", production)
-                          .replace("// PRODUCTION_ROW", row).replace("// PRODUCTION_SESSION", session))
+                          .replace("// PRODUCTION_ROW", row).replace("// PRODUCTION_SESSION", session)
+                          .replace("// PRODUCTION_VIEWPORT", viewport))
         binary = folder / "InkMapTests"
         subprocess.run([args.swiftc, "-swift-version", "6", "-parse-as-library",
                         "-module-cache-path", str(folder / "modules"), str(source),

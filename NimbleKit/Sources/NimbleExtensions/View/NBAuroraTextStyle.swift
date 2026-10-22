@@ -124,11 +124,7 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     }
 
     private func clippedFrame(_ frame: CGRect) -> CGRect {
-        guard let scrollViewport else { return frame }
-        guard let window = scrollViewport.window,
-              NBAuroraTextVisibility.intersects(frame, window: window,
-                                               clipping: scrollViewport.clipping) else { return .null }
-        return frame
+        scrollViewport?.clippedFrame(frame) ?? frame
     }
 
     private func receive(_ measured: CGRect) {

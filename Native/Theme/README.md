@@ -146,17 +146,21 @@ Existing valid paint survives failed refreshes. The app's Aurora activity hook
 also suspends the map clock, rejects pre-suspension results (including failures),
 and requests fresh animated ink on resume. Text scopes revalidate their leases
 on appearance and scene activation. A deferred, coalesced session revision also
-recreates only invisible text/row/window measurement probes after foregrounding.
-Appearance requests fresh list-window, row and local-label measurements as well,
-so entering a tab does not depend on a shuffle or changed layout coordinates.
-It leaves content identities and controls intact, makes unchanged positions
-report again, and pairs fresh SwiftUI frames with UIKit window origins. If the
-restored scroll viewport arrives later, text and row probes remeasure against
-it without waiting for a scroll. Offscreen measurements still use the stable
-null sentinel. Row and local-label recovery probes mount only when a measurement
-is requested and remove themselves after reporting; normal row scrolling uses
-the original content geometry observers without a permanent background
-GeometryReader per row. A newer request supersedes a pending probe's result.
+requests fresh measurements after foregrounding. Each scroll viewport keeps one
+UIKit reader and requests a report on appearance, parent/viewport movement and
+foreground return. Request identities allow unchanged coordinates to report
+again; the reader coalesces queued requests, rejects unattached/zero-size layout,
+and reports bounds changes as well as window/origin changes. It does not poll.
+Completed layout reports propagate a viewport-local measurement identity so
+both rows and their local labels refresh even when their positions are unchanged.
+Early label/row positions survive until the window and clipping area are ready;
+visibility still excludes them from ink delivery until then. Ready viewports
+retain the stable null sentinel for offscreen text. Temporary GeometryReaders
+read current row/label positions in appearance tasks after readiness, rather
+than depending on a transparent probe's geometry-change callback. They leave
+content identities and controls intact and remove themselves after a valid
+measurement; normal scrolling uses the original content geometry observers.
+Disappearance cancels requests and newer requests supersede pending results.
 The scheduler inspects weak leases in one
 pass without rebuilding client collections each tick. Map size, color math and
 30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
@@ -255,8 +259,12 @@ rapid-return coalescing and cancellation when inactive, and models a culled
 row and its invalid local label measurements recovering at their original
 coordinates without scrolling or rendering a redundant map. Viewport cases
 include the top and bottom visible strips, partial labels, parent clipping and
-the window boundary. SwiftUI probe remounting and the reported iPhone appearance
-still require a device check.
+the window boundary. Initial readiness tests cover all 120 orders of row, label,
+appearance, window and clipping measurements without scrolling. The production
+UIKit reader runs with layout/conversion doubles to check late attachment,
+zero-size layout, unchanged-position reports, 100 coalesced requests, drawer
+resizing and reattachment. SwiftUI task scheduling, actual coordinate conversion
+and the reported iPhone appearance still require an iOS build and device check.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
 production glyph caching, original-mask restoration, search-attribute restoration,

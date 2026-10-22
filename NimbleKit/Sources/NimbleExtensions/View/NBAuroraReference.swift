@@ -81,6 +81,7 @@ struct AuroraViewport: Equatable {
 /// Read-only geometry: each hosting container paints its own sky, but samples
 /// the same window coordinates so nested lists and headers join continuously.
 struct AuroraViewportReader: UIViewRepresentable {
+    var reportID: UUID? = nil
     let onChange: (AuroraViewport) -> Void
 
     func makeUIView(context: Context) -> AuroraViewportView {
@@ -89,14 +90,18 @@ struct AuroraViewportReader: UIViewRepresentable {
 
     func updateUIView(_ view: AuroraViewportView, context: Context) {
         view.onChange = onChange
+        view.reportID = reportID
         view.scheduleReport()
     }
 }
 
 final class AuroraViewportView: UIView {
     var onChange: ((AuroraViewport) -> Void)?
+    var reportID: UUID?
     private var pending = false
     private var lastReported: AuroraViewport?
+    private var lastReportID: UUID?
+    private var lastBounds = CGRect.null
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -108,6 +113,10 @@ final class AuroraViewportView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        if window == nil {
+            lastReported = nil
+            lastReportID = nil
+        }
         scheduleReport()
     }
 
@@ -125,8 +134,11 @@ final class AuroraViewportView: UIView {
             guard let window = self.window, self.bounds.width > 0, self.bounds.height > 0 else { return }
             let viewport = AuroraViewport(size: window.bounds.size,
                                           origin: self.convert(self.bounds.origin, to: window))
-            guard viewport != self.lastReported else { return }
+            guard viewport != self.lastReported || self.reportID != self.lastReportID
+                    || self.bounds != self.lastBounds else { return }
             self.lastReported = viewport
+            self.lastReportID = self.reportID
+            self.lastBounds = self.bounds
             self.onChange?(viewport)
         }
     }
