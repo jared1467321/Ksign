@@ -488,10 +488,10 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
     // MARK: - Aggregate download API
 
     // All regular network downloads share one continued-processing task. The
-    // system Live Activity therefore shows one aggregate percentage for the
-    // whole active batch while keeping one displayed filename sticky until that
-    // specific download terminates. Concurrent callbacks therefore cannot make
-    // the system Live Activity rapidly alternate between filenames.
+    // system receives aggregate fractional progress for the whole active batch,
+    // while the subtitle shows completed/total and keeps one displayed filename
+    // sticky until that specific download terminates. Concurrent callbacks cannot
+    // make the system Live Activity rapidly alternate between filenames.
     func startTask(
         for downloadId: String,
         filename: String,
@@ -1104,7 +1104,9 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
 
         let displayFraction = _progressFraction(for: report)
 
-        if let displayFraction {
+        if let completed = report.completed, let total = report.total, total > 0 {
+            pieces.append("\(completed)/\(total)")
+        } else if let displayFraction {
             pieces.append("\(Int((displayFraction * 100).rounded()))%")
         }
 
@@ -1113,8 +1115,8 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
         }
 
         // The owner title already communicates the active phase. Keep ordinary
-        // subtitles compact ("67% · Apollo.ipa"), but preserve terminal/error
-        // state when it adds information the percentage cannot.
+        // subtitles compact ("2/3 · Apollo.ipa"), but preserve terminal/error
+        // state when it adds information the progress label cannot.
         if report.detail == "Error" || report.detail == "Cancelled" || report.detail == "Paused" || report.detail == "Finished with Skips" {
             pieces.append(report.detail!)
         } else if pieces.isEmpty, let detail = report.detail, !detail.isEmpty {
@@ -1160,13 +1162,16 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
                 ?? state.currentDownloadId
         }()
         let filename = currentID.flatMap { state.items[$0]?.filename }
-        let percent = Int((progress * 100).rounded())
+        let completed = state.items.values.filter { $0.terminal }.count
+        let progressLabel = total > 0
+            ? "\(completed)/\(total)"
+            : "\(Int((progress * 100).rounded()))%"
         let title = total == 1 ? "Downloading IPA" : "Downloading \(total) IPAs"
         let subtitle: String
         if let filename, !filename.isEmpty {
-            subtitle = "\(percent)% · \(filename)"
+            subtitle = "\(progressLabel) · \(filename)"
         } else {
-            subtitle = "\(percent)%"
+            subtitle = progressLabel
         }
         return (progress, title, subtitle)
     }
