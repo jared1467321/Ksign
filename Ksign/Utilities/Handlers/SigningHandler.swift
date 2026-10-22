@@ -596,6 +596,7 @@ extension SigningHandler {
     private func _applyPlatformCompatibility(to app: URL) throws {
         let target = SigningPlatformCompatibility.Target(system: ProcessInfo.processInfo.operatingSystemVersion,
             minimumOverride: _options.minimumAppRequirement)
+        Logger.signing.notice("[\(self._uuid)] iOS compatibility minimum: \(target.version); SDK metadata: \(target.sdkVersion)")
         var enumerationError: Error?
         guard let entries = _fileManager.enumerator(at: app, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
             options: [], errorHandler: { _, error in enumerationError = error; return false }) else {
@@ -625,13 +626,16 @@ extension SigningHandler {
             let data = try Data(contentsOf: plist)
             guard var info = try PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any]
             else { continue }
-            let bundle = plist.deletingLastPathComponent()
-            let isRoot = bundle.standardizedFileURL == app.standardizedFileURL
-            let codeBundle = ["app", "appex", "framework", "bundle"].contains(bundle.pathExtension.lowercased())
-            let patchedExecutable = (info["CFBundleExecutable"] as? String).map {
+            let isRoot = plist.standardizedFileURL == app.appendingPathComponent("Info.plist").standardizedFileURL
+            guard let bundle = SigningPlatformCompatibility.codeBundle(containing: plist, inside: app) else { continue }
+            let executable = info["CFBundleExecutable"] as? String
+            let patchedExecutable = executable.map {
                 patchedBinaries.contains(bundle.appendingPathComponent($0).resolvingSymlinksInPath().standardizedFileURL)
             } ?? false
-            guard isRoot || (codeBundle && (patchedExecutable || SigningPlatformCompatibility.rejectionReason(info) != nil)) else { continue }
+            // An already-iOS extension/framework can still carry a newer OS
+            // requirement. Normalize it only inside an activated shim tree.
+            guard SigningPlatformCompatibility.shouldNormalize(info, target: target,
+                isRoot: isRoot, executableWasPatched: patchedExecutable) else { continue }
             SigningPlatformCompatibility.normalize(&info, target: target,
                 isApplication: isRoot || bundle.pathExtension == "app" || bundle.pathExtension == "appex")
             let patched = try PropertyListSerialization.data(fromPropertyList: info, format: format, options: 0)

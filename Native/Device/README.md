@@ -75,11 +75,15 @@ source trees from the chunk-size experiment.
   In the private signing workspace, it normalizes the main app and affected code
   bundles' platform/device-family declarations, removes device/capability filters,
   and retargets foreign Mach-O platform/version commands before signing. The
-  default version baseline is this device's current iOS version; an explicit
-  signing minimum takes precedence. It covers thin and universal binaries,
-  embedded frameworks/dylibs and retained extensions without extracting resources.
-  Already-iOS binary metadata, CPU types, executable code and original library
-  files stay intact. Malformed or encrypted binaries fail the attempt; changing
+  default minimum is iOS 16.0, independent of this device's exact OS release;
+  an explicit signing minimum takes precedence. Embedded iOS code with a higher
+  minimum is lowered too, only inside the activated shim tree. It covers thin
+  and universal binaries, embedded frameworks/dylibs and retained extensions
+  without extracting resources. Versioned framework plists and retained bundle
+  plists with compatibility declarations but no executable are covered too.
+  CPU types, executable code and original library files stay intact. Existing
+  iOS SDK fields are preserved when only lowering a minimum. Malformed or
+  encrypted binaries fail the attempt; changing
   metadata does not supply missing APIs or translate machine code. Signing and
   installation report their ordinary success/failure, and launch may still fail.
 - Before native **Sign & Install** hands successful packages to the drawer,

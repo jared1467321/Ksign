@@ -12,7 +12,7 @@
 NSString *LCPatchMachOFixupARM64eSlice(const char *path);
 NSString *LCPatchMachOForSDK26(const char *path);
 
-// nil on success (including resources and already-iOS binaries).
+// nil on success (including resources and binaries needing no metadata edits).
 NSString * _Nullable KsignPatchMachOForIOS(const char * _Nonnull path,
                                           uint32_t minimumOS, uint32_t sdk,
                                           NSUInteger * _Nonnull changedSlices);

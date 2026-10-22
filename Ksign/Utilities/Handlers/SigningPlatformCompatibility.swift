@@ -20,10 +20,18 @@ enum SigningPlatformCompatibility {
             let current = "\(system.majorVersion).\(system.minorVersion).\(system.patchVersion)"
             let currentPacked = Self.packed(current)!
             let requested = Self.packed(minimumOverride)
-            version = requested == nil ? current : minimumOverride
-            minimumOS = requested ?? currentPacked
+            // This path tries to admit an otherwise-incompatible app, even if
+            // it cannot launch. Do not manufacture a requirement for the host's
+            // exact release/beta version. Match Ksign's oldest supported iOS.
+            version = requested == nil ? "16.0" : minimumOverride
+            minimumOS = requested ?? 0x100000
             sdk = max(currentPacked, minimumOS)
             sdkVersion = sdk == currentPacked ? current : minimumOverride
+        }
+
+        func exceedsMinimum(_ version: Any?) -> Bool {
+            guard let version = version as? String, let packed = Self.packed(version) else { return false }
+            return packed > minimumOS
         }
 
         private static func packed(_ version: String) -> UInt32? {
@@ -35,6 +43,39 @@ enum SigningPlatformCompatibility {
             return values[0] << 16 | (values.count > 1 ? values[1] << 8 : 0) |
                 (values.count > 2 ? values[2] : 0)
         }
+    }
+
+    /// Versioned frameworks keep Info.plist under Versions/A/Resources. Their
+    /// executable is resolved from the enclosing framework, not Resources.
+    static func codeBundle(containing plist: URL, inside app: URL) -> URL? {
+        let root = app.standardizedFileURL
+        var directory = plist.deletingLastPathComponent().standardizedFileURL
+        while directory == root || directory.path.hasPrefix(root.path + "/") {
+            if ["app", "appex", "framework", "bundle", "xpc", "plugin"].contains(directory.pathExtension.lowercased()) {
+                let relative = String(plist.standardizedFileURL.path.dropFirst(directory.path.count + 1))
+                let components = relative.split(separator: "/")
+                let versioned = directory.pathExtension.lowercased() == "framework" &&
+                    components.first == "Versions" &&
+                    ((components.count == 4 && components[2] == "Resources" && components[3] == "Info.plist") ||
+                     (components.count == 3 && components[2] == "Info.plist"))
+                if ["Info.plist", "Contents/Info.plist", "Resources/Info.plist"].contains(relative) || versioned {
+                    return directory
+                }
+                // An arbitrary data Info.plist under a bundle isn't its metadata.
+                return nil
+            }
+            if directory == root { return nil }
+            directory.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    static func shouldNormalize(_ info: [String: Any], target: Target,
+                                isRoot: Bool, executableWasPatched: Bool) -> Bool {
+        // Some retained bundles/placeholders declare install compatibility
+        // without an executable. Those declarations still belong to the app.
+        isRoot || executableWasPatched || rejectionReason(info) != nil ||
+            target.exceedsMinimum(info["MinimumOSVersion"])
     }
 
     static func normalize(_ info: inout [String: Any], target: Target, isApplication: Bool) {

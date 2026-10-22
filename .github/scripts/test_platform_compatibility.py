@@ -72,6 +72,25 @@ class PlatformTests(unittest.TestCase):
         blob = thin([build_version(2)])
         self.assertEqual(self.patch(blob), (0, blob, ""))
 
+    def test_embedded_ios_framework_minimum_is_lowered_without_changing_sdk(self):
+        for endian in ("<", ">"):
+            with self.subTest(endian=endian):
+                blob = thin([build_version(2, minimum=0x1B0000, sdk=0x1B0000, endian=endian)], endian=endian)
+                result, output, error = self.patch(blob)
+                expected = bytearray(blob)
+                struct.pack_into(endian + "I", expected, 44, MINIMUM)
+                self.assertEqual((result, error), (1, ""))
+                self.assertEqual(output, expected)
+                self.assertEqual(self.patch(output), (0, output, ""))
+
+    def test_embedded_legacy_ios_framework_minimum_is_lowered(self):
+        blob = thin([struct.pack("<4I", 0x25, 16, 0x1B0000, 0x1B0000)])
+        result, output, error = self.patch(blob)
+        expected = bytearray(blob)
+        struct.pack_into("<I", expected, 40, MINIMUM)
+        self.assertEqual((result, error), (1, ""))
+        self.assertEqual(output, expected)
+
     def test_legacy_platforms_keep_the_same_command_layout(self):
         for kind in (0x24, 0x2F, 0x30):
             for endian in ("<", ">"):

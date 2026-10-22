@@ -78,6 +78,11 @@ static int patchSlice(uint8_t *bytes, size_t size, uint32_t minimumOS, uint32_t 
                     write32(command + 12, minimumOS, big);
                     write32(command + 16, sdk, big);
                 }
+            } else if (read32(command + 12, big) > minimumOS) {
+                // A foreign app may embed an iOS framework with a higher floor.
+                // This parser only runs inside an activated compatibility shim.
+                changed = 1;
+                if (apply) write32(command + 12, minimumOS, big);
             }
         } else if (kind == 0x24 || kind == 0x25 || kind == 0x2f || kind == 0x30) {
             // The legacy version-min commands have the same 16-byte layout.
@@ -90,6 +95,9 @@ static int patchSlice(uint8_t *bytes, size_t size, uint32_t minimumOS, uint32_t 
                     write32(command + 8, minimumOS, big);
                     write32(command + 12, sdk, big);
                 }
+            } else if (read32(command + 8, big) > minimumOS) {
+                changed = 1;
+                if (apply) write32(command + 8, minimumOS, big);
             }
         } else if (kind == 0x21 || kind == 0x2c) { // LC_ENCRYPTION_INFO[_64]
             if (length < (kind == 0x2c ? 24u : 20u))
