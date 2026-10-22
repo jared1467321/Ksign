@@ -7,7 +7,6 @@ struct NBAuroraTextStyleModifier: ViewModifier {
     @AppStorage("Feather.auroraAdaptiveText") private var adaptiveText = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
-    @Environment(\.nbAuroraTextRow) private var textRow
 
     let primary: NBThemeColor
     var secondary: NBThemeColor? = nil
@@ -22,18 +21,10 @@ struct NBAuroraTextStyleModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled && (adaptsPrimary || (secondary != nil && adaptsSecondary)),
            #available(iOS 17.0, tvOS 17.0, *) {
-            if let textRow = textRow as? NBAuroraTextRowTracker {
-                NBAuroraRowTextShaderScope(
-                    content: content, primary: primary, secondary: secondary,
-                    adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
-                    row: textRow
-                )
-            } else {
-                NBAuroraTextShaderScope(
-                    content: content, primary: primary, secondary: secondary,
-                    adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary
-                )
-            }
+            NBAuroraTextShaderScope(
+                content: content, primary: primary, secondary: secondary,
+                adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary
+            )
         } else if let secondary {
             content.foregroundStyle(legacyInk(primary, adapts: adaptsPrimary),
                                     legacyInk(secondary, adapts: adaptsSecondary))
@@ -59,14 +50,8 @@ struct NBAuroraTextStyleModifier: ViewModifier {
 @available(iOS 17.0, tvOS 17.0, *)
 private struct NBAuroraTextShaderScope<Content: View>: View {
     @ObservedObject private var session = AuroraSession.shared
-    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.nbAuroraTextViewport) private var scrollViewport
-    @StateObject private var lease = NBAuroraInkLease()
-    @State private var frame = CGRect.zero
-    @State private var viewport: AuroraViewport?
-    @State private var viewportFrame = CGRect.zero
-    @State private var isVisible = false
+    @StateObject private var attachment = NBAuroraTextAttachment()
 
     let content: Content
     let primary: NBThemeColor
@@ -75,66 +60,34 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     let adaptsSecondary: Bool
 
     var body: some View {
-        let window = windowFrame
-        let size = window?.size ?? CGSize(width: max(1, frame.width), height: max(1, frame.height))
-        let origin = CGPoint(x: frame.minX - (window?.minX ?? 0),
-                             y: frame.minY - (window?.minY ?? 0))
-        let bounds = CGRect(x: -origin.x, y: -origin.y, width: size.width, height: size.height)
+        NBAuroraPlacedForeground(content: content, primary: primary, secondary: secondary,
+                                 adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
+                                 identity: session.identity.shaderIdentity,
+                                 placement: attachment.placement, paint: attachment.lease.paint)
+            .background {
+                NBAuroraTextAnchor(attachment: attachment, reduceMotion: reduceMotion)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+    }
+}
 
+@available(iOS 17.0, tvOS 17.0, *)
+private struct NBAuroraPlacedForeground<Content: View>: View {
+    let content: Content
+    let primary: NBThemeColor
+    let secondary: NBThemeColor?
+    let adaptsPrimary: Bool
+    let adaptsSecondary: Bool
+    let identity: NBAuroraShaderIdentity
+    @ObservedObject var placement: NBAuroraTextPlacement
+    let paint: NBAuroraInkPaint
+
+    var body: some View {
         NBAuroraMappedForeground(content: content, primary: primary, secondary: secondary,
                                  adaptsPrimary: adaptsPrimary, adaptsSecondary: adaptsSecondary,
-                                 bounds: bounds, identity: session.identity.shaderIdentity,
-                                 paint: lease.paint)
-            .background {
-                GeometryReader { proxy in
-                    // Resolve the proxy during layout. Deferred callbacks use
-                    // this value rather than querying a retained layout proxy.
-                    let measured = proxy.frame(in: .global)
-                    NBAuroraTextGeometryReport(value: measured, revision: session.measurementRevision,
-                                               receive: receive)
-                    if scrollViewport == nil {
-                        AuroraViewportReader { reported in
-                            // Pair UIKit's report with the captured layout value.
-                            viewport = reported
-                            viewportFrame = measured
-                            receive(measured)
-                        }
-                    }
-                }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
-            .onAppear { isVisible = true; updateLease(refresh: true) }
-            .onDisappear { isVisible = false; updateLease() }
-            .onChange(of: scenePhase) { phase in updateLease(refresh: phase == .active) }
-            .onChange(of: reduceMotion) { _ in updateLease() }
-            .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
-            .onChange(of: scrollViewport) { _ in updateLease() }
-    }
-
-    private func receive(_ measured: CGRect) {
-        // Keep geometry independent of visibility. A viewport can become ready
-        // or expand without moving this label or producing another layout.
-        if frame != measured { frame = measured }
-        updateLease()
-    }
-
-    private var windowFrame: CGRect? {
-        if let scrollViewport { return scrollViewport.window }
-        return viewport.map {
-            CGRect(x: viewportFrame.minX - $0.origin.x, y: viewportFrame.minY - $0.origin.y,
-                   width: $0.size.width, height: $0.size.height)
-        }
-    }
-
-    private func updateLease(refresh: Bool = false) {
-        let intersects = windowFrame.map {
-            NBAuroraTextVisibility.intersects(frame, window: $0, clipping: scrollViewport?.clipping)
-        } ?? false
-        let active = isVisible && intersects && scenePhase == .active
-        guard lease.active != active || lease.reduceMotion != reduceMotion || (refresh && active) else { return }
-        NBAuroraInkMap.shared.update(lease, active: active,
-                                    reduceMotion: reduceMotion)
+                                 bounds: placement.bounds, identity: identity, paint: paint)
     }
 }
 

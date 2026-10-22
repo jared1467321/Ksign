@@ -84,101 +84,52 @@ and receive no further frame notifications. On reentry they immediately receive
 the latest matching cached frame. Reduce Motion clients receive only the frozen
 cache, including when animated clients are also active.
 
-`NBListAdaptable` supplies a shared text viewport outside the row builder. This
-measures the scroll container's full bounds and window conversion once;
-safe-area content margins are not subtracted from visible glass-backed content.
-Nested viewports still intersect their parent's bounds, and window clipping
-excludes content outside the screen.
-Descendant labels need no individual UIKit window anchor. Layout measurements
-retain their coordinates independently of viewport readiness and clipping.
-A positive intersection with
-both viewport and window is required, in addition to onAppear and active scene
-state: prefetched but offscreen rows cannot register for live paint. Visible
-geometry changes update shader coordinates without re-registering an unchanged
-lease. Text outside a supplied viewport retains its own window reader and is
-clipped against that window.
+Adaptive labels now attach one transparent UIKit anchor to their background.
+The anchor explicitly accepts the proposed label size. A single shared 30 Hz
+layout clock measures attached labels directly in window coordinates and checks
+their native clipping ancestors, hidden state and opacity. A zero-sized initial
+layout stays registered: the next usable display tick starts color delivery
+without another SwiftUI appearance/geometry callback or user interaction. The
+same path covers retained cells, tab entry, sheets and drawer detent changes.
+Window/local sizes preserve alignment when selection scales a row.
 
-The Library's navigation canvas, list canvas and section-level inherited text
-styles use `adaptsContainerText: false`. They retain their theme foregrounds but
-no longer receive animated paint around the app collection. Titles, subtitles,
-chevrons, selection icons and headers already have explicit foreground roles;
-those individual paints retain their vivid colors. Other screens keep the
-existing default for inherited container text. The row collection and native
-list/grid containers are unchanged.
+Layout ticks publish only changed visible placements and lease transitions.
+Offscreen anchors release paint and do not publish placement or receive animated
+frames. The layout clock has weak anchor references, cleans up abandoned anchors,
+and stops when no anchors remain or the application becomes inactive. The map
+still uses its separate shared 30 Hz clock, serial GPU worker, cached frames and
+weak leases. This adds one shared native geometry scan, not one timer or render
+per label; device performance still needs measurement with long lists.
 
-Downloads now follows the same policy for its navigation, list and section
-containers, supplies one shared text viewport, and installs row tracking on
-finished downloads, active downloads and import/status rows. Explicit labels
-retain adaptive colors while inherited container styles stay out of the live
-paint path. The empty-state overlay keeps its independent foreground tracking.
+Text activation no longer waits for a SwiftUI scroll viewport, row-local frame,
+`onAppear`, scene-phase environment change, or one-shot recovery measurement.
+The old geometry reporters, row trackers and session measurement revisions have
+been removed. `nbThemeTextRow()` and `nbThemeTextViewport()` remain as no-op source
+compatibility helpers; existing call sites do not install those observers.
+SwiftUI still owns the original controls, layout, accessibility and semantic
+foreground styles. Only small foreground views observe placement and paint.
 
-The IPA Vault and bulk install drawers also disable inherited adaptive paint
-on their canvases. Vault file and upload labels use row tracking within each
-list's shared viewport, and section titles use chrome foregrounds. File labels
-compare their name, size and selection before rebuilding. Download progress
-does not observe through the Vault screen; upload progress observes only through
-its section, publishes at 0.4-second intervals plus the final byte update, and
-compares unchanged upload rows. Directory decoding, sorting and local file
-metadata reads run off the main actor. Bulk install cells drop their progress
-views and repeating animations on disappearance while jobs continue in the
-session. Check both drawers with large queues, active transfers, selection,
-scrolling, detent changes and minimize/restore on a device; the Linux suites
-cannot measure SwiftUI frame times or verify these presentation lifecycles.
+Library, Downloads, Settings and IPA Vault keep inherited adaptive paint disabled
+on grouping containers whose labels already have explicit foreground roles.
+Vault file/upload equality checks and progress throttling remain in place.
 
-Library and Downloads cells install `nbThemeTextRow()`. One global geometry measurement
-tracks the row's movement; titles, subtitles, chevrons and selection glyphs only
-report their local offsets when their layout changes. The row tracker updates
-small foreground placement objects directly, without publishing movement or
-ink through the cell's body or environment. Each label still clips independently
-at the viewport edge and retains its own ink lease. The coordinate conversion
-accounts for the row's selection scale. Fully offscreen rows retain their latest
-geometry without publishing placement or updating their clients on each scroll
-step. Disabling adaptive ink or using the iOS 16 fallback bypasses row tracking.
+Reduce Motion receives a separately cached frame at time 1.8, matching the
+backdrop. The attachment checks shader identity so shuffling also refreshes
+frozen ink without an animation clock. Shuffling rejects old in-flight work.
+Until the matching map arrives, or if Metal setup fails, text retains its visible
+white-difference fallback. Render failures receive one immediate retry, then
+stop until a new presentation or foreground return permits recovery. Existing
+valid paint survives failed refreshes. Application suspension stops both clocks
+and invalidates pre-suspension GPU results.
 
-Weak scope leases stop the shared clock when no animated text is visible. A
-weak clock target also cleans up a discarded owner. Reduce Motion uses a
-separately cached frame at time 1.8, matching the backdrop. Shuffling discards
-old in-flight identities. Until a matching map arrives, or if Metal setup fails,
-text retains a visible white-difference fallback. A render failure gets one
-immediate retry with rebuilt Metal resources; two consecutive failures stop
-requests until the app becomes active again or all clients leave and return.
-Existing valid paint survives failed refreshes. The app's Aurora activity hook
-also suspends the map clock, rejects pre-suspension results (including failures),
-and requests fresh animated ink on resume. Text scopes revalidate their leases
-on appearance and scene activation. A deferred, coalesced session revision also
-requests fresh measurements after foregrounding.
-The first active launch also requests this deferred pass, even though the
-animation clock already started at session construction. Duplicate activation
-does not repeat it, and an interrupted launch cancels delivery until activation
-resumes. The pass preserves the current sky identity and running clock.
-Each scroll viewport keeps one UIKit reader and requests a report on appearance,
-parent/viewport movement and foreground return. Request identities allow unchanged coordinates to report
-again; the reader coalesces queued requests, rejects unattached/zero-size layout,
-and reports bounds changes as well as window/origin changes. It does not poll.
-Completed window reports reconfigure row visibility even when positions are
-unchanged. Persistent GeometryReaders capture immutable layout values for the
-viewport, each row, and each local label. `NBAuroraTextGeometryReport` delivers
-the initial value on appearance and each changed value as layout settles; it
-also replays the current value on the session's foreground revision. There are
-no temporary probes or one-shot geometry tasks to consume a provisional frame
-and then stop reporting. No deferred callback queries a retained GeometryProxy.
-UIKit reports update only window coordinates, and the viewport measurement
-owner supports either callback arriving first.
-
-Clipping only determines paint eligibility; it never replaces stored geometry
-with a null sentinel. A provisional nonempty viewport can still exclude a row
-until a tab or drawer finishes layout. Once clipping changes, retained positions
-allow immediate activation without scrolling, selection or another measurement.
-Offscreen leases still release paint and receive no animation updates. The map
-lifecycle suite covers stationary rows across provisional/settled clipping,
-drawer expansion, tab return, and offscreen movement, as well as all 120 orders
-of the initial row, label, appearance, window and clipping events. These are
-production tracker tests with platform doubles; an iOS build must still verify
-the SwiftUI callbacks and first visible frame in Settings, Downloaded, Signed
-and IPA Vault without touching or scrolling the screen.
-The scheduler inspects weak leases in one
-pass without rebuilding client collections each tick. Map size, color math and
-30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
+`run_map_tests.py` compiles the production attachment/clock and map scheduler
+against UIKit/GPU boundary doubles. It verifies a zero-to-valid layout with no
+layout callbacks, hidden-tab return, stationary drawer expansion, clipping,
+selection scale, unchanged-frame suppression, Reduce Motion/shuffle, foreground
+return, detachment and weak cleanup. A 103-row / 309-label fixture verifies that
+only the 24 visible labels receive paint and all anchors share one layout clock.
+These checks do not execute UIKit or SwiftUI's actual compositor; verify initial
+colors on an iOS build in Settings, Downloaded, Signed and IPA Vault.
 
 The cached grid approximates the per-pixel source, especially around very sharp
 hue boundaries. The fixed CPU corpus measures average maximum-channel error

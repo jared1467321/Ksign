@@ -40,12 +40,22 @@ struct NBAuroraStarfieldCache {
 // UIKit layout/conversion itself remains a platform boundary.
 struct UIColor { static let clear = UIColor() }
 @MainActor class UIView {
-    var window: UIView?
+    weak var window: UIView?
+    weak var superview: UIView?
+    var isHidden = false
+    var alpha: CGFloat = 1
+    var clipsToBounds = false
+    var windowScale = CGSize(width: 1, height: 1)
     var bounds: CGRect
     var windowOrigin = CGPoint.zero
     var isUserInteractionEnabled = true
     var backgroundColor: UIColor?
     init(frame: CGRect) { bounds = CGRect(origin: .zero, size: frame.size) }
+    func convert(_ rect: CGRect, to: UIView) -> CGRect {
+        CGRect(x: windowOrigin.x + rect.minX * windowScale.width,
+               y: windowOrigin.y + rect.minY * windowScale.height,
+               width: rect.width * windowScale.width, height: rect.height * windowScale.height)
+    }
     func didMoveToWindow() {}
     func layoutSubviews() {}
     func convert(_ point: CGPoint, to: UIView) -> CGPoint {
@@ -62,7 +72,6 @@ extension AuroraViewportView {
 // PRODUCTION_SESSION
 
 extension AuroraSession {
-    fileprivate var measurementRefreshPendingForTest: Bool { measurementRefreshPending }
     func shuffle(_ low: UInt64) {
         identity = AuroraTestIdentity(shaderIdentity: NBAuroraShaderIdentity(high: 0, low: low))
     }
@@ -88,20 +97,27 @@ final class NBAuroraInkWorker: @unchecked Sendable {
 @MainActor
 final class CADisplayLink {
     static var active: [CADisplayLink] = []
-    private let target: NBAuroraInkClock
+    private let target: AnyObject
     var preferredFramesPerSecond = 0
     private(set) var invalidated = false
-    fileprivate init(target: NBAuroraInkClock, selector: String) { self.target = target }
+    fileprivate init(target: AnyObject, selector: String) { self.target = target }
     func add(to: RunLoop, forMode: RunLoop.Mode) { Self.active.append(self) }
     func invalidate() {
         invalidated = true
         Self.active.removeAll { $0 === self }
     }
-    func tick() { target.fire(self) }
+    func tick() {
+        if let target = target as? NBAuroraInkClock { target.fire(self) }
+        if let target = target as? NBAuroraTextLayoutTick { target.fire(self) }
+    }
 }
 
 // PRODUCTION_MAP
-// PRODUCTION_ROW
+// PRODUCTION_ATTACHMENT
+
+extension NBAuroraTextLayoutClock {
+    fileprivate var linkForTest: CADisplayLink? { displayLink }
+}
 
 extension NBAuroraInkMap {
     fileprivate var busyForTest: Bool { inFlight }
@@ -113,41 +129,6 @@ extension NBAuroraInkPaint {
 
 @main
 enum InkMapLifetimeTests {
-    static func viewportMeasurementOrdering() {
-        let frame = CGRect(x: 10, y: 180, width: 380, height: 600)
-        let origin = CGPoint(x: 10, y: 160)
-        let size = CGSize(width: 400, height: 900)
-        let expectedWindow = CGRect(x: 0, y: 20, width: 400, height: 900)
-        for windowFirst in [false, true] {
-            var measurement = NBAuroraTextViewportMeasurement()
-            if windowFirst { measurement.receiveWindow(origin: origin, size: size) }
-            measurement.receiveFrame(frame)
-            if !windowFirst { measurement.receiveWindow(origin: origin, size: size) }
-            assert(measurement.frame == frame && measurement.window == expectedWindow,
-                   "Window and layout callbacks must initialize in either order")
-            // A deferred UIKit report owns only window coordinates. It cannot
-            // replace the valid SwiftUI frame with a stale proxy reading.
-            measurement.receiveWindow(origin: origin, size: size)
-            assert(measurement.frame == frame && measurement.window == expectedWindow)
-
-            let moved = CGRect(x: 10, y: 280, width: 380, height: 350)
-            measurement.receiveFrame(moved)
-            assert(measurement.window == expectedWindow,
-                   "Keep the last window until a fresh UIKit origin arrives")
-            measurement.receiveWindow(origin: CGPoint(x: 10, y: 260), size: size)
-            assert(measurement.frame == moved && measurement.window == expectedWindow,
-                   "Drawer movement and resize must pair with the new layout frame")
-            measurement.receiveFrame(.zero)
-            measurement.receiveWindow(origin: origin, size: size)
-            assert(!NBAuroraTextViewport(frame: measurement.frame, window: measurement.window).isReady)
-            measurement.receiveFrame(frame)
-            measurement.receiveWindow(origin: origin, size: size)
-            assert(measurement.frame == frame && measurement.window == expectedWindow,
-                   "Temporary zero layout must recover at the original coordinates")
-        }
-        print("Viewport pairing passed: window/layout callback ordering, frame preservation, deferred reports, drawer movement/resize and zero-layout recovery.")
-    }
-
     @MainActor
     static func viewportReporting() async {
         let view = AuroraViewportView(frame: .zero)
@@ -203,96 +184,6 @@ enum InkMapLifetimeTests {
         assert(reports[4] == reports[3], "Reattachment must recover without scrolling")
         view.onChange = nil
         print("Viewport reporting passed: late window/layout, unchanged-position replay, 100 coalesced requests, detent resizing and reattachment.")
-    }
-
-    static func viewportEdges() {
-        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
-        let list = CGRect(x: 10, y: 100, width: 380, height: 700)
-        let viewport = NBAuroraTextViewport(frame: list, window: window)
-        assert(viewport.clipping == list)
-        for pending in [NBAuroraTextViewport(clipping: .zero, window: window),
-                        NBAuroraTextViewport(clipping: list, window: nil)] {
-            assert(!pending.isReady)
-        }
-        assert(viewport.isReady)
-        // Safe-area content margins can overlap visible list content under
-        // glass bars. Eligibility follows the actual list edges, including
-        // a single visible point of a partially clipped label.
-        for y in [CGFloat(81), 100, 120, 760, 799] {
-            assert(NBAuroraTextVisibility.intersects(
-                CGRect(x: 20, y: y, width: 200, height: 20), window: window, clipping: viewport.clipping))
-        }
-        for y in [CGFloat(80), 800, 920] {
-            assert(!NBAuroraTextVisibility.intersects(
-                CGRect(x: 20, y: y, width: 200, height: 20), window: window, clipping: viewport.clipping))
-        }
-        let parent = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 140, width: 400, height: 560), window: window)
-        let nested = NBAuroraTextViewport(frame: list, window: nil, parent: parent)
-        assert(nested.clipping == CGRect(x: 10, y: 140, width: 380, height: 560) && nested.window == window,
-               "Nested lists still honor parent clipping and inherit its window")
-        assert(!NBAuroraTextVisibility.intersects(
-            CGRect(x: 20, y: 110, width: 200, height: 20), window: window, clipping: nested.clipping))
-        let outsideWindow = NBAuroraTextViewport(frame: CGRect(x: 0, y: 0, width: 400, height: 1000), window: window)
-        assert(!NBAuroraTextVisibility.intersects(
-            CGRect(x: 20, y: 950, width: 200, height: 20), window: window, clipping: outsideWindow.clipping))
-        print("Viewport edges passed: visible top/bottom strips, partial labels, offscreen exclusion and nested clipping.")
-    }
-
-    @MainActor
-    static func measurementRecovery() async {
-        let session = AuroraSession()
-        let identity = session.identity.shaderIdentity
-        let launchStart = session.activeStart
-        session.setActive(true)
-        session.setActive(true)
-        assert(session.measurementRevision == 0 && session.measurementRefreshPendingForTest,
-               "The first active launch must request a deferred measurement refresh")
-        await settle { session.measurementRevision == 1 }
-        assert(session.activeStart == launchStart && session.identity.shaderIdentity == identity,
-               "The launch refresh must preserve the running Aurora clock and sky")
-        session.setActive(true)
-        assert(!session.measurementRefreshPendingForTest,
-               "Duplicate startup activation must not schedule another refresh")
-        session.setActive(false)
-        session.setActive(false)
-        session.setActive(true)
-        session.setActive(true)
-        assert(session.measurementRevision == 1 && session.measurementRefreshPendingForTest,
-               "Remeasure only after the foreground transition has settled")
-        await settle { session.measurementRevision == 2 }
-        assert(!session.measurementRefreshPendingForTest && session.identity.shaderIdentity == identity,
-               "One return must refresh probes without shuffling the sky")
-        let pausedTime = session.accumulatedTime
-        assert(session.time(at: Date(), reduceMotion: false) >= pausedTime)
-        assert(session.time(at: Date(), reduceMotion: true) == 1.8)
-
-        session.setActive(false)
-        session.setActive(true)
-        session.setActive(false)
-        await settle { !session.measurementRefreshPendingForTest }
-        assert(session.measurementRevision == 2,
-               "Going inactive again must cancel the queued measurement refresh")
-
-        session.setActive(true)
-        session.setActive(false)
-        session.setActive(true)
-        await settle { session.measurementRevision == 3 }
-        assert(!session.measurementRefreshPendingForTest,
-               "Rapid returns coalesce into one refresh of the currently active scene")
-        session.randomize()
-        session.setActive(true)
-        assert(session.measurementRevision == 3 && !session.measurementRefreshPendingForTest,
-               "Shuffling and duplicate activation must not rebuild probes")
-        // The first startup refresh can also be interrupted before delivery.
-        let interrupted = AuroraSession()
-        interrupted.setActive(true)
-        interrupted.setActive(false)
-        await settle { !interrupted.measurementRefreshPendingForTest }
-        assert(interrupted.measurementRevision == 0)
-        interrupted.setActive(true)
-        await settle { interrupted.measurementRevision == 1 }
-        assert(!interrupted.measurementRefreshPendingForTest)
-        print("Measurement recovery passed: first active launch, duplicate activation, interrupted startup, deferred foreground refresh, coalescing, cancellation and unchanged animation clock.")
     }
 
     @MainActor
@@ -376,239 +267,176 @@ enum InkMapLifetimeTests {
     }
 
     @MainActor
-    static func initialViewportReadiness() async {
-        func orders(_ events: [Int]) -> [[Int]] {
-            if events.isEmpty { return [[]] }
-            return events.flatMap { event in
-                orders(events.filter { $0 != event }).map { [event] + $0 }
-            }
-        }
-        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
-        let clipping = CGRect(x: 0, y: 200, width: 400, height: 600)
-        let geometry = NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 210, width: 380, height: 70),
-                                               size: CGSize(width: 380, height: 70))
-        let local = CGRect(x: 70, y: 5, width: 200, height: 20)
-        for order in orders([0, 1, 2, 3, 4]) {
-            let row = NBAuroraTextRowTracker(), client = NBAuroraRowTextClient()
-            var viewport = NBAuroraTextViewport(clipping: .zero, window: nil)
-            var appeared = false
-            for event in order {
-                switch event {
-                case 0: row.move(to: geometry)
-                case 1: row.measure(client, localFrame: local)
-                case 2: appeared = true; row.setVisible(client, true)
-                case 3: viewport = NBAuroraTextViewport(clipping: viewport.clipping, window: window)
-                default: viewport = NBAuroraTextViewport(clipping: clipping, window: viewport.window)
-                }
-                row.configure(viewport: viewport, active: appeared, reduceMotion: false)
-                if !viewport.isReady { assert(!client.lease.active) }
-            }
-            assert(client.lease.active, "All initial measurement orders must activate without scrolling: \(order)")
-            if !NBAuroraInkWorker.pending.isEmpty { NBAuroraInkWorker.complete(Data([10])) }
-            await settle { client.lease.paint.frame != nil }
-            assert(client.placement.bounds == geometry.inkBounds(for: local, window: window))
-            let paint = client.lease.paint.frame!.id
-            let writes = client.placement.$bounds.writes
-            var replay = viewport
-            replay.measurementID = UUID()
-            assert(replay != viewport && replay.clipping == viewport.clipping && replay.window == viewport.window,
-                   "A completed appearance report must reach labels even at unchanged positions")
-            row.configure(viewport: replay, active: true, reduceMotion: false)
-            row.measure(client, localFrame: local)
-            assert(client.lease.paint.frame?.id == paint && client.placement.$bounds.writes == writes)
-            assert(NBAuroraInkWorker.pending.isEmpty, "Readiness replay must reuse ink without rendering again")
-            row.setVisible(client, false)
-            row.configure(viewport: replay, active: false, reduceMotion: false)
-        }
-        assert(CADisplayLink.active.isEmpty)
-        print("Initial readiness passed: all 120 orders of row, label, appearance, window and clipping measurements activate without scrolling; unchanged-position replay reuses ink.")
+    static func attachmentLifecycle() async {
+        let clock = NBAuroraTextLayoutClock.shared
+        let map = NBAuroraInkMap.shared
+        let window = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 900))
+        let clip = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 560))
+        clip.windowOrigin.y = 200
+        clip.clipsToBounds = true
+        clip.superview = window
+        let anchor = NBAuroraTextAnchorView(frame: .zero)
+        let attachment = NBAuroraTextAttachment()
+        anchor.attachment = attachment
+        anchor.superview = clip
+        clock.register(anchor)
+        assert(clock.linkForTest == nil, "An unattached label must not start a clock")
+        anchor.window = window
+        anchor.didMoveToWindow()
+        let link = clock.linkForTest!
+        for _ in 0..<10 { clock.register(anchor) }
+        assert(clock.linkForTest === link && CADisplayLink.active.count == 1,
+               "All labels share one layout clock; updates must not add clocks")
+        link.tick()
+        assert(!attachment.lease.active && NBAuroraInkWorker.pending.isEmpty,
+               "A provisional zero-size layout must wait without starting GPU work")
+
+        // Deliberately deliver NO layoutSubviews/onAppear/geometry callback.
+        // Native layout can settle after SwiftUI has sent its initial events.
+        anchor.bounds.size = CGSize(width: 200, height: 20)
+        anchor.windowOrigin = CGPoint(x: 90, y: 225)
+        link.tick()
+        assert(attachment.lease.active && NBAuroraInkWorker.pending.count == 1,
+               "The first usable native layout must start ink without user interaction")
+        NBAuroraInkWorker.complete(Data([30]))
+        await settle { !map.busyForTest }
+        assert(attachment.placement.bounds == CGRect(x: -90, y: -225, width: 400, height: 900))
+        let inkID = attachment.lease.paint.frame!.id
+        let placementWrites = attachment.placement.$bounds.writes
+        let paintWrites = attachment.lease.paint.notificationsForTest
+        for _ in 0..<60 { link.tick() }
+        assert(attachment.placement.$bounds.writes == placementWrites
+               && attachment.lease.paint.notificationsForTest == paintWrites,
+               "Unchanged layout ticks must not publish or re-register ink")
+
+        clip.isHidden = true
+        link.tick()
+        assert(!attachment.lease.active && attachment.lease.paint.frame == nil)
+        clip.isHidden = false
+        link.tick()
+        assert(attachment.lease.paint.frame?.id == inkID,
+               "Showing a retained tab must recover without a SwiftUI appearance callback")
+        clip.alpha = 0
+        link.tick()
+        assert(!attachment.lease.active)
+        clip.alpha = 1
+        clip.bounds.size.height = 1
+        link.tick()
+        assert(!attachment.lease.active)
+        clip.bounds.size.height = 560
+        link.tick()
+        assert(attachment.lease.paint.frame?.id == inkID,
+               "Expanding a drawer must activate stationary labels")
+
+        anchor.windowOrigin.y = 800
+        link.tick()
+        assert(!attachment.lease.active)
+        anchor.windowOrigin.y = 759
+        link.tick()
+        assert(attachment.lease.active, "One visible point at a clip edge is eligible")
+        anchor.windowOrigin.y = 225
+        anchor.windowScale = CGSize(width: 0.98, height: 0.98)
+        link.tick()
+        let bounds = attachment.placement.bounds
+        assert(abs(bounds.minX + 90 / 0.98) < 0.000001)
+        assert(abs(bounds.width - 400 / 0.98) < 0.000001,
+               "Selection transforms must preserve window-aligned ink")
+
+        anchor.reduceMotion = true
+        link.tick()
+        assert(NBAuroraInkWorker.pending.count == 1 && CADisplayLink.active.count == 1,
+               "Reduce Motion keeps layout tracking but stops the animated map clock")
+        NBAuroraInkWorker.complete(Data([31]))
+        await settle { !map.busyForTest }
+        assert(attachment.lease.paint.frame?.argument.bytes == Data([31]))
+        for _ in 0..<60 { link.tick() }
+        assert(NBAuroraInkWorker.pending.isEmpty)
+        let oldIdentity = AuroraSession.shared.identity.shaderIdentity
+        AuroraSession.shared.shuffle(123)
+        link.tick()
+        assert(NBAuroraInkWorker.pending.count == 1,
+               "Shuffling must refresh frozen ink even without an animated map clock")
+        NBAuroraInkWorker.complete(Data([32]))
+        await settle { !map.busyForTest }
+        assert(attachment.lease.paint.frame?.identity != oldIdentity)
+        anchor.reduceMotion = false
+        link.tick()
+        assert(NBAuroraInkWorker.pending.count == 1)
+        NBAuroraInkWorker.complete(Data([33]))
+        await settle { !map.busyForTest }
+        let resumedInkID = attachment.lease.paint.frame!.id
+
+        map.setActive(false)
+        clock.setActive(false)
+        assert(CADisplayLink.active.isEmpty && !attachment.lease.active)
+        clock.register(anchor)
+        assert(CADisplayLink.active.isEmpty, "Background updates cannot restart layout work")
+        map.setActive(true)
+        clock.setActive(true)
+        clock.linkForTest!.tick()
+        assert(attachment.lease.active && attachment.lease.paint.frame?.id == resumedInkID)
+        anchor.window = nil
+        anchor.didMoveToWindow()
+        assert(CADisplayLink.active.isEmpty && attachment.lease.paint.frame == nil)
+
+        // Weak registration must not keep removed UIKit anchors alive.
+        var orphan: NBAuroraTextAnchorView? = NBAuroraTextAnchorView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
+        orphan!.attachment = attachment
+        orphan!.window = window
+        orphan!.didMoveToWindow()
+        let orphanLink = clock.linkForTest!
+        orphanLink.tick()
+        assert(attachment.lease.active)
+        weak var retired = orphan
+        orphan = nil
+        assert(retired == nil)
+        orphanLink.tick()
+        assert(CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.isEmpty && !attachment.lease.active)
+        print("Attachment lifecycle passed: delayed first layout with no callbacks, stationary tab/drawer visibility, clipping, scales, unchanged-frame suppression, Reduce Motion and shuffle, background/resume, detachment and weak cleanup.")
     }
 
     @MainActor
-    static func stationaryLayoutRecovery() async {
-        let row = NBAuroraTextRowTracker(), client = NBAuroraRowTextClient()
-        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
-        let provisional = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 0, width: 400, height: 100),
-                                               window: window)
-        let settled = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 200, width: 400, height: 600),
-                                           window: window)
-        let geometry = NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 220, width: 360, height: 70),
-                                               size: CGSize(width: 360, height: 70))
-        let local = CGRect(x: 70, y: 5, width: 200, height: 20)
-        // A nonempty provisional viewport is "ready" but can still exclude
-        // visible rows until the presentation settles. Do not lose layout.
-        assert(provisional.isReady)
-        row.configure(viewport: provisional, active: true, reduceMotion: false)
-        row.setVisible(client, true)
-        row.measure(client, localFrame: .zero)
-        row.move(to: NBAuroraTextRowGeometry(frame: .zero, size: .zero))
-        row.measure(client, localFrame: local)
-        row.move(to: geometry)
-        assert(!client.lease.active && client.lease.paint.frame == nil)
-        row.configure(viewport: settled, active: true, reduceMotion: false)
-        assert(client.lease.active, "Settled clipping must activate stationary rows without another geometry event")
-        if !NBAuroraInkWorker.pending.isEmpty { NBAuroraInkWorker.complete(Data([30])) }
-        await settle { client.lease.paint.frame != nil }
-        let inkID = client.lease.paint.frame!.id
-        assert(client.placement.bounds == geometry.inkBounds(for: local, window: window))
-
-        // Detent changes and tab returns can change visibility without moving
-        // the row. Neither should need a selection, scroll, or label remount.
-        row.configure(viewport: provisional, active: true, reduceMotion: false)
-        assert(!client.lease.active && client.lease.paint.frame == nil)
-        row.configure(viewport: settled, active: true, reduceMotion: false)
-        assert(client.lease.paint.frame?.id == inkID)
-        row.configure(viewport: settled, active: false, reduceMotion: false)
-        row.configure(viewport: settled, active: true, reduceMotion: false)
-        assert(client.lease.paint.frame?.id == inkID)
-
-        row.configure(viewport: provisional, active: true, reduceMotion: false)
-        let writes = client.placement.$bounds.writes
-        let moved = NBAuroraTextRowGeometry(frame: geometry.frame.offsetBy(dx: 0, dy: 100), size: geometry.size)
-        row.move(to: moved)
-        assert(client.placement.$bounds.writes == writes && !client.lease.active,
-               "Retaining offscreen geometry must not publish placement or activate ink")
-        row.configure(viewport: settled, active: true, reduceMotion: false)
-        assert(client.placement.bounds == moved.inkBounds(for: local, window: window),
-               "A later viewport must use the most recent retained coordinates")
-        assert(client.lease.paint.frame?.id == inkID && NBAuroraInkWorker.pending.isEmpty)
-        row.setVisible(client, false)
-        row.configure(viewport: settled, active: false, reduceMotion: false)
-        assert(CADisplayLink.active.isEmpty)
-        print("Stationary layout recovery passed: provisional clipping, zero-to-valid layout, detent changes, tab return and retained offscreen movement activate without remeasurement.")
-    }
-
-    @MainActor
-    static func rowTracking() async {
-        let row = NBAuroraTextRowTracker()
-        let window = CGRect(x: 10, y: 20, width: 400, height: 900)
-        let viewport = NBAuroraTextViewport(clipping: CGRect(x: 10, y: 200, width: 400, height: 560),
-                                          window: window)
-        let clients = (0..<3).map { _ in NBAuroraRowTextClient() }
-        let localFrames = [CGRect(x: 70, y: 5, width: 200, height: 20),
-                           CGRect(x: 70, y: 30, width: 200, height: 20),
-                           CGRect(x: 350, y: 20, width: 10, height: 15)]
-        row.configure(viewport: viewport, active: true, reduceMotion: false)
-        for (client, frame) in zip(clients, localFrames) {
-            row.measure(client, localFrame: frame)
-            row.setVisible(client, true)
+    static func attachedListVisibility() async {
+        let clock = NBAuroraTextLayoutClock.shared
+        let map = NBAuroraInkMap.shared
+        let window = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 900))
+        let clip = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 560))
+        clip.windowOrigin.y = 200
+        clip.clipsToBounds = true
+        clip.superview = window
+        let clients = (0..<309).map { _ in NBAuroraTextAttachment() }
+        let anchors = clients.enumerated().map { index, client in
+            let view = NBAuroraTextAnchorView(frame: CGRect(x: 0, y: 0, width: 100, height: 15))
+            view.attachment = client
+            view.superview = clip
+            view.window = window
+            view.windowOrigin = CGPoint(x: 20, y: 205 + (index / 3) * 70 + (index % 3) * 20)
+            view.didMoveToWindow()
+            return view
         }
-        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 210, width: 380, height: 70),
-                                            size: CGSize(width: 380, height: 70)))
-        assert(clients.allSatisfy { $0.lease.active })
-        assert(NBAuroraInkWorker.pending.count == 1, "One row movement must share one ink render")
-        NBAuroraInkWorker.complete(Data([11]))
-        await settle { clients.allSatisfy { $0.lease.paint.frame != nil } }
-        for (client, local) in zip(clients, localFrames) {
-            assert(client.placement.bounds == CGRect(x: -10 - local.minX, y: -190 - local.minY,
-                                                     width: 400, height: 900))
+        let link = clock.linkForTest!
+        link.tick()
+        if !NBAuroraInkWorker.pending.isEmpty {
+            NBAuroraInkWorker.complete(Data([34]))
+            await settle { !map.busyForTest }
         }
-        let inkID = clients[0].lease.paint.frame!.id
-        // A genuinely invalid layout must deactivate paint; the persistent
-        // reporter can restore it when a usable layout arrives.
-        let originalGeometry = NBAuroraTextRowGeometry(
-            frame: CGRect(x: 20, y: 210, width: 380, height: 70), size: CGSize(width: 380, height: 70))
-        row.configure(viewport: viewport, active: false, reduceMotion: false)
-        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
-        row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
-        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
-        row.move(to: originalGeometry)
-        assert(clients.allSatisfy { $0.lease.active && $0.lease.paint.frame?.id == inkID },
-               "Fresh measurements must restore cached ink without scrolling")
-        assert(NBAuroraInkWorker.pending.isEmpty,
-               "Remeasuring must not trigger a redundant map render")
-        // Tab entry can retain both invalid row and local label
-        // measurements. The persistent reporters refresh both coordinate sets
-        // at the original positions, without a shuffle or a scroll.
-        row.configure(viewport: viewport, active: false, reduceMotion: false)
-        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
-        for client in clients {
-            row.setVisible(client, false)
-            row.measure(client, localFrame: .null)
-        }
-        row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
-        for client in clients { row.setVisible(client, true) }
-        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
-        row.move(to: originalGeometry)
-        assert(clients.allSatisfy { !$0.lease.active }, "The row alone cannot recover invalid label measurements")
-        for (client, frame) in zip(clients, localFrames) { row.measure(client, localFrame: frame) }
-        assert(clients.allSatisfy { $0.lease.active && $0.lease.paint.frame?.id == inkID })
-        assert(NBAuroraInkWorker.pending.isEmpty, "Tab reentry reuses cached ink")
-        // No label remeasurement: one row movement updates all three offsets.
-        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 175, width: 380, height: 70),
-                                            size: CGSize(width: 380, height: 70)))
-        assert(!clients[0].lease.active && clients[1].lease.active && clients[2].lease.active,
-               "A partially visible row still clips each label independently")
-        assert(clients[1].lease.paint.frame?.id == inkID && NBAuroraInkWorker.pending.isEmpty)
-        row.move(to: NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 730, width: 380, height: 70),
-                                            size: CGSize(width: 380, height: 70)))
-        assert(clients[0].lease.active && !clients[1].lease.active && clients[2].lease.active,
-               "The bottom edge keeps visible titles and partial icons active while excluding an offscreen subtitle")
-        assert(clients[0].lease.paint.frame?.id == inkID && clients[2].lease.paint.frame?.id == inkID)
-        let counts = clients.map { $0.placement.$bounds.writes }
-        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
-        assert(clients.allSatisfy { !$0.lease.active && $0.lease.paint.frame == nil })
-        row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
-        assert(clients.map { $0.placement.$bounds.writes } == counts,
-               "Offscreen movement must not publish placement changes")
-        assert(CADisplayLink.active.isEmpty)
-
-        // Selection scales the row by 0.98. Shader bounds must invert that
-        // transform, rather than treating local points as window points.
-        let scaled = NBAuroraTextRowGeometry(frame: CGRect(x: 24, y: 214, width: 372.4, height: 68.6),
-                                             size: CGSize(width: 380, height: 70))
-        row.move(to: scaled)
-        for (client, local) in zip(clients, localFrames) {
-            let bounds = client.placement.bounds
-            let global = scaled.globalFrame(for: local)
-            let p = CGPoint(x: 3, y: 7)
-            let u = (p.x - bounds.minX) / bounds.width
-            let v = (p.y - bounds.minY) / bounds.height
-            assert(abs(u - (global.minX + p.x * 0.98 - window.minX) / window.width) < 0.000001)
-            assert(abs(v - (global.minY + p.y * 0.98 - window.minY) / window.height) < 0.000001)
-            assert(client.lease.paint.frame?.id == inkID, "Reentry must reuse current ink")
-        }
-        let changed = CGRect(x: 90, y: 8, width: 180, height: 40)
-        row.measure(clients[0], localFrame: changed)
-        assert(clients[0].placement.bounds == scaled.inkBounds(for: changed, window: window),
-               "Wrapping/edit layout must update a label's local offset")
-        row.configure(viewport: viewport, active: false, reduceMotion: false)
-        assert(CADisplayLink.active.isEmpty && clients.allSatisfy { !$0.lease.active })
-        row.configure(viewport: viewport, active: true, reduceMotion: true)
-        assert(CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.count == 1)
-        NBAuroraInkWorker.complete(Data([12]))
-        await settle { clients.allSatisfy { $0.lease.paint.frame?.argument.bytes == Data([12]) } }
-        for client in clients { row.setVisible(client, false) }
-        assert(clients.allSatisfy { $0.lease.paint.frame == nil })
-
-        let rows = (0..<103).map { _ in NBAuroraTextRowTracker() }
-        let labels = rows.map { tracker in
-            tracker.configure(viewport: viewport, active: true, reduceMotion: false)
-            return localFrames.map { frame in
-                let client = NBAuroraRowTextClient()
-                tracker.measure(client, localFrame: frame)
-                tracker.setVisible(client, true)
-                return client
-            }
-        }
-        func scroll(_ offset: CGFloat) {
-            for (index, tracker) in rows.enumerated() {
-                let frame = CGRect(x: 20, y: 210 + CGFloat(index) * 70 - offset, width: 380, height: 70)
-                tracker.move(to: NBAuroraTextRowGeometry(frame: frame, size: frame.size))
-            }
-        }
-        scroll(0)
-        assert(labels.flatMap { $0 }.filter { $0.lease.active }.count == 24)
-        let offscreenWrites = labels.dropFirst(8).flatMap { $0 }.map { $0.placement.$bounds.writes }
-        scroll(5)
-        assert(labels.dropFirst(8).flatMap { $0 }.map { $0.placement.$bounds.writes } == offscreenWrites)
-        scroll(700)
-        assert(labels.prefix(10).flatMap { $0 }.allSatisfy { !$0.lease.active })
-        assert(labels[10..<18].flatMap { $0 }.allSatisfy { $0.lease.active })
-        assert(labels.dropFirst(18).flatMap { $0 }.allSatisfy { !$0.lease.active })
-        for tracker in rows { tracker.configure(viewport: viewport, active: false, reduceMotion: false) }
-        assert(CADisplayLink.active.isEmpty && NBAuroraInkWorker.pending.isEmpty)
-        print("Row tracking passed: shared movement, per-label clipping, offscreen suppression, cached reentry, selection scale, layout changes and Reduce Motion.")
+        assert(clients.filter { $0.lease.active }.count == 24)
+        assert(CADisplayLink.active.count == 2, "309 anchors share one layout clock and one map clock")
+        let offscreenWrites = clients.dropFirst(24).map { $0.placement.$bounds.writes }
+        for view in anchors { view.windowOrigin.y -= 1 }
+        link.tick()
+        assert(clients.dropFirst(24).map { $0.placement.$bounds.writes } == offscreenWrites)
+        assert(clients.dropFirst(24).allSatisfy { $0.lease.paint.notificationsForTest == 0 },
+               "Retained offscreen anchors must never receive paint")
+        for view in anchors { view.windowOrigin.y -= 699 }
+        link.tick()
+        assert(clients.prefix(30).allSatisfy { !$0.lease.active })
+        assert(clients[30..<54].allSatisfy { $0.lease.active && $0.lease.paint.frame != nil })
+        assert(clients.dropFirst(54).allSatisfy { !$0.lease.active })
+        assert(NBAuroraInkWorker.pending.isEmpty, "Scroll reentry must reuse the current map")
+        for view in anchors { view.window = nil; view.didMoveToWindow() }
+        assert(CADisplayLink.active.isEmpty && clients.allSatisfy { $0.lease.paint.frame == nil })
+        print("Attached list visibility passed: 103 retained rows / 309 labels share two clocks; only 24 visible labels receive paint, offscreen placement is silent, and scrolling reuses cached ink.")
     }
 
     @MainActor
@@ -622,18 +450,14 @@ enum InkMapLifetimeTests {
 
     @MainActor
     static func main() async {
-        viewportEdges()
-        viewportMeasurementOrdering()
         await viewportReporting()
-        await measurementRecovery()
         // Deterministic time input for the map coordinator tests below.
         AuroraSession.shared.activeStart = nil
         AuroraSession.shared.accumulatedTime = 12
         await transientFailure()
         await activityRecovery()
-        await rowTracking()
-        await initialViewportReadiness()
-        await stationaryLayoutRecovery()
+        await attachmentLifecycle()
+        await attachedListVisibility()
         let map = NBAuroraInkMap()
         let scopes = (0..<100).map { _ in NBAuroraInkLease() }
         for scope in scopes { map.update(scope, active: true, reduceMotion: false) }

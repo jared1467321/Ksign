@@ -21,8 +21,11 @@ def main():
     production = production.replace("@objc ", "")
     production = production.replace("#selector(NBAuroraInkClock.fire(_:))", '"fire"')
     fixture = (root / "Native/Theme/InkMapLifetime.swift").read_text()
-    row = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraTextRowTracking.swift").read_text()
-    row = row.replace("import SwiftUI\n", "")
+    attachment = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraTextAttachment.swift").read_text()
+    attachment = attachment.split("// MARK: - SwiftUI attachment")[0]
+    attachment = attachment.replace("import SwiftUI\n", "").replace("import UIKit\n", "")
+    attachment = attachment.replace("@objc ", "").replace(
+        "#selector(NBAuroraTextLayoutTick.fire(_:))", '"fire"')
     reference = (root / "NimbleKit/Sources/NimbleExtensions/View/NBAuroraReference.swift").read_text()
     session = "@MainActor\nfinal class AuroraSession" + reference.split(
         "@MainActor\nfinal class AuroraSession", 1
@@ -37,7 +40,7 @@ def main():
         folder = Path(folder)
         source = folder / "InkMapTests.swift"
         source.write_text(fixture.replace("// PRODUCTION_MAP", production)
-                          .replace("// PRODUCTION_ROW", row).replace("// PRODUCTION_SESSION", session)
+                          .replace("// PRODUCTION_ATTACHMENT", attachment).replace("// PRODUCTION_SESSION", session)
                           .replace("// PRODUCTION_VIEWPORT", viewport))
         binary = folder / "InkMapTests"
         subprocess.run([args.swiftc, "-swift-version", "6", "-parse-as-library",
