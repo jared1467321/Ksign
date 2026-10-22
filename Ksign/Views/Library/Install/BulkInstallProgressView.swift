@@ -20,6 +20,7 @@ import NimbleExtensions
 struct BulkInstallProgressView: View {
 	@ObservedObject var job: InstallJob
 	@State private var showsSkipReason = false
+	@State private var isVisible = false
 
 	// Which dot this row gets.
 	//
@@ -45,9 +46,9 @@ struct BulkInstallProgressView: View {
 
 	var body: some View {
 		VStack(spacing: 6) {
-			if job.phase == .queued {
-				// Waiting apps need one cached image, with no progress observer,
-				// second artwork layer, mask or repeating animation.
+			if job.phase == .queued || !isVisible {
+				// Waiting and retained offscreen apps need one cached image,
+				// with no progress observer, mask or repeating animation.
 				InstallStaticAppIcon(app: job.app)
 					.equatable()
 					.nbThemeOpacity(0.35)
@@ -72,6 +73,10 @@ struct BulkInstallProgressView: View {
 					.nbThemeForeground(.warning)
 			}
 		}
+		// Lazy grids retain cells after scrolling. Retained offscreen cells
+		// must release progress observers and repeating icon animations.
+		.onAppear { isVisible = true }
+		.onDisappear { isVisible = false }
 		// Finish the progress fill, then fade only this icon before retirement.
 		// Moving all remaining queued icons is deliberately not animated.
 		.opacity(job.phase == .completed ? 0 : 1)

@@ -132,7 +132,7 @@ private struct IPAVaultNginxEntry: Decodable {
     let size: Int64?
 }
 
-private struct IPAVaultRemoteFile: Identifiable, Hashable {
+private struct IPAVaultRemoteFile: Identifiable, Hashable, Sendable {
     let name: String
     let size: Int64
     let url: URL
@@ -140,7 +140,7 @@ private struct IPAVaultRemoteFile: Identifiable, Hashable {
     var id: String { url.absoluteString }
 }
 
-private struct IPAVaultLocalFile: Identifiable, Hashable {
+private struct IPAVaultLocalFile: Identifiable, Hashable, Sendable {
     let name: String
     let size: Int64
     let url: URL
@@ -155,7 +155,7 @@ private enum IPAVaultUploadState: Equatable {
     case cancelled
 }
 
-private struct IPAVaultUploadJob: Identifiable {
+private struct IPAVaultUploadJob: Identifiable, Equatable {
     let id: UUID
     let file: IPAVaultLocalFile
     let remoteURL: URL
@@ -256,19 +256,20 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
         let now = Date()
         let previous = samples[id] ?? (now, 0, 0)
         let elapsed = now.timeIntervalSince(previous.time)
-        var speed = previous.speed
+        // URLSession may call back for every network buffer. Publish one
+        // coherent row snapshot per sample, with a final byte update at EOF.
+        guard elapsed >= 0.4 || totalBytesSent == totalBytesExpectedToSend else { return }
+        let instant = Double(max(0, totalBytesSent - previous.bytes)) / max(elapsed, 0.001)
+        let speed = previous.speed > 0 ? (previous.speed * 0.7 + instant * 0.3) : instant
+        samples[id] = (now, totalBytesSent, speed)
 
-        if elapsed >= 0.4 {
-            let instant = Double(max(0, totalBytesSent - previous.bytes)) / elapsed
-            speed = previous.speed > 0 ? (previous.speed * 0.7 + instant * 0.3) : instant
-            samples[id] = (now, totalBytesSent, speed)
-        }
-
-        jobs[index].bytesSent = totalBytesSent
+        var job = jobs[index]
+        job.bytesSent = totalBytesSent
         if totalBytesExpectedToSend > 0 {
-            jobs[index].totalBytes = totalBytesExpectedToSend
+            job.totalBytes = totalBytesExpectedToSend
         }
-        jobs[index].bytesPerSecond = speed
+        job.bytesPerSecond = speed
+        jobs[index] = job
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -309,9 +310,11 @@ private final class IPAVaultUploadManager: NSObject, ObservableObject, URLSessio
 
 struct IPAVaultView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var downloadManager: IPADownloadManager
+    // Read only when performing an action; download progress never changes
+    // the server directory or its selection UI.
+    let downloadManager: IPADownloadManager
     @ObservedObject private var presentationSession = IPAVaultPresentationSession.shared
-    @ObservedObject private var uploadManager = IPAVaultUploadManager.shared
+    private let uploadManager = IPAVaultUploadManager.shared
 
     @AppStorage("Ksign.IPAVault.serverURL") private var serverURL = "http://100.89.243.68:8765/"
     @AppStorage("Ksign.IPAVault.mode") private var modeRaw = IPAVaultMode.download.rawValue
@@ -357,7 +360,7 @@ struct IPAVaultView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .nbThemeCanvas()
+            .nbThemeCanvas(adaptsText: false)
             .navigationTitle("IPA Vault")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -462,6 +465,7 @@ struct IPAVaultView: View {
                     .nbThemeForeground(.textSecondary)
                 Text("No files found")
                     .font(.headline)
+                    .nbThemeForeground(.text)
                 Text("Check the server address or add files to the VPS folder.")
                     .font(.footnote)
                     .nbThemeForeground(.textSecondary)
@@ -477,6 +481,7 @@ struct IPAVaultView: View {
                         Text(statusMessage)
                             .font(.footnote)
                             .nbThemeForeground(.textSecondary)
+                            .nbThemeTextRow()
                     }
                 }
 
@@ -485,20 +490,11 @@ struct IPAVaultView: View {
                         Button {
                             toggleRemote(file)
                         } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: presentationSession.selectedRemoteIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .nbThemeForeground(presentationSession.selectedRemoteIDs.contains(file.id) ? .accent : .textSecondary)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(file.name)
-                                        .nbThemeForeground(.text)
-                                        .lineLimit(2)
-                                    Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
-                                        .font(.caption)
-                                        .nbThemeForeground(.textSecondary)
-                                }
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
+                            IPAVaultFileLabel(
+                                name: file.name, size: file.size,
+                                isSelected: presentationSession.selectedRemoteIDs.contains(file.id)
+                            )
+                            .equatable()
                         }
                         .buttonStyle(.plain)
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -516,7 +512,7 @@ struct IPAVaultView: View {
                     }
                 } header: {
                     HStack {
-                        Text("Server")
+                        Text("Server").nbThemeChromeForeground(.textSecondary)
                         Spacer()
                         Button(presentationSession.selectedRemoteIDs.count == remoteFiles.count ? "Clear" : "Select All") {
                             if presentationSession.selectedRemoteIDs.count == remoteFiles.count {
@@ -525,13 +521,15 @@ struct IPAVaultView: View {
                                 presentationSession.selectedRemoteIDs = Set(remoteFiles.map(\.id))
                             }
                         }
+                        .nbThemeForeground(.accent)
                     }
                 }
                 }
-                .nbThemeRow()
+                .nbThemeRow(adaptsText: false)
             }
             .listStyle(.insetGrouped)
-            .nbThemeCanvas()
+            .nbThemeCanvas(rendersAurora: false, adaptsText: false)
+            .nbThemeTextViewport()
             .refreshable { await refreshRemoteFiles() }
         }
     }
@@ -540,55 +538,30 @@ struct IPAVaultView: View {
     private var localContent: some View {
         List {
             Group {
-            if !uploadManager.jobs.isEmpty {
-                Section("Uploads") {
-                    ForEach(uploadManager.jobs) { job in
-                        IPAVaultUploadRow(job: job, manager: uploadManager)
-                    }
-
-                    if uploadManager.jobs.contains(where: {
-                        switch $0.state {
-                        case .completed, .cancelled: return true
-                        default: return false
-                        }
-                    }) {
-                        Button("Clear Finished") {
-                            uploadManager.clearFinished()
-                        }
-                    }
-                }
-            }
+            IPAVaultUploadSection()
 
             Section {
                 if localFiles.isEmpty {
                     Text("No files are in Ksign's Downloads folder.")
                         .nbThemeForeground(.textSecondary)
+                        .nbThemeTextRow()
                 } else {
                     ForEach(localFiles) { file in
                         Button {
                             toggleLocal(file)
                         } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: presentationSession.selectedLocalIDs.contains(file.id) ? "checkmark.circle.fill" : "circle")
-                                    .nbThemeForeground(presentationSession.selectedLocalIDs.contains(file.id) ? .accent : .textSecondary)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(file.name)
-                                        .nbThemeForeground(.text)
-                                        .lineLimit(2)
-                                    Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
-                                        .font(.caption)
-                                        .nbThemeForeground(.textSecondary)
-                                }
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
+                            IPAVaultFileLabel(
+                                name: file.name, size: file.size,
+                                isSelected: presentationSession.selectedLocalIDs.contains(file.id)
+                            )
+                            .equatable()
                         }
                         .buttonStyle(.plain)
                     }
                 }
             } header: {
                 HStack {
-                    Text("Ksign Downloads")
+                    Text("Ksign Downloads").nbThemeChromeForeground(.textSecondary)
                     Spacer()
                     if !localFiles.isEmpty {
                         Button(presentationSession.selectedLocalIDs.count == localFiles.count ? "Clear" : "Select All") {
@@ -598,14 +571,16 @@ struct IPAVaultView: View {
                                 presentationSession.selectedLocalIDs = Set(localFiles.map(\.id))
                             }
                         }
+                        .nbThemeForeground(.accent)
                     }
                 }
             }
             }
-            .nbThemeRow()
+            .nbThemeRow(adaptsText: false)
         }
         .listStyle(.insetGrouped)
-        .nbThemeCanvas()
+        .nbThemeCanvas(rendersAurora: false, adaptsText: false)
+        .nbThemeTextViewport()
         .refreshable { await refreshLocalFiles() }
     }
 
@@ -616,6 +591,7 @@ struct IPAVaultView: View {
                 Divider().nbThemeOverlay(.separator)
                 Toggle("Tuning logs", isOn: $diagnosticsEnabled)
                     .font(.subheadline)
+                    .nbThemeForeground(.text)
                     .padding(.horizontal)
                     .padding(.vertical, 8)
                     .accessibilityHint("Save detailed download diagnostics in the Asign Logs folder")
@@ -842,19 +818,21 @@ struct IPAVaultView: View {
                 throw NSError(domain: "IPAVault", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Server returned HTTP \(http.statusCode)."])
             }
 
-            let entries = try JSONDecoder().decode([IPAVaultNginxEntry].self, from: data)
-            remoteFiles = entries.compactMap { entry in
-                guard entry.type == "file",
-                      !entry.name.hasPrefix(".ipavault-"),
-                      let size = entry.size,
-                      size > 0 else { return nil }
-                return IPAVaultRemoteFile(
-                    name: entry.name,
-                    size: size,
-                    url: baseURL.appendingPathComponent(entry.name, isDirectory: false)
-                )
-            }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            remoteFiles = try await Task.detached(priority: .userInitiated) {
+                let entries = try JSONDecoder().decode([IPAVaultNginxEntry].self, from: data)
+                return entries.compactMap { entry in
+                    guard entry.type == "file",
+                          !entry.name.hasPrefix(".ipavault-"),
+                          let size = entry.size,
+                          size > 0 else { return nil }
+                    return IPAVaultRemoteFile(
+                        name: entry.name,
+                        size: size,
+                        url: baseURL.appendingPathComponent(entry.name, isDirectory: false)
+                    )
+                }
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            }.value
 
             presentationSession.selectedRemoteIDs = presentationSession.selectedRemoteIDs.intersection(Set(remoteFiles.map(\.id)))
             errorMessage = nil
@@ -871,21 +849,23 @@ struct IPAVaultView: View {
 
         do {
             let directory = URL.documentsDirectory.appendingPathComponent("Downloads", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let urls = try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            )
+            localFiles = try await Task.detached(priority: .userInitiated) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let urls = try FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                    options: [.skipsHiddenFiles]
+                )
 
-            localFiles = urls.compactMap { url in
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                      values.isRegularFile == true,
-                      let size = values.fileSize,
-                      size > 0 else { return nil }
-                return IPAVaultLocalFile(name: url.lastPathComponent, size: Int64(size), url: url)
-            }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                return urls.compactMap { url in
+                    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                          values.isRegularFile == true,
+                          let size = values.fileSize,
+                          size > 0 else { return nil }
+                    return IPAVaultLocalFile(name: url.lastPathComponent, size: Int64(size), url: url)
+                }
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            }.value
 
             presentationSession.selectedLocalIDs = presentationSession.selectedLocalIDs.intersection(Set(localFiles.map(\.id)))
             errorMessage = nil
@@ -896,15 +876,75 @@ struct IPAVaultView: View {
     }
 }
 
-private struct IPAVaultUploadRow: View {
+// Independent row inputs keep selection changes from rebuilding unchanged
+// label/geometry subtrees or formatting every file size again.
+private struct IPAVaultFileLabel: View, Equatable {
+    let name: String
+    let size: Int64
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .nbThemeForeground(isSelected ? .accent : .textSecondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name)
+                    .nbThemeForeground(.text)
+                    .lineLimit(2)
+                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                    .font(.caption)
+                    .nbThemeForeground(.textSecondary)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .nbThemeTextRow()
+    }
+}
+
+// Transfer progress invalidates this section, leaving the selectable directory
+// and its toolbar out of the upload update path.
+private struct IPAVaultUploadSection: View {
+    @ObservedObject private var manager = IPAVaultUploadManager.shared
+
+    var body: some View {
+        if !manager.jobs.isEmpty {
+            Section {
+                ForEach(manager.jobs) { job in
+                    IPAVaultUploadRow(job: job, manager: manager)
+                        .equatable()
+                }
+                if manager.jobs.contains(where: {
+                    switch $0.state {
+                    case .completed, .cancelled: return true
+                    default: return false
+                    }
+                }) {
+                    Button("Clear Finished") { manager.clearFinished() }
+                        .nbThemeForeground(.accent)
+                        .nbThemeTextRow()
+                }
+            } header: {
+                Text("Uploads").nbThemeChromeForeground(.textSecondary)
+            }
+        }
+    }
+}
+
+private struct IPAVaultUploadRow: View, Equatable {
     let job: IPAVaultUploadJob
     let manager: IPAVaultUploadManager
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.job == rhs.job && lhs.manager === rhs.manager
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(job.file.name)
+                        .nbThemeForeground(.text)
                         .lineLimit(1)
                     Text(detail)
                         .font(.caption)
@@ -920,6 +960,7 @@ private struct IPAVaultUploadRow: View {
             }
         }
         .padding(.vertical, 2)
+        .nbThemeTextRow()
     }
 
     private var detail: String {
@@ -946,6 +987,7 @@ private struct IPAVaultUploadRow: View {
                 manager.cancel(job.id)
             } label: {
                 Image(systemName: "xmark.circle.fill")
+                    .nbThemeForeground(.danger)
             }
             .buttonStyle(.borderless)
         case .failed:
@@ -953,6 +995,7 @@ private struct IPAVaultUploadRow: View {
                 manager.retry(job.id)
             } label: {
                 Image(systemName: "arrow.clockwise.circle.fill")
+                    .nbThemeForeground(.accent)
             }
             .buttonStyle(.borderless)
         case .completed:

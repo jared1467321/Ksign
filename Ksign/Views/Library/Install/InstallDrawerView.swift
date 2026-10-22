@@ -105,6 +105,7 @@ struct InstallDrawerSheet: View {
 				HStack(spacing: 14) {
 					Text(_title)
 						.font(.headline)
+						.nbThemeForeground(.heading)
 
 					Spacer(minLength: 0)
 
@@ -220,7 +221,9 @@ struct InstallDrawerSheet: View {
 			InstallDrawerApps()
 				.equatable()
 		}
-		.nbThemeCanvas()
+		// Labels own their ink; an inherited animated foreground here would
+		// invalidate the entire grid on every map frame.
+		.nbThemeCanvas(adaptsText: false)
 		// Nested inside the drawer, the way it used to be nested inside the row.
 		.sheet(item: $session.webviewJob) { job in
 			// The server is built lazily now, so this is only reachable once
@@ -334,5 +337,6 @@ private struct InstallDrawerApps: View, Equatable {
 			BulkInstallPreviewView()
 				.padding(.bottom, 20)
 		}
+		.nbThemeTextViewport()
 	}
 }

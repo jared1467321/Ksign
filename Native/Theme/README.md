@@ -112,6 +112,19 @@ finished downloads, active downloads and import/status rows. Explicit labels
 retain adaptive colors while inherited container styles stay out of the live
 paint path. The empty-state overlay keeps its independent foreground tracking.
 
+The IPA Vault and bulk install drawers also disable inherited adaptive paint
+on their canvases. Vault file and upload labels use row tracking within each
+list's shared viewport, and section titles use chrome foregrounds. File labels
+compare their name, size and selection before rebuilding. Download progress
+does not observe through the Vault screen; upload progress observes only through
+its section, publishes at 0.4-second intervals plus the final byte update, and
+compares unchanged upload rows. Directory decoding, sorting and local file
+metadata reads run off the main actor. Bulk install cells drop their progress
+views and repeating animations on disappearance while jobs continue in the
+session. Check both drawers with large queues, active transfers, selection,
+scrolling, detent changes and minimize/restore on a device; the Linux suites
+cannot measure SwiftUI frame times or verify these presentation lifecycles.
+
 Library and Downloads cells install `nbThemeTextRow()`. One global geometry measurement
 tracks the row's movement; titles, subtitles, chevrons and selection glyphs only
 report their local offsets when their layout changes. The row tracker updates
