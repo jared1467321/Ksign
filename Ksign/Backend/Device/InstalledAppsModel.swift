@@ -22,7 +22,7 @@ final class InstalledAppsModel: ObservableObject {
             let manager = DeviceInstallationManager.shared
             let workflow = UUID()
             manager.clearSetupFailure()
-            manager.retainWorkflow(workflow)
+            manager.retainWorkflow(workflow, requiresVPNChoice: true)
             BackgroundTaskManager.shared.claim(.installedApps)
             var succeeded = false
             defer {
@@ -34,10 +34,15 @@ final class InstalledAppsModel: ObservableObject {
             do {
                 let installed = try await manager.installedApps()
                 try Task.checkCancellation()
-                apps = installed.sorted {
-                    let order = $0.name.localizedStandardCompare($1.name)
-                    return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
-                }
+                let dated = await Task.detached(priority: .userInitiated) {
+                    installed.map { app in
+                        var app = app
+                        app.registrationDate = InstalledAppDates.registrationDate(for: app.id)
+                        return app
+                    }.sorted(by: IDeviceInstalledApp.newestFirst)
+                }.value
+                try Task.checkCancellation()
+                apps = dated
                 hasLoaded = true
                 succeeded = true
             } catch is CancellationError {

@@ -157,11 +157,28 @@ source trees from the chunk-size experiment.
 - When the workflow ends, Ksign removes the protected temporary pairing file
   and stops a VPN connection it started. It leaves an already connected VPN
   alone. A new VPN connection may replace another active VPN.
-- **Installed Apps** is a separate main tab. Choose **Load Installed Apps** or
+- **Library → Installed Apps** is the third segment beside Downloaded Apps and
+  Signed Apps; the original bottom tabs, including App Store, remain available.
+  Choose **Load Installed Apps** or
   **Refresh** to query iOS over the selected iDevice connection (Built-in or
   Manual). It lists user-installed apps regardless of whether an IPA or library
   record exists in Ksign. The list includes App Store apps and apps installed
   elsewhere: iOS's app inventory does not identify the original installer.
+  After loading/refreshing, Ksign shows the existing **Reconnect VPN** banner
+  with its reconnect and dismiss buttons, as after background installs/setup.
+  Loading the list does not open Shortcuts or a share sheet automatically.
+  Tapping the reminder uses the selected reconnect method: run the shortcut or
+  choose it from the existing share sheet. Dismissing the sheet leaves the
+  reminder available. If the device is locked when loading finishes, the existing
+  reconnect notification and saved pending request let you choose after unlock
+  or relaunch. Native connection/pairing cleanup still runs. Installs/setup/removal
+  otherwise keep their configured behavior; a refresh overlapping another workflow
+  leaves the manual reminder instead of launching the shortcut automatically.
+  Apps are sorted newest first using LaunchServices' reported registration
+  dates, which can change after an update or reinstall. Missing dates sort last;
+  equal/missing dates use name and bundle ID for stable ordering. If iOS does
+  not expose any dates, the screen explains the alphabetical fallback instead
+  of inventing dates from library files or when an app was first observed.
   Search by name or bundle identifier. Tap a row to review removal, hold it for
   **Uninstall from Device…**, or use **Edit**, select multiple apps, and choose **Uninstall**.
   Select All applies to the visible search results. Review the selected names

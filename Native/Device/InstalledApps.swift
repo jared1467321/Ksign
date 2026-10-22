@@ -8,7 +8,21 @@ public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
     public let applicationIdentifier: String?
     public let applicationType: String?
     public let isRemovable: Bool?
+    public var registrationDate: Date?
     public var id: String { bundleIdentifier }
+
+    /// Newest device registration first, unknown dates last. Stable ties keep
+    /// the list from jumping when dates are unavailable or shared by a batch.
+    public static func newestFirst(_ lhs: Self, _ rhs: Self) -> Bool {
+        switch (lhs.registrationDate, rhs.registrationDate) {
+        case let (left?, right?) where left != right: return left > right
+        case (.some, .none): return true
+        case (.none, .some): return false
+        default:
+            let order = lhs.name.localizedStandardCompare(rhs.name)
+            return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+        }
+    }
 
     public func removalRestriction(hostBundleIdentifier: String?) -> String? {
         if bundleIdentifier == hostBundleIdentifier {

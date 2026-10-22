@@ -120,6 +120,7 @@ struct LibraryView: View {
 	@Environment(\.nbInspectedThemeRole) private var inspectedThemeRole
 	@StateObject var downloadManager = DownloadManager.shared
 	@StateObject private var _exportManager = BulkExportManager()
+    @StateObject private var _installedApps = InstalledAppsModel()
 	@AppStorage("Feather.useLastExportLocation") private var _useLastExportLocation: Bool = false
 	
 	@State private var _selectedInfoAppPresenting: AnyApp?
@@ -134,7 +135,7 @@ struct LibraryView: View {
 
 	@State private var _alertDownloadString: String = "" // for _isDownloadingPresenting
 	@State private var _searchText = ""
-	@State private var _selectedTab: Int = 0 // 0 for Downloaded, 1 for Signed
+	@State private var _selectedTab: Int = 0 // Downloaded = 0, Signed = 1, Installed = 2
 	
 	// MARK: Edit Mode
     @State private var _isEditMode: EditMode = .inactive
@@ -187,6 +188,7 @@ struct LibraryView: View {
 				Picker("", selection: $_selectedTab) {
 					Text(.localized("Downloaded Apps")).tag(0)
 					Text(.localized("Signed Apps")).tag(1)
+                    Text("Installed Apps").tag(2)
 				}
 				.pickerStyle(SegmentedPickerStyle())
                 .frame(height: 36)
@@ -196,48 +198,52 @@ struct LibraryView: View {
 				
                 // Each cell's labels own their adaptive paint. Keep the list
                 // and section foregrounds out of the frame-update path.
-				NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
-					if _selectedTab == 0 {
-						NBSection(
-							.localized("Downloaded Apps"),
-							secondary: _filteredImportedApps.count.description
-						) {
-							ForEach(_filteredImportedApps, id: \.uuid) { app in
-								LibraryCellView(
-									app: app,
-									selectedInfoAppPresenting: $_selectedInfoAppPresenting,
-									selectedSigningAppPresenting: $_selectedSigningAppPresenting,
-									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
-									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
-									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
-									isSelected: _selectedApps.contains(app.uuid ?? ""),
-									onToggleSelection: { _toggleSelection(for: app) }
-								)
-							}
-						}
-					} else {
-						NBSection(
-							.localized("Signed Apps"),
-							secondary: _filteredSignedApps.count.description
-						) {
-							ForEach(_filteredSignedApps, id: \.uuid) { app in
-								LibraryCellView(
-									app: app,
-									selectedInfoAppPresenting: $_selectedInfoAppPresenting,
-									selectedSigningAppPresenting: $_selectedSigningAppPresenting,
-									selectedInstallAppPresenting: $_selectedInstallAppPresenting,
-									selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
-									cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
-									isSelected: _selectedApps.contains(app.uuid ?? ""),
-									onToggleSelection: { _toggleSelection(for: app) }
-								)
-							}
-						}
-					}
-				}
+                if _selectedTab == 2 {
+                    InstalledAppsView(model: _installedApps)
+                } else {
+                    NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
+                        if _selectedTab == 0 {
+                            NBSection(
+                                .localized("Downloaded Apps"),
+                                secondary: _filteredImportedApps.count.description
+                            ) {
+                                ForEach(_filteredImportedApps, id: \.uuid) { app in
+                                    LibraryCellView(
+                                        app: app,
+                                        selectedInfoAppPresenting: $_selectedInfoAppPresenting,
+                                        selectedSigningAppPresenting: $_selectedSigningAppPresenting,
+                                        selectedInstallAppPresenting: $_selectedInstallAppPresenting,
+                                        selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
+                                        cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
+                                        isSelected: _selectedApps.contains(app.uuid ?? ""),
+                                        onToggleSelection: { _toggleSelection(for: app) }
+                                    )
+                                }
+                            }
+                        } else {
+                            NBSection(
+                                .localized("Signed Apps"),
+                                secondary: _filteredSignedApps.count.description
+                            ) {
+                                ForEach(_filteredSignedApps, id: \.uuid) { app in
+                                    LibraryCellView(
+                                        app: app,
+                                        selectedInfoAppPresenting: $_selectedInfoAppPresenting,
+                                        selectedSigningAppPresenting: $_selectedSigningAppPresenting,
+                                        selectedInstallAppPresenting: $_selectedInstallAppPresenting,
+                                        selectedAppDylibsPresenting: $_selectedAppDylibsPresenting,
+                                        cryptCheckExtracted: { app in _runCryptCheckExtracted(app) },
+                                        isSelected: _selectedApps.contains(app.uuid ?? ""),
+                                        onToggleSelection: { _toggleSelection(for: app) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    .searchable(text: $_searchText, placement: inspectedThemeRole == nil
+                        ? .platform() : .navigationBarDrawer(displayMode: .always))
+                }
 			}
-			.searchable(text: $_searchText, placement: inspectedThemeRole == nil
-                ? .platform() : .navigationBarDrawer(displayMode: .always))
             .onAppear {
                 // This is local to the copied Library view, not the user's
                 // real search. An entered term makes Search Text visible.
@@ -247,6 +253,7 @@ struct LibraryView: View {
             }
             .nbThemeOverlay {
                 if
+                    _selectedTab != 2,
                     _filteredSignedApps.isEmpty,
                     _filteredImportedApps.isEmpty
                 {
@@ -269,9 +276,11 @@ struct LibraryView: View {
             }
 			.toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
-                    _editButton
-                    if _isEditMode.isEditing {
-                        _selectAllButton
+                    if _selectedTab != 2 {
+                        _editButton
+                        if _isEditMode.isEditing {
+                            _selectAllButton
+                        }
                     }
                 }
                 // This group is ALWAYS here, in edit mode or out of it. It used
@@ -286,40 +295,42 @@ struct LibraryView: View {
                 // longer responds to taps. Keeping one stable group and swapping
                 // its contents means the bar never has to add or remove a slot.
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    if _isEditMode.isEditing {
-                        if _selectedTab == 0 {
-                            _barButton("signature", enabled: !_selectedApps.isEmpty) {
-                                _bulkSignRequest = BulkSignRequest(apps: _resolveSelectedApps(), signAndInstall: false)
+                    if _selectedTab != 2 {
+                        if _isEditMode.isEditing {
+                            if _selectedTab == 0 {
+                                _barButton("signature", enabled: !_selectedApps.isEmpty) {
+                                    _bulkSignRequest = BulkSignRequest(apps: _resolveSelectedApps(), signAndInstall: false)
+                                }
+                                _barButton("arrow.down.app", enabled: !_selectedApps.isEmpty) {
+                                    _bulkSignRequest = BulkSignRequest(apps: _resolveSelectedApps(), signAndInstall: true)
+                                }
+                            } else {
+                                _barButton("square.and.arrow.down", enabled: !_selectedApps.isEmpty) {
+                                    InstallSession.shared.start(apps: _resolveSelectedApps())
+                                }
                             }
-                            _barButton("arrow.down.app", enabled: !_selectedApps.isEmpty) {
-                                _bulkSignRequest = BulkSignRequest(apps: _resolveSelectedApps(), signAndInstall: true)
+
+                            _barButton(
+                                "square.and.arrow.up",
+                                enabled: !_selectedApps.isEmpty && !_exportManager.isExporting
+                            ) {
+                                _exportManager.start(apps: _resolveSelectedApps())
+                            }
+
+                            _barButton("lock.open", enabled: !_selectedApps.isEmpty && !_cryptCheckExtractedRunning) {
+                                _bulkCryptCheckExtractedSelected()
+                            }
+
+                            _barButton("trash", enabled: !_selectedApps.isEmpty) {
+                                _bulkDeleteSelectedApps()
                             }
                         } else {
-                            _barButton("square.and.arrow.down", enabled: !_selectedApps.isEmpty) {
-                                InstallSession.shared.start(apps: _resolveSelectedApps())
+                            Menu {
+                                _importActions()
+                            } label: {
+                                Image(systemName: "plus")
+                                    .nbThemeForeground(.accent)
                             }
-                        }
-
-                        _barButton(
-                            "square.and.arrow.up",
-                            enabled: !_selectedApps.isEmpty && !_exportManager.isExporting
-                        ) {
-                            _exportManager.start(apps: _resolveSelectedApps())
-                        }
-
-                        _barButton("lock.open", enabled: !_selectedApps.isEmpty && !_cryptCheckExtractedRunning) {
-                            _bulkCryptCheckExtractedSelected()
-                        }
-
-                        _barButton("trash", enabled: !_selectedApps.isEmpty) {
-                            _bulkDeleteSelectedApps()
-                        }
-                    } else {
-                        Menu {
-                            _importActions()
-                        } label: {
-                            Image(systemName: "plus")
-                                .nbThemeForeground(.accent)
                         }
                     }
                 }

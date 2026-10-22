@@ -34,6 +34,7 @@ final class VPNReconnectCoordinator: ObservableObject {
     private var requestID: String?
     private var tappedRequestID: String?
     private var deviceWorkActive = false
+    private var userChoiceRequested = false
     private var openingShortcut = false
     private var shareSheetRequestID: String?
     private let defaults: UserDefaults
@@ -81,16 +82,21 @@ final class VPNReconnectCoordinator: ObservableObject {
         return components.url
     }
 
-    func beginDeviceWork() {
+    func beginDeviceWork(requiresUserChoice: Bool = false) {
         deviceWorkActive = true
+        // Inventory refreshes leave the existing reconnect reminder available
+        // without presenting a sheet or opening Shortcuts automatically.
+        userChoiceRequested = userChoiceRequested || requiresUserChoice
         clearPendingRequest()
         notice = nil
     }
 
     func deviceWorkFinished(restoreVPN: Bool) async {
         deviceWorkActive = false
+        let requiresChoice = userChoiceRequested
+        userChoiceRequested = false
         guard restoreVPN else { return }
-        await requestReconnect()
+        await requestReconnect(automaticallyPresent: !requiresChoice)
     }
 
     func testShortcut() async {
@@ -103,7 +109,7 @@ final class VPNReconnectCoordinator: ObservableObject {
         notice = nil
     }
 
-    private func requestReconnect() async {
+    private func requestReconnect(automaticallyPresent: Bool = true) async {
         guard defaults.bool(forKey: Self.enabledKey), !deviceWorkActive, !openingShortcut else { return }
         let name = (defaults.string(forKey: Self.shortcutNameKey) ?? Self.defaultShortcutName)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -118,7 +124,8 @@ final class VPNReconnectCoordinator: ObservableObject {
         defaults.set(name, forKey: Self.pendingNameKey)
         defaults.set(id, forKey: Self.pendingIDKey)
         if isForeground() {
-            await runPendingShortcut()
+            if automaticallyPresent { await runPendingShortcut() }
+            else { notice = "Tap Reconnect VPN when you want to run \(name)." }
         } else {
             notice = "Tap the reconnect notification, or return to Ksign and tap Reconnect VPN."
             let delivered = await notify(name, id)

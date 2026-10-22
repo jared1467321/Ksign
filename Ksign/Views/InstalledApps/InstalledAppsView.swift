@@ -4,7 +4,8 @@ import NimbleViews
 import NimbleExtensions
 
 struct InstalledAppsView: View {
-    @StateObject private var model = InstalledAppsModel()
+    @ObservedObject var model: InstalledAppsModel
+    @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @State private var searchText = ""
     @State private var isEditing = false
     @State private var selectedIDs: Set<String> = []
@@ -22,85 +23,94 @@ struct InstalledAppsView: View {
     }
 
     var body: some View {
-        NBNavigationView("Installed Apps", adaptsContainerText: false) {
-            NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
-                NBSection("On This Device", secondary: model.hasLoaded ? model.apps.count.description : nil) {
-                    Text("Apps reported by iOS, including apps that aren't saved in Ksign's library.")
+        NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
+            if reconnect.pendingShortcutName != nil {
+                NBSection("Reconnect VPN") {
+                    VPNReconnectBannerView()
+                }
+            }
+            NBSection("On This Device", secondary: model.hasLoaded ? model.apps.count.description : nil) {
+                Text("Apps reported by iOS, including apps that aren't saved in Ksign's library.")
+                    .font(.callout).nbThemeForeground(.textSecondary)
+                if model.hasLoaded {
+                    Text(model.apps.contains(where: { $0.registrationDate != nil })
+                         ? "Newest first. Apps without an available date are listed last."
+                         : "iOS did not provide installation dates. Apps are listed by name.")
+                        .font(.caption).nbThemeForeground(.textSecondary)
+                }
+                if model.isLoading {
+                    ProgressView("Loading installed apps…").nbThemeTint(.accent)
+                    Button("Cancel Loading", role: .cancel) { model.cancelLoading() }
+                } else if !model.hasLoaded {
+                    Text("Uses your iDevice connection. Select Built-in Connection or Manual Setup in Settings → Installation.")
                         .font(.callout).nbThemeForeground(.textSecondary)
-                    if model.isLoading {
-                        ProgressView("Loading installed apps…").nbThemeTint(.accent)
-                        Button("Cancel Loading", role: .cancel) { model.cancelLoading() }
-                    } else if !model.hasLoaded {
-                        Text("Uses your iDevice connection. Select Built-in Connection or Manual Setup in Settings → Installation.")
-                            .font(.callout).nbThemeForeground(.textSecondary)
-                        Button("Load Installed Apps") { model.load() }
-                    }
-                    if let error = model.error {
-                        Text(error).font(.callout).nbThemeForeground(.danger)
-                    }
+                    Button("Load Installed Apps") { model.load() }
                 }
-                if !visibleApps.isEmpty {
-                    NBSection("Installed Apps", secondary: visibleApps.count.description) {
-                        ForEach(visibleApps) { app in
-                            InstalledAppRow(app: app, restriction: restriction(app), isEditing: isEditing,
-                                isSelected: selectedIDs.contains(app.id),
-                                onToggle: { toggle(app) },
-                                onUninstall: { removal = DeviceUninstallSelection(apps: [app]) })
-                                .allowsHitTesting(!model.isLoading)
-                        }
-                    }
-                } else if model.hasLoaded, !model.isLoading {
-                    NBSection("Installed Apps") {
-                        Text(searchText.isEmpty ? "No user apps were reported by iOS." : "No apps match your search.")
-                            .nbThemeForeground(.textSecondary)
-                    }
+                if let error = model.error {
+                    Text(error).font(.callout).nbThemeForeground(.danger)
                 }
-                DeviceConnectionSetupView(failureInstructions: "Once connected, tap Refresh in Installed Apps.")
             }
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
-            .refreshable { await refresh() }
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    Button(isEditing ? "Done" : "Edit") {
-                        isEditing.toggle()
-                        if !isEditing { selectedIDs.removeAll() }
-                    }
-                    .disabled(!model.hasLoaded || model.isLoading)
-                    if isEditing {
-                        Button {
-                            let visible = selectableVisibleIDs
-                            if visible.isSubset(of: selectedIDs) { selectedIDs.subtract(visible) }
-                            else { selectedIDs.formUnion(visible) }
-                        } label: {
-                            SelectionCheckIcon(isSelected: !selectableVisibleIDs.isEmpty && selectableVisibleIDs.isSubset(of: selectedIDs))
-                        }
-                        .accessibilityLabel("Select or deselect all visible apps")
-                        .disabled(selectableVisibleIDs.isEmpty || model.isLoading)
+            if !visibleApps.isEmpty {
+                NBSection("Installed Apps", secondary: visibleApps.count.description) {
+                    ForEach(visibleApps) { app in
+                        InstalledAppRow(app: app, restriction: restriction(app), isEditing: isEditing,
+                            isSelected: selectedIDs.contains(app.id),
+                            onToggle: { toggle(app) },
+                            onUninstall: { removal = DeviceUninstallSelection(apps: [app]) })
+                            .allowsHitTesting(!model.isLoading)
                     }
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if isEditing {
-                        Button(role: .destructive) {
-                            removal = DeviceUninstallSelection(apps: model.apps.filter { selectedIDs.contains($0.id) })
-                        } label: {
-                            Label("Uninstall \(selectedIDs.count)", systemImage: "minus.circle")
-                        }
-                        .disabled(selectedIDs.isEmpty || model.isLoading)
-                    }
+            } else if model.hasLoaded, !model.isLoading {
+                NBSection("Installed Apps") {
+                    Text(searchText.isEmpty ? "No user apps were reported by iOS." : "No apps match your search.")
+                        .nbThemeForeground(.textSecondary)
+                }
+            }
+            DeviceConnectionSetupView(failureInstructions: "Once connected, tap Refresh in Installed Apps.")
+        }
+        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
+        .refreshable { await refresh() }
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarLeading) {
+                Button(isEditing ? "Done" : "Edit") {
+                    isEditing.toggle()
+                    if !isEditing { selectedIDs.removeAll() }
+                }
+                .disabled(!model.hasLoaded || model.isLoading)
+                if isEditing {
                     Button {
-                        selectedIDs.removeAll()
-                        model.load()
+                        let visible = selectableVisibleIDs
+                        if visible.isSubset(of: selectedIDs) { selectedIDs.subtract(visible) }
+                        else { selectedIDs.formUnion(visible) }
                     } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        SelectionCheckIcon(isSelected: !selectableVisibleIDs.isEmpty && selectableVisibleIDs.isSubset(of: selectedIDs))
                     }
-                    .disabled(model.isLoading)
+                    .accessibilityLabel("Select or deselect all visible apps")
+                    .disabled(selectableVisibleIDs.isEmpty || model.isLoading)
                 }
             }
-            .sheet(item: $removal) { selection in
-                UninstallAppsView(selection: selection) { bundleIdentifier in
-                    model.remove(bundleIdentifier)
-                    selectedIDs.remove(bundleIdentifier)
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if isEditing {
+                    Button(role: .destructive) {
+                        removal = DeviceUninstallSelection(apps: model.apps.filter { selectedIDs.contains($0.id) })
+                    } label: {
+                        Label("Uninstall \(selectedIDs.count)", systemImage: "minus.circle")
+                    }
+                    .disabled(selectedIDs.isEmpty || model.isLoading)
                 }
+                Button {
+                    selectedIDs.removeAll()
+                    model.load()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.isLoading)
+            }
+        }
+        .sheet(item: $removal) { selection in
+            UninstallAppsView(selection: selection) { bundleIdentifier in
+                model.remove(bundleIdentifier)
+                selectedIDs.remove(bundleIdentifier)
             }
         }
     }
@@ -149,6 +159,12 @@ private struct InstalledAppRow: View {
                 Text(app.id).font(.caption).nbThemeForeground(.textSecondary)
                 if let version = app.version {
                     Text(version).font(.caption).nbThemeForeground(.textSecondary)
+                }
+                if let date = app.registrationDate {
+                    Text("Installed or updated \(date.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption).nbThemeForeground(.textSecondary)
+                } else {
+                    Text("Install date unavailable").font(.caption).nbThemeForeground(.textSecondary)
                 }
                 if let restriction {
                     Text(restriction).font(.caption).nbThemeForeground(.textSecondary)

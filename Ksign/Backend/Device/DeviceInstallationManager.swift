@@ -79,8 +79,8 @@ final class DeviceInstallationManager: ObservableObject {
         switch phase { case .connecting, .pairing, .failed: return true; default: return false }
     }
 
-    func retainWorkflow(_ id: UUID) {
-        vpnReconnect.beginDeviceWork()
+    func retainWorkflow(_ id: UUID, requiresVPNChoice: Bool = false) {
+        vpnReconnect.beginDeviceWork(requiresUserChoice: requiresVPNChoice)
         workflows.insert(id)
     }
     func releaseWorkflow(_ id: UUID) { workflows.remove(id); cleanUpIfIdle() }
@@ -141,7 +141,7 @@ final class DeviceInstallationManager: ObservableObject {
     func installedApps() async throws -> [IDeviceInstalledApp] {
         let selectedMode = mode
         var apps: [IDeviceInstalledApp] = []
-        try await enqueue {
+        try await enqueue(requiresVPNChoice: true) {
             while self.exclusiveInstallation != nil ||
                 (!self.activeInstallations.isEmpty &&
                  (self.needsConnectionRecovery || self.configuredMode != selectedMode)) {
@@ -270,9 +270,10 @@ final class DeviceInstallationManager: ObservableObject {
         }
     }
 
-    private func enqueue(countsOperation: Bool = true, _ body: @escaping () async throws -> Void) async throws {
+    private func enqueue(countsOperation: Bool = true, requiresVPNChoice: Bool = false,
+                         _ body: @escaping () async throws -> Void) async throws {
         if countsOperation {
-            vpnReconnect.beginDeviceWork()
+            vpnReconnect.beginDeviceWork(requiresUserChoice: requiresVPNChoice)
             pendingOperations += 1
         }
         let id = UUID()

@@ -41,10 +41,13 @@ def main():
         flags = ["-swift-version", "5"]
         if sys.platform == "darwin":
             flags += ["-target", platform.machine() + "-apple-macosx14.0"]
+        coordinator = [str(ROOT / "Ksign/Backend/Device/VPNReconnectCoordinator.swift")] if sys.platform == "darwin" else []
         subprocess.run([compiler, *flags,
                         str(ROOT / "Native/Device/InstallPreflight.swift"),
                         str(ROOT / "Native/Device/InstalledApps.swift"),
                         str(ROOT / "Native/Device/UninstallRequest.swift"),
+                        str(ROOT / "Ksign/Backend/Device/InstalledAppDates.swift"),
+                        *coordinator,
                         str(ROOT / "Tests/DeviceUninstall/main.swift"),
                         "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True)
