@@ -89,6 +89,9 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                                  paint: lease.paint)
             .background {
                 GeometryReader { proxy in
+                    // Resolve the proxy during layout. Deferred callbacks use
+                    // this value rather than querying a retained layout proxy.
+                    let measured = proxy.frame(in: .global)
                     Color.clear
                         .onGeometryChange(for: CGRect.self) { geometry in
                             clippedFrame(geometry.frame(in: .global))
@@ -96,13 +99,11 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                         .onChange(of: scrollViewport) { _ in
                             // A restored viewport can make a culled label
                             // visible even when its layout never moves.
-                            receive(clippedFrame(proxy.frame(in: .global)))
+                            receive(clippedFrame(measured))
                         }
                     if scrollViewport == nil {
                         AuroraViewportReader { reported in
-                            // Pair the UIKit origin with a fresh SwiftUI frame,
-                            // not a cached frame from before a layout change.
-                            let measured = proxy.frame(in: .global)
+                            // Pair UIKit's report with the captured layout value.
                             viewport = reported
                             viewportFrame = measured
                             receive(measured)

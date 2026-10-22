@@ -22,8 +22,7 @@ public extension View {
 private struct NBAuroraTextViewportModifier: ViewModifier {
     @Environment(\.nbAuroraTextViewport) private var parent
     @ObservedObject private var session = AuroraSession.shared
-    @State private var frame = CGRect.zero
-    @State private var window: CGRect?
+    @State private var measurement = NBAuroraTextViewportMeasurement()
     @State private var measurementID = UUID()
     @State private var completedMeasurementID: UUID?
     @State private var appeared = false
@@ -32,12 +31,12 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
         let request = measurementID
         content
             .environment(\.nbAuroraTextViewport,
-                         NBAuroraTextViewport(frame: frame, window: window, parent: parent,
+                         NBAuroraTextViewport(frame: measurement.frame, window: measurement.window, parent: parent,
                                               measurementID: completedMeasurementID))
             .onGeometryChange(for: CGRect.self) { proxy in
                 proxy.frame(in: .global)
             } action: {
-                frame = $0
+                measurement.receiveFrame($0)
                 // Pair a changed SwiftUI frame with a fresh window report.
                 // Reusing an old UIKit origin here can produce false clipping.
                 requestMeasurement()
@@ -45,17 +44,14 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
             .background {
                 // One window-coordinate reader for the list, rather than one
                 // UIKit anchor for every title, subtitle and chevron.
-                GeometryReader { proxy in
-                    AuroraViewportReader(reportID: request) { viewport in
-                        guard appeared, measurementID == request else { return }
-                        // Read both coordinate systems together after return.
-                        frame = proxy.frame(in: .global)
-                        updateWindow(viewport)
-                        if NBAuroraTextViewport(frame: frame, window: window, parent: parent).isReady {
-                            completedMeasurementID = request
-                        }
+                AuroraViewportReader(reportID: request) { viewport in
+                    guard appeared, measurementID == request else { return }
+                    measurement.receiveWindow(origin: viewport.origin, size: viewport.size)
+                    if NBAuroraTextViewport(frame: measurement.frame, window: measurement.window, parent: parent).isReady {
+                        completedMeasurementID = request
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
@@ -68,12 +64,5 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
     private func requestMeasurement() {
         guard appeared else { return }
         measurementID = UUID()
-    }
-
-    private func updateWindow(_ viewport: AuroraViewport) {
-        guard !frame.isEmpty else { return }
-        window = CGRect(x: frame.minX - viewport.origin.x,
-                        y: frame.minY - viewport.origin.y,
-                        width: viewport.size.width, height: viewport.size.height)
     }
 }

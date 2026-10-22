@@ -61,10 +61,11 @@ private struct NBAuroraTextRowModifier: ViewModifier {
                 if let request = remeasurement {
                     // Keep recovery probes out of the normal scrolling path.
                     GeometryReader { proxy in
+                        let measured = NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
+                            .clipped(to: viewport)
                         Color.clear.task(id: request) {
                             guard remeasurement == request else { return }
-                            receive(NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
-                                .clipped(to: viewport))
+                            receive(measured)
                         }
                     }
                     .id(request)
@@ -123,9 +124,10 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
             .background {
                 if let request = remeasurement {
                     GeometryReader { proxy in
+                        let measured = proxy.frame(in: .named(row.coordinateSpaceID))
                         Color.clear.task(id: request) {
                             guard remeasurement == request else { return }
-                            receive(proxy.frame(in: .named(row.coordinateSpaceID)))
+                            receive(measured)
                         }
                     }
                     .id(request)

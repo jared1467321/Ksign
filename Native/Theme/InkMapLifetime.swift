@@ -113,6 +113,41 @@ extension NBAuroraInkPaint {
 
 @main
 enum InkMapLifetimeTests {
+    static func viewportMeasurementOrdering() {
+        let frame = CGRect(x: 10, y: 180, width: 380, height: 600)
+        let origin = CGPoint(x: 10, y: 160)
+        let size = CGSize(width: 400, height: 900)
+        let expectedWindow = CGRect(x: 0, y: 20, width: 400, height: 900)
+        for windowFirst in [false, true] {
+            var measurement = NBAuroraTextViewportMeasurement()
+            if windowFirst { measurement.receiveWindow(origin: origin, size: size) }
+            measurement.receiveFrame(frame)
+            if !windowFirst { measurement.receiveWindow(origin: origin, size: size) }
+            assert(measurement.frame == frame && measurement.window == expectedWindow,
+                   "Window and layout callbacks must initialize in either order")
+            // A deferred UIKit report owns only window coordinates. It cannot
+            // replace the valid SwiftUI frame with a stale proxy reading.
+            measurement.receiveWindow(origin: origin, size: size)
+            assert(measurement.frame == frame && measurement.window == expectedWindow)
+
+            let moved = CGRect(x: 10, y: 280, width: 380, height: 350)
+            measurement.receiveFrame(moved)
+            assert(measurement.window == expectedWindow,
+                   "Keep the last window until a fresh UIKit origin arrives")
+            measurement.receiveWindow(origin: CGPoint(x: 10, y: 260), size: size)
+            assert(measurement.frame == moved && measurement.window == expectedWindow,
+                   "Drawer movement and resize must pair with the new layout frame")
+            measurement.receiveFrame(.zero)
+            measurement.receiveWindow(origin: origin, size: size)
+            assert(!NBAuroraTextViewport(frame: measurement.frame, window: measurement.window).isReady)
+            measurement.receiveFrame(frame)
+            measurement.receiveWindow(origin: origin, size: size)
+            assert(measurement.frame == frame && measurement.window == expectedWindow,
+                   "Temporary zero layout must recover at the original coordinates")
+        }
+        print("Viewport pairing passed: window/layout callback ordering, frame preservation, deferred reports, drawer movement/resize and zero-layout recovery.")
+    }
+
     @MainActor
     static func viewportReporting() async {
         let view = AuroraViewportView(frame: .zero)
@@ -527,6 +562,7 @@ enum InkMapLifetimeTests {
     @MainActor
     static func main() async {
         viewportEdges()
+        viewportMeasurementOrdering()
         await viewportReporting()
         await measurementRecovery()
         // Deterministic time input for the map coordinator tests below.

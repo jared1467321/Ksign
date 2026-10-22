@@ -153,6 +153,12 @@ again; the reader coalesces queued requests, rejects unattached/zero-size layout
 and reports bounds changes as well as window/origin changes. It does not poll.
 Completed layout reports propagate a viewport-local measurement identity so
 both rows and their local labels refresh even when their positions are unchanged.
+Global list frames are captured by SwiftUI's geometry callback, while deferred
+UIKit reports update only window coordinates. Neither the viewport's queued
+report nor a row/label recovery task retains and queries a GeometryProxy later;
+recovery tasks consume immutable geometry captured during layout. The viewport
+measurement owner supports either callback arriving first and cannot overwrite
+a valid global frame from a deferred window callback.
 Early label/row positions survive until the window and clipping area are ready;
 visibility still excludes them from ink delivery until then. Ready viewports
 retain the stable null sentinel for offscreen text. Temporary GeometryReaders
@@ -263,7 +269,10 @@ the window boundary. Initial readiness tests cover all 120 orders of row, label,
 appearance, window and clipping measurements without scrolling. The production
 UIKit reader runs with layout/conversion doubles to check late attachment,
 zero-size layout, unchanged-position reports, 100 coalesced requests, drawer
-resizing and reattachment. SwiftUI task scheduling, actual coordinate conversion
+resizing and reattachment. The production viewport measurement owner is also
+tested for both callback orders, preservation of the latest SwiftUI frame,
+deferred window reports, moved/resized drawers and temporary zero-size recovery.
+SwiftUI task scheduling, actual coordinate conversion
 and the reported iPhone appearance still require an iOS build and device check.
 
 Run `python3 Native/Theme/run_chrome_tests.py` (or pass `--swiftc PATH`) to check
