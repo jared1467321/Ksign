@@ -12,6 +12,7 @@ enum TabEnum: String, CaseIterable, Hashable {
     case files
 	case sources
 	case library
+    case installed
 	case settings
 	case certificates
 	case appstore
@@ -21,6 +22,7 @@ enum TabEnum: String, CaseIterable, Hashable {
         case .files:        return .localized("Files")
 		case .sources:     	return .localized("Sources")
 		case .library: 		return .localized("Library")
+        case .installed:    return "Installed Apps"
 		case .settings: 	return .localized("Settings")
 		case .certificates:	return .localized("Certificates")
 		case .appstore: 	return .localized("App Store")
@@ -33,6 +35,7 @@ enum TabEnum: String, CaseIterable, Hashable {
         case .files:        return "folder.fill"
 		case .sources: 		return "globe.desk"
 		case .library: 		return "square.grid.2x2"
+        case .installed:    return "app.badge.checkmark"
 		case .settings: 	return "gearshape.2"
 		case .certificates: return "person.text.rectangle"
 		case .appstore: 	return "plus.app.fill"
@@ -46,6 +49,7 @@ enum TabEnum: String, CaseIterable, Hashable {
         case .files: FilesView()
 		case .sources: SourcesView()
 		case .library: LibraryView()
+        case .installed: InstalledAppsView()
 		case .settings: SettingsView()
 		case .certificates: NBNavigationView(.localized("Certificates")) { CertificatesView() }
 		case .appstore: AppstoreView()
@@ -57,6 +61,7 @@ enum TabEnum: String, CaseIterable, Hashable {
 		return [
             .files,
             .library,
+            .installed,
             .appstore,
             .downloader,
 			.settings,

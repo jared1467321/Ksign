@@ -118,7 +118,7 @@ pub unsafe extern "C" fn ksign_pairing_string_free(value: *mut c_char) {
     if !value.is_null() { drop(unsafe { CString::from_raw(value) }); }
 }
 
-/// Read-only, targeted lookup. Return only the identity needed for preflight,
+/// Read-only, targeted lookup. Return a compact summary for preflight/removal,
 /// without exporting Rust-owned plist arrays or unrelated installed-app data.
 /// A null output means the bundle is not installed. Free non-null output with
 /// ksign_pairing_string_free. The client is borrowed exclusively until return.
@@ -139,17 +139,7 @@ pub unsafe extern "C" fn ksign_installation_lookup(
     };
     let result: Result<Option<String>, idevice::IdeviceError> = run_sync_local(async {
         let apps = unsafe { &mut *client }.0.get_apps(None, Some(vec![bundle.clone()])).await?;
-        Ok(apps.get(&bundle).map(|app| {
-            let application_identifier = app.as_dictionary()
-                .and_then(|app| app.get("Entitlements"))
-                .and_then(|entitlements| entitlements.as_dictionary())
-                .and_then(|entitlements| entitlements.get("application-identifier"))
-                .and_then(|identifier| identifier.as_string());
-            serde_json::json!({
-                "bundleIdentifier": bundle,
-                "applicationIdentifier": application_identifier,
-            }).to_string()
-        }))
+        Ok(apps.get(&bundle).map(|app| installation_app_summary(&bundle, app).to_string()))
     });
     match result {
         Ok(Some(value)) => match CString::new(value) {
@@ -159,6 +149,57 @@ pub unsafe extern "C" fn ksign_installation_lookup(
         Ok(None) => std::ptr::null_mut(),
         Err(error) => ffi_err!(error),
     }
+}
+
+/// Enumerate user apps directly from the paired device. Keep Rust plist
+/// ownership inside this bridge; Swift receives one JSON string and frees it
+/// with ksign_pairing_string_free after decoding.
+#[cfg(feature = "installation_proxy")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ksign_installation_list(
+    client: *mut crate::installation_proxy::InstallationProxyClientHandle,
+    out_apps: *mut *mut c_char,
+) -> *mut IdeviceFfiError {
+    if client.is_null() || out_apps.is_null() {
+        return ffi_err!(idevice::IdeviceError::FfiInvalidArg);
+    }
+    unsafe { *out_apps = std::ptr::null_mut(); }
+    let result: Result<String, idevice::IdeviceError> = run_sync_local(async {
+        let apps = unsafe { &mut *client }.0.get_apps(Some("User"), None).await?;
+        let summaries: Vec<_> = apps.iter()
+            .map(|(bundle, app)| installation_app_summary(bundle, app))
+            .collect();
+        Ok(serde_json::Value::Array(summaries).to_string())
+    });
+    match result {
+        Ok(value) => match CString::new(value) {
+            Ok(value) => { unsafe { *out_apps = value.into_raw(); } std::ptr::null_mut() }
+            Err(_) => ffi_err!(idevice::IdeviceError::FfiInvalidString),
+        },
+        Err(error) => ffi_err!(error),
+    }
+}
+
+#[cfg(feature = "installation_proxy")]
+fn installation_app_summary(bundle: &str, app: &plist::Value) -> serde_json::Value {
+    let dictionary = app.as_dictionary();
+    let string = |key: &str| dictionary.and_then(|app| app.get(key))
+        .and_then(|value| value.as_string()).filter(|value| !value.is_empty());
+    let application_identifier = dictionary
+        .and_then(|app| app.get("Entitlements"))
+        .and_then(|entitlements| entitlements.as_dictionary())
+        .and_then(|entitlements| entitlements.get("application-identifier"))
+        .and_then(|identifier| identifier.as_string());
+    let is_removable = dictionary.and_then(|app| app.get("IsRemovable"))
+        .and_then(|value| value.as_boolean());
+    serde_json::json!({
+        "bundleIdentifier": bundle,
+        "name": string("CFBundleDisplayName").or_else(|| string("CFBundleName")).unwrap_or(bundle),
+        "version": string("CFBundleShortVersionString").or_else(|| string("CFBundleVersion")),
+        "applicationIdentifier": application_identifier,
+        "applicationType": string("ApplicationType"),
+        "isRemovable": is_removable,
+    })
 }
 
 #[cfg(test)]

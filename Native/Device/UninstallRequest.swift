@@ -1,38 +1,32 @@
 import Foundation
 
-/// Removal requires a known signing identity from the selected signed artifact.
-/// A bundle ID alone could accidentally target a different installed copy.
+/// Capture the app the user reviewed in the device list. Recheck that snapshot
+/// immediately before removal without requiring a locally saved signed app.
 public struct IDeviceUninstallRequest: Sendable {
     public let bundleIdentifier: String
-    let applicationIdentifier: String
+    let applicationIdentifier: String?
 
-    public init(bundleIdentifier: String, executableURL: URL) throws {
-        guard let identity = try MachOSigningIdentity.read(executableURL)?.applicationIdentifier else {
-            throw IDeviceInstallSkip(reason: "The signed app's identity could not be verified. Sign it again before uninstalling from Ksign.")
+    public init(installedApp: IDeviceInstalledApp, hostBundleIdentifier: String? = Bundle.main.bundleIdentifier) throws {
+        if let reason = installedApp.removalRestriction(hostBundleIdentifier: hostBundleIdentifier) {
+            throw IDeviceInstallSkip(reason: reason)
         }
-        try self.init(bundleIdentifier: bundleIdentifier, applicationIdentifier: identity)
+        bundleIdentifier = installedApp.bundleIdentifier
+        applicationIdentifier = installedApp.applicationIdentifier
     }
 
-    init(bundleIdentifier: String, applicationIdentifier: String) throws {
-        guard !bundleIdentifier.isEmpty, !bundleIdentifier.contains("\0"),
-              bundleIdentifier == bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines),
-              applicationIdentifier.hasSuffix("." + bundleIdentifier),
-              applicationIdentifier.count > bundleIdentifier.count + 1 else {
-            throw IDeviceInstallSkip(reason: "The signed app's bundle identifier and signing identity do not match.")
-        }
-        self.bundleIdentifier = bundleIdentifier
-        self.applicationIdentifier = applicationIdentifier
-    }
-
-    /// False means already absent. Unknown or different identities fail closed.
-    func validate(_ installed: IDeviceInstalledApplication?, hostBundleIdentifier: String?) throws -> Bool {
+    /// False means already absent. If iOS reports a different identity now, the
+    /// user must refresh and review that copy before sending another command.
+    func validate(_ installed: IDeviceInstalledApp?, hostBundleIdentifier: String?) throws -> Bool {
         guard bundleIdentifier != hostBundleIdentifier else {
             throw IDeviceInstallSkip(reason: "Ksign cannot uninstall itself. Remove it from the Home Screen if needed.")
         }
         guard let installed else { return false }
+        if let reason = installed.removalRestriction(hostBundleIdentifier: hostBundleIdentifier) {
+            throw IDeviceInstallSkip(reason: reason)
+        }
         guard installed.bundleIdentifier == bundleIdentifier,
-              installed.applicationIdentifier == applicationIdentifier else {
-            throw IDeviceInstallSkip(reason: "The installed app's signing identity does not match this signed copy. Remove it from the Home Screen if you intend to delete that copy.")
+              applicationIdentifier == nil || installed.applicationIdentifier == applicationIdentifier else {
+            throw IDeviceInstallSkip(reason: "The selected app changed or could not be verified. Refresh Installed Apps and review it again before uninstalling.")
         }
         return true
     }

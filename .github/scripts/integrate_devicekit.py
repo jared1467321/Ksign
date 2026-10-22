@@ -101,6 +101,7 @@ def transform(inputs):
         "IDeviceInstallationWorker.swift": "InstallationProxy/IDeviceInstallationWorker.swift",
         "InstallPreflight.swift": "InstallationProxy/InstallPreflight.swift",
         "UninstallRequest.swift": "InstallationProxy/UninstallRequest.swift",
+        "InstalledApps.swift": "InstallationProxy/InstalledApps.swift",
     }.items():
         outputs["Sources/IDeviceSwift/" + destination] = (TEMPLATES / name).read_text()
     return outputs

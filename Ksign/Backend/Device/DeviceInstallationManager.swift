@@ -138,6 +138,33 @@ final class DeviceInstallationManager: ObservableObject {
         }
     }
 
+    func installedApps() async throws -> [IDeviceInstalledApp] {
+        let selectedMode = mode
+        var apps: [IDeviceInstalledApp] = []
+        try await enqueue {
+            while self.exclusiveInstallation != nil ||
+                (!self.activeInstallations.isEmpty &&
+                 (self.needsConnectionRecovery || self.configuredMode != selectedMode)) {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            try Task.checkCancellation()
+            if self.needsConnectionRecovery {
+                self.configuredMode = nil
+                self.needsConnectionRecovery = false
+            }
+            try await self.prepare(selectedMode)
+            do {
+                apps = try await InstallationProxy(viewModel: InstallerStatusViewModel()).installedApps()
+            } catch {
+                if !(error is CancellationError), !(error is IDeviceInstallationRejection) {
+                    self.needsConnectionRecovery = true
+                }
+                throw error
+            }
+        }
+        return apps
+    }
+
     /// Hold the preparation queue until removal completes. Previously admitted
     /// installs drain first; no new install can reserve the connection meanwhile.
     func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {

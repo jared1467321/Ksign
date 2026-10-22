@@ -164,6 +164,27 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         } onCancel: { [cancellation] in cancellation.cancel() }
     }
 
+    /// Read installed user apps from iOS, without consulting the local library.
+    public func installedApps() async throws -> [IDeviceInstalledApp] {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await IDeviceInstallationWorker.performInstallation { [self] in
+                try checkCancellation()
+                return try withDeviceClient { client in
+                    var output: UnsafeMutablePointer<CChar>?
+                    defer { ksign_pairing_string_free(output) }
+                    try check(ksign_installation_list(client, &output))
+                    try checkCancellation()
+                    guard let output else {
+                        throw IDeviceSwiftError(message: "iOS did not return an installed-app list. Refresh to try again.")
+                    }
+                    return try JSONDecoder().decode([IDeviceInstalledApp].self,
+                        from: Data(String(cString: output).utf8))
+                }
+            }
+        } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
     /// Returns false when already absent. Once the command is sent, await its
     /// result even if cancelled: removal may already have committed on device.
     public func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {
@@ -171,28 +192,16 @@ public final class InstallationProxy: Identifiable, ObservableObject {
             try Task.checkCancellation()
             return try await IDeviceInstallationWorker.performInstallation { [self] in
                 try checkCancellation()
-                let heartbeat = HeartbeatManager.shared
-                let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
-                defer { withExtendedLifetime(connection) {} }
-                let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
-                defer { idevice_provider_free(provider) }
-                var client: OpaquePointer?
-                defer { installation_proxy_client_free(client) }
-                if let connection {
-                    try connection.withServiceConnection { adapter, handshake in
-                        try check(installation_proxy_connect_rsd(adapter, handshake, &client))
+                return try withDeviceClient { client in
+                    let installed = try lookup(request.bundleIdentifier, client: client)
+                    guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
+                    try checkCancellation()
+                    try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
+                    guard try lookup(request.bundleIdentifier, client: client) == nil else {
+                        throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
                     }
-                } else {
-                    try check(installation_proxy_connect(provider, &client))
+                    return true
                 }
-                let installed = try lookup(request.bundleIdentifier, client: client)
-                guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
-                try checkCancellation()
-                try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
-                guard try lookup(request.bundleIdentifier, client: client) == nil else {
-                    throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
-                }
-                return true
             }
         } onCancel: { [cancellation] in cancellation.cancel() }
     }
@@ -290,17 +299,39 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         try checkCancellation()
         guard let installed = result else { return }
         guard installed.bundleIdentifier == preflight.bundleIdentifier else { return }
-        try preflight.validateInstalledApplication(installed)
+        try preflight.validateInstalledApplication(IDeviceInstalledApplication(
+            bundleIdentifier: installed.bundleIdentifier, applicationIdentifier: installed.applicationIdentifier))
         try checkCancellation()
     }
 
-    private func lookup(_ bundleIdentifier: String, client: OpaquePointer?) throws -> IDeviceInstalledApplication? {
+    private func lookup(_ bundleIdentifier: String, client: OpaquePointer?) throws -> IDeviceInstalledApp? {
         var output: UnsafeMutablePointer<CChar>?
         defer { ksign_pairing_string_free(output) }
         try check(ksign_installation_lookup(client, bundleIdentifier, &output))
         guard let output else { return nil }
-        return try JSONDecoder().decode(IDeviceInstalledApplication.self,
+        return try JSONDecoder().decode(IDeviceInstalledApp.self,
             from: Data(String(cString: output).utf8))
+    }
+
+    // Keep the shared tunnel leased until the client has been freed. Native
+    // client creation, use and destruction all happen on the same worker.
+    private func withDeviceClient<T>(_ body: (OpaquePointer?) throws -> T) throws -> T {
+        let heartbeat = HeartbeatManager.shared
+        let connection = heartbeat.isRsd ? try heartbeat.acquireRSDConnection() : nil
+        defer { withExtendedLifetime(connection) {} }
+        let provider = connection == nil ? try makeLegacyProvider(heartbeat) : nil
+        defer { idevice_provider_free(provider) }
+        var client: OpaquePointer?
+        defer { installation_proxy_client_free(client) }
+        if let connection {
+            try connection.withServiceConnection { adapter, handshake in
+                try check(installation_proxy_connect_rsd(adapter, handshake, &client))
+            }
+        } else {
+            try check(installation_proxy_connect(provider, &client))
+        }
+        try checkCancellation()
+        return try body(client)
     }
 
     private func installSynchronously(at url: URL, suspend: Bool,

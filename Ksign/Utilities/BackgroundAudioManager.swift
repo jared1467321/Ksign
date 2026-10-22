@@ -61,6 +61,7 @@ final class BackgroundAudioManager {
 		case bulkInstalls
 		case singleInstall
         case uninstalling
+        case installedApps
 		case downloads
 		case bulkExport
 		case importing
@@ -75,6 +76,7 @@ final class BackgroundAudioManager {
 			case .bulkInstalls:		return "Bulk installs"
 			case .singleInstall:	return "Install"
             case .uninstalling: return "Uninstall"
+            case .installedApps: return "Installed apps"
 			case .downloads:		return "Downloads"
 			case .bulkExport:		return "Bulk export"
 			case .importing:		return "Import"

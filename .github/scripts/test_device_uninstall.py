@@ -31,6 +31,7 @@ def main():
         target = kit / "Sources/IDeviceSwift/InstallationProxy/UninstallRequest.swift"
         assert target.read_text() == overlays.MARKER + (ROOT / "Native/Device/UninstallRequest.swift").read_text()
         assert (kit / "Sources/IDeviceSwift/InstallationProxy/InstallationProxy.swift").read_text() == overlays.MARKER + (ROOT / "Native/Device/InstallationProxy.swift").read_text()
+        assert (kit / "Sources/IDeviceSwift/InstallationProxy/InstalledApps.swift").read_text() == overlays.MARKER + (ROOT / "Native/Device/InstalledApps.swift").read_text()
         print("Device overlays validated against pinned upstream sources", flush=True)
         compiler = shutil.which("swiftc")
         if not compiler:
@@ -42,6 +43,7 @@ def main():
             flags += ["-target", platform.machine() + "-apple-macosx14.0"]
         subprocess.run([compiler, *flags,
                         str(ROOT / "Native/Device/InstallPreflight.swift"),
+                        str(ROOT / "Native/Device/InstalledApps.swift"),
                         str(ROOT / "Native/Device/UninstallRequest.swift"),
                         str(ROOT / "Tests/DeviceUninstall/main.swift"),
                         "-o", str(executable)], check=True)
