@@ -58,6 +58,10 @@ public struct IDeviceInstallPreflight {
         throw IDeviceInstallSkip(reason: "This app targets \(names), not iOS or iPadOS.")
     }
 
+    public static func signingApplicationIdentifier(executableURL: URL) throws -> String? {
+        try MachOSigningIdentity.read(executableURL)?.applicationIdentifier
+    }
+
     public static func checkSigningIdentity(executableURL: URL,
                                             installed: IDeviceInstalledApplication) throws {
         guard let existing = installed.applicationIdentifier, !existing.isEmpty,

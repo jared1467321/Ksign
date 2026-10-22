@@ -32,14 +32,18 @@ final class InstalledAppsModel: ObservableObject {
                 loadTask = nil
             }
             do {
+                let registry = IDeviceManagedInstallRegistry.shared
+                let observed = try registry.snapshot()
                 let installed = try await manager.installedApps()
                 try Task.checkCancellation()
-                let dated = await Task.detached(priority: .userInitiated) {
-                    installed.map { app in
+                let dated = try await Task.detached(priority: .userInitiated) {
+                    let dated = installed.map { app in
                         var app = app
-                        app.registrationDate = InstalledAppDates.registrationDate(for: app.id)
+                        app.registrationDate = IDeviceInstalledAppDates.registrationDate(for: app.id)
                         return app
-                    }.sorted(by: IDeviceInstalledApp.newestFirst)
+                    }
+                    return try registry.reconcile(dated, observed: observed,
+                        hostBundleIdentifier: Bundle.main.bundleIdentifier).sorted(by: IDeviceInstalledApp.newestFirst)
                 }.value
                 try Task.checkCancellation()
                 apps = dated

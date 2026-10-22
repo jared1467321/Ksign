@@ -30,8 +30,10 @@ struct InstalledAppsView: View {
                 }
             }
             NBSection("On This Device", secondary: model.hasLoaded ? model.apps.count.description : nil) {
-                Text("Apps reported by iOS, including apps that aren't saved in Ksign's library.")
+                Text("Only verified apps installed through Ksign appear here. Their IPA files don't need to be kept in your library.")
                     .font(.callout).nbThemeForeground(.textSecondary)
+                Text("Apps installed before tracking was added must be installed through Ksign again to appear here.")
+                    .font(.caption).nbThemeForeground(.textSecondary)
                 if model.hasLoaded {
                     Text(model.apps.contains(where: { $0.registrationDate != nil })
                          ? "Newest first. Apps without an available date are listed last."
@@ -62,7 +64,7 @@ struct InstalledAppsView: View {
                 }
             } else if model.hasLoaded, !model.isLoading {
                 NBSection("Installed Apps") {
-                    Text(searchText.isEmpty ? "No user apps were reported by iOS." : "No apps match your search.")
+                    Text(searchText.isEmpty ? "No verified Ksign-installed apps are on this device." : "No apps match your search.")
                         .nbThemeForeground(.textSecondary)
                 }
             }

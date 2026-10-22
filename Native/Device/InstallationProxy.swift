@@ -194,12 +194,16 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                 try checkCancellation()
                 return try withDeviceClient { client in
                     let installed = try lookup(request.bundleIdentifier, client: client)
-                    guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
+                    guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else {
+                        try request.didRemove()
+                        return false
+                    }
                     try checkCancellation()
                     try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
                     guard try lookup(request.bundleIdentifier, client: client) == nil else {
                         throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
                     }
+                    try request.didRemove()
                     return true
                 }
             }
@@ -309,8 +313,10 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         defer { ksign_pairing_string_free(output) }
         try check(ksign_installation_lookup(client, bundleIdentifier, &output))
         guard let output else { return nil }
-        return try JSONDecoder().decode(IDeviceInstalledApp.self,
+        var app = try JSONDecoder().decode(IDeviceInstalledApp.self,
             from: Data(String(cString: output).utf8))
+        app.registrationDate = IDeviceInstalledAppDates.registrationDate(for: app.id)
+        return app
     }
 
     // Keep the shared tunnel leased until the client has been freed. Native
@@ -440,6 +446,18 @@ public final class InstallationProxy: Identifiable, ObservableObject {
             DispatchQueue.main.async { UIApplication.shared.perform(#selector(NSXPCConnection.suspend)) }
         }
         try check(installation_proxy_install_with_callback(proxy, stagingPath, nil, Self.progressCallback, context))
+        // This command has committed. Record it before checking cancellation,
+        // which must not erase a successful install's ownership. Bookkeeping
+        // failure must never retry an already-completed installation.
+        if let preflight {
+            do {
+                if let installed = try lookup(preflight.bundleIdentifier, client: proxy) {
+                    try IDeviceManagedInstallRegistry.shared.recordConfirmedInstall(installed)
+                }
+            } catch {
+                NSLog("Ksign couldn't record a completed install: %@", error.localizedDescription)
+            }
+        }
         try checkCancellation()
     }
 

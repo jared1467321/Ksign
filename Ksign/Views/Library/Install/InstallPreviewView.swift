@@ -44,17 +44,20 @@ struct InstallPreviewView: View {
 		let viewModel = InstallerStatusViewModel(isIdevice: method == 1)
 		self._viewModel = StateObject(wrappedValue: viewModel)
 		let bundleID = app.identifier
+		let tracking = ServerInstallTracking()
 		self._installer = StateObject(
 			wrappedValue: try! ServerInstaller(
 				app: app,
 				viewModel: viewModel,
 				startsServer: method == 0 && !isSharing,
+				installTracking: tracking,
 				statusReporter: { status in
 					SingleInstallLiveActivityReporter.shared.handleServerStatus(
 						status,
 						bundleID: bundleID,
 						viewModel: viewModel,
-						isServerInstall: method == 0
+						isServerInstall: method == 0,
+						onInstalled: { tracking.confirm() }
 					)
 				}
 			)
@@ -192,6 +195,8 @@ struct InstallPreviewView: View {
 					SingleInstallLiveActivityReporter.shared.updatePackage(1)
 
 					if await !isSharing {
+						let tracking = await installer.installTracking
+						tracking.prepare(packageURL: archiveURL)
 						SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
 						await MainActor.run {
 							_usesCanonicalArchive = true
@@ -233,6 +238,8 @@ struct InstallPreviewView: View {
 				}
 
 				if await !isSharing {
+					let tracking = await installer.installTracking
+					tracking.prepare(packageURL: packageUrl)
                     SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
                     await MainActor.run {
                         installer.packageUrl = packageUrl
@@ -397,7 +404,8 @@ final class SingleInstallLiveActivityReporter {
 		_ status: InstallerStatusViewModel.InstallerStatus,
 		bundleID: String?,
 		viewModel: InstallerStatusViewModel,
-		isServerInstall: Bool
+		isServerInstall: Bool,
+		onInstalled: @escaping () -> Void
 	) {
 		updateStatus(status)
 		guard isServerInstall else { return }
@@ -413,6 +421,7 @@ final class SingleInstallLiveActivityReporter {
 					InstallProgressUIBridge.shared.submit(progress, to: viewModel)
 				},
 				onCompleted: {
+					onInstalled()
 					let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
 					SingleInstallLiveActivityReporter.shared.updateStatus(completed)
 					InstallProgressUIBridge.shared.submit(1, to: viewModel)

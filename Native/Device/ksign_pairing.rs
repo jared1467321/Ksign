@@ -197,6 +197,7 @@ fn installation_app_summary(bundle: &str, app: &plist::Value) -> serde_json::Val
         "name": string("CFBundleDisplayName").or_else(|| string("CFBundleName")).unwrap_or(bundle),
         "version": string("CFBundleShortVersionString").or_else(|| string("CFBundleVersion")),
         "applicationIdentifier": application_identifier,
+        "installationPath": string("Path"),
         "applicationType": string("ApplicationType"),
         "isRemovable": is_removable,
     })

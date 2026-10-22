@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 
 func require(_ value: Bool, _ message: String) {
     precondition(value, message)
@@ -15,13 +16,15 @@ func rejects(_ message: String, _ operation: () throws -> Void) {
     }
 }
 
-// The real JSON bridge's schema. No signed files or library records are created
-// by these tests: device-reported apps must be sufficient for removal.
+// The real JSON bridge's schema. No library records or saved IPAs are needed,
+// but a persisted receipt for this particular installed copy is mandatory.
 func app(bundle: String = "test.example.app", identity: String? = "TEAM123456.test.example.app",
-         type: String? = "User", removable: Bool? = nil) throws -> IDeviceInstalledApp {
+         type: String? = "User", removable: Bool? = nil,
+         path: String? = "/private/var/containers/Bundle/Application/KSIGN-COPY/Example.app") throws -> IDeviceInstalledApp {
     let json: [String: Any] = [
         "bundleIdentifier": bundle, "name": "Example", "version": "1.2.3",
         "applicationIdentifier": identity.map { $0 as Any } ?? NSNull(),
+        "installationPath": path.map { $0 as Any } ?? NSNull(),
         "applicationType": type.map { $0 as Any } ?? NSNull(),
         "isRemovable": removable.map { $0 as Any } ?? NSNull(),
     ]
@@ -32,22 +35,38 @@ func app(bundle: String = "test.example.app", identity: String? = "TEAM123456.te
 let installed = try app()
 let bundle = installed.id
 let host = "test.ksign"
-let request = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host)
+let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Ksign-OwnershipTests-\(UUID())")
+try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: directory) }
+let registryURL = directory.appendingPathComponent("ManagedInstalls.json")
+let registry = IDeviceManagedInstallRegistry(fileURL: registryURL)
+try require(registry.snapshot().isEmpty, "A new registry grants no uninstall permission")
+rejects("device app without a Ksign receipt") {
+    _ = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host, registry: registry)
+}
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+let receipt = try registry.snapshot().first!
+let reopened = IDeviceManagedInstallRegistry(fileURL: registryURL)
+try require(reopened.snapshot() == [receipt], "Ownership survives relaunch independently of library files")
+let request = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host, registry: registry)
 require(installed.name == "Example" && installed.version == "1.2.3", "Decode names and versions from iOS")
 try require(request.validate(installed, hostBundleIdentifier: host), "A reviewed device app needs no saved IPA")
 try require(!request.validate(nil, hostBundleIdentifier: host), "Already absent must not send removal")
 
-// App Store and sideloaded apps are both user apps. An unavailable entitlement
-// must not impose the old requirement to obtain a signed executable first.
 let unknownIdentity = try app(identity: nil)
-let unknownRequest = try IDeviceUninstallRequest(installedApp: unknownIdentity, hostBundleIdentifier: host)
-try require(unknownRequest.validate(unknownIdentity, hostBundleIdentifier: host), "Device apps without entitlements remain removable")
 let storeApp = try app(identity: "APPSTORE.test.example.app")
-let storeRequest = try IDeviceUninstallRequest(installedApp: storeApp, hostBundleIdentifier: host)
-try require(storeRequest.validate(storeApp, hostBundleIdentifier: host), "App Store user apps are eligible too")
+for unowned in [unknownIdentity, storeApp, try app(path: nil),
+                try app(path: "/private/var/containers/Bundle/Application/REPLACEMENT/Example.app")] {
+    rejects("untracked, unverifiable or replaced copy during selection") {
+        _ = try IDeviceUninstallRequest(installedApp: unowned, hostBundleIdentifier: host, registry: registry)
+    }
+    rejects("replacement after selection") {
+        _ = try request.validate(unowned, hostBundleIdentifier: host)
+    }
+}
 
 rejects("self removal during selection") {
-    _ = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: bundle)
+    _ = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: bundle, registry: registry)
 }
 rejects("self removal before sending") {
     _ = try request.validate(installed, hostBundleIdentifier: bundle)
@@ -57,7 +76,7 @@ rejects("self removal even when lookup is absent") {
 }
 for blocked in [try app(type: "System"), try app(type: nil), try app(removable: false)] {
     rejects("blocked app during selection") {
-        _ = try IDeviceUninstallRequest(installedApp: blocked, hostBundleIdentifier: host)
+        _ = try IDeviceUninstallRequest(installedApp: blocked, hostBundleIdentifier: host, registry: registry)
     }
     rejects("app became blocked after selection") {
         _ = try request.validate(blocked, hostBundleIdentifier: host)
@@ -69,18 +88,117 @@ for changed in [try app(identity: "OTHERTEAM.test.example.app"), try app(identit
         _ = try request.validate(changed, hostBundleIdentifier: host)
     }
 }
-try require(unknownRequest.validate(installed, hostBundleIdentifier: host), "A query returning additional identity metadata must not require a saved IPA")
+try require(registry.snapshot() == [receipt], "Rejected or cancelled removals preserve ownership for retry")
 for invalidID in ["", " " + bundle, bundle + "\n", "test. example.app", bundle + "\0ignored"] {
     rejects("invalid bundle identifier") {
-        _ = try IDeviceUninstallRequest(installedApp: app(bundle: invalidID), hostBundleIdentifier: host)
+        _ = try IDeviceUninstallRequest(installedApp: app(bundle: invalidID), hostBundleIdentifier: host, registry: registry)
     }
 }
 let missingOptionalFields = Data(#"{"bundleIdentifier":"test.minimal","name":"Minimal"}"#.utf8)
 let minimal = try JSONDecoder().decode(IDeviceInstalledApp.self, from: missingOptionalFields)
 require(minimal.version == nil && minimal.applicationIdentifier == nil, "Omitted optional metadata decodes")
 rejects("unverified application type") {
-    _ = try IDeviceUninstallRequest(installedApp: minimal, hostBundleIdentifier: host)
+    _ = try IDeviceUninstallRequest(installedApp: minimal, hostBundleIdentifier: host, registry: registry)
 }
+
+let unrelated = try app(bundle: "test.store", identity: "STORE.test.store")
+let listed = try registry.reconcile([installed, unrelated, minimal], observed: registry.snapshot(), hostBundleIdentifier: host)
+require(listed.map(\.id) == [bundle], "Only verified Ksign installations appear in the list")
+let unverifiableList = try registry.reconcile([unknownIdentity], observed: registry.snapshot(), hostBundleIdentifier: host)
+require(unverifiableList.isEmpty, "Missing metadata hides an unverifiable copy")
+try require(registry.snapshot() == [receipt], "Unavailable metadata must not destroy a valid receipt")
+try request.didRemove()
+try require(registry.snapshot().isEmpty, "Confirmed removal clears its persistent receipt")
+try require(IDeviceManagedInstallRegistry(fileURL: registryURL).snapshot().isEmpty, "Removed receipts stay gone after relaunch")
+rejects("old selection after receipt removal") {
+    _ = try request.validate(installed, hostBundleIdentifier: host)
+}
+
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+let absentRequest = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host, registry: registry)
+try require(!absentRequest.validate(nil, hostBundleIdentifier: host), "An already absent app sends no uninstall command")
+try absentRequest.didRemove()
+try require(registry.snapshot().isEmpty, "Already absent also clears tracking")
+
+// A stale completion or inventory must never delete a newer installation.
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+let staleRequest = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host, registry: registry)
+let oldSnapshot = try registry.snapshot()
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+let newerReceipt = try registry.snapshot()
+try staleRequest.didRemove()
+try require(registry.snapshot() == newerReceipt, "Stale removal preserves a newer receipt")
+_ = try registry.reconcile([], observed: oldSnapshot, hostBundleIdentifier: host)
+try require(registry.snapshot() == newerReceipt, "Old inventory cannot prune a concurrent install")
+_ = try registry.reconcile([], observed: registry.snapshot(), hostBundleIdentifier: host)
+try require(registry.snapshot().isEmpty, "Successful refresh prunes absent apps")
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+_ = try registry.reconcile([storeApp], observed: registry.snapshot(), hostBundleIdentifier: host)
+try require(registry.snapshot().isEmpty, "Refresh prunes replaced copies")
+
+// Neither an unverifiable success nor a system/self app establishes ownership.
+for unverifiable in [unknownIdentity, try app(path: nil), try app(type: "System"), try app(removable: false)] {
+    try registry.recordConfirmedInstall(unverifiable, hostBundleIdentifier: host)
+}
+try registry.recordConfirmedInstall(installed, hostBundleIdentifier: bundle)
+try require(registry.snapshot().isEmpty, "Unknown identities, copy bindings, system apps and Ksign stay untracked")
+
+let oldDate = Date(timeIntervalSince1970: 100)
+let newDate = Date(timeIntervalSince1970: 200)
+let identity = installed.applicationIdentifier!
+try registry.recordObservedInstall(bundleIdentifier: bundle, applicationIdentifier: identity,
+    previousRegistrationDate: oldDate, registrationDate: oldDate, preparedAt: oldDate, hostBundleIdentifier: host)
+try registry.recordObservedInstall(bundleIdentifier: bundle, applicationIdentifier: identity,
+    previousRegistrationDate: oldDate, registrationDate: nil, preparedAt: oldDate, hostBundleIdentifier: host)
+try registry.recordObservedInstall(bundleIdentifier: bundle, applicationIdentifier: identity,
+    previousRegistrationDate: nil, registrationDate: oldDate, preparedAt: newDate, hostBundleIdentifier: host)
+try registry.recordObservedInstall(bundleIdentifier: bundle, applicationIdentifier: identity,
+    previousRegistrationDate: newDate, registrationDate: oldDate, preparedAt: oldDate, hostBundleIdentifier: host)
+try require(registry.snapshot().isEmpty, "A server prompt or unchanged registration grants no ownership")
+try registry.recordObservedInstall(bundleIdentifier: bundle, applicationIdentifier: identity,
+    previousRegistrationDate: oldDate, registrationDate: newDate, preparedAt: oldDate, hostBundleIdentifier: host)
+var serverApp = installed
+serverApp.registrationDate = newDate
+let serverRequest = try IDeviceUninstallRequest(installedApp: serverApp, hostBundleIdentifier: host, registry: registry)
+try require(serverRequest.validate(serverApp, hostBundleIdentifier: host), "A confirmed server copy is removable without its IPA")
+for date in [Optional(oldDate), nil] {
+    var changed = serverApp
+    changed.registrationDate = date
+    rejects("server copy changed or registration unavailable") {
+        _ = try serverRequest.validate(changed, hostBundleIdentifier: host)
+    }
+}
+try serverRequest.didRemove()
+
+let corruptURL = directory.appendingPathComponent("corrupt.json")
+try Data("broken".utf8).write(to: corruptURL)
+let corrupt = IDeviceManagedInstallRegistry(fileURL: corruptURL)
+rejects("corrupt ownership file must fail closed") { _ = try corrupt.snapshot() }
+rejects("corrupt ownership file must not be silently overwritten") {
+    try corrupt.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+}
+require(try String(contentsOf: corruptURL, encoding: .utf8) == "broken", "Corrupt file preserved")
+let obstructed = directory.appendingPathComponent("not-a-directory")
+let unwritable = IDeviceManagedInstallRegistry(fileURL: obstructed.appendingPathComponent("records.json"))
+try Data().write(to: obstructed)
+rejects("failed persistence cannot grant ownership") {
+    try unwritable.recordConfirmedInstall(installed, hostBundleIdentifier: host)
+}
+try require(unwritable.snapshot().isEmpty, "An unsuccessful write must not change the in-memory allowlist")
+
+let concurrentURL = directory.appendingPathComponent("concurrent.json")
+let concurrentRegistry = IDeviceManagedInstallRegistry(fileURL: concurrentURL)
+DispatchQueue.concurrentPerform(iterations: 16) { index in
+    do {
+        let identifier = "test.concurrent.\(index)"
+        try concurrentRegistry.recordConfirmedInstall(
+            app(bundle: identifier, identity: "TEAM.\(identifier)"), hostBundleIdentifier: host)
+    } catch { fatalError("Concurrent receipt write failed: \(error)") }
+}
+try require(concurrentRegistry.snapshot().count == 16, "Concurrent installs must not overwrite each other's receipts")
+try require(IDeviceManagedInstallRegistry(fileURL: concurrentURL).snapshot().count == 16,
+            "Every concurrent receipt survives relaunch")
+
 // Install dates win over alphabetical order; undated apps stay at the bottom.
 var older = try app(bundle: "test.a-old")
 older.registrationDate = Date(timeIntervalSince1970: 100)

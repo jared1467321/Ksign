@@ -161,9 +161,13 @@ source trees from the chunk-size experiment.
   Signed Apps; the original bottom tabs, including App Store, remain available.
   Choose **Load Installed Apps** or
   **Refresh** to query iOS over the selected iDevice connection (Built-in or
-  Manual). It lists user-installed apps regardless of whether an IPA or library
-  record exists in Ksign. The list includes App Store apps and apps installed
-  elsewhere: iOS's app inventory does not identify the original installer.
+  Manual). It shows only installed copies verified against Ksign's persistent
+  install receipts, regardless of whether their IPA or library record is kept.
+  App Store apps, system apps, and apps installed elsewhere are excluded.
+  iOS's inventory does not identify the original installer, so existing apps
+  cannot be adopted from the inventory, signing history, or saved library files.
+  Apps installed before this tracking was added must be installed through Ksign
+  again to enter the list.
   After loading/refreshing, Ksign shows the existing **Reconnect VPN** banner
   with its reconnect and dismiss buttons, as after background installs/setup.
   Loading the list does not open Shortcuts or a share sheet automatically.
@@ -187,13 +191,26 @@ source trees from the chunk-size experiment.
   pairing/VPN requirements apply even for apps originally installed with Server.
   Library files are kept. System apps and Ksign itself are not eligible; iOS can
   also reject removal of managed or restricted apps. The app's device-reported
-  signing identity is captured when selected and rechecked immediately before
-  removal; a changed copy requires refreshing and reviewing again. Apps without
-  a reported identity remain eligible without a local signed executable.
+  signing identity and copy binding are checked against the receipt when selected
+  and again immediately before removal. Unknown identities are ineligible.
+  Native installs save a receipt after iOS confirms completion, using the reported
+  signing identity and bundle installation path (or registration date if the path
+  is unavailable). Server installs inspect the final signed IPA before prompting;
+  they require a new local OS registration after progress completion and bind the
+  receipt to that date and the IPA's signing identity. Signing/exporting an IPA,
+  accepting a prompt, or an unchanged/unknown registration does not grant ownership.
+  If required metadata or persistence is unavailable, the app stays unlisted.
+  Receipts live in Application Support separately from the library, with atomic
+  writes serialized across install workers. Corrupt tracking files fail closed.
   The installation queue must finish or be cancelled first. Removal runs
-  sequentially, waits for iOS completion, verifies absence, updates the list,
+  sequentially, waits for iOS completion, verifies absence, deletes the receipt,
+  updates the list,
   and shows a result per app. **Stop After Current App** leaves the remaining
   apps untouched. Connection errors never automatically replay a removal command.
+  Already absent apps also lose their receipts. Failed/cancelled removals keep
+  theirs for retry. A successful inventory refresh prunes absent/replaced copies
+  without pruning newer receipts created after the query began. Missing metadata
+  hides a copy without throwing away its receipt.
 - **Forget Built-in Pairing** removes Ksign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
 - If the device handshake fails, Built-in Connection refreshes and restarts

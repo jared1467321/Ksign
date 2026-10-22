@@ -6,6 +6,7 @@ public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
     public let name: String
     public let version: String?
     public let applicationIdentifier: String?
+    public let installationPath: String?
     public let applicationType: String?
     public let isRemovable: Bool?
     public var registrationDate: Date?

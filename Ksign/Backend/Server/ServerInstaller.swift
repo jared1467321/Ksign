@@ -21,6 +21,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	private var _needsShutdown = false
 
 	var packageUrl: URL?
+	let installTracking: ServerInstallTracking
 
 	// Other apps this server also serves. A batched group is served from a
 	// single server: the host serves its own payload plus every member's, each
@@ -37,10 +38,12 @@ class ServerInstaller: Identifiable, ObservableObject {
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
 		startsServer: Bool = true,
+		installTracking: ServerInstallTracking = ServerInstallTracking(),
 		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil
 	) throws {
 		self.app = app
 		self.viewModel = viewModel
+		self.installTracking = installTracking
 		self._statusReporter = statusReporter
 		if startsServer {
 			try startServing()

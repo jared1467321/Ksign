@@ -353,11 +353,13 @@ final class InstallJob: ObservableObject, Identifiable {
 		let method = _installationMethod
 		let bundleID = app.identifier
 		let statusModel = viewModel
+		let tracking = ServerInstallTracking()
 
 		installer = try ServerInstaller(
 			app: app,
 			viewModel: viewModel,
 			startsServer: serves,
+			installTracking: tracking,
 			statusReporter: { status in
 				BulkInstallLiveActivityReporter.shared.updateStatus(jobID: jobID, status: status)
 
@@ -380,6 +382,7 @@ final class InstallJob: ObservableObject, Identifiable {
 							InstallProgressUIBridge.shared.submit(progress, to: statusModel)
 						},
 						onCompleted: {
+							tracking.confirm()
 							let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
 							BulkInstallLiveActivityReporter.shared.updateStatus(
 								jobID: jobID,
@@ -872,6 +875,7 @@ final class InstallJob: ObservableObject, Identifiable {
 					guard attempt.isCurrent else { throw CancellationError() }
 
 					if method == 0 {
+						installer?.installTracking.prepare(packageURL: packageURL)
 						BulkInstallLiveActivityReporter.shared.updatePackage(
 							jobID: jobID, progress: 1, isCurrent: { attempt.isCurrent }
 						)
@@ -927,6 +931,7 @@ final class InstallJob: ObservableObject, Identifiable {
 					guard attempt.isCurrent else { throw CancellationError() }
 
 					if method == 0 {
+						installer?.installTracking.prepare(packageURL: packageURL)
 						BulkInstallLiveActivityReporter.shared.updateStatus(
 							jobID: jobID, status: .ready, isCurrent: { attempt.isCurrent }
 						)
