@@ -38,7 +38,6 @@ private struct NBAuroraTextRowModifier: ViewModifier {
     @AppStorage("Feather.auroraBackground") private var aurora = true
     @AppStorage("Feather.auroraAdaptiveText") private var adaptive = true
     @State private var appeared = false
-    @State private var remeasurement: UUID?
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -53,30 +52,20 @@ private struct NBAuroraTextRowModifier: ViewModifier {
         content
             .environment(\.nbAuroraTextRow, row)
             .coordinateSpace(name: row.coordinateSpaceID)
-            .onGeometryChange(for: NBAuroraTextRowGeometry.self) { proxy in
-                NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
-                    .clipped(to: viewport)
-            } action: { receive($0) }
             .background {
-                if let request = remeasurement {
-                    // Keep recovery probes out of the normal scrolling path.
-                    GeometryReader { proxy in
-                        let measured = NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size)
-                            .clipped(to: viewport)
-                        Color.clear.task(id: request) {
-                            guard remeasurement == request else { return }
-                            receive(measured)
-                        }
-                    }
-                    .id(request)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                GeometryReader { proxy in
+                    NBAuroraTextGeometryReport(
+                        value: NBAuroraTextRowGeometry(frame: proxy.frame(in: .global), size: proxy.size),
+                        revision: session.measurementRevision,
+                        receive: row.move(to:)
+                    )
                 }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
-            .onAppear { appeared = true; configure(refresh: true); requestMeasurement() }
-            .onDisappear { appeared = false; configure(); remeasurement = nil }
-            .onChange(of: viewport) { _ in configure(); requestMeasurement() }
-            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
+            .onAppear { appeared = true; configure(refresh: true) }
+            .onDisappear { appeared = false; configure() }
+            .onChange(of: viewport) { _ in configure() }
             .onChange(of: scenePhase) { phase in configure(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in configure() }
             .onChange(of: session.identity.shaderIdentity) { _ in configure(refresh: true) }
@@ -86,25 +75,12 @@ private struct NBAuroraTextRowModifier: ViewModifier {
         row.configure(viewport: viewport, active: appeared && scenePhase == .active,
                       reduceMotion: reduceMotion, refresh: refresh)
     }
-
-    private func requestMeasurement() {
-        remeasurement = appeared && viewport?.isReady == true ? UUID() : nil
-    }
-
-    private func receive(_ geometry: NBAuroraTextRowGeometry) {
-        row.move(to: geometry)
-        if geometry.frame.isNull || (!geometry.frame.isEmpty && geometry.size.width > 0 && geometry.size.height > 0) {
-            remeasurement = nil
-        }
-    }
 }
 
 @available(iOS 17.0, tvOS 17.0, *)
 struct NBAuroraRowTextShaderScope<Content: View>: View {
     @StateObject private var client = NBAuroraRowTextClient()
     @ObservedObject private var session = AuroraSession.shared
-    @Environment(\.nbAuroraTextViewport) private var viewport
-    @State private var remeasurement: UUID?
     let content: Content
     let primary: NBThemeColor
     let secondary: NBThemeColor?
@@ -119,35 +95,18 @@ struct NBAuroraRowTextShaderScope<Content: View>: View {
                                     placement: client.placement, paint: client.lease.paint)
             // These coordinates stay constant while the row scrolls. Changes
             // to wrapping, layout or edit controls still remeasure each label.
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(row.coordinateSpaceID)) }
-                action: { receive($0) }
             .background {
-                if let request = remeasurement {
-                    GeometryReader { proxy in
-                        let measured = proxy.frame(in: .named(row.coordinateSpaceID))
-                        Color.clear.task(id: request) {
-                            guard remeasurement == request else { return }
-                            receive(measured)
-                        }
-                    }
-                    .id(request)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                GeometryReader { proxy in
+                    NBAuroraTextGeometryReport(
+                        value: proxy.frame(in: .named(row.coordinateSpaceID)),
+                        revision: session.measurementRevision
+                    ) { row.measure(client, localFrame: $0) }
                 }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
-            .onChange(of: viewport) { _ in requestMeasurement() }
-            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
-            .onAppear { row.setVisible(client, true); requestMeasurement() }
-            .onDisappear { row.setVisible(client, false); remeasurement = nil }
-    }
-
-    private func requestMeasurement() {
-        remeasurement = client.visible && viewport?.isReady == true ? UUID() : nil
-    }
-
-    private func receive(_ frame: CGRect) {
-        row.measure(client, localFrame: frame)
-        if !frame.isNull && !frame.isEmpty { remeasurement = nil }
+            .onAppear { row.setVisible(client, true) }
+            .onDisappear { row.setVisible(client, false) }
     }
 }
 

@@ -67,8 +67,6 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
     @State private var viewport: AuroraViewport?
     @State private var viewportFrame = CGRect.zero
     @State private var isVisible = false
-    @State private var isInViewport = false
-    @State private var measurementID = UUID()
 
     let content: Content
     let primary: NBThemeColor
@@ -92,15 +90,8 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                     // Resolve the proxy during layout. Deferred callbacks use
                     // this value rather than querying a retained layout proxy.
                     let measured = proxy.frame(in: .global)
-                    Color.clear
-                        .onGeometryChange(for: CGRect.self) { geometry in
-                            clippedFrame(geometry.frame(in: .global))
-                        } action: { receive($0) }
-                        .onChange(of: scrollViewport) { _ in
-                            // A restored viewport can make a culled label
-                            // visible even when its layout never moves.
-                            receive(clippedFrame(measured))
-                        }
+                    NBAuroraTextGeometryReport(value: measured, revision: session.measurementRevision,
+                                               receive: receive)
                     if scrollViewport == nil {
                         AuroraViewportReader { reported in
                             // Pair UIKit's report with the captured layout value.
@@ -110,28 +101,21 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                         }
                     }
                 }
-                // Recreate the probes, never the text or its controls.
-                .id(measurementID)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
-            .onAppear { isVisible = true; updateLease(refresh: true); measurementID = UUID() }
+            .onAppear { isVisible = true; updateLease(refresh: true) }
             .onDisappear { isVisible = false; updateLease() }
             .onChange(of: scenePhase) { phase in updateLease(refresh: phase == .active) }
             .onChange(of: reduceMotion) { _ in updateLease() }
             .onChange(of: session.identity.shaderIdentity) { _ in updateLease(refresh: true) }
-            .onChange(of: session.measurementRevision) { _ in measurementID = UUID() }
             .onChange(of: scrollViewport) { _ in updateLease() }
     }
 
-    private func clippedFrame(_ frame: CGRect) -> CGRect {
-        scrollViewport?.clippedFrame(frame) ?? frame
-    }
-
     private func receive(_ measured: CGRect) {
-        // Offscreen positions still resolve to a stable sentinel while scrolling.
-        isInViewport = !measured.isNull
-        if isInViewport { frame = measured }
+        // Keep geometry independent of visibility. A viewport can become ready
+        // or expand without moving this label or producing another layout.
+        if frame != measured { frame = measured }
         updateLease()
     }
 
@@ -147,7 +131,7 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
         let intersects = windowFrame.map {
             NBAuroraTextVisibility.intersects(frame, window: $0, clipping: scrollViewport?.clipping)
         } ?? false
-        let active = isVisible && isInViewport && intersects && scenePhase == .active
+        let active = isVisible && intersects && scenePhase == .active
         guard lease.active != active || lease.reduceMotion != reduceMotion || (refresh && active) else { return }
         NBAuroraInkMap.shared.update(lease, active: active,
                                     reduceMotion: reduceMotion)

@@ -36,13 +36,6 @@ struct NBAuroraTextViewport: Equatable, Sendable {
     var isReady: Bool {
         window.map { NBAuroraTextVisibility.intersects(clipping, window: $0) } == true
     }
-
-    func clippedFrame(_ frame: CGRect) -> CGRect {
-        // Preserve initial positions until both coordinate systems are ready.
-        // The visibility check still prevents incomplete layouts activating ink.
-        guard isReady, let window else { return frame }
-        return NBAuroraTextVisibility.intersects(frame, window: window, clipping: clipping) ? frame : .null
-    }
 }
 
 extension NBAuroraTextViewport {

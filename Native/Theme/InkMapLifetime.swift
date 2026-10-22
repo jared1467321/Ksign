@@ -210,14 +210,11 @@ enum InkMapLifetimeTests {
         let list = CGRect(x: 10, y: 100, width: 380, height: 700)
         let viewport = NBAuroraTextViewport(frame: list, window: window)
         assert(viewport.clipping == list)
-        let label = CGRect(x: 20, y: 120, width: 200, height: 20)
         for pending in [NBAuroraTextViewport(clipping: .zero, window: window),
                         NBAuroraTextViewport(clipping: list, window: nil)] {
-            assert(!pending.isReady && pending.clippedFrame(label) == label,
-                   "Standalone labels and rows must retain positions during incomplete layout")
+            assert(!pending.isReady)
         }
-        assert(viewport.isReady && viewport.clippedFrame(label) == label)
-        assert(viewport.clippedFrame(CGRect(x: 20, y: 800, width: 200, height: 20)).isNull)
+        assert(viewport.isReady)
         // Safe-area content margins can overlap visible list content under
         // glass bars. Eligibility follows the actual list edges, including
         // a single visible point of a partially clipped label.
@@ -397,7 +394,7 @@ enum InkMapLifetimeTests {
             var appeared = false
             for event in order {
                 switch event {
-                case 0: row.move(to: geometry.clipped(to: viewport))
+                case 0: row.move(to: geometry)
                 case 1: row.measure(client, localFrame: local)
                 case 2: appeared = true; row.setVisible(client, true)
                 case 3: viewport = NBAuroraTextViewport(clipping: viewport.clipping, window: window)
@@ -428,6 +425,60 @@ enum InkMapLifetimeTests {
     }
 
     @MainActor
+    static func stationaryLayoutRecovery() async {
+        let row = NBAuroraTextRowTracker(), client = NBAuroraRowTextClient()
+        let window = CGRect(x: 0, y: 0, width: 400, height: 900)
+        let provisional = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 0, width: 400, height: 100),
+                                               window: window)
+        let settled = NBAuroraTextViewport(clipping: CGRect(x: 0, y: 200, width: 400, height: 600),
+                                           window: window)
+        let geometry = NBAuroraTextRowGeometry(frame: CGRect(x: 20, y: 220, width: 360, height: 70),
+                                               size: CGSize(width: 360, height: 70))
+        let local = CGRect(x: 70, y: 5, width: 200, height: 20)
+        // A nonempty provisional viewport is "ready" but can still exclude
+        // visible rows until the presentation settles. Do not lose layout.
+        assert(provisional.isReady)
+        row.configure(viewport: provisional, active: true, reduceMotion: false)
+        row.setVisible(client, true)
+        row.measure(client, localFrame: .zero)
+        row.move(to: NBAuroraTextRowGeometry(frame: .zero, size: .zero))
+        row.measure(client, localFrame: local)
+        row.move(to: geometry)
+        assert(!client.lease.active && client.lease.paint.frame == nil)
+        row.configure(viewport: settled, active: true, reduceMotion: false)
+        assert(client.lease.active, "Settled clipping must activate stationary rows without another geometry event")
+        if !NBAuroraInkWorker.pending.isEmpty { NBAuroraInkWorker.complete(Data([30])) }
+        await settle { client.lease.paint.frame != nil }
+        let inkID = client.lease.paint.frame!.id
+        assert(client.placement.bounds == geometry.inkBounds(for: local, window: window))
+
+        // Detent changes and tab returns can change visibility without moving
+        // the row. Neither should need a selection, scroll, or label remount.
+        row.configure(viewport: provisional, active: true, reduceMotion: false)
+        assert(!client.lease.active && client.lease.paint.frame == nil)
+        row.configure(viewport: settled, active: true, reduceMotion: false)
+        assert(client.lease.paint.frame?.id == inkID)
+        row.configure(viewport: settled, active: false, reduceMotion: false)
+        row.configure(viewport: settled, active: true, reduceMotion: false)
+        assert(client.lease.paint.frame?.id == inkID)
+
+        row.configure(viewport: provisional, active: true, reduceMotion: false)
+        let writes = client.placement.$bounds.writes
+        let moved = NBAuroraTextRowGeometry(frame: geometry.frame.offsetBy(dx: 0, dy: 100), size: geometry.size)
+        row.move(to: moved)
+        assert(client.placement.$bounds.writes == writes && !client.lease.active,
+               "Retaining offscreen geometry must not publish placement or activate ink")
+        row.configure(viewport: settled, active: true, reduceMotion: false)
+        assert(client.placement.bounds == moved.inkBounds(for: local, window: window),
+               "A later viewport must use the most recent retained coordinates")
+        assert(client.lease.paint.frame?.id == inkID && NBAuroraInkWorker.pending.isEmpty)
+        row.setVisible(client, false)
+        row.configure(viewport: settled, active: false, reduceMotion: false)
+        assert(CADisplayLink.active.isEmpty)
+        print("Stationary layout recovery passed: provisional clipping, zero-to-valid layout, detent changes, tab return and retained offscreen movement activate without remeasurement.")
+    }
+
+    @MainActor
     static func rowTracking() async {
         let row = NBAuroraTextRowTracker()
         let window = CGRect(x: 10, y: 20, width: 400, height: 900)
@@ -453,17 +504,10 @@ enum InkMapLifetimeTests {
                                                      width: 400, height: 900))
         }
         let inkID = clients[0].lease.paint.frame!.id
-        // Model a transition that leaves the measurement probe culled. A
-        // lease-only resume cannot recover; the recreated probe must report
-        // the same on-screen geometry again without any scroll displacement.
+        // A genuinely invalid layout must deactivate paint; the persistent
+        // reporter can restore it when a usable layout arrives.
         let originalGeometry = NBAuroraTextRowGeometry(
             frame: CGRect(x: 20, y: 210, width: 380, height: 70), size: CGSize(width: 380, height: 70))
-        assert(originalGeometry.clipped(to: viewport) == originalGeometry)
-        assert(originalGeometry.clipped(to: nil) == originalGeometry)
-        assert(originalGeometry.clipped(to: NBAuroraTextViewport(clipping: viewport.clipping, window: nil))
-               == originalGeometry, "Keep raw geometry while the window measurement is pending")
-        assert(originalGeometry.clipped(to: NBAuroraTextViewport(clipping: .null, window: window)) == originalGeometry,
-               "An unavailable clipping frame must preserve raw positions until readiness")
         row.configure(viewport: viewport, active: false, reduceMotion: false)
         row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
         row.configure(viewport: viewport, active: true, reduceMotion: false, refresh: true)
@@ -473,8 +517,8 @@ enum InkMapLifetimeTests {
                "Fresh measurements must restore cached ink without scrolling")
         assert(NBAuroraInkWorker.pending.isEmpty,
                "Remeasuring must not trigger a redundant map render")
-        // Tab entry can retain both a culled row and invalid local label
-        // measurements. The appearance probes refresh both coordinate sets
+        // Tab entry can retain both invalid row and local label
+        // measurements. The persistent reporters refresh both coordinate sets
         // at the original positions, without a shuffle or a scroll.
         row.configure(viewport: viewport, active: false, reduceMotion: false)
         row.move(to: NBAuroraTextRowGeometry(frame: .null, size: .zero))
@@ -550,7 +594,7 @@ enum InkMapLifetimeTests {
         func scroll(_ offset: CGFloat) {
             for (index, tracker) in rows.enumerated() {
                 let frame = CGRect(x: 20, y: 210 + CGFloat(index) * 70 - offset, width: 380, height: 70)
-                tracker.move(to: NBAuroraTextRowGeometry(frame: frame, size: frame.size).clipped(to: viewport))
+                tracker.move(to: NBAuroraTextRowGeometry(frame: frame, size: frame.size))
             }
         }
         scroll(0)
@@ -589,6 +633,7 @@ enum InkMapLifetimeTests {
         await activityRecovery()
         await rowTracking()
         await initialViewportReadiness()
+        await stationaryLayoutRecovery()
         let map = NBAuroraInkMap()
         let scopes = (0..<100).map { _ in NBAuroraInkLease() }
         for scope in scopes { map.update(scope, active: true, reduceMotion: false) }

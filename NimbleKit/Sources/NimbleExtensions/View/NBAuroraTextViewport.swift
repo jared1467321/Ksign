@@ -33,32 +33,32 @@ private struct NBAuroraTextViewportModifier: ViewModifier {
             .environment(\.nbAuroraTextViewport,
                          NBAuroraTextViewport(frame: measurement.frame, window: measurement.window, parent: parent,
                                               measurementID: completedMeasurementID))
-            .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .global)
-            } action: {
-                measurement.receiveFrame($0)
-                // Pair a changed SwiftUI frame with a fresh window report.
-                // Reusing an old UIKit origin here can produce false clipping.
-                requestMeasurement()
-            }
             .background {
-                // One window-coordinate reader for the list, rather than one
-                // UIKit anchor for every title, subtitle and chevron.
-                AuroraViewportReader(reportID: request) { viewport in
-                    guard appeared, measurementID == request else { return }
-                    measurement.receiveWindow(origin: viewport.origin, size: viewport.size)
-                    if NBAuroraTextViewport(frame: measurement.frame, window: measurement.window, parent: parent).isReady {
-                        completedMeasurementID = request
+                GeometryReader { proxy in
+                    NBAuroraTextGeometryReport(value: proxy.frame(in: .global),
+                                               revision: session.measurementRevision) {
+                        measurement.receiveFrame($0)
+                        // Pair the first and each changed layout with a fresh
+                        // window report, even if the container never scrolls.
+                        requestMeasurement()
                     }
+                    // One window-coordinate reader for the list, rather than
+                    // one UIKit anchor for every title and subtitle.
+                    AuroraViewportReader(reportID: request) { viewport in
+                        guard appeared, measurementID == request else { return }
+                        measurement.receiveWindow(origin: viewport.origin, size: viewport.size)
+                        if NBAuroraTextViewport(frame: measurement.frame, window: measurement.window, parent: parent).isReady {
+                            completedMeasurementID = request
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
             .onAppear { appeared = true; requestMeasurement() }
             .onDisappear { appeared = false }
             .onChange(of: parent) { _ in requestMeasurement() }
-            .onChange(of: session.measurementRevision) { _ in requestMeasurement() }
     }
 
     private func requestMeasurement() {

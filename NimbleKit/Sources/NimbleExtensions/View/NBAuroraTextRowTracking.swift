@@ -6,17 +6,6 @@ struct NBAuroraTextRowGeometry: Equatable {
     let frame: CGRect
     let size: CGSize
 
-    func clipped(to viewport: NBAuroraTextViewport?) -> Self {
-        // Initial layout may know the window before the list's clipping frame.
-        // Keep raw positions until both are ready; otherwise a null sentinel
-        // can strand an unchanged visible row until the user scrolls.
-        guard let viewport else { return self }
-        guard !viewport.clippedFrame(frame).isNull else {
-            return Self(frame: .null, size: .zero)
-        }
-        return self
-    }
-
     func globalFrame(for local: CGRect) -> CGRect {
         guard !frame.isNull, !frame.isEmpty, size.width > 0, size.height > 0,
               !local.isNull, !local.isEmpty else { return .null }
@@ -75,8 +64,18 @@ final class NBAuroraTextRowTracker: ObservableObject {
 
     func move(to geometry: NBAuroraTextRowGeometry) {
         guard self.geometry != geometry else { return }
+        let wasVisible = intersectsViewport(self.geometry.frame)
+        // Visibility is derived from retained layout, never encoded by
+        // replacing an offscreen row's coordinates with a null sentinel.
         self.geometry = geometry
+        guard wasVisible || intersectsViewport(geometry.frame) else { return }
         updateClients()
+    }
+
+    private func intersectsViewport(_ frame: CGRect) -> Bool {
+        active && viewport?.window.map {
+            NBAuroraTextVisibility.intersects(frame, window: $0, clipping: viewport?.clipping)
+        } == true
     }
 
     func measure(_ client: NBAuroraRowTextClient, localFrame: CGRect) {

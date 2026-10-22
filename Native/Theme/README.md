@@ -89,9 +89,9 @@ measures the scroll container's full bounds and window conversion once;
 safe-area content margins are not subtracted from visible glass-backed content.
 Nested viewports still intersect their parent's bounds, and window clipping
 excludes content outside the screen.
-Descendant labels need no individual UIKit window anchor. Their geometry
-transform returns a constant null rectangle outside the viewport, avoiding
-state writes for every offscreen scroll offset. A positive intersection with
+Descendant labels need no individual UIKit window anchor. Layout measurements
+retain their coordinates independently of viewport readiness and clipping.
+A positive intersection with
 both viewport and window is required, in addition to onAppear and active scene
 state: prefetched but offscreen rows cannot register for live paint. Visible
 geometry changes update shader coordinates without re-registering an unchanged
@@ -131,9 +131,9 @@ report their local offsets when their layout changes. The row tracker updates
 small foreground placement objects directly, without publishing movement or
 ink through the cell's body or environment. Each label still clips independently
 at the viewport edge and retains its own ink lease. The coordinate conversion
-accounts for the row's selection scale. Fully offscreen rows report a stable
-null geometry; disabling adaptive ink or using the iOS 16 fallback bypasses the
-row tracking path.
+accounts for the row's selection scale. Fully offscreen rows retain their latest
+geometry without publishing placement or updating their clients on each scroll
+step. Disabling adaptive ink or using the iOS 16 fallback bypasses row tracking.
 
 Weak scope leases stop the shared clock when no animated text is visible. A
 weak clock target also cleans up a discarded owner. Reduce Motion uses a
@@ -155,22 +155,27 @@ Each scroll viewport keeps one UIKit reader and requests a report on appearance,
 parent/viewport movement and foreground return. Request identities allow unchanged coordinates to report
 again; the reader coalesces queued requests, rejects unattached/zero-size layout,
 and reports bounds changes as well as window/origin changes. It does not poll.
-Completed layout reports propagate a viewport-local measurement identity so
-both rows and their local labels refresh even when their positions are unchanged.
-Global list frames are captured by SwiftUI's geometry callback, while deferred
-UIKit reports update only window coordinates. Neither the viewport's queued
-report nor a row/label recovery task retains and queries a GeometryProxy later;
-recovery tasks consume immutable geometry captured during layout. The viewport
-measurement owner supports either callback arriving first and cannot overwrite
-a valid global frame from a deferred window callback.
-Early label/row positions survive until the window and clipping area are ready;
-visibility still excludes them from ink delivery until then. Ready viewports
-retain the stable null sentinel for offscreen text. Temporary GeometryReaders
-read current row/label positions in appearance tasks after readiness, rather
-than depending on a transparent probe's geometry-change callback. They leave
-content identities and controls intact and remove themselves after a valid
-measurement; normal scrolling uses the original content geometry observers.
-Disappearance cancels requests and newer requests supersede pending results.
+Completed window reports reconfigure row visibility even when positions are
+unchanged. Persistent GeometryReaders capture immutable layout values for the
+viewport, each row, and each local label. `NBAuroraTextGeometryReport` delivers
+the initial value on appearance and each changed value as layout settles; it
+also replays the current value on the session's foreground revision. There are
+no temporary probes or one-shot geometry tasks to consume a provisional frame
+and then stop reporting. No deferred callback queries a retained GeometryProxy.
+UIKit reports update only window coordinates, and the viewport measurement
+owner supports either callback arriving first.
+
+Clipping only determines paint eligibility; it never replaces stored geometry
+with a null sentinel. A provisional nonempty viewport can still exclude a row
+until a tab or drawer finishes layout. Once clipping changes, retained positions
+allow immediate activation without scrolling, selection or another measurement.
+Offscreen leases still release paint and receive no animation updates. The map
+lifecycle suite covers stationary rows across provisional/settled clipping,
+drawer expansion, tab return, and offscreen movement, as well as all 120 orders
+of the initial row, label, appearance, window and clipping events. These are
+production tracker tests with platform doubles; an iOS build must still verify
+the SwiftUI callbacks and first visible frame in Settings, Downloaded, Signed
+and IPA Vault without touching or scrolling the screen.
 The scheduler inspects weak leases in one
 pass without rebuilding client collections each tick. Map size, color math and
 30 Hz timing are unchanged. iOS 16 retains its difference-blended text.
