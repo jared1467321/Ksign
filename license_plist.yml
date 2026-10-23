@@ -11,6 +11,9 @@ options:
   force: true
 
 manual:
+  - name: "LIEF"
+    source: https://github.com/lief-project/LIEF
+    file: "Asign/Resources/LIEF-LICENSE.txt"
   - source: https://github.com/jkcoxson/idevice
     name: idevice
     body: |-

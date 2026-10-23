@@ -1,0 +1,8 @@
+LIEF 1.0.0
+https://github.com/lief-project/LIEF
+
+Copyright 2017 - 2026 R. Thomas
+Copyright 2017 - 2026 Quarkslab
+
+Licensed under the Apache License, Version 2.0; see LIEF-LICENSE.txt.
+Used to expand Mach-O load-command space when applying IPA patches.

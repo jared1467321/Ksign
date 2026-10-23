@@ -148,7 +148,7 @@ enum IPAPatcher {
                 let resolver = RunpathResolver(root: root, executable: destination, library: libraryDestination)
                 let context = Unmanaged.passUnretained(resolver).toOpaque()
                 let result = withExtendedLifetime(resolver) {
-                    KsignPatchIPAFile(prepared.path, loadPath, { runpath, context in
+                    KsignPatchIPAFileWithGrowth(prepared.path, loadPath, { runpath, context in
                         guard let runpath, let context else { return -1 }
                         return Unmanaged<RunpathResolver>.fromOpaque(context).takeUnretainedValue()
                             .resolve(String(cString: runpath))

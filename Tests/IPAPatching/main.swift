@@ -133,6 +133,17 @@ let shadowResult = try Data(contentsOf: shadowExtension.appendingPathComponent("
 precondition(shadowResult.range(of: Data("@executable_path/../../Frameworks/blatantsPatch.dylib".utf8)) != nil)
 precondition(shadowResult.range(of: Data("@rpath/blatantsPatch.dylib".utf8)) == nil)
 
+// Growth is automatic within the same transaction and remains silent.
+let growthApp = scratch.appendingPathComponent("Growth.app")
+try makeBundle(growthApp)
+let growthExtension = growthApp.appendingPathComponent("PlugIns/Stickers.appex")
+let growthInput = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
+try makeBundle(growthExtension, bytes: growthInput)
+try IPAPatcher.apply(to: growthApp, library: library)
+let grown = try Data(contentsOf: growthExtension.appendingPathComponent("Executable"))
+precondition(grown.count >= growthInput.count + 0x4000)
+precondition(grown.range(of: Data("@executable_path/../../Frameworks/blatantsPatch.dylib".utf8)) != nil)
+
 // A failing extension must not modify the app, earlier extensions, or a
 // pre-existing library. Equal executable names must never collide in staging.
 let failing = scratch.appendingPathComponent("Failing.app")

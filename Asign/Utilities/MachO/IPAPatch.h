@@ -3,6 +3,12 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define KSIGN_IPA_HEADER_SPACE (-2)
+
 // Resolve LC_RPATH in the original executable's location, rather than its
 // staging directory. Return 1 for the installed patch library, 0 for a known
 // absent candidate, or -1 for a shadowing/unverifiable candidate. The first
@@ -21,5 +27,15 @@ int KsignPatchIPALoadCommands(void *bytes, size_t size, const char *loadPath,
 int KsignPatchIPAFile(const char *file, const char *loadPath,
                      KsignIPARunpathResolver resolver, void *context,
                      char *error, size_t errorSize);
+
+// Uses the mapped fast path first, then rebuilds cramped executables with
+// additional header space. Writes only the caller's staged private copy.
+int KsignPatchIPAFileWithGrowth(const char *file, const char *loadPath,
+                               KsignIPARunpathResolver resolver, void *context,
+                               char *error, size_t errorSize);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

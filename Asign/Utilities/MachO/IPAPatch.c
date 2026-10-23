@@ -144,8 +144,11 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
     }
     size_t added = (24 + strlen(path) + 1 + alignment - 1) & ~(alignment - 1);
     size_t total = kept + added;
-    if (total > UINT32_MAX || total > firstData - header)
-        return fail(error, errorSize, "Insufficient Mach-O header space for the patch library.");
+    if (total > UINT32_MAX) return fail(error, errorSize, "Mach-O load commands are too large.");
+    if (total > firstData - header) {
+        fail(error, errorSize, "Insufficient Mach-O header space for the patch library.");
+        return KSIGN_IPA_HEADER_SPACE;
+    }
     // Padding is not executable data. Refuse to overwrite an unrecognized payload.
     for (size_t i = end; i < header + total; ++i)
         if (bytes[i]) return fail(error, errorSize, "Mach-O header padding contains data.");
@@ -206,12 +209,16 @@ int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
         }
     }
     size_t maximum = 0;
+    int needsSpace = 0;
     for (uint32_t i = 0; i < count; ++i) {
-        if (patchSlice(bytes + slices[i].offset, slices[i].size, path,
+        int result = patchSlice(bytes + slices[i].offset, slices[i].size, path,
                        resolver, context, &slices[i].compact, NULL,
-                       &slices[i].commands, error, errorSize) < 0) return -1;
+                       &slices[i].commands, error, errorSize);
+        if (result == KSIGN_IPA_HEADER_SPACE) needsSpace = 1;
+        else if (result < 0) return result;
         if (slices[i].commands > maximum) maximum = slices[i].commands;
     }
+    if (needsSpace) return KSIGN_IPA_HEADER_SPACE;
     uint8_t *scratch = malloc(maximum);
     if (!scratch) return fail(error, errorSize, "Cannot allocate patch command buffer.");
     for (uint32_t i = 0; i < count; ++i)

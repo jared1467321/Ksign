@@ -11,7 +11,7 @@ TMP := $(if $(DERIVED_DATA),$(DERIVED_DATA),$(TMPDIR)/$(NAME))
 STAGE := $(TMP)/stage
 APP := $(TMP)/Build/Products/Release-$(PLATFORM)
 
-.PHONY: all clean deps native $(SCHEMES)
+.PHONY: all clean deps native patch-native $(SCHEMES)
 
 all: $(SCHEMES)
 
@@ -25,7 +25,10 @@ deps:
 	mkdir -p deps
 	python3 .github/scripts/fetch_backloop_certs.py deps
 
-native:
+patch-native:
+	python3 .github/scripts/prepare_ipa_patch_lief.py --target ios
+
+native: patch-native
 	python3 .github/scripts/build_device_native.py
 	python3 .github/scripts/patch_idevicekit.py
 

@@ -59,6 +59,8 @@ intermediate IPA export is needed.
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit
 relative path. This reduces the header space required for compatible extensions.
+If that space is still insufficient, device builds automatically expand and
+rebuild cramped ARM64 executable headers before signing, retaining all slices.
 
 Successful patching is silent. If patching fails, the attempt is rolled back
 and signing continues. A notice appears after signing, or after the entire

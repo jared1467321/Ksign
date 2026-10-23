@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "release": "https://github.com/lief-project/LIEF/releases/download/1.0.0",
+  "archives": {
+    "ios-arm64": {
+      "name": "LIEF-1.0.0-iOS-arm64.tar.gz",
+      "sha256": "556026160349673239e93a335ff8bdd70a95e117cbc2e2a73d98d8f506e3ca48"
+    },
+    "Darwin-arm64": {
+      "name": "LIEF-1.0.0-Darwin-arm64.tar.gz",
+      "sha256": "c7bedf2e2acab9bced1c8701b06261fc6f4eba1957f80cbf86323a3f5e172167"
+    },
+    "Darwin-x86_64": {
+      "name": "LIEF-1.0.0-Darwin-x86_64.tar.gz",
+      "sha256": "f15541e53344b3bb58078472bd9ab737b9f89cd24d51f46866066e554ead7107"
+    },
+    "Linux-x86_64": {
+      "name": "LIEF-1.0.0-Linux-x86_64.tar.gz",
+      "sha256": "81b86bcc69d311a01ec1914d26c31ebbb605ac761ec02f10bc5b588de74a8e91"
+    },
+    "Linux-aarch64": {
+      "name": "LIEF-1.0.0-Linux-aarch64.tar.gz",
+      "sha256": "42b638989ca35d778640f11deba4560f5e5ad9976fca4012aeeba9b7bacf997d"
+    }
+  }
+}

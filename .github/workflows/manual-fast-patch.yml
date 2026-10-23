@@ -86,6 +86,13 @@ jobs:
             IDeviceKit/.build/IDevice.xcframework
           key: idevice-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native_cache_key.outputs.key }}
 
+      - name: Cache IPA header-growth SDKs
+        if: ${{ inputs.clean != true }}
+        uses: actions/cache@v4
+        with:
+          path: .build/ipa-patch-lief
+          key: ipa-patch-lief-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Native/IPAPatch/lief.json') }}
+
       - name: Build
         run: |
           python3 -m unittest discover -s Tests/Packaging -v
