@@ -20,7 +20,7 @@ func rejects(_ message: String, _ operation: () throws -> Void) {
 // but a persisted receipt for this particular installed copy is mandatory.
 func app(bundle: String = "test.example.app", identity: String? = "TEAM123456.test.example.app",
          type: String? = "User", removable: Bool? = nil,
-         path: String? = "/private/var/containers/Bundle/Application/KSIGN-COPY/Example.app") throws -> IDeviceInstalledApp {
+         path: String? = "/private/var/containers/Bundle/Application/ASIGN-COPY/Example.app") throws -> IDeviceInstalledApp {
     let json: [String: Any] = [
         "bundleIdentifier": bundle, "name": "Example", "version": "1.2.3",
         "applicationIdentifier": identity.map { $0 as Any } ?? NSNull(),
@@ -34,14 +34,14 @@ func app(bundle: String = "test.example.app", identity: String? = "TEAM123456.te
 
 let installed = try app()
 let bundle = installed.id
-let host = "test.ksign"
-let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Ksign-OwnershipTests-\(UUID())")
+let host = "test.asign"
+let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Asign-OwnershipTests-\(UUID())")
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: directory) }
 let registryURL = directory.appendingPathComponent("ManagedInstalls.json")
 let registry = IDeviceManagedInstallRegistry(fileURL: registryURL)
 try require(registry.snapshot().isEmpty, "A new registry grants no uninstall permission")
-rejects("device app without a Ksign receipt") {
+rejects("device app without a Asign receipt") {
     _ = try IDeviceUninstallRequest(installedApp: installed, hostBundleIdentifier: host, registry: registry)
 }
 try registry.recordConfirmedInstall(installed, hostBundleIdentifier: host)
@@ -103,7 +103,7 @@ rejects("unverified application type") {
 
 let unrelated = try app(bundle: "test.store", identity: "STORE.test.store")
 let listed = try registry.reconcile([installed, unrelated, minimal], observed: registry.snapshot(), hostBundleIdentifier: host)
-require(listed.map(\.id) == [bundle], "Only verified Ksign installations appear in the list")
+require(listed.map(\.id) == [bundle], "Only verified Asign installations appear in the list")
 let unverifiableList = try registry.reconcile([unknownIdentity], observed: registry.snapshot(), hostBundleIdentifier: host)
 require(unverifiableList.isEmpty, "Missing metadata hides an unverifiable copy")
 try require(registry.snapshot() == [receipt], "Unavailable metadata must not destroy a valid receipt")
@@ -141,7 +141,7 @@ for unverifiable in [unknownIdentity, try app(path: nil), try app(type: "System"
     try registry.recordConfirmedInstall(unverifiable, hostBundleIdentifier: host)
 }
 try registry.recordConfirmedInstall(installed, hostBundleIdentifier: bundle)
-try require(registry.snapshot().isEmpty, "Unknown identities, copy bindings, system apps and Ksign stay untracked")
+try require(registry.snapshot().isEmpty, "Unknown identities, copy bindings, system apps and Asign stay untracked")
 
 let oldDate = Date(timeIntervalSince1970: 100)
 let newDate = Date(timeIntervalSince1970: 200)

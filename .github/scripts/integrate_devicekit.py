@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply Ksign's reviewed overlays to the pinned IDeviceKit submodule.
+"""Apply Asign's reviewed overlays to the pinned IDeviceKit submodule.
 
 Bounded uploads and buffer-lifetime fixes are included in InstallationProxy.
 Unknown inputs fail before any writes. Edit Native/Device,
@@ -129,7 +129,7 @@ def apply(kit):
             source = MARKER + source
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
-    print("Applied Ksign device installation overlays")
+    print("Applied Asign device installation overlays")
 
 
 if __name__ == "__main__":

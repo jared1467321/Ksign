@@ -455,7 +455,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                     try IDeviceManagedInstallRegistry.shared.recordConfirmedInstall(installed)
                 }
             } catch {
-                NSLog("Ksign couldn't record a completed install: %@", error.localizedDescription)
+                NSLog("Asign couldn't record a completed install: %@", error.localizedDescription)
             }
         }
         try checkCancellation()
@@ -473,7 +473,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         var provider: OpaquePointer?
         let error = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: idevice_sockaddr.self, capacity: 1) {
-                idevice_tcp_provider_new($0, pairing, "Ksign installation", &provider)
+                idevice_tcp_provider_new($0, pairing, "Asign installation", &provider)
             }
         }
         // The constructor consumes pairing on success; the address and label

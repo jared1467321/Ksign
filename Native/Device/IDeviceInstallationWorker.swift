@@ -16,7 +16,7 @@ final class IDeviceInstallationWorker {
                 let result = autoreleasepool { Result(catching: operation) }
                 continuation.resume(with: result)
             }
-            thread.name = "Ksign device install attempt"
+            thread.name = "Asign device install attempt"
             thread.qualityOfService = .userInitiated
             thread.start()
         }
@@ -32,7 +32,7 @@ final class IDeviceInstallationWorker {
                 autoreleasepool { operation() }
             }
         }
-        thread.name = "Ksign device installation"
+        thread.name = "Asign device installation"
         thread.qualityOfService = .userInitiated
         thread.start()
     }

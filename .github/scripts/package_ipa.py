@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the updated ASign app with its built-in device connection.
+"""Package the updated Asign app with its built-in device connection.
 
 Ad-hoc signatures preserve entitlement requests for re-signers;
 they do not authorize installation. Distribution still needs valid profiles.
@@ -48,15 +48,15 @@ def validate_executables(bundles):
 
 
 def package(app, output):
-    with tempfile.TemporaryDirectory(prefix="ksign-package-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="asign-package-") as temporary:
         stage = Path(temporary)
         payload = stage / "Payload"
         payload.mkdir()
         copy = payload / app.name
         shutil.copytree(app, copy, symlinks=True)
-        tunnel = copy / "PlugIns/KsignDeviceTunnel.appex"
+        tunnel = copy / "PlugIns/AsignDeviceTunnel.appex"
         if not tunnel.is_dir():
-            raise RuntimeError("The Xcode build did not embed KsignDeviceTunnel.appex")
+            raise RuntimeError("The Xcode build did not embed AsignDeviceTunnel.appex")
         for certificate in (ROOT / "deps").glob("*"):
             if certificate.is_file():
                 shutil.copy2(certificate, copy / certificate.name)
@@ -67,9 +67,9 @@ def package(app, output):
         for bundle in bundles + [copy]:
             command = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
             if bundle == tunnel:
-                command += ["--entitlements", str(ROOT / "KsignDeviceTunnel/KsignDeviceTunnel.entitlements")]
+                command += ["--entitlements", str(ROOT / "AsignDeviceTunnel/AsignDeviceTunnel.entitlements")]
             elif bundle == copy:
-                command += ["--entitlements", str(ROOT / "Ksign/Supporting Files/BuiltInDevice.entitlements")]
+                command += ["--entitlements", str(ROOT / "Asign/Supporting Files/BuiltInDevice.entitlements")]
             subprocess.run(command + [str(bundle)], check=True)
         validate_executables(bundles + [copy])
         destination = output / (app.stem + ".ipa")

@@ -1,8 +1,8 @@
 
 <img src="https://github.com/user-attachments/assets/986892f9-c32f-448d-a24e-ba8659203fbf" height="200">
 
-# Ksign 
-[![GitHub Release](https://img.shields.io/github/v/release/nyasami/ksign?style=for-the-badge&color=3c94fc)](https://github.com/nyasami/ksign/releases/latest) 
+# Asign
+[![GitHub Release](https://img.shields.io/github/v/release/nyasami/ksign?style=for-the-badge&color=3c94fc)](https://github.com/nyasami/ksign/releases/latest)
 [![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/nyasami/ksign/total?style=for-the-badge&color=6bc563)](https://github.com/nyasami/ksign/releases)
 
 Yet another codesigning app, have you ever wondered what if Feather and Esign had a child?
@@ -15,7 +15,7 @@ Another reason is this app was built specifically for Khoindvn to share his cert
 ## Help
 You can create your Issue at [Issue](https://github.com/Nyasami/Ksign-public/issues), this will also be the place for you to request a new feature so feel free to make one!
 
-You can also join Ksign Discord [here](https://discord.gg/sfbZfQzVdQ) for better communication.
+You can also join Asign Discord [here](https://discord.gg/sfbZfQzVdQ) for better communication.
 
 ## Download
 Go to [Releases](https://github.com/Nyasami/Ksign-public/releases) and download the newest ipa from there.
@@ -52,7 +52,7 @@ an existing custom selection stays selected.
 
 In **Settings → Backup & Restore**, enter a backup password and choose
 **Create Backup**. Save the `.asignbackup` file to iCloud Drive or another
-location outside ASign. Files saved inside ASign are removed when the app is
+location outside Asign. Files saved inside Asign are removed when the app is
 deleted. You can choose the saved file and **Unlock Backup** to check your
 password without restoring anything.
 

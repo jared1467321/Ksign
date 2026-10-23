@@ -40,7 +40,7 @@ jobs:
           path: |
             ~/Library/Caches/org.swift.swiftpm
             ~/Library/org.swift.swiftpm
-          key: spm-${{ runner.os }}-${{ hashFiles('Ksign.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          key: spm-${{ runner.os }}-${{ hashFiles('Asign.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: |
             spm-${{ runner.os }}-
 
@@ -95,6 +95,6 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ASign-ipa
-          path: packages/ASign.ipa
+          name: Asign-ipa
+          path: packages/Asign.ipa
           if-no-files-found: error

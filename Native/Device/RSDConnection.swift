@@ -101,7 +101,7 @@ extension HeartbeatManager {
         var handshake: OpaquePointer?
         let error = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: idevice_sockaddr.self, capacity: 1) {
-                tunnel_create_rppairing($0, socklen_t(MemoryLayout<sockaddr_in>.size), "Ksign", pairing, nil, nil, &adapter, &handshake)
+                tunnel_create_rppairing($0, socklen_t(MemoryLayout<sockaddr_in>.size), "Asign", pairing, nil, nil, &adapter, &handshake)
             }
         }
         if let error {

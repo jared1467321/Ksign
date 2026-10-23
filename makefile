@@ -1,12 +1,11 @@
-NAME := Ksign
+NAME := Asign
 PLATFORM := iphoneos
-SCHEMES := Ksign
-# Name of the built .app bundle and the produced .ipa. Kept separate from
-# SCHEMES so the Xcode scheme/target can stay "Ksign" while the output is
-# renamed. Must match PRODUCT_NAME in Ksign.xcodeproj/project.pbxproj.
-OUTPUT_NAME := ASign
-# Build output goes to $(TMPDIR)/Ksign by default (unchanged for local
-# builds). CI can set DERIVED_DATA to a stable path so it can be cached
+SCHEMES := Asign
+# Name of the built .app bundle and the produced .ipa.
+# Must match PRODUCT_NAME in Asign.xcodeproj/project.pbxproj.
+OUTPUT_NAME := Asign
+# Build output goes to $(TMPDIR)/Asign by default.
+# CI can set DERIVED_DATA to a stable path so it can be cached
 # between runs, e.g. `DERIVED_DATA=$PWD/DerivedData make`.
 TMP := $(if $(DERIVED_DATA),$(DERIVED_DATA),$(TMPDIR)/$(NAME))
 STAGE := $(TMP)/stage
@@ -32,7 +31,7 @@ native:
 
 $(SCHEMES): native deps
 	xcodebuild \
-	    -project Ksign.xcodeproj \
+	    -project Asign.xcodeproj \
 	    -scheme "$@" \
 	    -configuration Release \
 	    -arch arm64 \

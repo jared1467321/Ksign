@@ -274,7 +274,7 @@ public enum ASignArchive {
         }
     }
 
-    /// Materialize only the files zsign or ASign modification logic must touch on disk.
+    /// Materialize only the files zsign or Asign modification logic must touch on disk.
     /// Untouched resources remain archive-backed.
     @discardableResult
     public static func materializeSigningInputs(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one pinned idevice XCFramework with Ksign's pairing bridge.
+"""Build one pinned idevice XCFramework with Asign's pairing bridge.
 
 Run before opening Xcode or resolving packages. --prepare-only is useful for
 Linux cargo tests; --archive accepts an already downloaded, hash-checked archive.
@@ -40,7 +40,7 @@ def hardware_aes_environment(environ):
     else:
         flags = shlex.split(env.get("RUSTFLAGS", ""))
     if "aes_force_soft" in flags or "--cfg=aes_force_soft" in flags:
-        raise RuntimeError("aes_force_soft conflicts with Ksign's hardware AES build")
+        raise RuntimeError("aes_force_soft conflicts with Asign's hardware AES build")
     flags.extend(["--cfg", "aes_armv8"])
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
     return env
@@ -135,7 +135,7 @@ def main():
     stamp = build_fingerprint()
     stamp_path = WORK / "built-stamp"
     if OUTPUT.exists() and stamp_path.exists() and stamp_path.read_text() == stamp:
-        print("Using cached Ksign iDevice framework")
+        print("Using cached Asign iDevice framework")
         return
     targets = [("aarch64-apple-ios", "iphoneos"), ("aarch64-apple-ios-sim", "iphonesimulator")]
     run("rustup", "target", "add", "--toolchain", toolchain, *(target for target, _ in targets))

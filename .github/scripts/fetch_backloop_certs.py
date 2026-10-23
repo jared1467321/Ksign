@@ -63,7 +63,7 @@ def fetch_bytes(url: str, accept: str) -> bytes:
         url,
         headers={
             "Accept": accept,
-            "User-Agent": "Ksign-build/2.0",
+            "User-Agent": "Asign-build/2.0",
         },
     )
     with urlopen(request, timeout=30) as response:
@@ -317,7 +317,7 @@ def main(argv: list[str]) -> int:
         try:
             candidate = fetch_candidate(provider)
             with tempfile.TemporaryDirectory(
-                prefix="ksign-tls-candidate-",
+                prefix="asign-tls-candidate-",
                 dir=output_dir.parent,
             ) as temp_name:
                 staged = Path(temp_name)

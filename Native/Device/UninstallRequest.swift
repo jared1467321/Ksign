@@ -14,7 +14,7 @@ public struct IDeviceUninstallRequest: Sendable {
         }
         bundleIdentifier = installedApp.bundleIdentifier
         guard let record = try registry.snapshot().first(where: { $0.matches(installedApp) }) else {
-            throw IDeviceInstallSkip(reason: "This installed copy isn't verified as installed by Ksign. Refresh Installed Apps before trying again.")
+            throw IDeviceInstallSkip(reason: "This installed copy isn't verified as installed by Asign. Refresh Installed Apps before trying again.")
         }
         managedInstall = record
         self.registry = registry
@@ -24,7 +24,7 @@ public struct IDeviceUninstallRequest: Sendable {
     /// user must refresh and review that copy before sending another command.
     func validate(_ installed: IDeviceInstalledApp?, hostBundleIdentifier: String?) throws -> Bool {
         guard bundleIdentifier != hostBundleIdentifier else {
-            throw IDeviceInstallSkip(reason: "Ksign cannot uninstall itself. Remove it from the Home Screen if needed.")
+            throw IDeviceInstallSkip(reason: "Asign cannot uninstall itself. Remove it from the Home Screen if needed.")
         }
         guard let installed else { return false }
         if let reason = installed.removalRestriction(hostBundleIdentifier: hostBundleIdentifier) {

@@ -532,7 +532,7 @@ void password_check_fix(NSString *path)
 
 void password_check_fix_free(NSString *path)
 {
-    // Kept for source compatibility with ASign. password_check_fix now owns and
+    // Kept for source compatibility with Asign. password_check_fix now owns and
     // releases its temporary CMS/BIO state instead of leaking it across calls.
     (void)path;
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Proof of a completed Ksign install, tied to that installed copy rather than
+/// Proof of a completed Asign install, tied to that installed copy rather than
 /// just its bundle ID. Never infer ownership from a saved IPA or library row.
 public struct IDeviceManagedInstall: Codable, Equatable, Sendable {
     public let token: UUID
@@ -66,7 +66,7 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             // A fresh installation has no owned apps yet.
         } catch {
-            readFailure = "Ksign couldn't read its installed-app records: \(error.localizedDescription)"
+            readFailure = "Asign couldn't read its installed-app records: \(error.localizedDescription)"
         }
     }
 
@@ -151,7 +151,7 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
             try data.write(to: fileURL, options: .atomic)
             records = updated
         } catch {
-            throw IDeviceInstallSkip(reason: "Ksign couldn't save its installed-app records: \(error.localizedDescription)")
+            throw IDeviceInstallSkip(reason: "Asign couldn't save its installed-app records: \(error.localizedDescription)")
         }
     }
 }

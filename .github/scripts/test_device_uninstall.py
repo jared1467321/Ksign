@@ -20,7 +20,7 @@ def main():
     spec = importlib.util.spec_from_file_location("device_overlays", Path(__file__).with_name("integrate_devicekit.py"))
     overlays = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(overlays)
-    with tempfile.TemporaryDirectory(prefix="ksign-uninstall-tests-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="asign-uninstall-tests-") as scratch:
         kit = Path(scratch) / "IDeviceKit"
         kit.mkdir()
         # Fresh upstream checkout in scratch: do not mutate the user's submodule.
@@ -43,7 +43,7 @@ def main():
         flags = ["-swift-version", "5"]
         if sys.platform == "darwin":
             flags += ["-target", platform.machine() + "-apple-macosx14.0"]
-        coordinator = [str(ROOT / "Ksign/Backend/Device/VPNReconnectCoordinator.swift")] if sys.platform == "darwin" else []
+        coordinator = [str(ROOT / "Asign/Backend/Device/VPNReconnectCoordinator.swift")] if sys.platform == "darwin" else []
         subprocess.run([compiler, *flags,
                         str(ROOT / "Native/Device/InstallPreflight.swift"),
                         str(ROOT / "Native/Device/InstalledApps.swift"),

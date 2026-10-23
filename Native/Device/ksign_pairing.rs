@@ -1,4 +1,4 @@
-//! Ksign's cancellable iOS pairing bridge. Built into the existing idevice FFI
+//! Asign's cancellable iOS pairing bridge. Built into the existing idevice FFI
 //! library, so there is only one Rust runtime and one version of the protocol.
 //! Bonjour advertising belongs to Swift/NetService, not raw multicast sockets.
 
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn ksign_pairing_run(
             result = pairing => result,
             _ = wait_cancelled(session) => Err("Pairing cancelled".into()),
             _ = tokio::time::sleep(Duration::from_secs(180)) =>
-                Err("Pairing timed out. Return to Ksign and try again.".into()),
+                Err("Pairing timed out. Return to Asign and try again.".into()),
         }
     });
     match result {
@@ -220,7 +220,7 @@ mod tests {
     fn cancellation_closes_a_waiting_listener_without_a_device() {
         unsafe {
             let session = ksign_pairing_new();
-            let name = CString::new("Ksign test").unwrap();
+            let name = CString::new("Asign test").unwrap();
             let mut record = std::ptr::null_mut();
             let started = std::time::Instant::now();
             let error = ksign_pairing_run(session, name.as_ptr(), Some(cancel_when_listening), session.cast(), &mut record);

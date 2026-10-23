@@ -1,6 +1,6 @@
 import Foundation
 
-/// A device-reported snapshot, independent of Ksign's library and IPA files.
+/// A device-reported snapshot, independent of Asign's library and IPA files.
 public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
     public let bundleIdentifier: String
     public let name: String
@@ -27,10 +27,10 @@ public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
 
     public func removalRestriction(hostBundleIdentifier: String?) -> String? {
         if bundleIdentifier == hostBundleIdentifier {
-            return "Ksign cannot uninstall itself. Remove it from the Home Screen if needed."
+            return "Asign cannot uninstall itself. Remove it from the Home Screen if needed."
         }
         if applicationType != "User" || isRemovable == false {
-            return "iOS does not allow Ksign to remove this app."
+            return "iOS does not allow Asign to remove this app."
         }
         if bundleIdentifier.isEmpty || bundleIdentifier.contains("\0") ||
             bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {

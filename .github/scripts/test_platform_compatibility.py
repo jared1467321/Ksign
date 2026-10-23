@@ -195,11 +195,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require-swift", action="store_true")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="ksign-platform-tests-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="asign-platform-tests-") as scratch:
         directory = Path(scratch)
         library = directory / ("platform.dylib" if sys.platform == "darwin" else "platform.so")
         subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
-                        str(ROOT / "Ksign/Utilities/MachO/PlatformCompatibility.c"), "-o", str(library)], check=True)
+                        str(ROOT / "Asign/Utilities/MachO/PlatformCompatibility.c"), "-o", str(library)], check=True)
         loaded = ctypes.CDLL(str(library))
         patcher = loaded.KsignPatchPlatformMetadata
         patcher.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint32,
@@ -212,8 +212,8 @@ def main():
         fuzz = directory / "platform-fuzz"
         subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-                        "-I", str(ROOT / "Ksign/Utilities/MachO"),
-                        str(ROOT / "Ksign/Utilities/MachO/PlatformCompatibility.c"),
+                        "-I", str(ROOT / "Asign/Utilities/MachO"),
+                        str(ROOT / "Asign/Utilities/MachO/PlatformCompatibility.c"),
                         str(ROOT / "Tests/PlatformCompatibility/fuzz.c"), "-o", str(fuzz)], check=True)
         # This parser allocates no heap memory. Keep address/UB checks enabled;
         # LeakSanitizer cannot inspect processes in traced development containers.
@@ -233,8 +233,8 @@ def main():
                         "-emit-module-path", str(directory / "IDeviceSwift.swiftmodule"), "-o", str(module)], check=True)
         executable = directory / "platform-tests"
         subprocess.run([swift, *swift_flags, "-I", scratch, "-L", scratch, "-lIDeviceSwift",
-                        str(ROOT / "Ksign/Utilities/Handlers/SigningPlatformCompatibility.swift"),
-                        str(ROOT / "Ksign/Views/Signing/SigningPreflight.swift"),
+                        str(ROOT / "Asign/Utilities/Handlers/SigningPlatformCompatibility.swift"),
+                        str(ROOT / "Asign/Views/Signing/SigningPreflight.swift"),
                         str(ROOT / "Tests/PlatformCompatibility/main.swift"), "-o", str(executable)], check=True)
         env = dict(os.environ)
         env["DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"] = scratch

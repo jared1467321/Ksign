@@ -2,7 +2,7 @@
 //  Color+halloween.swift
 //  NimbleKit
 //
-//  Theme storage and the compatibility facade used by Ksign/NimbleViews.
+//  Theme storage and the compatibility facade used by Asign/NimbleViews.
 //
 //  The original Halloween palette remains the built-in default, but colors are
 //  now resolved from the selected theme profile at runtime. Keeping the

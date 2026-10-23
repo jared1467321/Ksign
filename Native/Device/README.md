@@ -1,13 +1,13 @@
 # Built-in device installation
 
-The existing manual build workflow produces one updated `packages/ASign.ipa`.
-It embeds `KsignDeviceTunnel.appex` and Ksign's pairing bridge. The Server and
+The existing manual build workflow produces one updated `packages/Asign.ipa`.
+It embeds `AsignDeviceTunnel.appex` and Asign's pairing bridge. The Server and
 Manual Setup paths remain available in Installation settings.
 
 ## Build
 
 Use **Actions → Manual Build (cached) → Run workflow** on the
-`Installation-improvements` branch. The artifact contains `ASign.ipa`.
+`Installation-improvements` branch. The artifact contains `Asign.ipa`.
 
 For a local Mac build, install Rust 1.99.0 with rustup, initialize the submodules,
 and run `make`. The native build downloads the exact source revision and verifies
@@ -36,7 +36,7 @@ source trees from the chunk-size experiment.
 
 ## Requirements and workflow
 
-- Ksign and its embedded tunnel must be signed with provisioning profiles that
+- Asign and its embedded tunnel must be signed with provisioning profiles that
   authorize `com.apple.developer.networking.networkextension` with
   `packet-tunnel-provider`. Ad-hoc packaging preserves the requested
   entitlements but does not grant this capability. Keep the extension when
@@ -58,8 +58,8 @@ source trees from the chunk-size experiment.
   a connection error requests recovery after active installs drain. An app
   rejected by iOS (for example, an incompatible platform or invalid signature)
   fails individually without replacing the shared connection for later apps.
-  A queued Ksign update follows the other queued device installs. Avoid adding
-  more apps after Ksign's own update has already begun.
+  A queued Asign update follows the other queued device installs. Avoid adding
+  more apps after Asign's own update has already begun.
 - **Sign** and **Sign & Install**, for both single apps and batches, review the
   current signing options before starting work. A local installed-app check warns
   about bundle identifiers already on this device without starting the VPN.
@@ -117,7 +117,7 @@ source trees from the chunk-size experiment.
   upload does not free capacity: the next queued app waits until an installation
   and its native cleanup finish. Memory headroom and kernel pressure may temporarily
   admit fewer apps, but never exceed the chosen limit. Duplicate-bundle
-  reservations, pause/drain checks and Ksign's exclusive self-update remain
+  reservations, pause/drain checks and Asign's exclusive self-update remain
   enforced.
   Numeric drawer progress is coalesced to at most five deliveries per second
   per attempt while active, with immediate final values at completion. Inactive
@@ -154,21 +154,21 @@ source trees from the chunk-size experiment.
   **Library → Signed Apps**. Use the library trash button to remove those signed
   files; failed and unstarted entries remain for later. A completed queue also
   offers **Select Installed Apps** until its result is closed or a new queue starts.
-- When the workflow ends, Ksign removes the protected temporary pairing file
+- When the workflow ends, Asign removes the protected temporary pairing file
   and stops a VPN connection it started. It leaves an already connected VPN
   alone. A new VPN connection may replace another active VPN.
 - **Library → Installed Apps** is the third segment beside Downloaded Apps and
   Signed Apps; the original bottom tabs, including App Store, remain available.
   Choose **Load Installed Apps** or
   **Refresh** to query iOS over the selected iDevice connection (Built-in or
-  Manual). It shows only installed copies verified against Ksign's persistent
+  Manual). It shows only installed copies verified against Asign's persistent
   install receipts, regardless of whether their IPA or library record is kept.
   App Store apps, system apps, and apps installed elsewhere are excluded.
   iOS's inventory does not identify the original installer, so existing apps
   cannot be adopted from the inventory, signing history, or saved library files.
-  Apps installed before this tracking was added must be installed through Ksign
+  Apps installed before this tracking was added must be installed through Asign
   again to enter the list.
-  After loading/refreshing, Ksign shows the existing **Reconnect VPN** banner
+  After loading/refreshing, Asign shows the existing **Reconnect VPN** banner
   with its reconnect and dismiss buttons, as after background installs/setup.
   Loading the list does not open Shortcuts or a share sheet automatically.
   Tapping the reminder uses the selected reconnect method: run the shortcut or
@@ -189,7 +189,7 @@ source trees from the chunk-size experiment.
   and bundle identifiers, then confirm deletion of the apps and their data.
   The paired-device command may not show another iOS Delete prompt. The same
   pairing/VPN requirements apply even for apps originally installed with Server.
-  Library files are kept. System apps and Ksign itself are not eligible; iOS can
+  Library files are kept. System apps and Asign itself are not eligible; iOS can
   also reject removal of managed or restricted apps. The app's device-reported
   signing identity and copy binding are checked against the receipt when selected
   and again immediately before removal. Unknown identities are ineligible.
@@ -211,7 +211,7 @@ source trees from the chunk-size experiment.
   theirs for retry. A successful inventory refresh prunes absent/replaced copies
   without pruning newer receipts created after the query began. Missing metadata
   hides a copy without throwing away its receipt.
-- **Forget Built-in Pairing** removes Ksign's saved credentials. Removing iOS's
+- **Forget Built-in Pairing** removes Asign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
 - If the device handshake fails, Built-in Connection refreshes and restarts
   this app's local VPN once before retrying. If saved or imported credentials
@@ -223,9 +223,9 @@ source trees from the chunk-size experiment.
   Connection recovery finishes before installation starts; a failed app install
   is never automatically replayed.
 
-The initial installation of Ksign, Apple signing and trust requirements, and
+The initial installation of Asign, Apple signing and trust requirements, and
 system consent prompts cannot be automated by this implementation. No network
-service operated by Ksign is required for direct installation.
+service operated by Asign is required for direct installation.
 
 ## Reconnect Tailscale after installation
 
@@ -233,28 +233,28 @@ service operated by Ksign is required for direct installation.
    add Tailscale's **Connect** action. Run it once to check that it connects and
    resolve any first-run permissions. In the shortcut's details, enable
    **Show in Share Sheet** and allow **Text** input. The shortcut can ignore
-   that input. Remove any **Open App** actions to keep execution inside Ksign.
-2. In Ksign, open **Settings → Installation → iDevice → Built-in Connection**
+   that input. Remove any **Open App** actions to keep execution inside Asign.
+2. In Asign, open **Settings → Installation → iDevice → Built-in Connection**
    and enable **Reconnect VPN after installation**. Allow notifications for
    the background completion reminder. Enter a different shortcut name if
    needed; other VPNs can use the same feature through their own shortcuts.
 3. Leave **Reconnect method → Share Sheet** selected, then use **Test Share
    Sheet** while no installation is running. Scroll down in the system share
-   sheet and select **Restore Tailscale**. The name in Ksign is a reminder;
+   sheet and select **Restore Tailscale**. The name in Asign is a reminder;
    iOS requires you to select the actual shortcut yourself.
 
-When all device operations and workflows finish, Ksign stops the local VPN it
+When all device operations and workflows finish, Asign stops the local VPN it
 started and waits for disconnection before presenting the share sheet over
 the current screen, including the install drawer. Select your shortcut to
 reconnect without switching to the Shortcuts app. Failed or cancelled work
 also offers reconnection once cleanup finishes. Setup checks use the same
-handoff. A VPN Ksign adopted without starting stays untouched and does not
+handoff. A VPN Asign adopted without starting stays untouched and does not
 trigger reconnection. Manual Setup does not trigger reconnection.
 
-If Ksign finishes in the background, it saves a pending request and sends a
-notification. Tap it to open Ksign and show the share sheet. If you dismiss
+If Asign finishes in the background, it saves a pending request and sends a
+notification. Tap it to open Asign and show the share sheet. If you dismiss
 the sheet or notifications are unavailable, tap the **Reconnect VPN** reminder
-in Ksign, the install drawer, or Installation settings to bring it back.
+in Asign, the install drawer, or Installation settings to bring it back.
 Returning to the app alone does not run the shortcut. Starting new device work
 invalidates the previous request, including its notification, and dismisses
 its share sheet, so an old request cannot launch another handoff during the
@@ -265,16 +265,16 @@ workflow ends.
 Share Sheet is the default method, including for previously enabled installs
 with no saved method. The feature itself remains off until enabled. To retain
 the earlier automatic behavior, select **Open Shortcuts Automatically**; this
-briefly opens Shortcuts, and you can add **Open App → Ksign** as the shortcut's
+briefly opens Shortcuts, and you can add **Open App → Asign** as the shortcut's
 last action to return. That method uses **Test Reconnect Shortcut** for testing.
 
-Ksign cannot silently control another app's VPN or confirm the shortcut
+Asign cannot silently control another app's VPN or confirm the shortcut
 connected successfully; Shortcuts reports action failures. Completing a share
 activity acknowledges the handoff without verifying the VPN. If your shortcut
 is missing from the share sheet, check **Show in Share Sheet** and its accepted
 input types. Actions that explicitly open an app still switch to that app.
-If the local VPN has not disconnected within 20 seconds, Ksign skips the handoff.
-Force quitting or replacing Ksign during self-update can prevent completion
+If the local VPN has not disconnected within 20 seconds, Asign skips the handoff.
+Force quitting or replacing Asign during self-update can prevent completion
 cleanup from running and still requires a manual reconnect.
 
 ## Verification status
@@ -324,7 +324,7 @@ Shortcuts execution or notification delivery.
 Also verify selecting the Text-accepting reconnect shortcut inside the share
 sheet, presenting it over the install drawer, dismiss/retry, and the iPad
 popover anchor. Remove any Open App actions when checking execution inside
-Ksign. The UIKit share sheet requires an Xcode build and real device validation.
+Asign. The UIKit share sheet requires an Xcode build and real device validation.
 
 ## Source attribution
 
@@ -332,5 +332,5 @@ The protocol implementation is iDevice by Jackson Coxson, declared MIT by its
 upstream Cargo metadata and README:
 https://github.com/jkcoxson/idevice/tree/7bd551c16c6dd2e058740d85a2d9399a51a776e9
 
-Ksign's Swift integration, pairing bridge, and narrow IPv4 packet reflection
+Asign's Swift integration, pairing bridge, and narrow IPv4 packet reflection
 are maintained in this repository. StikPair's implementation is not included.
