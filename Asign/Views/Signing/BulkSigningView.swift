@@ -388,6 +388,7 @@ extension BulkSigningView {
 			BackgroundTaskManager.shared.release(.signing, success: failures.isEmpty)
 
 			var sections: [String] = []
+			if let patchingFailures = context.patchingReport.summary { sections.append(patchingFailures) }
 			if !skippedApps.isEmpty { sections.append("Skipped before signing:\n" + skippedApps.map(\.description).joined(separator: "\n")) }
 			if !failures.isEmpty { sections.append("Signing failed:\n" + failures.map { "\($0.name): \($0.error.localizedDescription)" }.joined(separator: "\n")) }
 			if !handoff.withheld.isEmpty { sections.append("Signed, not queued for installation:\n" + handoff.withheld.map(\.description).joined(separator: "\n") + "\n\nThese signed apps remain in Signed Apps.") }

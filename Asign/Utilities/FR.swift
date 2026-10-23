@@ -123,6 +123,10 @@ enum FR {
                 (SigningAppSnapshot(app), SigningCredentials(certificate))
             }
 			let handler = SigningHandler(app: source, options: options, packages: context.packages, signingSession: context.session)
+            let patchingID = handler.signedAppID
+            handler.onPatchingFailure = { reason in
+                context.patchingReport.record(id: patchingID, name: source.name ?? "Unknown", reason: reason)
+            }
             handler.credentials = credentials
             let memory = ArchiveMemoryCoordinator.shared
             let signingID = UUID(uuidString: handler.signedAppID) ?? UUID()

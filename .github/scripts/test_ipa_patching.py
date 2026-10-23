@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Test the production IPA patcher, transaction rollback, and failure reporting."""
+import argparse
+import ctypes
+import hashlib
+import os
+from pathlib import Path
+import platform
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+LOAD_PATH = b"@executable_path/../../Frameworks/blatantsPatch.dylib"
+
+
+def dylib(path, weak=True, endian="<", wide=True):
+    size = (24 + len(path) + 1 + (7 if wide else 3)) & ~(7 if wide else 3)
+    return struct.pack(endian + "6I", 0x80000018 if weak else 0xC, size, 24, 2, 0, 0) + path + bytes(size - 24 - len(path))
+
+
+def thin(extra=(), endian="<", wide=True, padding=256, encrypted=False):
+    header_size, section_base, section_size = (32, 72, 80) if wide else (28, 56, 68)
+    segment = bytearray(section_base + section_size)
+    struct.pack_into(endian + "2I", segment, 0, 0x19 if wide else 1, len(segment))
+    segment[8:14] = b"__TEXT"
+    segment[section_base:section_base + 6] = b"__text"
+    commands = [segment, *extra]
+    if encrypted:
+        commands.append(struct.pack(endian + "6I", 0x2C, 24, 0, 0, 1, 0))
+    # Include an existing signature carrying recognizable entitlement data.
+    code_offset = header_size + sum(map(len, commands)) + 16 + padding
+    payload = b"UNCHANGED_EXECUTABLE_CODE" * 4
+    signature = b"ORIGINAL_SIGNATURE_XML_AND_DER_ENTITLEMENTS"
+    signature_offset = code_offset + len(payload)
+    file_size = signature_offset + len(signature)
+    if wide:
+        struct.pack_into(endian + "4Q4I", segment, 24, 0, file_size, 0, file_size, 7, 5, 1, 0)
+        struct.pack_into(endian + "2Q2I", segment, section_base + 32, 0, len(payload), code_offset, 0)
+    else:
+        struct.pack_into(endian + "8I", segment, 24, 0, file_size, 0, file_size, 7, 5, 1, 0)
+        struct.pack_into(endian + "4I", segment, section_base + 32, 0, len(payload), code_offset, 0)
+    commands.append(struct.pack(endian + "4I", 0x1D, 16, signature_offset, len(signature)))
+    header = struct.pack(endian + "7I", 0xFEEDFACF if wide else 0xFEEDFACE,
+                         0x100000C if wide else 12, 0 if wide else 9, 2, len(commands), sum(map(len, commands)), 0)
+    return header + (bytes(4) if wide else b"") + b"".join(commands) + bytes(padding) + payload + signature
+
+
+def fat(slices, endian=">", wide=False):
+    entry_size = 32 if wide else 20
+    data = bytearray(8 + entry_size * len(slices))
+    struct.pack_into(endian + "2I", data, 0, 0xCAFEBABF if wide else 0xCAFEBABE, len(slices))
+    for index, blob in enumerate(slices):
+        data.extend(bytes((-len(data)) % 64))
+        offset = len(data)
+        slice_endian = ">" if blob[:4] in (bytes.fromhex("feedface"), bytes.fromhex("feedfacf")) else "<"
+        cpu, subtype = struct.unpack_from(slice_endian + "2I", blob, 4)
+        entry = struct.pack(endian + ("2I2Q2I" if wide else "5I"), cpu, subtype,
+                            offset, len(blob), 6, *([0] if wide else []))
+        data[8 + index * entry_size:8 + (index + 1) * entry_size] = entry
+        data.extend(blob)
+    return bytes(data)
+
+
+class PatchingTests(unittest.TestCase):
+    patcher = None
+    file_patcher = None
+
+    def patch(self, blob, path=LOAD_PATH):
+        buffer = ctypes.create_string_buffer(blob, max(1, len(blob)))
+        error = ctypes.create_string_buffer(512)
+        result = self.patcher(buffer, len(blob), path, error, len(error))
+        return result, buffer.raw[:len(blob)], error.value.decode()
+
+    def assert_rejected(self, blob):
+        result, output, error = self.patch(blob)
+        self.assertEqual(result, -1)
+        self.assertTrue(error)
+        self.assertEqual(output, blob, "A rejected patch modified the input")
+
+    def test_weak_load_and_existing_code_signature_survive(self):
+        for endian in ("<", ">"):
+            for wide in (False, True):
+                with self.subTest(endian=endian, wide=wide):
+                    original = thin(endian=endian, wide=wide)
+                    result, output, error = self.patch(original)
+                    self.assertEqual((result, error), (0, ""))
+                    self.assertEqual(len(output), len(original))
+                    header = 32 if wide else 28
+                    old_length = struct.unpack_from(endian + "I", original, 20)[0]
+                    command = header + old_length
+                    self.assertEqual(struct.unpack_from(endian + "I", output, command)[0], 0x80000018)
+                    self.assertEqual(output[command + 24:command + 24 + len(LOAD_PATH)], LOAD_PATH)
+                    payload = original.index(b"UNCHANGED_EXECUTABLE_CODE")
+                    self.assertEqual(output[payload:], original[payload:])
+                    self.assertEqual(output[:16], original[:16])
+                    self.assertEqual(self.patch(output), (0, output, ""))
+
+    def test_repatch_normalizes_duplicate_and_old_paths(self):
+        other = dylib(b"/System/Library/Frameworks/Foundation.framework/Foundation")
+        original = thin([dylib(b"@rpath/blatantsPatch.dylib"), other,
+                         dylib(b"@executable_path/blatantsPatch.dylib", weak=False)])
+        result, output, error = self.patch(original)
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(output.count(b"blatantsPatch.dylib"), 1)
+        self.assertIn(other, output)
+
+    def test_universal_tables_and_all_architecture_slices_are_preserved(self):
+        slices = [thin(wide=False), thin(), thin(endian=">")]
+        for endian in ("<", ">"):
+            for wide in (False, True):
+                with self.subTest(endian=endian, wide=wide):
+                    original = fat(slices, endian, wide)
+                    result, output, error = self.patch(original)
+                    self.assertEqual((result, error), (0, ""))
+                    table_end = 8 + len(slices) * (32 if wide else 20)
+                    self.assertEqual(output[:table_end], original[:table_end])
+                    self.assertEqual(output.count(LOAD_PATH), len(slices))
+                    self.assertEqual(self.patch(output), (0, output, ""))
+
+    def test_failed_later_slice_never_modifies_earlier_slices(self):
+        self.assert_rejected(fat([thin(), thin(encrypted=True)]))
+        self.assert_rejected(fat([thin(), thin(padding=0)]))
+
+    def test_encrypted_truncated_and_unpadded_executables_are_rejected(self):
+        for blob in (b"", b"abcd", thin(encrypted=True), thin(padding=0), thin()[:90]):
+            self.assert_rejected(blob)
+
+    def test_payload_in_header_padding_is_not_overwritten(self):
+        blob = bytearray(thin())
+        end = 32 + struct.unpack_from("<I", blob, 20)[0]
+        blob[end] = 123
+        self.assert_rejected(bytes(blob))
+
+    def test_bad_segments_and_load_paths_are_rejected(self):
+        for offset, value in ((36, 7), (96, 0xFFFFFFFF), (80, 0xFFFFFFFF)):
+            blob = bytearray(thin())
+            struct.pack_into("<I", blob, offset, value)
+            self.assert_rejected(bytes(blob))
+        bad = bytearray(dylib(b"@rpath/example.dylib"))
+        struct.pack_into("<I", bad, 8, len(bad))
+        self.assert_rejected(thin([bad]))
+
+    def test_overlapping_or_mismatched_fat_slices_are_rejected(self):
+        for offset, value in ((8, 1234), (36, 64), (16, 0xFFFFFFFF)):
+            blob = bytearray(fat([thin(), thin()]))
+            struct.pack_into(">I", blob, offset, value)
+            self.assert_rejected(bytes(blob))
+
+    def test_patch_library_is_the_supplied_arm64_blatants_binary(self):
+        data = (ROOT / "Asign/Resources/blatantsPatch.dylib.bin").read_bytes()
+        self.assertEqual(struct.unpack_from("<4I", data), (0xFEEDFACF, 0x100000C, 0, 6))
+        self.assertIn(b"blatantsPatch", data)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), "4fb1f1d688a795bd3fb63aec01cf238ed48834fb95733cdaa280ee0618401f5a")
+
+    def test_real_linked_macho_keeps_its_code_and_signature(self):
+        original = bytearray((ROOT / "Asign/Resources/blatantsPatch.dylib.bin").read_bytes())
+        # Exercise a real linker-produced section/command layout as an executable.
+        struct.pack_into("<I", original, 12, 2)
+        result, output, error = self.patch(bytes(original))
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(output[0x4000:], original[0x4000:])
+        inspector = shutil.which("llvm-objdump") or shutil.which("llvm-objdump-20")
+        if inspector:
+            with tempfile.TemporaryDirectory() as temporary:
+                executable = Path(temporary) / "Patched"
+                inspected = bytearray(output)
+                # Restore the fixture's library filetype for LLVM's stricter
+                # cross-check (its original LC_ID_DYLIB is still present).
+                struct.pack_into("<I", inspected, 12, 6)
+                executable.write_bytes(inspected)
+                inspection = subprocess.run([inspector, "--macho", "--dylibs-used", str(executable)],
+                                            check=True, capture_output=True, text=True)
+                self.assertIn(LOAD_PATH.decode(), inspection.stdout)
+
+    def test_staged_file_mapping_saves_success_and_preserves_rejected_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "Executable"
+            error = ctypes.create_string_buffer(512)
+            good = thin()
+            target.write_bytes(good)
+            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, error, len(error)), 0)
+            self.assertEqual(target.read_bytes(), self.patch(good)[1])
+            bad = thin(encrypted=True)
+            target.write_bytes(bad)
+            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, error, len(error)), -1)
+            self.assertEqual(target.read_bytes(), bad)
+            self.assertTrue(error.value)
+            link = Path(temporary) / "Symlink"
+            link.symlink_to(target)
+            self.assertEqual(self.file_patcher(os.fsencode(link), LOAD_PATH, error, len(error)), -1)
+            self.assertEqual(target.read_bytes(), bad)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--require-swift", action="store_true")
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="asign-ipapatch-tests-") as scratch:
+        directory = Path(scratch)
+        source = ROOT / "Asign/Utilities/MachO/IPAPatch.c"
+        library = directory / ("libIPAPatch.dylib" if sys.platform == "darwin" else "libIPAPatch.so")
+        subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
+                        str(source), "-o", str(library)], check=True)
+        native = ctypes.CDLL(str(library))
+        function = native.KsignPatchIPALoadCommands
+        function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        PatchingTests.patcher = staticmethod(function)
+        file_function = native.KsignPatchIPAFile
+        file_function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+        file_function.restype = ctypes.c_int
+        PatchingTests.file_patcher = staticmethod(file_function)
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(PatchingTests))
+        if not result.wasSuccessful():
+            return 1
+        fuzz = directory / "ipapatch-fuzz"
+        subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1",
+                        "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                        "-I", str(source.parent), str(source),
+                        str(ROOT / "Tests/IPAPatching/fuzz.c"), "-o", str(fuzz)], check=True)
+        fixtures = []
+        for index, data in enumerate([thin(), thin(wide=False), thin(endian=">"),
+                                      fat([thin(), thin(wide=False)]), fat([thin()], wide=True)]):
+            fixture = directory / f"fuzz-{index}"
+            fixture.write_bytes(data)
+            fixtures.append(str(fixture))
+        environment = dict(os.environ)
+        environment["ASAN_OPTIONS"] = environment.get("ASAN_OPTIONS", "") + ":detect_leaks=0"
+        subprocess.run([str(fuzz), *fixtures], check=True, env=environment)
+        swift = shutil.which("swiftc")
+        if not swift:
+            print("Swift transaction/report tests unavailable: swiftc is not installed.", flush=True)
+            return 1 if args.require_swift else 0
+        native_object = directory / "IPAPatch.o"
+        subprocess.run(["clang", "-c", str(source), "-o", str(native_object)], check=True)
+        executable = directory / "ipapatch-tests"
+        flags = ["-swift-version", "5"]
+        if sys.platform == "darwin":
+            flags += ["-target", platform.machine() + "-apple-macosx14.0"]
+        subprocess.run([swift, *flags, "-import-objc-header", str(source.with_suffix(".h")),
+                        str(ROOT / "Asign/Utilities/Handlers/IPAPatcher.swift"),
+                        str(ROOT / "Tests/IPAPatching/main.swift"), str(native_object),
+                        "-o", str(executable)], check=True)
+        subprocess.run([str(executable), str(ROOT / "Asign/Resources/blatantsPatch.dylib.bin")], check=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

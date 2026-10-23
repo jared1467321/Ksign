@@ -30,6 +30,7 @@ actor SigningStageGate {
 final class SigningBatchContext {
     let packages = TweakPackageCache()
     let session = ZsignSigningSession()
+    let patchingReport = SigningPatchReport()
     private static let memoryWarnings = NotificationCenter.default.addObserver(
         forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
     ) { _ in ArchiveMemoryCoordinator.shared.noteAppMemoryWarning() }
@@ -66,6 +67,7 @@ final class SigningHandler: NSObject {
 	private let _uniqueWorkDir: URL
     var memoryCheckpoint: ((String) async throws -> Void)?
     var credentials: SigningCredentials?
+    var onPatchingFailure: ((String) -> Void)?
 	// the options struct is not gonna decode these so
 	// we're just going to do this. If appicon is not
 	// specified, we're not going to modify the app
@@ -103,13 +105,15 @@ final class SigningHandler: NSObject {
             // Ambiguous aliases retain complete extraction for source-order compatibility.
 			let hasBroadTweakMutations = _options.injectionFiles.contains {
 				$0.pathExtension.lowercased() != "dylib"
-			} || _options.experiment_replaceSubstrateWithEllekit
+			} || _options.experiment_replaceSubstrateWithEllekit || _options.ipaPatching == true
             var needsFullTreeForTweaks = false
             if hasBroadTweakMutations {
                 var inputs = _options.injectionFiles
-                if (_options.experiment_replaceSubstrateWithEllekit || archiveApp.paths(relativePrefix: "Frameworks/CydiaSubstrate.framework").isEmpty),
+                if (!inputs.isEmpty || _options.experiment_replaceSubstrateWithEllekit),
+                   (_options.experiment_replaceSubstrateWithEllekit || archiveApp.paths(relativePrefix: "Frameworks/CydiaSubstrate.framework").isEmpty),
                    let loader = Bundle.main.url(forResource: "ellekit", withExtension: "deb") { inputs.append(loader) }
                 var mutations = try await TweakHandler.mutationPaths(for: inputs, options: _options, packages: _packages)
+                if _options.ipaPatching == true { mutations.insert(IPAPatcher.libraryRelativePath) }
                 if let executable = try archiveApp.metadata().executable { mutations.insert(executable) }
                 needsFullTreeForTweaks = !archiveApp.supportsSparseTweakMutations(at: mutations)
             }
@@ -125,6 +129,7 @@ final class SigningHandler: NSObject {
 			} else {
                 var hashExclusions = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
                 hashExclusions.insert("embedded.mobileprovision")
+                if _options.ipaPatching == true { hashExclusions.insert(IPAPatcher.libraryRelativePath) }
                 if _options.removeWatchPlaceholder { hashExclusions.insert("com.apple.WatchPlaceholder") }
 				var removals = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
                 if _options.removeWatchPlaceholder { removals.insert("com.apple.WatchPlaceholder") }
@@ -243,6 +248,15 @@ final class SigningHandler: NSObject {
             credentials: credentials
         )
         try await handler.disinject()
+
+        if _options.ipaPatching == true {
+            do { try IPAPatcher.apply(to: movedAppPath) }
+            catch let error as IPAPatcher.RecoveryFailure {
+                onPatchingFailure?(error.localizedDescription)
+                throw error
+            }
+            catch { onPatchingFailure?(error.localizedDescription) }
+        }
 		
 		if !_options.onlyModify {
 			let handler = ZsignHandler(

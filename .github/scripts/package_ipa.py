@@ -55,6 +55,14 @@ def validate_extension_identifiers(app):
         identifiers[identifier] = extension
 
 
+def validate_patch_library(app):
+    name = "blatantsPatch.dylib.bin"
+    bundled = app / name
+    source = ROOT / "Asign/Resources" / name
+    if not bundled.is_file() or bundled.read_bytes() != source.read_bytes():
+        raise RuntimeError("The app is missing the current bundled Blatant’s patch library")
+
+
 def make_resignable(app):
     # Xcode embeds OpenSSL with mode 0555. Zsign opens code with O_RDWR, so
     # retaining that mode in the IPA makes a valid Mach-O fail to map on iOS.
@@ -99,6 +107,7 @@ def package(app, output):
             raise RuntimeError("The Xcode build did not embed AsignDeviceTunnel.appex")
         remove_obsolete_branding(copy)
         validate_extension_identifiers(copy)
+        validate_patch_library(copy)
         for certificate in (ROOT / "deps").glob("*"):
             if certificate.is_file():
                 shutil.copy2(certificate, copy / certificate.name)

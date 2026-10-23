@@ -133,6 +133,8 @@ struct Options: Codable, Equatable {
 	var injectPath: InjectPath
 	/// Inject folder (i.e. `Frameworks/`)
 	var injectFolder: InjectFolder
+	/// Optional so existing saved signing options continue to decode unchanged.
+	var ipaPatching: Bool? = nil
 	// default
 	static let defaultOptions = Options(
 		appAppearance: "Default",

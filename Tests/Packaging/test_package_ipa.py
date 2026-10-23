@@ -70,6 +70,16 @@ class CachedExtensionTests(unittest.TestCase):
         packager.validate_extension_identifiers(self.app)
         self.assertTrue(extension.is_dir())
 
+    def test_patch_library_is_required_in_the_built_app(self):
+        with self.assertRaisesRegex(RuntimeError, "patch library"):
+            packager.validate_patch_library(self.app)
+        library = self.app / "blatantsPatch.dylib.bin"
+        library.write_bytes((ROOT / "Asign/Resources" / library.name).read_bytes())
+        packager.validate_patch_library(self.app)
+        library.write_bytes(b"stale cached patch")
+        with self.assertRaisesRegex(RuntimeError, "patch library"):
+            packager.validate_patch_library(self.app)
+
 
 if __name__ == "__main__":
     unittest.main()

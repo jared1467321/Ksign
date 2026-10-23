@@ -342,12 +342,14 @@ extension SigningView {
 		)
 
 		let signingName = app.name
+		let context = SigningBatchContext()
 		FR.signPackageFile(
 			app,
 			using: options,
 			icon: appIcon,
 			certificate: certificate,
             archiveApp: archiveApp,
+            batchContext: context,
 			backgroundCompletion: { error, _ in
 				BackgroundTaskManager.shared.report(
 					.signing,
@@ -367,28 +369,36 @@ extension SigningView {
 				
 				UIAlertController.showAlert(
 					title: error is IDeviceInstallSkip ? "Signing Skipped" : .localized("Signing"),
-					message: error.localizedDescription,
+					message: [error.localizedDescription, context.patchingReport.summary].compactMap { $0 }.joined(separator: "\n\n"),
 					actions: [ok]
 				)
 			} else {
 				Task { @MainActor in
+					var notices = [String]()
+					let patchingFailure = context.patchingReport.summary
+					if let patchingFailure { notices.append(patchingFailure) }
+					var installID: String?
 					if signAndInstall, let signedID {
 						let handoff = await SigningPreflightCoordinator.prepareInstallation([signedID])
-						if let id = handoff.appIDs.first {
-							DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-								NotificationCenter.default.post(name: NSNotification.Name("feather.installApp"), object: id)
-							}
-						}
+						installID = handoff.appIDs.first
 						if !handoff.withheld.isEmpty {
-							BackgroundTaskManager.shared.end(.signing, success: true)
-							UIAlertController.showAlertWithOk(title: "Signed · Not Installed",
-								message: handoff.withheld.map(\.description).joined(separator: "\n\n") + "\n\nThe signed app remains in Signed Apps.",
-								action: { dismiss() })
-							return
+							notices.append(handoff.withheld.map(\.description).joined(separator: "\n\n") + "\n\nThe signed app remains in Signed Apps.")
 						}
 					}
 					BackgroundTaskManager.shared.end(.signing, success: true)
-					dismiss()
+					let finish = {
+						if let installID {
+							DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+								NotificationCenter.default.post(name: NSNotification.Name("feather.installApp"), object: installID)
+							}
+						}
+						dismiss()
+					}
+					if notices.isEmpty { finish() }
+					else {
+						UIAlertController.showAlertWithOk(title: patchingFailure == nil ? "Signed · Not Installed" : "Signing Results",
+							message: notices.joined(separator: "\n\n"), action: finish)
+					}
 				}
 			}
 		}

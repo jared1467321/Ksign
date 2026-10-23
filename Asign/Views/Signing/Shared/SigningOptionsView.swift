@@ -149,6 +149,8 @@ struct SigningOptionsView: View {
             .nbThemeForeground(.textSecondary)
         }
         
+        IPAPatchingOptionsView(options: $options)
+
         NBSection(.localized("Advanced")) {
             _toggle(.localized("Adhoc Signing"),
                     systemImage: "signature",
@@ -236,6 +238,24 @@ struct SigningOptionsView: View {
             } icon: {
                 Image(systemName: systemImage)
             }
+        }
+    }
+}
+
+struct IPAPatchingOptionsView: View {
+    @Binding var options: Options
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { options.ipaPatching == true },
+                set: { options.ipaPatching = $0 }
+            )) {
+                Label(.localized("IPA Patching"), systemImage: "bandage")
+            }
+        } footer: {
+            Text(.localized("Apply Blatant’s compatibility patch to the app and its extensions. Patching failures are reported after signing."))
+                .nbThemeForeground(.textSecondary)
         }
     }
 }

@@ -48,6 +48,18 @@ Existing custom profiles retain their saved colors, and Halloween remains
 available. The old built-in default switches to Aurora Glass once on upgrade;
 an existing custom selection stays selected.
 
+## IPA patching
+
+Enable **IPA Patching** in an app's signing **Properties**, or in
+**Settings → Signing Options** to use it by default. This applies the bundled
+Blatant’s patch to the main app and its extensions before the existing signing
+step. All architecture slices are retained. No separate patching pass or
+intermediate IPA export is needed.
+
+Successful patching is silent. If patching fails, the attempt is rolled back
+and signing continues. A notice appears after signing, or after the entire
+batch, naming the affected apps and the reasons. Other apps continue normally.
+
 ## Backup before reinstalling
 
 In **Settings → Backup & Restore**, enter a backup password and choose

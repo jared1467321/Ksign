@@ -84,6 +84,7 @@
 		3371F6492DA92A1800281AC6 /* Exceptions for "Asign" folder in "Asign" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Resources/blatantsPatch.dylib.bin,
 				Resources/ellekit.deb,
 				Resources/Info.plist,
 			);
@@ -96,6 +97,7 @@
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
 			buildPhase = 3379C1B72DA869A1004372DA /* Resources */;
 			membershipExceptions = (
+				Resources/blatantsPatch.dylib.bin,
 				Resources/ellekit.deb,
 			);
 		};
