@@ -15,6 +15,46 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def bundle_identifier(bundle):
+    with (bundle / "Info.plist").open("rb") as file:
+        identifier = plistlib.load(file).get("CFBundleIdentifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise RuntimeError(f"Missing bundle identifier: {bundle}")
+    return identifier
+
+
+def remove_obsolete_branding(app):
+    # Restored DerivedData can keep extensions whose product names changed.
+    # Remove only known obsolete copies, after checking the replacement exists
+    # and has the same identity. Work on the staging copy, before re-signing.
+    for old_name, new_name in (
+        ("KsignDeviceTunnel.appex", "AsignDeviceTunnel.appex"),
+        ("KsignLiveActivity.appex", "AsignLiveActivity.appex"),
+    ):
+        obsolete = app / "PlugIns" / old_name
+        if not obsolete.exists():
+            continue
+        replacement = obsolete.with_name(new_name)
+        if not replacement.is_dir():
+            raise RuntimeError(f"Cannot remove obsolete extension without its replacement: {replacement}")
+        if bundle_identifier(obsolete) != bundle_identifier(replacement):
+            raise RuntimeError(f"Obsolete extension has a different identity from its replacement: {obsolete}")
+        shutil.rmtree(obsolete)
+    obsolete_icon = app / "ksign_extension.png"
+    if (app / "asign_extension.png").is_file():
+        obsolete_icon.unlink(missing_ok=True)
+
+
+def validate_extension_identifiers(app):
+    identifiers = {}
+    for extension in sorted((app / "PlugIns").glob("*.appex")):
+        identifier = bundle_identifier(extension)
+        if identifier in identifiers:
+            raise RuntimeError(f"Duplicate extension bundle identifier {identifier}: "
+                               f"{identifiers[identifier].name} and {extension.name}")
+        identifiers[identifier] = extension
+
+
 def make_resignable(app):
     # Xcode embeds OpenSSL with mode 0555. Zsign opens code with O_RDWR, so
     # retaining that mode in the IPA makes a valid Mach-O fail to map on iOS.
@@ -57,6 +97,8 @@ def package(app, output):
         tunnel = copy / "PlugIns/AsignDeviceTunnel.appex"
         if not tunnel.is_dir():
             raise RuntimeError("The Xcode build did not embed AsignDeviceTunnel.appex")
+        remove_obsolete_branding(copy)
+        validate_extension_identifiers(copy)
         for certificate in (ROOT / "deps").glob("*"):
             if certificate.is_file():
                 shutil.copy2(certificate, copy / certificate.name)
