@@ -56,6 +56,10 @@ Blatant’s patch to the main app and its extensions before the existing signing
 step. All architecture slices are retained. No separate patching pass or
 intermediate IPA export is needed.
 
+The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
+search paths resolve it to the bundled library. Otherwise it keeps an explicit
+relative path. This reduces the header space required for compatible extensions.
+
 Successful patching is silent. If patching fails, the attempt is rolled back
 and signing continues. A notice appears after signing, or after the entire
 batch, naming the affected apps and the reasons. Other apps continue normally.

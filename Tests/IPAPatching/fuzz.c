@@ -13,6 +13,11 @@ static uint32_t random32(void) {
     return state;
 }
 
+static int resolveRunpath(const char *path, void *context) {
+    (void)context;
+    return strcmp(path, "@executable_path/../../Frameworks") == 0 ? 1 : -1;
+}
+
 int main(int argc, char **argv) {
     size_t attempts = 0;
     for (int fixture = 1; fixture < argc; ++fixture) {
@@ -35,7 +40,8 @@ int main(int argc, char **argv) {
             memcpy(snapshot, input, size);
             char error[256];
             int result = KsignPatchIPALoadCommands(input, used,
-                "@executable_path/Frameworks/blatantsPatch.dylib", error, sizeof(error));
+                "@executable_path/Frameworks/blatantsPatch.dylib",
+                iteration % 2 ? resolveRunpath : NULL, NULL, error, sizeof(error));
             if (result < 0) {
                 assert(error[0]);
                 assert(memcmp(input, snapshot, size) == 0);

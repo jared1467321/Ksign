@@ -16,6 +16,36 @@ enum IPAPatcher {
         let loadPath: String
     }
 
+    private final class RunpathResolver {
+        let root: URL
+        let executableDirectory: URL
+        let library: URL
+
+        init(root: URL, executable: URL, library: URL) {
+            self.root = root
+            executableDirectory = executable.deletingLastPathComponent()
+            self.library = library
+        }
+
+        func resolve(_ runpath: String) -> Int32 {
+            let prefixes = ["@loader_path", "@executable_path"]
+            guard let prefix = prefixes.first(where: { runpath == $0 || runpath.hasPrefix($0 + "/") }) else {
+                return -1 // Its runtime location cannot be verified here.
+            }
+            let suffix = String(runpath.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let candidate = executableDirectory.appendingPathComponent(suffix, isDirectory: true)
+                .appendingPathComponent(library.lastPathComponent)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            guard candidate.path.hasPrefix(root.path + "/") else { return -1 }
+            if candidate.path == library.path { return 1 }
+            // An earlier extension-local copy would shadow the app's patch.
+            let manager = FileManager.default
+            if manager.fileExists(atPath: candidate.path) ||
+               (try? manager.destinationOfSymbolicLink(atPath: candidate.path)) != nil { return -1 }
+            return 0
+        }
+    }
+
     struct Failure: LocalizedError {
         let detail: String
         var errorDescription: String? { detail }
@@ -115,7 +145,15 @@ enum IPAPatcher {
             if let loadPath {
                 var error = [CChar](repeating: 0, count: 512)
                 let errorSize = error.count
-                let result = KsignPatchIPAFile(prepared.path, loadPath, &error, errorSize)
+                let resolver = RunpathResolver(root: root, executable: destination, library: libraryDestination)
+                let context = Unmanaged.passUnretained(resolver).toOpaque()
+                let result = withExtendedLifetime(resolver) {
+                    KsignPatchIPAFile(prepared.path, loadPath, { runpath, context in
+                        guard let runpath, let context else { return -1 }
+                        return Unmanaged<RunpathResolver>.fromOpaque(context).takeUnretainedValue()
+                            .resolve(String(cString: runpath))
+                    }, context, &error, errorSize)
+                }
                 guard result >= 0 else {
                     let relative = String(destination.path.dropFirst(root.path.count + 1))
                     throw Failure(detail: "\(relative): \(String(cString: error))")

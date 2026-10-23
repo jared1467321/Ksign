@@ -33,6 +33,27 @@ func executable(encrypted: Bool = false) -> Data {
     return data
 }
 
+func executable(runpaths: [String], padding: Int) -> Data {
+    var data = executable()
+    data.replaceSubrange(512..<576, with: Data(repeating: 0, count: 64))
+    var cursor = 184
+    for path in runpaths {
+        let bytes = Data(path.utf8)
+        let length = (12 + bytes.count + 1 + 7) & ~7
+        put32(&data, cursor, 0x8000001c)
+        put32(&data, cursor + 4, UInt32(length))
+        put32(&data, cursor + 8, 12)
+        data.replaceSubrange((cursor + 12)..<(cursor + 12 + bytes.count), with: bytes)
+        cursor += length
+    }
+    put32(&data, 16, UInt32(1 + runpaths.count))
+    put32(&data, 20, UInt32(cursor - 32))
+    let codeOffset = cursor + padding
+    put32(&data, 152, UInt32(codeOffset))
+    data.replaceSubrange(codeOffset..<(codeOffset + 64), with: Data(repeating: 0x41, count: 64))
+    return data
+}
+
 func makeBundle(_ url: URL, name: String = "Executable", bytes: Data? = nil) throws {
     try manager.createDirectory(at: url, withIntermediateDirectories: true)
     let plist = try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": name], format: .binary, options: 0)
@@ -83,6 +104,34 @@ for (target, bytes) in zip(targets, firstPass) {
 }
 try IPAPatcher.apply(to: app, library: library)
 try check(try targets.map { try Data(contentsOf: $0.executable) } == firstPass)
+
+// Reproduce tight extension headers: 64 bytes of padding fits IPAPatch's
+// 56-byte @rpath command but not the old 80-byte executable-relative command.
+let compactApp = scratch.appendingPathComponent("Compact.app")
+try makeBundle(compactApp)
+let sticker = compactApp.appendingPathComponent("PlugIns/Stickers.appex")
+let searchPaths = ["@loader_path/Frameworks", "@executable_path/../../Frameworks"]
+try makeBundle(sticker, bytes: executable(runpaths: searchPaths, padding: 64))
+try IPAPatcher.apply(to: compactApp, library: library)
+let stickerExecutable = sticker.appendingPathComponent("Executable")
+let compactResult = try Data(contentsOf: stickerExecutable)
+precondition(compactResult.range(of: Data("@rpath/blatantsPatch.dylib".utf8)) != nil)
+try IPAPatcher.apply(to: compactApp, library: library)
+try check(try Data(contentsOf: stickerExecutable) == compactResult)
+
+// A local copy in an earlier runpath must not shadow the bundled patch.
+// The explicit fallback still works when the extension has sufficient room.
+let shadowApp = scratch.appendingPathComponent("Shadow.app")
+try makeBundle(shadowApp)
+let shadowExtension = shadowApp.appendingPathComponent("PlugIns/Stickers.appex")
+try makeBundle(shadowExtension, bytes: executable(runpaths: searchPaths, padding: 96))
+let localFrameworks = shadowExtension.appendingPathComponent("Frameworks")
+try manager.createDirectory(at: localFrameworks, withIntermediateDirectories: false)
+try Data("different local library".utf8).write(to: localFrameworks.appendingPathComponent(IPAPatcher.libraryName))
+try IPAPatcher.apply(to: shadowApp, library: library)
+let shadowResult = try Data(contentsOf: shadowExtension.appendingPathComponent("Executable"))
+precondition(shadowResult.range(of: Data("@executable_path/../../Frameworks/blatantsPatch.dylib".utf8)) != nil)
+precondition(shadowResult.range(of: Data("@rpath/blatantsPatch.dylib".utf8)) == nil)
 
 // A failing extension must not modify the app, earlier extensions, or a
 // pre-existing library. Equal executable names must never collide in staging.

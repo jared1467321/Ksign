@@ -15,11 +15,19 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 LOAD_PATH = b"@executable_path/../../Frameworks/blatantsPatch.dylib"
+COMPACT_PATH = b"@rpath/blatantsPatch.dylib"
+RUNPATH_RESOLVER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 
 
 def dylib(path, weak=True, endian="<", wide=True):
     size = (24 + len(path) + 1 + (7 if wide else 3)) & ~(7 if wide else 3)
     return struct.pack(endian + "6I", 0x80000018 if weak else 0xC, size, 24, 2, 0, 0) + path + bytes(size - 24 - len(path))
+
+
+def runpath(path, endian="<", wide=True):
+    alignment = 8 if wide else 4
+    size = (12 + len(path) + 1 + alignment - 1) & ~(alignment - 1)
+    return struct.pack(endian + "3I", 0x8000001C, size, 12) + path + bytes(size - 12 - len(path))
 
 
 def thin(extra=(), endian="<", wide=True, padding=256, encrypted=False):
@@ -69,10 +77,11 @@ class PatchingTests(unittest.TestCase):
     patcher = None
     file_patcher = None
 
-    def patch(self, blob, path=LOAD_PATH):
+    def patch(self, blob, path=LOAD_PATH, resolver=None):
         buffer = ctypes.create_string_buffer(blob, max(1, len(blob)))
         error = ctypes.create_string_buffer(512)
-        result = self.patcher(buffer, len(blob), path, error, len(error))
+        callback = RUNPATH_RESOLVER((lambda value, _: resolver(value))) if resolver else RUNPATH_RESOLVER()
+        result = self.patcher(buffer, len(blob), path, callback, None, error, len(error))
         return result, buffer.raw[:len(blob)], error.value.decode()
 
     def assert_rejected(self, blob):
@@ -107,6 +116,81 @@ class PatchingTests(unittest.TestCase):
         self.assertEqual((result, error), (0, ""))
         self.assertEqual(output.count(b"blatantsPatch.dylib"), 1)
         self.assertIn(other, output)
+
+    def test_compact_path_fits_where_the_original_extension_path_does_not(self):
+        original = thin([runpath(b"@executable_path/../../Frameworks")], padding=64)
+        self.assert_rejected(original)
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual((result, error), (0, ""))
+        self.assertIn(COMPACT_PATH + b"\0", output)
+        self.assertNotIn(LOAD_PATH + b"\0", output)
+        payload = original.index(b"UNCHANGED_EXECUTABLE_CODE")
+        self.assertEqual(output[payload:], original[payload:])
+        self.assertEqual(self.patch(output, resolver=lambda _: 1), (0, output, ""))
+
+    def test_runpaths_are_checked_in_order_once_during_preflight(self):
+        paths = [b"@executable_path/Frameworks", b"@executable_path/../../Frameworks"]
+        original = thin([runpath(path) for path in paths], padding=64)
+        visited = []
+
+        def resolve(path):
+            visited.append(path)
+            return 1 if path == paths[1] else 0
+
+        result, output, error = self.patch(original, resolver=resolve)
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(visited, paths)
+        self.assertIn(COMPACT_PATH, output)
+
+    def test_shadowing_or_unverifiable_runpath_keeps_the_explicit_reference(self):
+        paths = [b"@loader_path/Frameworks", b"@executable_path/../../Frameworks"]
+        for unavailable in (-1, 0):
+            original = thin([runpath(path) for path in paths])
+            resolve = lambda path: unavailable if path == paths[0] else (1 if unavailable == -1 else 0)
+            result, output, error = self.patch(original, resolver=resolve)
+            self.assertEqual((result, error), (0, ""))
+            self.assertIn(LOAD_PATH, output)
+            self.assertNotIn(COMPACT_PATH, output)
+
+    def test_runpath_choice_is_independent_for_each_preserved_slice(self):
+        first = thin([runpath(b"@executable_path/../../Frameworks")], padding=64)
+        second = thin()
+        original = fat([first, second])
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(output[:48], original[:48])
+        self.assertEqual(output.count(COMPACT_PATH), 1)
+        self.assertEqual(output.count(LOAD_PATH), 1)
+        # An unresolved tight slice still rejects the entire attempt, before writes.
+        original = fat([first, thin(padding=64)])
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual(result, -1)
+        self.assertTrue(error)
+        self.assertEqual(output, original)
+
+    def test_compact_path_keeps_header_limits_and_endian_support(self):
+        for endian in ("<", ">"):
+            for wide in (False, True):
+                original = thin([runpath(b"@loader_path/../../Frameworks", endian, wide)],
+                                endian=endian, wide=wide, padding=56)
+                result, output, error = self.patch(original, resolver=lambda _: 1)
+                self.assertEqual((result, error), (0, ""))
+                self.assertIn(COMPACT_PATH, output)
+        original = thin([runpath(b"@loader_path/../../Frameworks")], padding=48)
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual(result, -1)
+        self.assertEqual(output, original)
+        self.assertIn("Insufficient", error)
+
+    def test_malformed_runpath_is_rejected_before_resolving_or_writing(self):
+        command = bytearray(runpath(b"@loader_path/../../Frameworks"))
+        struct.pack_into("<I", command, 8, len(command))
+        original = thin([command])
+        self.assert_rejected(original)
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual(result, -1)
+        self.assertEqual(output, original)
+        self.assertIn("runpath", error)
 
     def test_universal_tables_and_all_architecture_slices_are_preserved(self):
         slices = [thin(wide=False), thin(), thin(endian=">")]
@@ -182,17 +266,28 @@ class PatchingTests(unittest.TestCase):
             error = ctypes.create_string_buffer(512)
             good = thin()
             target.write_bytes(good)
-            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, error, len(error)), 0)
+            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, RUNPATH_RESOLVER(), None, error, len(error)), 0)
             self.assertEqual(target.read_bytes(), self.patch(good)[1])
             bad = thin(encrypted=True)
             target.write_bytes(bad)
-            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, error, len(error)), -1)
+            self.assertEqual(self.file_patcher(os.fsencode(target), LOAD_PATH, RUNPATH_RESOLVER(), None, error, len(error)), -1)
             self.assertEqual(target.read_bytes(), bad)
             self.assertTrue(error.value)
             link = Path(temporary) / "Symlink"
             link.symlink_to(target)
-            self.assertEqual(self.file_patcher(os.fsencode(link), LOAD_PATH, error, len(error)), -1)
+            self.assertEqual(self.file_patcher(os.fsencode(link), LOAD_PATH, RUNPATH_RESOLVER(), None, error, len(error)), -1)
             self.assertEqual(target.read_bytes(), bad)
+
+    def test_staged_file_uses_verified_compact_reference(self):
+        original = thin([runpath(b"@executable_path/../../Frameworks")], padding=64)
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "Staged"
+            target.write_bytes(original)
+            callback = RUNPATH_RESOLVER(lambda path, _: 1 if path == b"@executable_path/../../Frameworks" else -1)
+            error = ctypes.create_string_buffer(512)
+            result = self.file_patcher(os.fsencode(target), LOAD_PATH, callback, None, error, len(error))
+            self.assertEqual((result, error.value), (0, b""))
+            self.assertEqual(target.read_bytes(), self.patch(original, resolver=lambda _: 1)[1])
 
 
 def main():
@@ -207,11 +302,13 @@ def main():
                         str(source), "-o", str(library)], check=True)
         native = ctypes.CDLL(str(library))
         function = native.KsignPatchIPALoadCommands
-        function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+        function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p,
+                             RUNPATH_RESOLVER, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
         function.restype = ctypes.c_int
         PatchingTests.patcher = staticmethod(function)
         file_function = native.KsignPatchIPAFile
-        file_function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+        file_function.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                 RUNPATH_RESOLVER, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
         file_function.restype = ctypes.c_int
         PatchingTests.file_patcher = staticmethod(file_function)
         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(PatchingTests))
@@ -224,7 +321,8 @@ def main():
                         str(ROOT / "Tests/IPAPatching/fuzz.c"), "-o", str(fuzz)], check=True)
         fixtures = []
         for index, data in enumerate([thin(), thin(wide=False), thin(endian=">"),
-                                      fat([thin(), thin(wide=False)]), fat([thin()], wide=True)]):
+                                      fat([thin(), thin(wide=False)]), fat([thin()], wide=True),
+                                      thin([runpath(b"@executable_path/../../Frameworks")], padding=64)]):
             fixture = directory / f"fuzz-{index}"
             fixture.write_bytes(data)
             fixtures.append(str(fixture))

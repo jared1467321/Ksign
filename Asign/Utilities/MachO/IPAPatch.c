@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-typedef struct { size_t offset, size, commands; } PatchSlice;
+typedef struct { size_t offset, size, commands; int compact; } PatchSlice;
 
 static uint32_t read32(const uint8_t *p, int big) {
     uint32_t result = 0;
@@ -45,7 +45,9 @@ static const char *basenameOf(const char *path) {
 
 // Preserve every unrelated command, and normalize previous references to this
 // same patch library to one weak command using the current executable's path.
-static int patchSlice(uint8_t *bytes, size_t size, const char *path, uint8_t *scratch,
+static int patchSlice(uint8_t *bytes, size_t size, const char *path,
+                      KsignIPARunpathResolver resolver, void *context, int *compact,
+                      uint8_t *scratch,
                       size_t *required, char *error, size_t errorSize) {
     if (size < 28 || !thinMagic(read32(bytes, 1)))
         return fail(error, errorSize, "Invalid Mach-O executable.");
@@ -62,6 +64,7 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path, uint8_t *sc
     size_t end = header + length, cursor = header, kept = 0, firstData = size;
     uint32_t keptCount = 0;
     int sawFileData = 0;
+    int runpathResolution = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (end - cursor < 8) return fail(error, errorSize, "Truncated Mach-O load command.");
         const uint8_t *command = bytes + cursor;
@@ -76,6 +79,14 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path, uint8_t *sc
                 !memchr(command + nameOffset, 0, commandSize - nameOffset))
                 return fail(error, errorSize, "Invalid dylib load path.");
             remove = strcmp(basenameOf((const char *)command + nameOffset), basenameOf(path)) == 0;
+        } else if (kind == 0x8000001c) { // LC_RPATH
+            if (commandSize < 12) return fail(error, errorSize, "Invalid runpath command.");
+            uint32_t pathOffset = read32(command + 8, big);
+            if (pathOffset < 12 || pathOffset >= commandSize ||
+                !memchr(command + pathOffset, 0, commandSize - pathOffset))
+                return fail(error, errorSize, "Invalid runpath string.");
+            if (!scratch && resolver && runpathResolution == 0)
+                runpathResolution = resolver((const char *)command + pathOffset, context);
         } else if (kind == 1 || kind == 0x19) { // LC_SEGMENT[_64]
             int segmentWide = kind == 0x19;
             size_t base = segmentWide ? 72 : 56, sectionSize = segmentWide ? 80 : 68;
@@ -123,6 +134,14 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path, uint8_t *sc
     }
     if (cursor != end || !sawFileData || firstData < end)
         return fail(error, errorSize, "Cannot determine safe Mach-O header padding.");
+    // Cache this choice during preflight for each slice. Do not rerun a
+    // filesystem resolver after earlier slices have already been modified.
+    if (!scratch) *compact = runpathResolution == 1;
+    char compactPath[4097];
+    if (*compact) {
+        snprintf(compactPath, sizeof(compactPath), "@rpath/%s", basenameOf(path));
+        path = compactPath;
+    }
     size_t added = (24 + strlen(path) + 1 + alignment - 1) & ~(alignment - 1);
     size_t total = kept + added;
     if (total > UINT32_MAX || total > firstData - header)
@@ -148,6 +167,7 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path, uint8_t *sc
 }
 
 int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
+                             KsignIPARunpathResolver resolver, void *context,
                              char *error, size_t errorSize) {
     if (error && errorSize) error[0] = 0;
     if (!buffer || size < 4 || !path || strncmp(path, "@executable_path/", 17) ||
@@ -155,7 +175,7 @@ int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
         return fail(error, errorSize, "Invalid IPA patch input.");
     uint8_t *bytes = buffer;
     uint32_t magic = read32(bytes, 1), count = 1;
-    PatchSlice slices[64] = {{0, size, 0}};
+    PatchSlice slices[64] = {{0, size, 0, 0}};
     if (!thinMagic(magic)) {
         int big = magic == 0xcafebabe || magic == 0xcafebabf;
         int wide = magic == 0xcafebabf || magic == 0xbfbafeca;
@@ -182,25 +202,29 @@ int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
             if (!thinMagic(sliceMagic) || read32(entry, big) != read32(bytes + offset + 4, sliceBig) ||
                 read32(entry + 4, big) != read32(bytes + offset + 8, sliceBig))
                 return fail(error, errorSize, "Universal Mach-O architecture mismatch.");
-            slices[i] = (PatchSlice){(size_t)offset, (size_t)length, 0};
+            slices[i] = (PatchSlice){(size_t)offset, (size_t)length, 0, 0};
         }
     }
     size_t maximum = 0;
     for (uint32_t i = 0; i < count; ++i) {
-        if (patchSlice(bytes + slices[i].offset, slices[i].size, path, NULL,
+        if (patchSlice(bytes + slices[i].offset, slices[i].size, path,
+                       resolver, context, &slices[i].compact, NULL,
                        &slices[i].commands, error, errorSize) < 0) return -1;
         if (slices[i].commands > maximum) maximum = slices[i].commands;
     }
     uint8_t *scratch = malloc(maximum);
     if (!scratch) return fail(error, errorSize, "Cannot allocate patch command buffer.");
     for (uint32_t i = 0; i < count; ++i)
-        patchSlice(bytes + slices[i].offset, slices[i].size, path, scratch,
+        patchSlice(bytes + slices[i].offset, slices[i].size, path,
+                   NULL, NULL, &slices[i].compact, scratch,
                    &slices[i].commands, error, errorSize);
     free(scratch);
     return 0;
 }
 
-int KsignPatchIPAFile(const char *file, const char *path, char *error, size_t errorSize) {
+int KsignPatchIPAFile(const char *file, const char *path,
+                     KsignIPARunpathResolver resolver, void *context,
+                     char *error, size_t errorSize) {
     if (error && errorSize) error[0] = 0;
     int descriptor = open(file, O_RDWR | O_NOFOLLOW);
     if (descriptor < 0) return fail(error, errorSize, "Cannot open the staged executable for patching.");
@@ -216,7 +240,7 @@ int KsignPatchIPAFile(const char *file, const char *path, char *error, size_t er
         close(descriptor);
         return fail(error, errorSize, "Cannot map the staged executable.");
     }
-    int result = KsignPatchIPALoadCommands(bytes, size, path, error, errorSize);
+    int result = KsignPatchIPALoadCommands(bytes, size, path, resolver, context, error, errorSize);
     if (result == 0 && msync(bytes, size, MS_SYNC) != 0)
         result = fail(error, errorSize, "Cannot save the patched executable.");
     if (munmap(bytes, size) != 0 && result == 0)
