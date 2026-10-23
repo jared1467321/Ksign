@@ -12,6 +12,24 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "Native/IPAPatch/lief.json"
+PREPARATION_VERSION = b"ios-null-logger-v1"
+
+
+def patch_ios_logging(library):
+    """Keep the pinned iOS SDK's lazy logger inside the sandbox.
+
+    Even logging.disable()/set_path()/set_logger() first construct LIEF's
+    default logger. Its /tmp/lief.log cannot be opened by an iOS app, and the
+    SDK's exception-free spdlog calls abort() on that failure. Redirect its
+    single default filename to /dev/null before linking. Equal-length bytes
+    preserve the archive index, Mach-O sections, symbols and relocations.
+    """
+    original = b"/tmp/lief.log\0"
+    replacement = b"/dev/null\0".ljust(len(original), b"\0")
+    data = library.read_bytes()
+    if data.count(original) != 1:
+        raise RuntimeError("Unexpected iOS LIEF default log path; review the pinned SDK before linking")
+    library.write_bytes(data.replace(original, replacement))
 
 
 def prepare(target="host"):
@@ -20,7 +38,7 @@ def prepare(target="host"):
     key = "ios-arm64" if target == "ios" else host
     archive = config["archives"][key]
     destination = ROOT / ".build/ipa-patch-lief" / target
-    fingerprint = hashlib.sha256(CONFIG.read_bytes() + key.encode()).hexdigest()
+    fingerprint = hashlib.sha256(CONFIG.read_bytes() + key.encode() + PREPARATION_VERSION).hexdigest()
     stamp = destination / ".version"
     if stamp.is_file() and stamp.read_text() == fingerprint and (destination / "lib/libLIEF.a").is_file():
         return destination
@@ -51,6 +69,8 @@ def prepare(target="host"):
                     shutil.copyfileobj(source, stream)
         if not (staged / "lib/libLIEF.a").is_file() or not (staged / "include/LIEF/MachO.hpp").is_file():
             raise RuntimeError("The LIEF SDK does not contain the required headers and static library")
+        if target == "ios":
+            patch_ios_logging(staged / "lib/libLIEF.a")
         (staged / ".version").write_text(fingerprint)
         if destination.exists():
             shutil.rmtree(destination)

@@ -16,6 +16,15 @@ prepares the iOS static SDK; host tests prepare a matching host SDK. Both live
 in the ignored `.build/ipa-patch-lief` directory and are cached by CI. The SDK
 is linked statically for devices. Simulator builds retain the header-only path.
 
+The iOS SDK's default logger opens `/tmp/lief.log` before any logging API can
+disable or replace it. That path is outside an app's writable container, and
+the SDK's spdlog aborts on the failed open. After verifying the release checksum,
+SDK preparation redirects the single default filename to `/dev/null`, padding
+the replacement to the original length so archive and object offsets stay
+unchanged. Preparation fails if the pinned SDK no longer has exactly one such
+filename. The preparation stamp and CI cache include this adjustment; existing
+SDK caches are rebuilt. The runtime still disables logging before parsing.
+
 Before opening Xcode directly, run:
 
 ```sh

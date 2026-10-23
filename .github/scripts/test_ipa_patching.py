@@ -486,6 +486,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require-swift", action="store_true")
     args = parser.parse_args()
+    preparation = unittest.defaultTestLoader.discover(str(ROOT / "Tests/IPAPatching"), pattern="test_*.py")
+    if not unittest.TextTestRunner(verbosity=2).run(preparation).wasSuccessful():
+        return 1
     with tempfile.TemporaryDirectory(prefix="asign-ipapatch-tests-") as scratch:
         directory = Path(scratch)
         source = ROOT / "Asign/Utilities/MachO/IPAPatch.c"
