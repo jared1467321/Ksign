@@ -99,6 +99,7 @@ jobs:
           python3 .github/scripts/test_platform_compatibility.py --require-swift
           python3 .github/scripts/test_ipa_patching.py --require-swift
           python3 .github/scripts/test_device_uninstall.py --require-swift
+          python3 .github/scripts/test_signing_workspace.py --require-swift
           DERIVED_DATA="$PWD/DerivedData" make
 
       - name: Upload IPA

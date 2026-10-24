@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Owns every mutable input for one signing operation. Shared prepared tweaks
 /// are copied into this directory before patching; no writable tree is reused.
@@ -41,16 +46,65 @@ final class SigningWorkspace {
     var didValidateFile: ((URL) -> Void)?
 #endif
 
+    /// Use filesystem spelling consistently, including for paths whose final
+    /// components do not exist (for example MobileInstallation placeholders).
+    /// Foundation can strip /private from an existing path but retain it for a
+    /// missing file, so independently normalized URL strings cannot be compared.
+    private static func canonicalPath(_ url: URL) throws -> String {
+        let path = url.path
+        guard !path.contains("\0") else { throw Failure.escaped(path) }
+        if let resolved = realpath(path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        let code = errno
+        guard code == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+        }
+
+        // Resolve existing ancestors even when realpath cannot resolve the whole
+        // path. Follow links explicitly: peeling a dangling link off as though it
+        // were a missing filename could conceal an external destination.
+        let manager = FileManager.default
+        var pending = Array(path.split(separator: "/").map(String.init).reversed())
+        var resolved: [String] = []
+        var links = 0
+        while let component = pending.popLast() {
+            if component == "." { continue }
+            if component == ".." {
+                if !resolved.isEmpty { resolved.removeLast() }
+                continue
+            }
+            let candidate = "/" + (resolved + [component]).joined(separator: "/")
+            let attributes: [FileAttributeKey: Any]
+            do { attributes = try manager.attributesOfItem(atPath: candidate) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+                resolved.append(component)
+                continue
+            }
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                links += 1
+                guard links <= 40 else { throw Failure.escaped(path) }
+                let target = try manager.destinationOfSymbolicLink(atPath: candidate)
+                if target.hasPrefix("/") { resolved.removeAll() }
+                pending.append(contentsOf: target.split(separator: "/").map(String.init).reversed())
+            } else {
+                resolved.append(component)
+            }
+        }
+        return "/" + resolved.joined(separator: "/")
+    }
+
     private func sanitizeContents(at path: URL, allowMissing: Bool = false) throws {
         let manager = FileManager.default
-        let root = directory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let root = try Self.canonicalPath(directory) + "/"
         let lexicalRoot = directory.standardizedFileURL.path + "/"
         func lexicallyContains(_ url: URL) -> Bool {
             let path = url.standardizedFileURL.path
             return path.hasPrefix(lexicalRoot) || path.hasPrefix(root)
         }
-        func contains(_ url: URL) -> Bool {
-            url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root)
+        func contains(_ url: URL) throws -> Bool {
+            try Self.canonicalPath(url).hasPrefix(root)
         }
         func validate(_ file: URL, attributes: [FileAttributeKey: Any]) throws -> FileAttributeType? {
 #if ARCHIVE_MEMORY_TESTING
@@ -63,9 +117,9 @@ final class SigningWorkspace {
                 let target = try manager.destinationOfSymbolicLink(atPath: file.path)
                 let targetURL = target.hasPrefix("/") ? URL(fileURLWithPath: target) :
                     file.deletingLastPathComponent().appendingPathComponent(target)
-                // resolvingSymlinksInPath may leave dangling links unresolved;
-                // check the lexical target too, before trusting its resolution.
-                guard lexicallyContains(targetURL), contains(targetURL) else {
+                // Reject lexical escapes as well as destinations reached
+                // through links, including links whose targets do not exist.
+                guard lexicallyContains(targetURL), try contains(targetURL) else {
                     throw Failure.escaped(file.path)
                 }
             } else if type == .typeRegular, ((attributes[.referenceCount] as? NSNumber)?.intValue ?? 1) > 1 {
@@ -84,14 +138,14 @@ final class SigningWorkspace {
                    let executable = info["CFBundleExecutable"] as? String {
                     let executableURL = executable.hasPrefix("/") ? URL(fileURLWithPath: executable) :
                         file.deletingLastPathComponent().appendingPathComponent(executable)
-                    guard lexicallyContains(executableURL), contains(executableURL) else {
-                        throw Failure.escaped(executable)
+                    guard lexicallyContains(executableURL), try contains(executableURL) else {
+                        throw Failure.escaped("\(file.path) (CFBundleExecutable: \(executable))")
                     }
                 }
             }
             return type
         }
-        guard contains(path) else { throw Failure.escaped(path.path) }
+        guard try contains(path) else { throw Failure.escaped(path.path) }
         let attributes: [FileAttributeKey: Any]
         do { attributes = try manager.attributesOfItem(atPath: path.path) }
         catch let error as CocoaError where allowMissing && (error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile) {
