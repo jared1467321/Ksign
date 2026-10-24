@@ -86,7 +86,7 @@ enum IPAPatcher {
                 continue
             }
             let bundle = url.deletingLastPathComponent()
-            if url.lastPathComponent == "Info.plist", bundle != root,
+            if url.lastPathComponent == "Info.plist", bundle.path != root.path,
                ["app", "appex"].contains(bundle.pathExtension) { plists.append(url) }
         }
         if let enumerationError { throw enumerationError }
@@ -172,7 +172,12 @@ enum IPAPatcher {
             guard var info = try PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any] else {
                 throw Failure(detail: "Invalid Info.plist for identity compatibility.")
             }
-            let captured = target.infoPlist.deletingLastPathComponent() == root ? originalRootIdentifier : nil
+            // URL equality also compares directory/trailing-slash spelling.
+            // Identify the root plist by its normalized filesystem path so a
+            // captured pre-onlyModify identity is used on Darwin as well.
+            let isRootPlist = target.infoPlist.standardizedFileURL.path ==
+                root.appendingPathComponent("Info.plist").standardizedFileURL.path
+            let captured = isRootPlist ? originalRootIdentifier : nil
             guard let identifier = (info[originalIdentifierKey] as? String) ?? captured ?? (info["CFBundleIdentifier"] as? String),
                   !identifier.isEmpty else { throw Failure(detail: "Cannot determine the original bundle identifier.") }
             if info[originalIdentifierKey] as? String != identifier {

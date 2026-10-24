@@ -69,6 +69,11 @@ try check(Data(contentsOf: app.appendingPathComponent("Main")) == before, "Dupli
 let onlyModify = try fixture("OnlyModify", identifier: "org.example.clone")
 try apply(onlyModify, original: "org.example.original")
 try check(plist(onlyModify.appendingPathComponent("Info.plist"))[key] as? String == "org.example.original", "Captured ID after onlyModify")
+try check(plist(onlyModify.appendingPathComponent("Info.plist"))["CFBundleIdentifier"] as? String == "org.example.clone", "onlyModify signing ID changed")
+let withoutDirectorySlash = try fixture("OnlyModifyWithoutDirectorySlash", identifier: "org.example.second.clone")
+try apply(URL(fileURLWithPath: withoutDirectorySlash.path, isDirectory: false), original: "org.example.second.original")
+try check(plist(withoutDirectorySlash.appendingPathComponent("Info.plist"))[key] as? String == "org.example.second.original",
+          "Root identity depends on URL trailing slash")
 
 // An old Blatant-patched input still needs the new companion.
 let upgrade = try fixture("Upgrade", binary: oldPatch)
