@@ -10,10 +10,15 @@ import Glibc
 enum IPAPatcher {
     static let libraryName = "blatantsPatch.dylib"
     static let libraryRelativePath = "Frameworks/" + libraryName
+    static let identityLibraryName = "asignIdentity.dylib"
+    static let identityLibraryRelativePath = "Frameworks/" + identityLibraryName
+    static let libraryRelativePaths: Set<String> = [libraryRelativePath, identityLibraryRelativePath]
+    static let originalIdentifierKey = "AsignOriginalBundleIdentifier"
 
     struct Target {
         let executable: URL
         let loadPath: String
+        let infoPlist: URL
     }
 
     private final class RunpathResolver {
@@ -102,48 +107,81 @@ enum IPAPatcher {
             let to = library.pathComponents
             let common = zip(from, to).prefix(while: { $0.0 == $0.1 }).count
             let relative = Array(repeating: "..", count: from.count - common) + Array(to.dropFirst(common))
-            return Target(executable: executable, loadPath: "@executable_path/" + relative.joined(separator: "/"))
+            return Target(executable: executable, loadPath: "@executable_path/" + relative.joined(separator: "/"), infoPlist: plist)
         }
     }
 
     static func apply(to app: URL,
                       library: URL? = Bundle.main.url(forResource: "blatantsPatch.dylib", withExtension: "bin"),
+                      identityLibrary: URL? = Bundle.main.url(forResource: "asignIdentity.dylib", withExtension: "bin"),
+                      originalRootIdentifier: String? = nil,
                       replace: ((URL, URL) throws -> Void)? = nil) throws {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
         let targets = try Self.targets(in: root)
-        // Detect existing patch loads before section validation or staging.
-        // Previously patched inputs may have layouts we cannot safely rewrite.
-        let pending = try targets.filter { target in
-            var error = [CChar](repeating: 0, count: 512)
-            let errorSize = error.count
-            let result = KsignIPAFileHasPatchLibrary(target.executable.path, libraryName, &error, errorSize)
-            guard result >= 0 else {
-                let relative = String(target.executable.path.dropFirst(root.path.count + 1))
-                throw Failure(detail: "\(relative): \(String(cString: error))")
+        struct Library {
+            let name: String
+            let source: URL?
+            let destination: URL
+        }
+        let libraries = [Library(name: identityLibraryName, source: identityLibrary,
+                                 destination: root.appendingPathComponent(identityLibraryRelativePath)),
+                         Library(name: libraryName, source: library,
+                                 destination: root.appendingPathComponent(libraryRelativePath))]
+        var injections: [URL: [Library]] = [:]
+        for target in targets {
+            for patch in libraries {
+                var error = [CChar](repeating: 0, count: 512)
+                let errorSize = error.count
+                let result = KsignIPAFileHasPatchLibrary(target.executable.path, patch.name, &error, errorSize)
+                guard result >= 0 else {
+                    let relative = String(target.executable.path.dropFirst(root.path.count + 1))
+                    throw Failure(detail: "\(relative): \(String(cString: error))")
+                }
+                if result == 0 { injections[target.executable, default: []].append(patch) }
             }
-            return result == 0
         }
-        guard !pending.isEmpty else { return }
-        let libraryPath = root.appendingPathComponent(libraryRelativePath)
-        if (try? manager.attributesOfItem(atPath: libraryPath.path)[.type]) as? FileAttributeType == .typeSymbolicLink {
-            throw Failure(detail: "The existing patch library is a symbolic link.")
+        var libraryCopies: [Library] = []
+        for patch in libraries {
+            try requireInside(patch.destination.resolvingSymlinksInPath(), root: root)
+            guard !targets.contains(where: { $0.executable == patch.destination }) else {
+                throw Failure(detail: "The patch library destination overlaps an app executable.")
+            }
+            if manager.fileExists(atPath: patch.destination.path) ||
+               (try? manager.destinationOfSymbolicLink(atPath: patch.destination.path)) != nil {
+                guard (try manager.attributesOfItem(atPath: patch.destination.path)[.type]) as? FileAttributeType == .typeRegular else {
+                    throw Failure(detail: "The existing \(patch.name) is not a regular file.")
+                }
+                // Keep third-party Blatant libraries. Refresh our own companion
+                // from the current signer so future fixes reach prepatched apps.
+                if patch.name == identityLibraryName, let source = patch.source,
+                   !manager.contentsEqual(atPath: source.path, andPath: patch.destination.path) {
+                    libraryCopies.append(patch)
+                }
+            } else {
+                guard patch.source != nil else { throw Failure(detail: "The bundled \(patch.name) is missing.") }
+                libraryCopies.append(patch)
+            }
         }
-        let libraryDestination = libraryPath.resolvingSymlinksInPath()
-        try requireInside(libraryDestination, root: root)
-        guard !targets.contains(where: { $0.executable == libraryDestination }) else {
-            throw Failure(detail: "The patch library destination overlaps an app executable.")
+
+        var identityPlists: [(URL, Data)] = []
+        for target in targets {
+            try requireInside(target.infoPlist.resolvingSymlinksInPath(), root: root)
+            let data = try Data(contentsOf: target.infoPlist)
+            var format = PropertyListSerialization.PropertyListFormat.binary
+            guard var info = try PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any] else {
+                throw Failure(detail: "Invalid Info.plist for identity compatibility.")
+            }
+            let captured = target.infoPlist.deletingLastPathComponent() == root ? originalRootIdentifier : nil
+            guard let identifier = (info[originalIdentifierKey] as? String) ?? captured ?? (info["CFBundleIdentifier"] as? String),
+                  !identifier.isEmpty else { throw Failure(detail: "Cannot determine the original bundle identifier.") }
+            if info[originalIdentifierKey] as? String != identifier {
+                info[originalIdentifierKey] = identifier
+                identityPlists.append((target.infoPlist,
+                    try PropertyListSerialization.data(fromPropertyList: info, format: format, options: 0)))
+            }
         }
-        // Keep the library supplied with a prepatched app, including when only
-        // some of its extensions still need a load command.
-        let needsLibrary = !manager.fileExists(atPath: libraryDestination.path)
-        if !needsLibrary,
-           (try manager.attributesOfItem(atPath: libraryDestination.path)[.type]) as? FileAttributeType != .typeRegular {
-            throw Failure(detail: "The existing patch library is not a regular file.")
-        }
-        if needsLibrary && library == nil {
-            throw Failure(detail: "The bundled Blatant’s patch library is missing.")
-        }
+        guard !injections.isEmpty || !libraryCopies.isEmpty || !identityPlists.isEmpty else { return }
         let scratch = root.deletingLastPathComponent().appendingPathComponent(".IPAPatch_" + UUID().uuidString)
         try manager.createDirectory(at: scratch, withIntermediateDirectories: false)
         defer { try? manager.removeItem(at: scratch) }
@@ -154,7 +192,8 @@ enum IPAPatcher {
             let original: URL?
         }
         var replacements: [Replacement] = []
-        func stage(_ source: URL, destination: URL, loadPath: String?) throws {
+        func stage(_ source: URL, destination: URL, permissions: Int? = nil,
+                   transform: ((URL) throws -> Void)? = nil) throws {
             let index = replacements.count
             let prepared = scratch.appendingPathComponent("prepared-\(index)")
             try manager.copyItem(at: source, to: prepared)
@@ -163,24 +202,8 @@ enum IPAPatcher {
                 throw Failure(detail: "Patch input is not a regular file: \(source.lastPathComponent)")
             }
             let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o755
-            try manager.setAttributes([.posixPermissions: loadPath == nil ? 0o755 : mode | 0o200], ofItemAtPath: prepared.path)
-            if let loadPath {
-                var error = [CChar](repeating: 0, count: 512)
-                let errorSize = error.count
-                let resolver = RunpathResolver(root: root, executable: destination, library: libraryDestination)
-                let context = Unmanaged.passUnretained(resolver).toOpaque()
-                let result = withExtendedLifetime(resolver) {
-                    KsignPatchIPAFileWithGrowth(prepared.path, loadPath, { runpath, context in
-                        guard let runpath, let context else { return -1 }
-                        return Unmanaged<RunpathResolver>.fromOpaque(context).takeUnretainedValue()
-                            .resolve(String(cString: runpath))
-                    }, context, &error, errorSize)
-                }
-                guard result >= 0 else {
-                    let relative = String(destination.path.dropFirst(root.path.count + 1))
-                    throw Failure(detail: "\(relative): \(String(cString: error))")
-                }
-            }
+            try manager.setAttributes([.posixPermissions: permissions ?? (mode | 0o200)], ofItemAtPath: prepared.path)
+            try transform?(prepared)
             var original: URL?
             if manager.fileExists(atPath: destination.path) {
                 let backup = scratch.appendingPathComponent("original-\(index)")
@@ -189,15 +212,38 @@ enum IPAPatcher {
             }
             replacements.append(.init(destination: destination, prepared: prepared, original: original))
         }
-        for target in pending {
-            try stage(target.executable, destination: target.executable, loadPath: target.loadPath)
+        for target in targets {
+            guard let needed = injections[target.executable] else { continue }
+            try stage(target.executable, destination: target.executable) { prepared in
+                for patch in needed {
+                    let loadPath = String(target.loadPath.dropLast(libraryName.count)) + patch.name
+                    var error = [CChar](repeating: 0, count: 512)
+                    let errorSize = error.count
+                    let resolver = RunpathResolver(root: root, executable: target.executable, library: patch.destination)
+                    let context = Unmanaged.passUnretained(resolver).toOpaque()
+                    let result = withExtendedLifetime(resolver) {
+                        KsignPatchIPAFileWithGrowth(prepared.path, loadPath, { runpath, context in
+                            guard let runpath, let context else { return -1 }
+                            return Unmanaged<RunpathResolver>.fromOpaque(context).takeUnretainedValue()
+                                .resolve(String(cString: runpath))
+                        }, context, &error, errorSize)
+                    }
+                    guard result >= 0 else {
+                        let relative = String(target.executable.path.dropFirst(root.path.count + 1))
+                        throw Failure(detail: "\(relative): \(String(cString: error))")
+                    }
+                }
+            }
         }
-        if needsLibrary, let library {
-            try stage(library, destination: libraryDestination, loadPath: nil)
+        for patch in libraryCopies {
+            if let source = patch.source { try stage(source, destination: patch.destination, permissions: 0o755) }
+        }
+        for (plist, data) in identityPlists {
+            try stage(plist, destination: plist) { try data.write(to: $0) }
         }
 
-        let frameworks = libraryDestination.deletingLastPathComponent()
-        let createFrameworks = !manager.fileExists(atPath: frameworks.path)
+        let frameworks = root.appendingPathComponent("Frameworks", isDirectory: true)
+        let createFrameworks = !libraryCopies.isEmpty && !manager.fileExists(atPath: frameworks.path)
         if createFrameworks { try manager.createDirectory(at: frameworks, withIntermediateDirectories: false) }
         var committed: [Replacement] = []
         do {

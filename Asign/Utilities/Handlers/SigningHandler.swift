@@ -113,7 +113,7 @@ final class SigningHandler: NSObject {
                    (_options.experiment_replaceSubstrateWithEllekit || archiveApp.paths(relativePrefix: "Frameworks/CydiaSubstrate.framework").isEmpty),
                    let loader = Bundle.main.url(forResource: "ellekit", withExtension: "deb") { inputs.append(loader) }
                 var mutations = try await TweakHandler.mutationPaths(for: inputs, options: _options, packages: _packages)
-                if _options.ipaPatching == true { mutations.insert(IPAPatcher.libraryRelativePath) }
+                if _options.ipaPatching == true { mutations.formUnion(IPAPatcher.libraryRelativePaths) }
                 if let executable = try archiveApp.metadata().executable { mutations.insert(executable) }
                 needsFullTreeForTweaks = !archiveApp.supportsSparseTweakMutations(at: mutations)
             }
@@ -129,7 +129,7 @@ final class SigningHandler: NSObject {
 			} else {
                 var hashExclusions = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
                 hashExclusions.insert("embedded.mobileprovision")
-                if _options.ipaPatching == true { hashExclusions.insert(IPAPatcher.libraryRelativePath) }
+                if _options.ipaPatching == true { hashExclusions.formUnion(IPAPatcher.libraryRelativePaths) }
                 if _options.removeWatchPlaceholder { hashExclusions.insert("com.apple.WatchPlaceholder") }
 				var removals = Set(try _options.removeFiles.map(_normalizedArchiveRelativePath))
                 if _options.removeWatchPlaceholder { removals.insert("com.apple.WatchPlaceholder") }
@@ -188,6 +188,10 @@ final class SigningHandler: NSObject {
         // Capture the ORIGINAL declarations before any signing option edits.
         // This is the same predicate that previously skipped this app outright.
         let platformRejection = SigningPlatformCompatibility.rejectionReason(infoDictionary as? [String: Any] ?? [:])
+        // onlyModify can change the root plist before IPAPatcher runs. Capture
+        // its original identity now; extensions are still unchanged at patch time.
+        let originalBundleIdentifier = (infoDictionary[IPAPatcher.originalIdentifierKey] as? String) ??
+            (infoDictionary["CFBundleIdentifier"] as? String)
 		
 		try await _modifyDict(using: infoDictionary, with: _options, to: movedAppPath)
 		
@@ -250,7 +254,7 @@ final class SigningHandler: NSObject {
         try await handler.disinject()
 
         if _options.ipaPatching == true {
-            do { try IPAPatcher.apply(to: movedAppPath) }
+            do { try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier) }
             catch let error as IPAPatcher.RecoveryFailure {
                 onPatchingFailure?(error.localizedDescription)
                 throw error

@@ -254,7 +254,7 @@ struct IPAPatchingOptionsView: View {
                 Label(.localized("IPA Patching"), systemImage: "bandage")
             }
         } footer: {
-            Text(.localized("Apply Blatant’s compatibility patch to the app and its extensions. Patching failures are reported after signing."))
+            Text(.localized("Apply compatibility patches to the app and its extensions. Patching failures are reported after signing."))
                 .nbThemeForeground(.textSecondary)
         }
     }

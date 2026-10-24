@@ -51,15 +51,29 @@ an existing custom selection stays selected.
 ## IPA patching
 
 Enable **IPA Patching** in an app's signing **Properties**, or in
-**Settings → Signing Options** to use it by default. This applies the bundled
-Blatant’s patch to the main app and its extensions before the existing signing
-step. All architecture slices are retained. No separate patching pass or
-intermediate IPA export is needed.
+**Settings → Signing Options** to use it by default. This applies Blatant’s
+patch and the original bundle identity companion to the main app and its
+extensions before signing. All architecture slices are retained. No separate
+patching pass or intermediate IPA export is needed.
 
-Executables that already load `blatantsPatch.dylib` in every architecture
-slice are skipped before patch validation. Existing patch libraries are kept;
-only executables that still need the patch are changed. If the entire app is
-already patched, the patching step leaves it untouched and signing continues.
+When signing changes an identifier, normal in-process `Bundle`/`NSBundle`
+identity and information-dictionary lookups see the original identifier. The
+companion also handles the corresponding Core Foundation lookups imported by
+the app and its embedded code. Each extension keeps its own original identity,
+and repeat signing preserves the first captured identity. Installation and
+signing still use the selected identifier. This applies to all patched apps;
+there are no app-specific configuration-file substitutions.
+
+The original identity must be captured before the first identifier change.
+If an input was already renamed by another tool, its earlier identity cannot
+be reliably inferred. Direct reads of the installed Info.plist, signing
+entitlements and external system services still reflect the installed identity;
+the companion provides a runtime view through the covered bundle APIs.
+
+Existing library loads are detected independently in every architecture slice;
+only missing loads are injected. Supplied Blatant libraries are preserved.
+The signer's own identity companion is refreshed on re-signing, and bundle
+identity metadata is installed in the same rollback transaction as the code.
 
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit

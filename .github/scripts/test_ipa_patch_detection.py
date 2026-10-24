@@ -29,14 +29,14 @@ class PatchDetectionTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.scratch.cleanup()
 
-    def inspect(self, blob):
+    def inspect(self, blob, library=b"blatantsPatch.dylib"):
         target = self.directory / "Executable"
         if target.exists():
             target.chmod(0o644)
         target.write_bytes(blob)
         target.chmod(0o444)
         error = ctypes.create_string_buffer(512)
-        result = self.detect(os.fsencode(target), b"blatantsPatch.dylib", error, len(error))
+        result = self.detect(os.fsencode(target), library, error, len(error))
         self.assertEqual(target.read_bytes(), blob)
         self.assertEqual(target.stat().st_mode & 0o777, 0o444)
         return result, error.value.decode()
@@ -60,6 +60,18 @@ class PatchDetectionTests(unittest.TestCase):
                                          ([thin(), patched], 0)):
                     with self.subTest(endian=endian, wide=wide, expected=expected):
                         self.assertEqual(self.inspect(fat(slices, endian, wide)), (expected, ""))
+
+    def test_companion_and_blatant_loads_are_detected_independently(self):
+        identity = b"asignIdentity.dylib"
+        for loads, expected in (([], (0, 0)), ([dylib(b"@rpath/blatantsPatch.dylib")], (1, 0)),
+                                ([dylib(b"@rpath/asignIdentity.dylib")], (0, 1)),
+                                ([dylib(b"@rpath/blatantsPatch.dylib"), dylib(b"@rpath/asignIdentity.dylib")], (1, 1))):
+            blob = thin(loads)
+            self.assertEqual((self.inspect(blob)[0], self.inspect(blob, identity)[0]), expected)
+        both = thin([dylib(b"@rpath/blatantsPatch.dylib"), dylib(b"@rpath/asignIdentity.dylib")])
+        partial = fat([both, thin([dylib(b"@rpath/blatantsPatch.dylib")])])
+        self.assertEqual(self.inspect(partial), (1, ""))
+        self.assertEqual(self.inspect(partial, identity), (0, ""))
 
     def test_incidental_strings_and_different_library_names_are_not_patch_loads(self):
         for blob in (thin(), thin() + b"blatantsPatch.dylib\0",

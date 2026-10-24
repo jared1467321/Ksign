@@ -543,19 +543,23 @@ def main():
         subprocess.run([str(fuzz), *fixtures], check=True, env=environment)
         swift = shutil.which("swiftc")
         if not swift:
-            print("Swift transaction/report tests unavailable: swiftc is not installed.", flush=True)
+            print("Swift identity transaction tests unavailable: swiftc is not installed.", flush=True)
             return 1 if args.require_swift else 0
         executable = directory / "ipapatch-tests"
         flags = ["-swift-version", "5"]
         if sys.platform == "darwin":
             flags += ["-target", platform.machine() + "-apple-macosx14.0"]
+        swift_main = directory / "main.swift"
+        shutil.copyfile(ROOT / "Tests/IPAPatching/identity.swift", swift_main)
         subprocess.run([swift, *flags, "-import-objc-header", str(source.with_suffix(".h")),
                         str(ROOT / "Asign/Utilities/Handlers/IPAPatcher.swift"),
-                        str(ROOT / "Tests/IPAPatching/main.swift"), str(native_object), str(growth_object), archive, *cpp_runtime,
+                        str(swift_main), str(native_object), str(growth_object), archive, *cpp_runtime,
                         "-o", str(executable)], check=True)
-        growth_fixture = directory / "growth-fixture"
-        growth_fixture.write_bytes(chained_image())
-        subprocess.run([str(executable), str(ROOT / "Asign/Resources/blatantsPatch.dylib.bin"), str(growth_fixture)], check=True)
+        (directory / "plain").write_bytes(thin())
+        (directory / "blatant-only").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib")]))
+        (directory / "blatant").write_bytes(b"Blatant fixture")
+        (directory / "identity").write_bytes(b"Identity fixture")
+        subprocess.run([str(executable), str(directory)], check=True)
     return 0
 
 

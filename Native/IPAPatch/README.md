@@ -7,18 +7,28 @@ ARM64 slices are rebuilt; every slice is retained. ARM64 references to the Mach
 header and compact unwind addresses are updated as part of the transformation.
 
 Before staging edits, `IPAPatcher` uses the read-only
-`KsignIPAFileHasPatchLibrary` scan to skip executables that already load
-`blatantsPatch.dylib` in every architecture. Detection validates the architecture
-and load-command tables without imposing section-layout requirements on files
-it will leave untouched. It accepts strong and weak load commands with an exact
-library basename. Existing patch libraries are preserved, including in apps
-where some extensions still need patching. Detection does not certify the
-validity of the original executable or repair existing damage.
+`KsignIPAFileHasPatchLibrary` scan for both `blatantsPatch.dylib` and
+`asignIdentity.dylib` in every architecture. Only missing loads are injected.
+Detection validates architecture and load-command tables without imposing
+section-layout requirements on executables it leaves untouched. It accepts
+strong and weak loads with an exact library basename. Supplied Blatant libraries
+are preserved; the signer's own identity companion is refreshed. Detection does
+not certify the validity of the original executable or repair existing damage.
 
 The original signature blob is retained for entitlement extraction by the
 normal signer. The fallback does not create an intermediate ad hoc signature.
 Changes are staged and atomically installed only after every slice succeeds.
 The enclosing app transaction and end-of-signing warnings remain unchanged.
+
+The original bundle identifier is captured in `AsignOriginalBundleIdentifier`
+for each app/extension Info.plist before native signing rewrites identifiers.
+The root identity is captured before `onlyModify` edits as well. Existing
+markers survive repeat signing. These plist edits share the executable/library
+staging and rollback transaction. Sparse workspaces already include the plists;
+both library paths are included in mutation and resource-hash exclusions.
+
+See [the identity companion](../IdentityPatch/README.md) for runtime coverage,
+build integration and its Apple-platform regression tests.
 
 SDK archives are pinned by version and SHA256 in `lief.json`. `make native`
 prepares the iOS static SDK; host tests prepare a matching host SDK. Both live

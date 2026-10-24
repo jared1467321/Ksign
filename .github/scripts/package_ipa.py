@@ -61,6 +61,9 @@ def validate_patch_library(app):
     source = ROOT / "Asign/Resources" / name
     if not bundled.is_file() or bundled.read_bytes() != source.read_bytes():
         raise RuntimeError("The app is missing the current bundled Blatant’s patch library")
+    identity = app / "asignIdentity.dylib.bin"
+    if not identity.is_file() or b"AsignIdentityPatch/v1\0" not in identity.read_bytes():
+        raise RuntimeError("The app is missing the built original bundle identity patch")
 
 
 def make_resignable(app):

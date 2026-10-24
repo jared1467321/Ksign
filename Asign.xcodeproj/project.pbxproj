@@ -212,6 +212,7 @@
 				3379C1B52DA869A1004372DA /* Sources */,
 				3379C1B62DA869A1004372DA /* Frameworks */,
 				3379C1B72DA869A1004372DA /* Resources */,
+				A53000012F5C000000000001 /* Build identity patch */,
 				3379BC662DC9DB32004372DA /* Copy Acknowledgements */,
 				FA11A0000000000000000033 /* Embed Foundation Extensions */,
 			);
@@ -358,6 +359,22 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		A53000012F5C000000000001 /* Build identity patch */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/.github/scripts/build_identity_patch.py",
+				"$(SRCROOT)/Native/IdentityPatch/IdentityPatch.m",
+				"$(SRCROOT)/Native/IdentityPatch/Rebind.c",
+				"$(SRCROOT)/Native/IdentityPatch/Rebind.h",
+			);
+			name = "Build identity patch";
+			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/asignIdentity.dylib.bin",);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "python3 \"$SRCROOT/.github/scripts/build_identity_patch.py\" --output \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/asignIdentity.dylib.bin\"\n";
+		};
 		3379BC662DC9DB32004372DA /* Copy Acknowledgements */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
