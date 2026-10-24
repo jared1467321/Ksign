@@ -73,7 +73,7 @@ struct BulkSigningView: View {
 	}
 
 	var body: some View {
-		NBNavigationView(.localized("Bulk Signing"), displayMode: .inline) {
+		NBNavigationView(.localized("Bulk Signing"), displayMode: .inline, adaptsContainerText: false) {
 			Form {
 				Group {
                 _cert()
@@ -85,9 +85,10 @@ struct BulkSigningView: View {
 					}
 				}
 				}
-				.nbThemeRow()
+				.nbThemeRow(adaptsText: false)
 			}
-			.nbThemeCanvas(rendersAurora: false)
+			// Labels own their adaptive ink so color frames cannot invalidate the form.
+			.nbThemeCanvas(rendersAurora: false, adaptsText: false)
 			.safeAreaInset(edge: .bottom) {
 				Button {
 					_start()
@@ -217,35 +218,50 @@ extension BulkSigningView {
 	
 	@ViewBuilder
 	private func _customizationProperties(for config: Binding<AppSignConfig>) -> some View {
-			DisclosureGroup(.localized("Modify")) {
-				NavigationLink(.localized("Existing Dylibs")) {
+			DisclosureGroup {
+				NavigationLink {
 					SigningDylibView(
 						app: config.app.wrappedValue,
 						options: config.options.optional()
 					)
+				} label: {
+					Text(String.localized("Existing Dylibs"))
+						.nbThemeForeground(.text)
 				}
 				
-				NavigationLink(String.localized("Frameworks & PlugIns")) {
+				NavigationLink {
 					SigningFrameworksView(
 						app: config.app.wrappedValue,
 						options: config.options.optional()
 					)
+				} label: {
+					Text(String.localized("Frameworks & PlugIns"))
+						.nbThemeForeground(.text)
 				}
 				#if NIGHTLY || DEBUG
-				NavigationLink(String.localized("Entitlements")) {
+				NavigationLink {
 					SigningEntitlementsView(
 						bindingValue: config.options.appEntitlementsFile
 					)
+				} label: {
+					Text(String.localized("Entitlements"))
+						.nbThemeForeground(.text)
 				}
 				#endif
-				NavigationLink(String.localized("Tweaks")) {
+				NavigationLink {
 					SigningTweaksView(
 						options: config.options
 					)
+				} label: {
+					Text(String.localized("Tweaks"))
+						.nbThemeForeground(.text)
 				}
+			} label: {
+				Text(String.localized("Modify"))
+					.nbThemeForeground(.text)
 			}
 			
-			NavigationLink(String.localized("Properties")) {
+			NavigationLink {
 				Form {
 					Group { SigningOptionsView(
 					options: config.options,
@@ -256,6 +272,9 @@ extension BulkSigningView {
 				}
 				.nbThemeCanvas()
 			.navigationTitle(.localized("Properties"))
+			} label: {
+				Text(String.localized("Properties"))
+					.nbThemeForeground(.text)
 		}
 	}
 
@@ -264,9 +283,12 @@ extension BulkSigningView {
 		NavigationLink {
 			destination()
 		} label: {
-			LabeledContent(title) {
+			LabeledContent {
 				Text(desc ?? .localized("Unknown"))
                     .nbThemeForeground(.textSecondary)
+			} label: {
+				Text(title)
+					.nbThemeForeground(.text)
 			}
 		}
 	}

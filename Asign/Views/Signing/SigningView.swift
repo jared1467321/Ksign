@@ -68,16 +68,17 @@ struct SigningView: View {
 		
 	// MARK: Body
     var body: some View {
-		NBNavigationView(app.name ?? .localized("Unknown"), displayMode: .inline) {
+		NBNavigationView(app.name ?? .localized("Unknown"), displayMode: .inline, adaptsContainerText: false) {
 			Form {
 				Group {
 				_customizationOptions(for: app)
 				_cert()
 				_customizationProperties(for: app)
 				}
-				.nbThemeRow()
+				.nbThemeRow(adaptsText: false)
 			}
-			.nbThemeCanvas(rendersAurora: false)
+			// Labels own their adaptive ink so color frames cannot invalidate the form.
+			.nbThemeCanvas(rendersAurora: false, adaptsText: false)
 			.disabled(_isSigning)
 			.safeAreaInset(edge: .bottom) {
 				if _isSigning {
@@ -244,35 +245,50 @@ extension SigningView {
 	@ViewBuilder
 	private func _customizationProperties(for app: AppInfoPresentable) -> some View {
 		NBSection(.localized("Advanced")) {
-			DisclosureGroup(.localized("Modify")) {
-				NavigationLink(.localized("Existing Dylibs")) {
+			DisclosureGroup {
+				NavigationLink {
 					SigningDylibView(
 						app: app,
 						options: $_temporaryOptions.optional()
 					)
+				} label: {
+					Text(String.localized("Existing Dylibs"))
+						.nbThemeForeground(.text)
 				}
 				
-				NavigationLink(String.localized("Frameworks & PlugIns")) {
+				NavigationLink {
 					SigningFrameworksView(
 						app: app,
 						options: $_temporaryOptions.optional()
 					)
+				} label: {
+					Text(String.localized("Frameworks & PlugIns"))
+						.nbThemeForeground(.text)
 				}
 				#if NIGHTLY || DEBUG
-				NavigationLink(String.localized("Entitlements")) {
+				NavigationLink {
 					SigningEntitlementsView(
 						bindingValue: $_temporaryOptions.appEntitlementsFile
 					)
+				} label: {
+					Text(String.localized("Entitlements"))
+						.nbThemeForeground(.text)
 				}
 				#endif
-				NavigationLink(String.localized("Tweaks")) {
+				NavigationLink {
 					SigningTweaksView(
 						options: $_temporaryOptions
 					)
+				} label: {
+					Text(String.localized("Tweaks"))
+						.nbThemeForeground(.text)
 				}
+			} label: {
+				Text(String.localized("Modify"))
+					.nbThemeForeground(.text)
 			}
 			
-			NavigationLink(String.localized("Properties")) {
+			NavigationLink {
 				Form {
 					Group { SigningOptionsView(
 					options: $_temporaryOptions,
@@ -283,6 +299,9 @@ extension SigningView {
 				}
 				.nbThemeCanvas()
 				.navigationTitle(.localized("Properties"))
+			} label: {
+				Text(String.localized("Properties"))
+					.nbThemeForeground(.text)
 			}
 		}
 	}
@@ -292,9 +311,12 @@ extension SigningView {
 		NavigationLink {
 			destination()
 		} label: {
-			LabeledContent(title) {
+			LabeledContent {
 				Text(desc ?? .localized("Unknown"))
                     .nbThemeForeground(.textSecondary)
+			} label: {
+				Text(title)
+					.nbThemeForeground(.text)
 			}
 		}
 	}
