@@ -43,6 +43,45 @@ static const char *basenameOf(const char *path) {
     return slash ? slash + 1 : path;
 }
 
+// Share architecture-table validation between read-only detection and edits.
+static int collectSlices(const uint8_t *bytes, size_t size, PatchSlice slices[64],
+                         uint32_t *sliceCount, char *error, size_t errorSize) {
+    if (!bytes || size < 4) return fail(error, errorSize, "Invalid Mach-O executable.");
+    uint32_t magic = read32(bytes, 1), count = 1;
+    slices[0] = (PatchSlice){0, size, 0, 0};
+    if (!thinMagic(magic)) {
+        int big = magic == 0xcafebabe || magic == 0xcafebabf;
+        int wide = magic == 0xcafebabf || magic == 0xbfbafeca;
+        if (size < 8 || !(big || magic == 0xbebafeca || magic == 0xbfbafeca))
+            return fail(error, errorSize, "Invalid Mach-O magic.");
+        size_t entrySize = wide ? 32 : 20;
+        count = read32(bytes + 4, big);
+        if (!count || count > 64 || count > (size - 8) / entrySize)
+            return fail(error, errorSize, "Invalid universal Mach-O table.");
+        size_t tableEnd = 8 + count * entrySize;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint8_t *entry = bytes + 8 + i * entrySize;
+            uint64_t offset = wide ? read64(entry + 8, big) : read32(entry + 8, big);
+            uint64_t length = wide ? read64(entry + 16, big) : read32(entry + 12, big);
+            uint32_t alignment = read32(entry + (wide ? 24 : 16), big);
+            if (offset < tableEnd || offset > size || length < 28 || length > size - offset ||
+                alignment > 63 || (offset & ((UINT64_C(1) << alignment) - 1)))
+                return fail(error, errorSize, "Invalid universal Mach-O slice range.");
+            for (uint32_t j = 0; j < i; ++j)
+                if (offset < slices[j].offset + slices[j].size && slices[j].offset < offset + length)
+                    return fail(error, errorSize, "Overlapping Mach-O slices.");
+            uint32_t sliceMagic = read32(bytes + offset, 1);
+            int sliceBig = sliceMagic == 0xfeedface || sliceMagic == 0xfeedfacf;
+            if (!thinMagic(sliceMagic) || read32(entry, big) != read32(bytes + offset + 4, sliceBig) ||
+                read32(entry + 4, big) != read32(bytes + offset + 8, sliceBig))
+                return fail(error, errorSize, "Universal Mach-O architecture mismatch.");
+            slices[i] = (PatchSlice){(size_t)offset, (size_t)length, 0, 0};
+        }
+    }
+    *sliceCount = count;
+    return 0;
+}
+
 // Preserve every unrelated command, and normalize previous references to this
 // same patch library to one weak command using the current executable's path.
 static int patchSlice(uint8_t *bytes, size_t size, const char *path,
@@ -177,37 +216,9 @@ int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
         !*basenameOf(path) || strlen(path) > 4096)
         return fail(error, errorSize, "Invalid IPA patch input.");
     uint8_t *bytes = buffer;
-    uint32_t magic = read32(bytes, 1), count = 1;
-    PatchSlice slices[64] = {{0, size, 0, 0}};
-    if (!thinMagic(magic)) {
-        int big = magic == 0xcafebabe || magic == 0xcafebabf;
-        int wide = magic == 0xcafebabf || magic == 0xbfbafeca;
-        if (size < 8 || !(big || magic == 0xbebafeca || magic == 0xbfbafeca))
-            return fail(error, errorSize, "Invalid Mach-O magic.");
-        size_t entrySize = wide ? 32 : 20;
-        count = read32(bytes + 4, big);
-        if (!count || count > 64 || count > (size - 8) / entrySize)
-            return fail(error, errorSize, "Invalid universal Mach-O table.");
-        size_t tableEnd = 8 + count * entrySize;
-        for (uint32_t i = 0; i < count; ++i) {
-            const uint8_t *entry = bytes + 8 + i * entrySize;
-            uint64_t offset = wide ? read64(entry + 8, big) : read32(entry + 8, big);
-            uint64_t length = wide ? read64(entry + 16, big) : read32(entry + 12, big);
-            uint32_t alignment = read32(entry + (wide ? 24 : 16), big);
-            if (offset < tableEnd || offset > size || length < 28 || length > size - offset ||
-                alignment > 63 || (offset & ((UINT64_C(1) << alignment) - 1)))
-                return fail(error, errorSize, "Invalid universal Mach-O slice range.");
-            for (uint32_t j = 0; j < i; ++j)
-                if (offset < slices[j].offset + slices[j].size && slices[j].offset < offset + length)
-                    return fail(error, errorSize, "Overlapping Mach-O slices.");
-            uint32_t sliceMagic = read32(bytes + offset, 1);
-            int sliceBig = sliceMagic == 0xfeedface || sliceMagic == 0xfeedfacf;
-            if (!thinMagic(sliceMagic) || read32(entry, big) != read32(bytes + offset + 4, sliceBig) ||
-                read32(entry + 4, big) != read32(bytes + offset + 8, sliceBig))
-                return fail(error, errorSize, "Universal Mach-O architecture mismatch.");
-            slices[i] = (PatchSlice){(size_t)offset, (size_t)length, 0, 0};
-        }
-    }
+    uint32_t count;
+    PatchSlice slices[64];
+    if (collectSlices(bytes, size, slices, &count, error, errorSize) < 0) return -1;
     size_t maximum = 0;
     int needsSpace = 0;
     for (uint32_t i = 0; i < count; ++i) {
@@ -227,6 +238,77 @@ int KsignPatchIPALoadCommands(void *buffer, size_t size, const char *path,
                    &slices[i].commands, error, errorSize);
     free(scratch);
     return 0;
+}
+
+static int hasPatchLibrary(const uint8_t *bytes, size_t size, const char *name,
+                           char *error, size_t errorSize) {
+    PatchSlice slices[64];
+    uint32_t count;
+    if (collectSlices(bytes, size, slices, &count, error, errorSize) < 0) return -1;
+    int allPatched = 1;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t *slice = bytes + slices[i].offset;
+        size_t sliceSize = slices[i].size;
+        if (sliceSize < 28 || !thinMagic(read32(slice, 1)))
+            return fail(error, errorSize, "Invalid Mach-O executable.");
+        uint32_t magic = read32(slice, 1);
+        int big = magic == 0xfeedface || magic == 0xfeedfacf;
+        int wide = magic == 0xfeedfacf || magic == 0xcffaedfe;
+        size_t header = wide ? 32 : 28, alignment = wide ? 8 : 4;
+        if (sliceSize < header || read32(slice + 12, big) != 2)
+            return fail(error, errorSize, "Bundle executable is not MH_EXECUTE.");
+        uint32_t commands = read32(slice + 16, big), length = read32(slice + 20, big);
+        if (length > sliceSize - header || length > 4 * 1024 * 1024 || commands > length / 8)
+            return fail(error, errorSize, "Invalid Mach-O load command table.");
+        size_t cursor = header, end = header + length;
+        int found = 0;
+        for (uint32_t j = 0; j < commands; ++j) {
+            if (end - cursor < 8) return fail(error, errorSize, "Truncated Mach-O load command.");
+            const uint8_t *command = slice + cursor;
+            uint32_t kind = read32(command, big), commandSize = read32(command + 4, big);
+            if (commandSize < 8 || commandSize > end - cursor || commandSize % alignment)
+                return fail(error, errorSize, "Invalid Mach-O load command size.");
+            if (kind == 0xc || kind == 0x80000018) { // LC_LOAD[_WEAK]_DYLIB
+                if (commandSize < 24) return fail(error, errorSize, "Invalid dylib load command.");
+                uint32_t offset = read32(command + 8, big);
+                if (offset < 24 || offset >= commandSize ||
+                    !memchr(command + offset, 0, commandSize - offset))
+                    return fail(error, errorSize, "Invalid dylib load path.");
+                if (strcmp(basenameOf((const char *)command + offset), name) == 0) found = 1;
+            }
+            cursor += commandSize;
+        }
+        if (cursor != end) return fail(error, errorSize, "Invalid Mach-O load command table.");
+        allPatched &= found;
+    }
+    return allPatched;
+}
+
+int KsignIPAFileHasPatchLibrary(const char *file, const char *name,
+                               char *error, size_t errorSize) {
+    if (error && errorSize) error[0] = 0;
+    if (!file || !name || !*name || strchr(name, '/'))
+        return fail(error, errorSize, "Invalid IPA patch detection input.");
+    int descriptor = open(file, O_RDONLY | O_NOFOLLOW);
+    if (descriptor < 0) return fail(error, errorSize, "Cannot open the executable for patch detection.");
+    struct stat attributes;
+    if (fstat(descriptor, &attributes) != 0 || !S_ISREG(attributes.st_mode) ||
+        attributes.st_size < 4 || (uint64_t)attributes.st_size > SIZE_MAX) {
+        close(descriptor);
+        return fail(error, errorSize, "Invalid executable for patch detection.");
+    }
+    size_t size = (size_t)attributes.st_size;
+    void *bytes = mmap(NULL, size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+    if (bytes == MAP_FAILED) {
+        close(descriptor);
+        return fail(error, errorSize, "Cannot map the executable for patch detection.");
+    }
+    int result = hasPatchLibrary(bytes, size, name, error, errorSize);
+    if (munmap(bytes, size) != 0 && result >= 0)
+        result = fail(error, errorSize, "Cannot unmap the executable after patch detection.");
+    if (close(descriptor) != 0 && result >= 0)
+        result = fail(error, errorSize, "Cannot close the executable after patch detection.");
+    return result;
 }
 
 int KsignPatchIPAFile(const char *file, const char *path,

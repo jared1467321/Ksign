@@ -56,6 +56,11 @@ Blatant’s patch to the main app and its extensions before the existing signing
 step. All architecture slices are retained. No separate patching pass or
 intermediate IPA export is needed.
 
+Executables that already load `blatantsPatch.dylib` in every architecture
+slice are skipped before patch validation. Existing patch libraries are kept;
+only executables that still need the patch are changed. If the entire app is
+already patched, the patching step leaves it untouched and signing continues.
+
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit
 relative path. This reduces the header space required for compatible extensions.

@@ -109,10 +109,22 @@ enum IPAPatcher {
     static func apply(to app: URL,
                       library: URL? = Bundle.main.url(forResource: "blatantsPatch.dylib", withExtension: "bin"),
                       replace: ((URL, URL) throws -> Void)? = nil) throws {
-        guard let library else { throw Failure(detail: "The bundled Blatant’s patch library is missing.") }
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
         let targets = try Self.targets(in: root)
+        // Detect existing patch loads before section validation or staging.
+        // Previously patched inputs may have layouts we cannot safely rewrite.
+        let pending = try targets.filter { target in
+            var error = [CChar](repeating: 0, count: 512)
+            let errorSize = error.count
+            let result = KsignIPAFileHasPatchLibrary(target.executable.path, libraryName, &error, errorSize)
+            guard result >= 0 else {
+                let relative = String(target.executable.path.dropFirst(root.path.count + 1))
+                throw Failure(detail: "\(relative): \(String(cString: error))")
+            }
+            return result == 0
+        }
+        guard !pending.isEmpty else { return }
         let libraryPath = root.appendingPathComponent(libraryRelativePath)
         if (try? manager.attributesOfItem(atPath: libraryPath.path)[.type]) as? FileAttributeType == .typeSymbolicLink {
             throw Failure(detail: "The existing patch library is a symbolic link.")
@@ -121,6 +133,16 @@ enum IPAPatcher {
         try requireInside(libraryDestination, root: root)
         guard !targets.contains(where: { $0.executable == libraryDestination }) else {
             throw Failure(detail: "The patch library destination overlaps an app executable.")
+        }
+        // Keep the library supplied with a prepatched app, including when only
+        // some of its extensions still need a load command.
+        let needsLibrary = !manager.fileExists(atPath: libraryDestination.path)
+        if !needsLibrary,
+           (try manager.attributesOfItem(atPath: libraryDestination.path)[.type]) as? FileAttributeType != .typeRegular {
+            throw Failure(detail: "The existing patch library is not a regular file.")
+        }
+        if needsLibrary && library == nil {
+            throw Failure(detail: "The bundled Blatant’s patch library is missing.")
         }
         let scratch = root.deletingLastPathComponent().appendingPathComponent(".IPAPatch_" + UUID().uuidString)
         try manager.createDirectory(at: scratch, withIntermediateDirectories: false)
@@ -167,10 +189,12 @@ enum IPAPatcher {
             }
             replacements.append(.init(destination: destination, prepared: prepared, original: original))
         }
-        for target in targets {
+        for target in pending {
             try stage(target.executable, destination: target.executable, loadPath: target.loadPath)
         }
-        try stage(library, destination: libraryDestination, loadPath: nil)
+        if needsLibrary, let library {
+            try stage(library, destination: libraryDestination, loadPath: nil)
+        }
 
         let frameworks = libraryDestination.deletingLastPathComponent()
         let createFrameworks = !manager.fileExists(atPath: frameworks.path)
