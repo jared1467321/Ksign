@@ -97,11 +97,18 @@ final class SigningWorkspace {
 
     private func sanitizeContents(at path: URL, allowMissing: Bool = false) throws {
         let manager = FileManager.default
-        let root = try Self.canonicalPath(directory) + "/"
-        let lexicalRoot = directory.standardizedFileURL.path + "/"
+        let canonicalRoot = try Self.canonicalPath(directory)
+        let root = canonicalRoot + "/"
+        // Enumeration can return the physical path even when the workspace was
+        // opened through an alias. Accept both roots, including Foundation's
+        // /private-stripped spelling, for the lexical check. The filesystem
+        // containment check below still resolves every candidate independently.
+        let lexicalRoots = [directory, URL(fileURLWithPath: canonicalRoot)].flatMap {
+            [$0.path + "/", $0.standardizedFileURL.path + "/"]
+        }
         func lexicallyContains(_ url: URL) -> Bool {
             let path = url.standardizedFileURL.path
-            return path.hasPrefix(lexicalRoot) || path.hasPrefix(root)
+            return lexicalRoots.contains(where: { path.hasPrefix($0) })
         }
         func contains(_ url: URL) throws -> Bool {
             try Self.canonicalPath(url).hasPrefix(root)

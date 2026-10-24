@@ -64,16 +64,20 @@ func withWorkspace(aliased: Bool = false, _ operation: (SigningWorkspace, URL) t
 }
 
 func contents(_ root: URL) throws -> [String: Data] {
+    let path = realpath(root.path, nil)!
+    let physicalRoot = URL(fileURLWithPath: String(cString: path), isDirectory: true)
+    free(path)
     var result: [String: Data] = [:]
-    let enumerator = manager.enumerator(at: root, includingPropertiesForKeys: nil)!
+    let enumerator = manager.enumerator(at: physicalRoot, includingPropertiesForKeys: nil)!
     for case let file as URL in enumerator {
         let type = try manager.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType
-        if type == .typeRegular { result[String(file.path.dropFirst(root.path.count + 1))] = try Data(contentsOf: file) }
+        if type == .typeRegular { result[String(file.path.dropFirst(physicalRoot.path.count + 1))] = try Data(contentsOf: file) }
     }
     return result
 }
 
 for aliased in [false, true] {
+    FileHandle.standardError.write(Data("Testing Watch placeholders through \(aliased ? "aliased" : "physical") workspace root\n".utf8))
     try withWorkspace(aliased: aliased) { workspace, app in
         try makeBundle(app.appendingPathComponent("PlugIns/Home WidgetExtension.appex"),
                        executable: "Home WidgetExtension", binary: true)
@@ -84,6 +88,14 @@ for aliased in [false, true] {
         let before = try contents(app)
         try workspace.sanitize(app)
         try check(contents(app) == before, "Preserve all binaries and Watch placeholder metadata")
+        let physical = realpath(app.path, nil)!
+        let physicalApp = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
+        free(physical)
+        // Darwin enumeration can produce physical paths while Foundation
+        // standardization strips /private, independently of the root's alias.
+        try workspace.sanitize(physicalApp.standardizedFileURL)
+        try workspace.sanitizeAdditions([physicalApp.appendingPathComponent("com.apple.WatchPlaceholder/Watchy.app").standardizedFileURL])
+        checks += 2
         check(!manager.fileExists(atPath: watch.appendingPathComponent("Executable").path), "Do not invent a Watch binary")
         check(!manager.fileExists(atPath: complication.appendingPathComponent("Executable").path), "Do not invent a complication binary")
         try workspace.sanitizeAdditions([app.appendingPathComponent("Frameworks/not-created/Library.dylib")])
