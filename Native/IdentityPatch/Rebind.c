@@ -1,7 +1,6 @@
 #include "Rebind.h"
 #include <dlfcn.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -18,21 +17,21 @@ static size_t ScopeLength;
 static const struct mach_header *SelfImage;
 
 static void replacePointer(void **slot, void *replacement) {
-    mach_vm_address_t address = (mach_vm_address_t)slot;
-    mach_vm_size_t regionSize = 0;
+    vm_address_t address = (vm_address_t)slot;
+    vm_size_t regionSize = 0;
     vm_region_basic_info_data_64_t info;
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
     mach_port_t object = MACH_PORT_NULL;
-    if (mach_vm_region(mach_task_self(), &address, &regionSize, VM_REGION_BASIC_INFO_64,
-                       (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS) return;
+    if (vm_region_64(mach_task_self(), &address, &regionSize, VM_REGION_BASIC_INFO_64,
+                     (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS) return;
     if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-    mach_vm_size_t pageSize = (mach_vm_size_t)getpagesize();
-    mach_vm_address_t page = (mach_vm_address_t)slot & ~(pageSize - 1);
-    if (mach_vm_protect(mach_task_self(), page, pageSize, FALSE,
-                        info.protection | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) return;
+    vm_size_t pageSize = (vm_size_t)getpagesize();
+    vm_address_t page = (vm_address_t)slot & ~(pageSize - 1);
+    if (vm_protect(mach_task_self(), page, pageSize, FALSE,
+                   info.protection | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) return;
     __atomic_store_n(slot, replacement, __ATOMIC_RELEASE);
     // Keep read-only data read-only after changing just the matched pointer.
-    mach_vm_protect(mach_task_self(), page, pageSize, FALSE, info.protection);
+    vm_protect(mach_task_self(), page, pageSize, FALSE, info.protection);
 }
 
 static void rebindImage(const struct mach_header *header, intptr_t slide) {
