@@ -5,7 +5,9 @@ import Metal
 enum NBAuroraInkMapFormat {
     static let width = 192
     static let height = 384
-    static let framesPerSecond = 30
+    // The sky moves slowly; its complementary ink can sample at half the
+    // backdrop cadence without reducing spatial detail or color saturation.
+    static let framesPerSecond = 15
 }
 
 /// A scope owns its lease; the map keeps only a weak reference to it. Dropped

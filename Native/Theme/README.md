@@ -44,7 +44,7 @@ on the foreground canvas modifier. An equality check on the backdrop's base and
 selected panes avoids updates when only unselected panes move; the backdrop's
 own clock, quality, accessibility and appearance dependencies remain live. The
 theme editor's geometry polling task exists only while picking and is cancelled
-when picking ends or its window disappears. Shader formulas, sampling, animation
+when picking ends or its window disappears. Shader formulas, sampling, backdrop animation
 cadence and glass surface parameters are unchanged.
 
 There is no appearance parameter in the Aurora shader or backdrop. Both modes
@@ -64,14 +64,18 @@ bright sky, and the rejected hard-light treatment, which compressed all colors
 into a narrow pastel-blue range.
 
 The map samples the procedural sky before pane refraction, glass highlights
-and stars. It does not capture the composited screen. One shared 30 Hz clock
+and stars. It does not capture the composited screen. One shared 15 Hz clock
 serves every visible text scope. The serial worker allows only one GPU request
 in flight, copies the small generated map into immutable RGBA data off the main
 thread, and caches a single shared shader argument. Raw bytes avoid image
 color-space conversions. The glyph shader interpolates these bytes without
 running the sky or reading the procedural noise texture. Render work is bounded
 at 73,728 sky evaluations per map, independent of glyph count or display scale.
-The map is 294,912 bytes (about 8.4 MiB/s at 30 Hz before uploads/copies).
+The map is 294,912 bytes (about 4.2 MiB/s at 15 Hz before uploads/copies).
+The text cadence is half the backdrop's 30 Hz cadence; map resolution, color
+math and glyph sharpness are unchanged. This halves scheduled map renders and
+paint deliveries, not necessarily total UI cost. Device measurements are still
+needed to assess responsiveness and whether color transitions look smooth.
 
 The map cache is not an ObservableObject and does not broadcast frames to
 retained views. Each scope owns a lease and a separate observable paint object;
@@ -84,9 +88,14 @@ the latest matching cached frame. Reduce Motion clients receive only the frozen
 cache, including when animated clients are also active.
 
 Adaptive labels now attach one transparent UIKit anchor to their background.
-The anchor explicitly accepts the proposed label size. A single shared 30 Hz
-layout clock measures attached labels directly in window coordinates and checks
-their native clipping ancestors, hidden state and opacity. A zero-sized initial
+The anchor explicitly accepts the proposed label size. A single shared 15 Hz
+layout clock measures attached labels directly in window coordinates. Changed
+window/local geometry immediately refreshes native clipping, hidden state and
+opacity on that tick. Stationary labels cache that result, including invisibility,
+for 0.25 seconds (rechecked on the next tick, about four times per second).
+This bounded recheck catches ancestor-only visibility/clipping changes without
+walking every label's ancestors on every tick. SwiftUI updates, reparenting,
+window changes and suspension invalidate the cache. A zero-sized initial
 layout stays registered: the next usable display tick starts color delivery
 without another SwiftUI appearance/geometry callback or user interaction. The
 same path covers retained cells, tab entry, sheets and drawer detent changes.
@@ -96,7 +105,7 @@ Layout ticks publish only changed visible placements and lease transitions.
 Offscreen anchors release paint and do not publish placement or receive animated
 frames. The layout clock has weak anchor references, cleans up abandoned anchors,
 and stops when no anchors remain or the application becomes inactive. The map
-still uses its separate shared 30 Hz clock, serial GPU worker, cached frames and
+still uses its separate shared 15 Hz clock, serial GPU worker, cached frames and
 weak leases. This adds one shared native geometry scan, not one timer or render
 per label; device performance still needs measurement with long lists.
 

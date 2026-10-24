@@ -31,13 +31,24 @@ final class NBAuroraTextAttachment: ObservableObject {
     }
 }
 
-/// UIKit owns both the label and clipping coordinates. Polling attached views
-/// once per shared display tick also covers layout that settles without a
-/// SwiftUI geometry/appearance notification (including retained list cells).
+/// UIKit owns both the label and clipping coordinates. Cheap placement checks
+/// follow movement at the ink cadence. Stationary labels reuse their clipping
+/// result between periodic checks, which also cover ancestor visibility changes
+/// without a SwiftUI geometry/appearance notification (including retained cells).
 @available(iOS 17.0, tvOS 17.0, *)
 final class NBAuroraTextAnchorView: UIView {
     weak var attachment: NBAuroraTextAttachment?
     var reduceMotion = false
+
+    private struct Geometry: Equatable {
+        let window: ObjectIdentifier
+        let bounds: CGRect
+        let frame: CGRect
+        let windowBounds: CGRect
+    }
+    private var lastGeometry: Geometry?
+    private var lastVisibilityCheck: CFTimeInterval = -.infinity
+    private var cachedInkBounds: CGRect?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -47,8 +58,14 @@ final class NBAuroraTextAnchorView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        invalidateGeometry()
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        invalidateGeometry()
         if window != nil {
             NBAuroraTextLayoutClock.shared.register(self)
         } else {
@@ -56,20 +73,48 @@ final class NBAuroraTextAnchorView: UIView {
         }
     }
 
-    func sample() {
-        attachment?.receive(bounds: inkBounds(), reduceMotion: reduceMotion)
+    func sample(at time: CFTimeInterval) {
+        attachment?.receive(bounds: inkBounds(at: time), reduceMotion: reduceMotion)
     }
 
     func suspend() {
+        invalidateGeometry()
         attachment?.receive(bounds: nil, reduceMotion: reduceMotion)
     }
 
-    private func inkBounds() -> CGRect? {
+    func invalidateGeometry() {
+        lastGeometry = nil
+        cachedInkBounds = nil
+        lastVisibilityCheck = -.infinity
+    }
+
+    private func inkBounds(at time: CFTimeInterval) -> CGRect? {
         guard let window, NBAuroraTextVisibility.usable(bounds),
-              NBAuroraTextVisibility.usable(window.bounds) else { return nil }
+              NBAuroraTextVisibility.usable(window.bounds) else {
+            invalidateGeometry()
+            return nil
+        }
         let frame = convert(bounds, to: window)
-        guard NBAuroraTextVisibility.usable(frame) else { return nil }
+        guard NBAuroraTextVisibility.usable(frame) else {
+            invalidateGeometry()
+            return nil
+        }
+        let geometry = Geometry(window: ObjectIdentifier(window), bounds: bounds,
+                                frame: frame, windowBounds: window.bounds)
+        // A moving/scaling label needs fresh clipping immediately. Ancestors
+        // can hide or resize around a stationary label, so never cache forever.
+        if geometry == lastGeometry, time - lastVisibilityCheck < 0.25 {
+            return cachedInkBounds
+        }
+        lastGeometry = geometry
+        lastVisibilityCheck = time
+        cachedInkBounds = visibleInkBounds(frame: frame, window: window)
+        return cachedInkBounds
+    }
+
+    private func visibleInkBounds(frame: CGRect, window: UIWindow) -> CGRect? {
         var visible = frame.intersection(window.bounds)
+        guard NBAuroraTextVisibility.usable(visible) else { return nil }
         var ancestor: UIView? = self
         while let view = ancestor {
             guard !view.isHidden, view.alpha > 0.01 else { return nil }
@@ -123,7 +168,7 @@ final class NBAuroraTextLayoutClock {
         }
     }
 
-    fileprivate func tick() {
+    fileprivate func tick(at time: CFTimeInterval) {
         guard active else { return }
         for (key, entry) in anchors {
             guard let view = entry.value else {
@@ -136,7 +181,7 @@ final class NBAuroraTextLayoutClock {
                 anchors.removeValue(forKey: key)
                 continue
             }
-            view.sample()
+            view.sample(at: time)
         }
         if anchors.isEmpty { stop() }
     }
@@ -163,7 +208,7 @@ private final class NBAuroraTextLayoutTick: NSObject {
     init(owner: NBAuroraTextLayoutClock) { self.owner = owner }
     @objc func fire(_ link: CADisplayLink) {
         guard let owner else { link.invalidate(); return }
-        owner.tick()
+        owner.tick(at: link.timestamp)
     }
 }
 
@@ -187,6 +232,7 @@ struct NBAuroraTextAnchor: UIViewRepresentable {
     func updateUIView(_ view: NBAuroraTextAnchorView, context: Context) {
         view.attachment = attachment
         view.reduceMotion = reduceMotion
+        view.invalidateGeometry()
         // No observable writes inside a SwiftUI update. The next display tick
         // reads actual layout, even if this update precedes window attachment.
         NBAuroraTextLayoutClock.shared.register(view)
