@@ -84,7 +84,6 @@
 		3371F6492DA92A1800281AC6 /* Exceptions for "Asign" folder in "Asign" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Resources/blatantsPatch.dylib.bin,
 				Resources/ellekit.deb,
 				Resources/Info.plist,
 			);
@@ -97,7 +96,6 @@
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
 			buildPhase = 3379C1B72DA869A1004372DA /* Resources */;
 			membershipExceptions = (
-				Resources/blatantsPatch.dylib.bin,
 				Resources/ellekit.deb,
 			);
 		};
@@ -212,7 +210,7 @@
 				3379C1B52DA869A1004372DA /* Sources */,
 				3379C1B62DA869A1004372DA /* Frameworks */,
 				3379C1B72DA869A1004372DA /* Resources */,
-				A53000012F5C000000000001 /* Build identity patch */,
+				A53000012F5C000000000001 /* Build Asign patch */,
 				3379BC662DC9DB32004372DA /* Copy Acknowledgements */,
 				FA11A0000000000000000033 /* Embed Foundation Extensions */,
 			);
@@ -359,21 +357,23 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		A53000012F5C000000000001 /* Build identity patch */ = {
+		A53000012F5C000000000001 /* Build Asign patch */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = ();
 			inputPaths = (
 				"$(SRCROOT)/.github/scripts/build_identity_patch.py",
 				"$(SRCROOT)/Native/IdentityPatch/IdentityPatch.m",
+				"$(SRCROOT)/Native/IdentityPatch/CompatibilityPatch.m",
+				"$(SRCROOT)/Native/IdentityPatch/CompatibilityPatch.h",
 				"$(SRCROOT)/Native/IdentityPatch/Rebind.c",
 				"$(SRCROOT)/Native/IdentityPatch/Rebind.h",
 			);
-			name = "Build identity patch";
-			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/asignIdentity.dylib.bin",);
+			name = "Build Asign patch";
+			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/asignpatch.dylib.bin",);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "python3 \"$SRCROOT/.github/scripts/build_identity_patch.py\" --output \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/asignIdentity.dylib.bin\"\n";
+			shellScript = "python3 \"$SRCROOT/.github/scripts/build_identity_patch.py\" --output \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/asignpatch.dylib.bin\"\n";
 		};
 		3379BC662DC9DB32004372DA /* Copy Acknowledgements */ = {
 			isa = PBXShellScriptBuildPhase;

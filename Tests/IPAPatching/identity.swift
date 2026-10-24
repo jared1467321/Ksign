@@ -19,7 +19,7 @@ let manager = FileManager.default
 let fixtures = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let plain = try Data(contentsOf: fixtures.appendingPathComponent("plain"))
 let oldPatch = try Data(contentsOf: fixtures.appendingPathComponent("blatant-only"))
-let libraries = [fixtures.appendingPathComponent("blatant"), fixtures.appendingPathComponent("identity")]
+let patchLibrary = fixtures.appendingPathComponent("patch")
 let key = IPAPatcher.originalIdentifierKey
 
 func plist(_ url: URL) throws -> [String: Any] {
@@ -35,7 +35,7 @@ func fixture(_ name: String, binary: Data? = nil, identifier: String = "com.exam
 }
 @discardableResult
 func apply(_ app: URL, original: String? = nil, replace: ((URL, URL) throws -> Void)? = nil) throws -> [String: [String]] {
-    try IPAPatcher.apply(to: app, library: libraries[0], identityLibrary: libraries[1],
+    try IPAPatcher.apply(to: app, library: patchLibrary,
                          originalRootIdentifier: original, replace: replace)
 }
 
@@ -52,8 +52,8 @@ for bundle in [app, ext] {
     let info = try plist(bundle.appendingPathComponent("Info.plist"))
     let exe = bundle.appendingPathComponent(info["CFBundleExecutable"] as! String)
     let data = try Data(contentsOf: exe)
-    try check(data.range(of: Data(IPAPatcher.libraryName.utf8)) != nil, "Missing Blatant injection")
-    try check(data.range(of: Data(IPAPatcher.identityLibraryName.utf8)) != nil, "Missing identity injection")
+    try check(data.range(of: Data(IPAPatcher.libraryName.utf8)) != nil, "Missing unified injection")
+    try check(!IPAPatcher.legacyLibraryNames.contains { data.range(of: Data($0.utf8)) != nil }, "Legacy load survived")
     try check(data.range(of: Data("UNCHANGED_EXECUTABLE_CODE".utf8)) != nil, "Executable payload changed")
 }
 let before = try Data(contentsOf: app.appendingPathComponent("Main"))
@@ -76,18 +76,39 @@ try apply(URL(fileURLWithPath: withoutDirectorySlash.path, isDirectory: false), 
 try check(plist(withoutDirectorySlash.appendingPathComponent("Info.plist"))[key] as? String == "org.example.second.original",
           "Root identity depends on URL trailing slash")
 
-// An old Blatant-patched input still needs the new companion.
-let upgrade = try fixture("Upgrade", binary: oldPatch)
+// Upgrade the old pair, including extension-local copies, to one library.
+let upgrade = try fixture("Upgrade", binary: try Data(contentsOf: fixtures.appendingPathComponent("legacy-pair")))
 let frameworks = upgrade.appendingPathComponent("Frameworks", isDirectory: true)
 try manager.createDirectory(at: frameworks, withIntermediateDirectories: false)
-let suppliedBlatant = Data("preserve third-party library".utf8)
-try suppliedBlatant.write(to: frameworks.appendingPathComponent(IPAPatcher.libraryName))
+for name in IPAPatcher.legacyLibraryNames {
+    try Data("legacy patch".utf8).write(to: frameworks.appendingPathComponent(name))
+}
+var removed: [String] = []
+try IPAPatcher.apply(to: upgrade, library: patchLibrary, didRemoveLibrary: { removed.append($0) })
+try check(Set(try manager.contentsOfDirectory(atPath: frameworks.path)) == [IPAPatcher.libraryName], "Upgrade left multiple libraries")
+try check(Set(removed) == Set(IPAPatcher.legacyLibraryNames.map { "Frameworks/" + $0 }), "Missing archive deletion journal")
+try Data("old unified patch".utf8).write(to: frameworks.appendingPathComponent(IPAPatcher.libraryName))
 try apply(upgrade)
-try check(Data(contentsOf: frameworks.appendingPathComponent(IPAPatcher.libraryName)) == suppliedBlatant, "Replaced Blatant library")
-try Data("old companion".utf8).write(to: frameworks.appendingPathComponent(IPAPatcher.identityLibraryName))
+try check(Data(contentsOf: frameworks.appendingPathComponent(IPAPatcher.libraryName)) == Data(contentsOf: patchLibrary),
+          "Did not refresh unified patch")
+let refreshed = try Data(contentsOf: upgrade.appendingPathComponent("Main"))
 try apply(upgrade)
-try check(Data(contentsOf: frameworks.appendingPathComponent(IPAPatcher.identityLibraryName)) == Data(contentsOf: libraries[1]),
-          "Did not refresh our companion")
+try check(Data(contentsOf: upgrade.appendingPathComponent("Main")) == refreshed, "Re-signing grew migrated load commands")
+let oldSingle = try fixture("OldSingle", binary: oldPatch)
+try apply(oldSingle)
+try check(Data(contentsOf: oldSingle.appendingPathComponent("Main")).range(of: Data("blatantsPatch.dylib".utf8)) == nil,
+          "Old single patch load survived")
+let extensionUpgrade = try fixture("ExtensionUpgrade")
+let legacyExtension = extensionUpgrade.appendingPathComponent("PlugIns/Share.appex", isDirectory: true)
+try manager.createDirectory(at: legacyExtension, withIntermediateDirectories: true)
+try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "org.example.share", "CFBundleExecutable": "Share"],
+                                  format: .xml, options: 0).write(to: legacyExtension.appendingPathComponent("Info.plist"))
+try oldPatch.write(to: legacyExtension.appendingPathComponent("Share"))
+let extensionFrameworks = legacyExtension.appendingPathComponent("Frameworks", isDirectory: true)
+try manager.createDirectory(at: extensionFrameworks, withIntermediateDirectories: false)
+try Data("legacy".utf8).write(to: extensionFrameworks.appendingPathComponent("blatantsPatch.dylib"))
+try apply(extensionUpgrade)
+try check(try manager.contentsOfDirectory(atPath: extensionFrameworks.path).isEmpty, "Extension kept old patch")
 
 let rollback = try fixture("Rollback")
 let originalPlist = try Data(contentsOf: rollback.appendingPathComponent("Info.plist"))
@@ -100,9 +121,26 @@ try expectFailure {
 try check(Data(contentsOf: rollback.appendingPathComponent("Main")) == plain, "Rollback left executable patched")
 try check(Data(contentsOf: rollback.appendingPathComponent("Info.plist")) == originalPlist, "Rollback left identity metadata")
 try check(!manager.fileExists(atPath: rollback.appendingPathComponent("Frameworks").path), "Rollback left libraries")
-let missing = try fixture("MissingCompanion")
-try expectFailure { try IPAPatcher.apply(to: missing, library: libraries[0], identityLibrary: nil) }
-try check(Data(contentsOf: missing.appendingPathComponent("Main")) == plain, "Missing companion modified executable")
+let missing = try fixture("MissingPatch")
+try expectFailure { try IPAPatcher.apply(to: missing, library: nil) }
+try check(Data(contentsOf: missing.appendingPathComponent("Main")) == plain, "Missing patch modified executable")
+let failedUpgrade = try fixture("FailedUpgrade", binary: try Data(contentsOf: fixtures.appendingPathComponent("legacy-pair")))
+let failedFrameworks = failedUpgrade.appendingPathComponent("Frameworks", isDirectory: true)
+try manager.createDirectory(at: failedFrameworks, withIntermediateDirectories: false)
+for name in IPAPatcher.legacyLibraryNames { try Data("old".utf8).write(to: failedFrameworks.appendingPathComponent(name)) }
+var failedRemovals: [String] = []
+try expectFailure {
+    try IPAPatcher.apply(to: failedUpgrade, library: patchLibrary, didRemoveLibrary: { failedRemovals.append($0) },
+        replace: { source, destination in
+            if destination.lastPathComponent == "Info.plist" { throw Failure(message: "Upgrade publication failed") }
+            if rename(source.path, destination.path) != 0 { throw Failure(message: "rename failed") }
+        })
+}
+try check(failedRemovals.isEmpty, "Failed migration published deletions")
+try check(Set(try manager.contentsOfDirectory(atPath: failedFrameworks.path)) == Set(IPAPatcher.legacyLibraryNames),
+          "Failed migration changed legacy files")
+try check(Data(contentsOf: failedUpgrade.appendingPathComponent("Main")) == Data(contentsOf: fixtures.appendingPathComponent("legacy-pair")),
+          "Failed migration changed executable")
 print("General original-identity staging, re-signing, extension and rollback tests passed")
 
 let cloudKey = IPAPatcher.originalCloudEntitlementKeys

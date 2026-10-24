@@ -6,14 +6,20 @@ of `KSIGN_IPA_HEADER_SPACE` selects `IPAPatchGrowth.cpp`, which adds at least
 ARM64 slices are rebuilt; every slice is retained. ARM64 references to the Mach
 header and compact unwind addresses are updated as part of the transformation.
 
-Before staging edits, `IPAPatcher` uses the read-only
-`KsignIPAFileHasPatchLibrary` scan for both `blatantsPatch.dylib` and
-`asignIdentity.dylib` in every architecture. Only missing loads are injected.
-Detection validates architecture and load-command tables without imposing
-section-layout requirements on executables it leaves untouched. It accepts
-strong and weak loads with an exact library basename. Supplied Blatant libraries
-are preserved; the signer's own identity companion is refreshed. Detection does
-not certify the validity of the original executable or repair existing damage.
+Before staging edits, `IPAPatcher` scans every architecture for
+`asignpatch.dylib` and either legacy name (`blatantsPatch.dylib` or
+`asignIdentity.dylib`). New apps get one load and one file. Re-signing refreshes
+the unified library. Legacy loads are rewritten in their existing ordinal
+positions to the same unified library, preserving other dependency bindings.
+An upgraded executable can retain multiple load commands to that one image;
+only `asignpatch.dylib` is installed and loaded at runtime. Legacy root and
+extension-local library files are removed in the rollback transaction, and
+successful removals are recorded for archive-backed signing/rebuilds.
+
+Read-only detection validates architecture and load-command tables without
+imposing section-layout requirements on executables it leaves untouched. It
+accepts strong and weak loads with an exact library basename. Detection does
+not certify the original executable or repair existing damage.
 
 The original signature blob is retained for entitlement extraction by the
 normal signer. The fallback does not create an intermediate ad hoc signature.
@@ -25,9 +31,9 @@ for each app/extension Info.plist before native signing rewrites identifiers.
 The root identity is captured before `onlyModify` edits as well. Existing
 markers survive repeat signing. These plist edits share the executable/library
 staging and rollback transaction. Sparse workspaces already include the plists;
-both library paths are included in mutation and resource-hash exclusions.
+current and legacy library paths are included in mutation and resource-hash exclusions.
 
-See [the identity companion](../IdentityPatch/README.md) for runtime coverage,
+See [the unified patch](../IdentityPatch/README.md) for runtime coverage,
 build integration and its Apple-platform regression tests.
 
 SDK archives are pinned by version and SHA256 in `lief.json`. `make native`

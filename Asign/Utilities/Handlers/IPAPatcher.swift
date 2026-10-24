@@ -8,11 +8,11 @@ import Glibc
 /// A patch attempt belongs to one private signing workspace. Prepare every
 /// executable before publishing any changes; never sign a half-patched app.
 enum IPAPatcher {
-    static let libraryName = "blatantsPatch.dylib"
+    static let libraryName = "asignpatch.dylib"
     static let libraryRelativePath = "Frameworks/" + libraryName
-    static let identityLibraryName = "asignIdentity.dylib"
-    static let identityLibraryRelativePath = "Frameworks/" + identityLibraryName
-    static let libraryRelativePaths: Set<String> = [libraryRelativePath, identityLibraryRelativePath]
+    static let legacyLibraryNames = ["blatantsPatch.dylib", "asignIdentity.dylib"]
+    // Include old destinations in sparse-workspace mutation/hash exclusions.
+    static let libraryRelativePaths = Set([libraryRelativePath] + legacyLibraryNames.map { "Frameworks/" + $0 })
     static let originalIdentifierKey = "AsignOriginalBundleIdentifier"
     static let originalCloudEntitlementKeys = "AsignOriginalCloudEntitlementKeys"
 
@@ -114,9 +114,9 @@ enum IPAPatcher {
 
     @discardableResult
     static func apply(to app: URL,
-                      library: URL? = Bundle.main.url(forResource: "blatantsPatch.dylib", withExtension: "bin"),
-                      identityLibrary: URL? = Bundle.main.url(forResource: "asignIdentity.dylib", withExtension: "bin"),
+                      library: URL? = Bundle.main.url(forResource: "asignpatch.dylib", withExtension: "bin"),
                       originalRootIdentifier: String? = nil,
+                      didRemoveLibrary: ((String) -> Void)? = nil,
                       replace: ((URL, URL) throws -> Void)? = nil) throws -> [String: [String]] {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
@@ -126,9 +126,7 @@ enum IPAPatcher {
             let source: URL?
             let destination: URL
         }
-        let libraries = [Library(name: identityLibraryName, source: identityLibrary,
-                                 destination: root.appendingPathComponent(identityLibraryRelativePath)),
-                         Library(name: libraryName, source: library,
+        let libraries = [Library(name: libraryName, source: library,
                                  destination: root.appendingPathComponent(libraryRelativePath))]
         var injections: [URL: [Library]] = [:]
         for target in targets {
@@ -140,7 +138,9 @@ enum IPAPatcher {
                     let relative = String(target.executable.path.dropFirst(root.path.count + 1))
                     throw Failure(detail: "\(relative): \(String(cString: error))")
                 }
-                if result == 0 { injections[target.executable, default: []].append(patch) }
+                let legacy = KsignIPAFileHasLegacyPatchLibrary(target.executable.path, &error, errorSize)
+                guard legacy >= 0 else { throw Failure(detail: String(cString: error)) }
+                if result == 0 || legacy == 1 { injections[target.executable, default: []].append(patch) }
             }
         }
         var libraryCopies: [Library] = []
@@ -154,15 +154,30 @@ enum IPAPatcher {
                 guard (try manager.attributesOfItem(atPath: patch.destination.path)[.type]) as? FileAttributeType == .typeRegular else {
                     throw Failure(detail: "The existing \(patch.name) is not a regular file.")
                 }
-                // Keep third-party Blatant libraries. Refresh our own companion
-                // from the current signer so future fixes reach prepatched apps.
-                if patch.name == identityLibraryName, let source = patch.source,
-                   !manager.contentsEqual(atPath: source.path, andPath: patch.destination.path) {
+                // Refresh the unified patch so fixes reach prepatched apps.
+                guard let source = patch.source else { throw Failure(detail: "The bundled \(patch.name) is missing.") }
+                if !manager.contentsEqual(atPath: source.path, andPath: patch.destination.path) {
                     libraryCopies.append(patch)
                 }
             } else {
                 guard patch.source != nil else { throw Failure(detail: "The bundled \(patch.name) is missing.") }
                 libraryCopies.append(patch)
+            }
+        }
+
+        var obsolete: [URL] = []
+        let bundles = Set([root] + targets.map { $0.executable.deletingLastPathComponent() })
+        for bundle in bundles.sorted(by: { $0.path < $1.path }) {
+            for name in legacyLibraryNames {
+                let url = bundle.appendingPathComponent("Frameworks/" + name)
+                try requireInside(url.resolvingSymlinksInPath(), root: root)
+                if manager.fileExists(atPath: url.path) || (try? manager.destinationOfSymbolicLink(atPath: url.path)) != nil {
+                    guard (try manager.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType == .typeRegular,
+                          !targets.contains(where: { $0.executable == url }) else {
+                        throw Failure(detail: "The legacy \(name) is not a removable library file.")
+                    }
+                    obsolete.append(url)
+                }
             }
         }
 
@@ -202,14 +217,14 @@ enum IPAPatcher {
                     try PropertyListSerialization.data(fromPropertyList: info, format: format, options: 0)))
             }
         }
-        guard !injections.isEmpty || !libraryCopies.isEmpty || !identityPlists.isEmpty else { return cloudPolicy }
+        guard !injections.isEmpty || !libraryCopies.isEmpty || !identityPlists.isEmpty || !obsolete.isEmpty else { return cloudPolicy }
         let scratch = root.deletingLastPathComponent().appendingPathComponent(".IPAPatch_" + UUID().uuidString)
         try manager.createDirectory(at: scratch, withIntermediateDirectories: false)
         defer { try? manager.removeItem(at: scratch) }
 
         struct Replacement {
             let destination: URL
-            let prepared: URL
+            let prepared: URL?
             let original: URL?
         }
         var replacements: [Replacement] = []
@@ -263,13 +278,23 @@ enum IPAPatcher {
             try stage(plist, destination: plist) { try data.write(to: $0) }
         }
 
+        for url in obsolete {
+            let backup = scratch.appendingPathComponent("original-\(replacements.count)")
+            try manager.copyItem(at: url, to: backup)
+            replacements.append(.init(destination: url, prepared: nil, original: backup))
+        }
+
         let frameworks = root.appendingPathComponent("Frameworks", isDirectory: true)
         let createFrameworks = !libraryCopies.isEmpty && !manager.fileExists(atPath: frameworks.path)
         if createFrameworks { try manager.createDirectory(at: frameworks, withIntermediateDirectories: false) }
         var committed: [Replacement] = []
         do {
             for replacement in replacements {
-                try (replace ?? atomicReplace)(replacement.prepared, replacement.destination)
+                if let prepared = replacement.prepared {
+                    try (replace ?? atomicReplace)(prepared, replacement.destination)
+                } else {
+                    try manager.removeItem(at: replacement.destination)
+                }
                 committed.append(replacement)
             }
         } catch {
@@ -287,6 +312,7 @@ enum IPAPatcher {
             }
             throw patchError
         }
+        for url in obsolete { didRemoveLibrary?(String(url.path.dropFirst(root.path.count + 1))) }
         return cloudPolicy
     }
 

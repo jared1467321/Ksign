@@ -255,7 +255,10 @@ final class SigningHandler: NSObject {
 
         var cloudEntitlementPolicy: [String: [String]] = [:]
         if _options.ipaPatching == true {
-            do { cloudEntitlementPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier) }
+            do {
+                cloudEntitlementPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier,
+                    didRemoveLibrary: { self._archiveExplicitDeletedPaths.insert($0) })
+            }
             catch let error as IPAPatcher.RecoveryFailure {
                 onPatchingFailure?(error.localizedDescription)
                 throw error
@@ -268,7 +271,7 @@ final class SigningHandler: NSObject {
                 appUrl: movedAppPath,
                 options: _options,
                 cert: appCertificate,
-                archiveContext: archiveContext,
+                archiveContext: _zsignArchiveContext(),
                 session: _signingSession,
                 credentials: credentials,
                 cloudEntitlementPolicy: cloudEntitlementPolicy

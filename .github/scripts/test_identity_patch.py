@@ -54,11 +54,11 @@ int KsignPatchIPAFileWithGrowth(const char *file, const char *path,
         executable.parent.mkdir(parents=True)
         frameworks = contents / "Frameworks"
         frameworks.mkdir()
-        identity = builder.build(frameworks / "asignIdentity.dylib", "macosx", "macosx", [platform.machine()])
+        identity = builder.build(frameworks / "asignpatch.dylib", "macosx", "macosx", [platform.machine()])
         sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
         flags = ["-target", platform.machine() + "-apple-macosx12.0", "-isysroot", sdk]
         subprocess.run(["xcrun", "clang", *flags, "-fobjc-arc", str(ROOT / "Tests/IdentityPatch/main.m"),
-                        "-framework", "Foundation", "-framework", "CoreFoundation", "-o", str(executable)], check=True)
+                        "-framework", "Foundation", "-framework", "CoreFoundation", "-framework", "Security", "-o", str(executable)], check=True)
         nested = contents / "PlugIns/Share.bundle"
         for bundle, identifier, original in [(app, "org.example.renamed", "org.example.original"),
                                               (nested, "org.example.renamed.share", "org.example.original.share")]:

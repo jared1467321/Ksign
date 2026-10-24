@@ -1,11 +1,36 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 static NSString *DuringLoad;
 static CFStringRef DuringInitializer;
+
+// Stand-ins exercise the legacy compatibility behavior without contacting
+// CloudKit or requiring a signing profile on the macOS test host.
+@interface CKEntitlements : NSObject
+@property(nonatomic, copy) NSDictionary *dictionary;
+- (instancetype)initWithEntitlementsDict:(NSDictionary *)dictionary;
+@end
+@implementation CKEntitlements
+- (instancetype)initWithEntitlementsDict:(NSDictionary *)dictionary {
+    self = [super init];
+    if (self) _dictionary = [dictionary copy];
+    return self;
+}
+@end
+
+@interface CKContainer : NSObject
+@property(nonatomic) BOOL setupCalled;
+- (instancetype)_initWithContainerIdentifier:(id)identifier;
+- (void)_setupWithContainerID:(id)identifier options:(id)options;
+@end
+@implementation CKContainer
+- (instancetype)_initWithContainerIdentifier:(__unused id)identifier { return [super init]; }
+- (void)_setupWithContainerID:(__unused id)identifier options:(__unused id)options { self.setupCalled = YES; }
+@end
 @interface AppLaunchProbe : NSObject
 @end
 @implementation AppLaunchProbe
@@ -49,6 +74,26 @@ int main(int argc, const char **argv) {
         check(argc == 4, "Expected nested bundle and two late-load libraries");
         check([DuringLoad isEqual:@"org.example.original"], "Patch was too late for app +load");
         check([(__bridge NSString *)DuringInitializer isEqual:@"org.example.original"], "Patch was too late for app constructor");
+        unsigned patchImages = 0;
+        for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
+            NSString *name = [@(_dyld_get_image_name(i)) lastPathComponent];
+            if ([name isEqualToString:@"asignpatch.dylib"]) ++patchImages;
+            check(![name isEqualToString:@"asignIdentity.dylib"] && ![name isEqualToString:@"blatantsPatch.dylib"],
+                  "A legacy patch image was loaded");
+        }
+        check(patchImages == 1, "Expected exactly one unified patch image");
+        NSDictionary *cloud = @{@"com.apple.developer.icloud-services": @[@"CloudKit"],
+                                @"com.apple.developer.icloud-container-environment": @"Production",
+                                @"keep": @"value"};
+        CKEntitlements *entitlements = [[CKEntitlements alloc] initWithEntitlementsDict:cloud];
+        check([entitlements.dictionary isEqual:@{@"keep": @"value"}], "Cloud entitlement hook was lost");
+        check(cloud.count == 3, "Cloud hook mutated the caller's dictionary");
+        check([[CKContainer alloc] _initWithContainerIdentifier:@"iCloud.example"] == nil, "Cloud constructor hook was lost");
+        CKContainer *container = [[CKContainer alloc] init];
+        [container _setupWithContainerID:nil options:nil];
+        check(!container.setupCalled, "Cloud setup hook was lost");
+        check([NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"../escape"] == nil,
+              "Invalid app group escaped its directory");
         verify(NSBundle.mainBundle, @"org.example.original");
         NSBundle *nested = [NSBundle bundleWithPath:@(argv[1])];
         check(nested != nil, "Nested fixture bundle is missing");

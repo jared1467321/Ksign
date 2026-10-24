@@ -24,19 +24,23 @@ class PatchDetectionTests(unittest.TestCase):
         cls.detect = cls.native.KsignIPAFileHasPatchLibrary
         cls.detect.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
         cls.detect.restype = ctypes.c_int
+        cls.legacy = cls.native.KsignIPAFileHasLegacyPatchLibrary
+        cls.legacy.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+        cls.legacy.restype = ctypes.c_int
 
     @classmethod
     def tearDownClass(cls):
         cls.scratch.cleanup()
 
-    def inspect(self, blob, library=b"blatantsPatch.dylib"):
+    def inspect(self, blob, library=b"blatantsPatch.dylib", legacy=False):
         target = self.directory / "Executable"
         if target.exists():
             target.chmod(0o644)
         target.write_bytes(blob)
         target.chmod(0o444)
         error = ctypes.create_string_buffer(512)
-        result = self.detect(os.fsencode(target), library, error, len(error))
+        result = (self.legacy(os.fsencode(target), error, len(error)) if legacy else
+                  self.detect(os.fsencode(target), library, error, len(error)))
         self.assertEqual(target.read_bytes(), blob)
         self.assertEqual(target.stat().st_mode & 0o777, 0o444)
         return result, error.value.decode()
@@ -72,6 +76,17 @@ class PatchDetectionTests(unittest.TestCase):
         partial = fat([both, thin([dylib(b"@rpath/blatantsPatch.dylib")])])
         self.assertEqual(self.inspect(partial), (1, ""))
         self.assertEqual(self.inspect(partial, identity), (0, ""))
+
+    def test_any_legacy_slice_requires_unified_migration(self):
+        unified = thin([dylib(b"@rpath/asignpatch.dylib")])
+        for name in (b"blatantsPatch.dylib", b"asignIdentity.dylib"):
+            old = thin([dylib(b"@rpath/asignpatch.dylib"), dylib(b"@rpath/" + name)])
+            for slices in ([old, unified], [unified, old]):
+                blob = fat(slices)
+                self.assertEqual(self.inspect(blob, b"asignpatch.dylib"), (1, ""))
+                self.assertEqual(self.inspect(blob, legacy=True), (1, ""))
+        self.assertEqual(self.inspect(unified, legacy=True), (0, ""))
+        self.assertEqual(self.inspect(thin() + b"blatantsPatch.dylib\0", legacy=True), (0, ""))
 
     def test_incidental_strings_and_different_library_names_are_not_patch_loads(self):
         for blob in (thin(), thin() + b"blatantsPatch.dylib\0",

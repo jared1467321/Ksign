@@ -2,11 +2,12 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 #import "Rebind.h"
+#import "CompatibilityPatch.h"
 
 // Written to each app/extension Info.plist before zsign changes its identity.
 static NSString *const OriginalKey = @"AsignOriginalBundleIdentifier";
 __attribute__((used, visibility("default")))
-const char AsignIdentityPatchVersion[] = "AsignIdentityPatch/v1";
+const char AsignPatchVersion[] = "AsignPatch/v1";
 
 static NSDictionary *(*GetInfo)(NSBundle *, SEL);
 static NSDictionary *(*GetLocalizedInfo)(NSBundle *, SEL);
@@ -165,14 +166,18 @@ static void InstallIdentityPatch(void) {
     method_setImplementation(value, (IMP)BundleValue);
     method_setImplementation(find, (IMP)BundleForIdentifier);
 
-    // Direct calls made by this companion retain the real CF implementations.
-    // Only imports in the containing app and its embedded code are rebound.
-#define BIND(name) { #name, (void *)name, (void *)Identity##name }
+    // Our own imports retain the real implementations. Identity is scoped to
+    // app code; Security keeps the legacy patch's process-wide import coverage.
+#define BIND(name) { #name, (void *)name, (void *)Identity##name, 0 }
     static const AsignIdentityBinding bindings[] = {
         BIND(CFBundleGetIdentifier), BIND(CFBundleGetInfoDictionary),
         BIND(CFBundleGetLocalInfoDictionary), BIND(CFBundleGetValueForInfoDictionaryKey),
         BIND(CFBundleCopyInfoDictionaryForURL), BIND(CFBundleCopyInfoDictionaryInDirectory),
-        BIND(CFBundleGetBundleWithIdentifier)
+        BIND(CFBundleGetBundleWithIdentifier),
+        { "SecItemAdd", (void *)SecItemAdd, (void *)AsignSecItemAdd, 1 },
+        { "SecItemCopyMatching", (void *)SecItemCopyMatching, (void *)AsignSecItemCopyMatching, 1 },
+        { "SecItemUpdate", (void *)SecItemUpdate, (void *)AsignSecItemUpdate, 1 },
+        { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 }
     };
 #undef BIND
     NSURL *scope = NSBundle.mainBundle.bundleURL;
@@ -188,6 +193,9 @@ static void InstallIdentityPatch(void) {
 @end
 @implementation AsignOriginalIdentityLoader
 + (void)load {
-    @autoreleasepool { InstallIdentityPatch(); }
+    @autoreleasepool {
+        AsignInstallCompatibilityPatch();
+        InstallIdentityPatch();
+    }
 }
 @end

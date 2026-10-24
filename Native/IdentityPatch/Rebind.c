@@ -43,7 +43,6 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
         size_t length = strlen(CanonicalScope);
         inScope = !strncmp(image.dli_fname, CanonicalScope, length) && image.dli_fname[length] == '/';
     }
-    if (!inScope) return;
     const struct mach_header_64 *mh = (const struct mach_header_64 *)header;
     if (mh->sizeofcmds > 16 * 1024 * 1024) return;
     const uint8_t *start = (const uint8_t *)(mh + 1), *end = start + mh->sizeofcmds;
@@ -106,6 +105,7 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
                 void *current = __atomic_load_n(&slots[k], __ATOMIC_ACQUIRE);
                 for (size_t b = 0; b < BindingCount; ++b) {
                     const AsignIdentityBinding *binding = &Bindings[b];
+                    if (!inScope && !binding->includeSystemImages) continue;
                     if ((name && !strcmp(name, binding->name)) || current == binding->original) {
                         if (current != binding->replacement) replacePointer(&slots[k], binding->replacement);
                         break;

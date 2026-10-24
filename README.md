@@ -51,14 +51,14 @@ an existing custom selection stays selected.
 ## IPA patching
 
 Enable **IPA Patching** in an app's signing **Properties**, or in
-**Settings → Signing Options** to use it by default. This applies Blatant’s
-patch and the original bundle identity companion to the main app and its
-extensions before signing. All architecture slices are retained. No separate
+**Settings → Signing Options** to use it by default. This injects one
+`asignpatch.dylib` containing the identity, keychain, app-group, defaults and
+CloudKit compatibility code into the main app and its extensions before signing. All architecture slices are retained. No separate
 patching pass or intermediate IPA export is needed.
 
 When signing changes an identifier, normal in-process `Bundle`/`NSBundle`
 identity and information-dictionary lookups see the original identifier. The
-companion also handles the corresponding Core Foundation lookups imported by
+patch also handles the corresponding Core Foundation lookups imported by
 the app and its embedded code. Each extension keeps its own original identity,
 and repeat signing preserves the first captured identity. Installation and
 signing still use the selected identifier. This applies to all patched apps;
@@ -68,12 +68,13 @@ The original identity must be captured before the first identifier change.
 If an input was already renamed by another tool, its earlier identity cannot
 be reliably inferred. Direct reads of the installed Info.plist, signing
 entitlements and external system services still reflect the installed identity;
-the companion provides a runtime view through the covered bundle APIs.
+the patch provides a runtime view through the covered bundle APIs.
 
-Existing library loads are detected independently in every architecture slice;
-only missing loads are injected. Supplied Blatant libraries are preserved.
-The signer's own identity companion is refreshed on re-signing, and bundle
-identity metadata is installed in the same rollback transaction as the code.
+Existing library loads are detected in every architecture slice. Re-signing
+refreshes the unified patch and migrates the old `blatantsPatch.dylib` /
+`asignIdentity.dylib` pair to `asignpatch.dylib`. The old files are removed,
+and bundle identity metadata is installed in the same rollback transaction.
+Archive rebuilds retain those removals.
 
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit

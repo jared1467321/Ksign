@@ -1,10 +1,20 @@
-# Original bundle identity companion
+# Unified Asign compatibility patch
 
-`asignIdentity.dylib` supplies the original identifier to app code after signing
-changes `CFBundleIdentifier`. It is built from this directory's source during
-the main Xcode target's **Build identity patch** phase and bundled as
-`asignIdentity.dylib.bin`. `IPAPatcher` injects it alongside Blatant's library.
-The packaging script rejects a build without the companion version marker.
+`asignpatch.dylib` contains the bundle identity, keychain, app-group,
+NSUserDefaults and CloudKit compatibility code in one source-built library.
+The main Xcode target's **Build Asign patch** phase bundles it as
+`asignpatch.dylib.bin`; the packaging script requires both implementation
+version markers and removes stale two-library resources from cached products.
+There is no runtime dependency on either former patch library.
+
+`CompatibilityPatch.m` carries the legacy patch's behavior: keychain queries
+use the signing profile's accessible group discovered by a probe; app-group
+folders live below the first available shared group, or Documents when no
+shared group exists; group defaults use the shared folder when available.
+The original probe account/service and folder layout are retained for upgrades.
+The four Security imports keep the legacy process-wide coverage, while
+identity imports remain scoped to the app and its embedded code. The CloudKit hooks retain the former local compatibility behavior; they do
+not restore access to the original developer's iCloud containers.
 
 Each app and extension gets its own `AsignOriginalBundleIdentifier` in its
 Info.plist. Capture happens before native signing; the root identifier is also
@@ -31,7 +41,7 @@ reveal which cloud capabilities its original developer used: start with the
 original IPA. An explicit custom entitlements file remains the user's override.
 Disabling compatibility patching doesn't apply this signing policy.
 
-The companion installs from Objective-C `+load`, before app initializers:
+The patch installs from Objective-C `+load`, before app initializers:
 
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,
   `objectForInfoDictionaryKey:` and `bundleWithIdentifier:` expose the original
@@ -43,8 +53,8 @@ The companion installs from Objective-C `+load`, before app initializers:
 - Immutable dictionary views are cached per source dictionary and original ID.
   CF Get/Copy ownership is retained. Foundation's real dictionaries are not
   mutated; signing and installation still use the selected identifier.
-- C imports are rebound only inside the containing app and its embedded code,
-  excluding the companion itself. A dyld callback includes later-loaded code.
+- Bundle C imports are rebound only inside the containing app and its embedded code,
+  excluding the patch itself. A dyld callback includes later-loaded code.
   Legacy lazy imports use their indirect symbols; resolved ordinary GOT imports
   can also be matched by address for chained-fixup images. Matched pointer pages
   regain their previous protection after a write.
@@ -62,10 +72,12 @@ Run on macOS with Xcode and Swift installed:
 python3 .github/scripts/test_identity_patch.py --require-apple
 ```
 
-The suite compiles the production Swift transaction and the native companion.
-It covers generic IDs, extension IDs, repeat signing, upgrading prepatched apps,
-companion refresh and publication rollback. A host app checks `+load` and C
+The suite compiles the production Swift transaction and the unified native patch.
+It covers generic IDs, extension IDs, repeat signing, migrating the old pair,
+unified library refresh and publication rollback. A host app checks `+load` and C
 initializers, Foundation/CF getters and dictionary copies, nested bundles, the
 unchanged on-disk installed ID, and late-loaded dylibs with chained and legacy
 fixups. The cached manual build workflow requires this suite before building.
-iOS device launch and extension behavior still require device validation.
+The host also checks that only one patch image loads and exercises the CloudKit
+hooks with stand-in classes. iOS device launch, keychain, shared-group and
+extension behavior still require device validation.

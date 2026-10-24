@@ -22,6 +22,9 @@ typedef int (*KsignIPARunpathResolver)(const char *runpath, void *context);
 int KsignIPAFileHasPatchLibrary(const char *file, const char *libraryName,
                                char *error, size_t errorSize);
 
+// Returns 1 when any architecture loads either legacy compatibility library.
+int KsignIPAFileHasLegacyPatchLibrary(const char *file, char *error, size_t errorSize);
+
 // Edits only load commands. All slices, code, and existing signature blobs
 // (including entitlements) survive for the normal signing stage. Validates
 // every slice before writing; returns -1 with an error on failure.

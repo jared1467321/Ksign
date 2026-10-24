@@ -82,8 +82,29 @@ static int collectSlices(const uint8_t *bytes, size_t size, PatchSlice slices[64
     return 0;
 }
 
-// Preserve every unrelated command, and normalize previous references to this
-// same patch library to one weak command using the current executable's path.
+static int legacyPatchName(const char *name) {
+    return !strcmp(name, "blatantsPatch.dylib") || !strcmp(name, "asignIdentity.dylib");
+}
+
+static int replacesPatch(const char *name, const char *path) {
+    const char *destination = basenameOf(path);
+    return !strcmp(name, destination) ||
+        (!strcmp(destination, "asignpatch.dylib") && legacyPatchName(name));
+}
+
+static void patchCommand(uint8_t *command, size_t size, const char *path, int big) {
+    memset(command, 0, size);
+    write32(command, 0x80000018, big);
+    write32(command + 4, (uint32_t)size, big);
+    write32(command + 8, 24, big);
+    write32(command + 12, 2, big);
+    memcpy(command + 24, path, strlen(path) + 1);
+}
+
+// Unified upgrades keep each existing dylib command in its original ordinal
+// position. Multiple legacy loads resolve to the same single runtime image;
+// removing a load could change ordinals used by unrelated symbol bindings.
+// Preserve unrelated commands and use the current executable's patch path.
 static int patchSlice(uint8_t *bytes, size_t size, const char *path,
                       KsignIPARunpathResolver resolver, void *context, int *compact,
                       uint8_t *scratch,
@@ -103,6 +124,8 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
     size_t end = header + length, cursor = header, kept = 0, firstData = size;
     uint32_t keptCount = 0;
     int sawFileData = 0;
+    uint32_t matches = 0;
+    int unified = !strcmp(basenameOf(path), "asignpatch.dylib");
     int runpathResolution = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (end - cursor < 8) return fail(error, errorSize, "Truncated Mach-O load command.");
@@ -117,7 +140,8 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
             if (nameOffset < 24 || nameOffset >= commandSize ||
                 !memchr(command + nameOffset, 0, commandSize - nameOffset))
                 return fail(error, errorSize, "Invalid dylib load path.");
-            remove = strcmp(basenameOf((const char *)command + nameOffset), basenameOf(path)) == 0;
+            remove = replacesPatch(basenameOf((const char *)command + nameOffset), path);
+            if (remove) ++matches;
         } else if (kind == 0x8000001c) { // LC_RPATH
             if (commandSize < 12) return fail(error, errorSize, "Invalid runpath command.");
             uint32_t pathOffset = read32(command + 8, big);
@@ -165,7 +189,6 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
             if (offset < firstData) firstData = offset;
         }
         if (!remove) {
-            if (scratch) memcpy(scratch + kept, command, commandSize);
             kept += commandSize;
             ++keptCount;
         }
@@ -182,7 +205,8 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
         path = compactPath;
     }
     size_t added = (24 + strlen(path) + 1 + alignment - 1) & ~(alignment - 1);
-    size_t total = kept + added;
+    size_t replacements = unified && matches ? matches : 1;
+    size_t total = kept + added * replacements;
     if (total > UINT32_MAX) return fail(error, errorSize, "Mach-O load commands are too large.");
     if (total > firstData - header) {
         fail(error, errorSize, "Insufficient Mach-O header space for the patch library.");
@@ -193,16 +217,26 @@ static int patchSlice(uint8_t *bytes, size_t size, const char *path,
         if (bytes[i]) return fail(error, errorSize, "Mach-O header padding contains data.");
     *required = total;
     if (scratch) {
-        uint8_t *command = scratch + kept;
-        memset(command, 0, added);
-        write32(command, 0x80000018, big);
-        write32(command + 4, (uint32_t)added, big);
-        write32(command + 8, 24, big);
-        write32(command + 12, 2, big);
-        memcpy(command + 24, path, strlen(path) + 1);
+        size_t output = 0;
+        cursor = header;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint8_t *command = bytes + cursor;
+            uint32_t kind = read32(command, big), commandSize = read32(command + 4, big);
+            int replace = (kind == 0xc || kind == 0x80000018) &&
+                replacesPatch(basenameOf((const char *)command + read32(command + 8, big)), path);
+            if (replace && unified) {
+                patchCommand(scratch + output, added, path, big);
+                output += added;
+            } else if (!replace) {
+                memcpy(scratch + output, command, commandSize);
+                output += commandSize;
+            }
+            cursor += commandSize;
+        }
+        if (!unified || !matches) patchCommand(scratch + output, added, path, big);
         memcpy(bytes + header, scratch, total);
         if (total < length) memset(bytes + header + total, 0, length - total);
-        write32(bytes + 16, keptCount + 1, big);
+        write32(bytes + 16, keptCount + (uint32_t)replacements, big);
         write32(bytes + 20, (uint32_t)total, big);
     }
     return 0;
@@ -245,7 +279,7 @@ static int hasPatchLibrary(const uint8_t *bytes, size_t size, const char *name,
     PatchSlice slices[64];
     uint32_t count;
     if (collectSlices(bytes, size, slices, &count, error, errorSize) < 0) return -1;
-    int allPatched = 1;
+    int allPatched = 1, anyLegacy = 0;
     for (uint32_t i = 0; i < count; ++i) {
         const uint8_t *slice = bytes + slices[i].offset;
         size_t sliceSize = slices[i].size;
@@ -274,20 +308,22 @@ static int hasPatchLibrary(const uint8_t *bytes, size_t size, const char *name,
                 if (offset < 24 || offset >= commandSize ||
                     !memchr(command + offset, 0, commandSize - offset))
                     return fail(error, errorSize, "Invalid dylib load path.");
-                if (strcmp(basenameOf((const char *)command + offset), name) == 0) found = 1;
+                const char *loaded = basenameOf((const char *)command + offset);
+                if (name ? !strcmp(loaded, name) : legacyPatchName(loaded)) found = 1;
             }
             cursor += commandSize;
         }
         if (cursor != end) return fail(error, errorSize, "Invalid Mach-O load command table.");
         allPatched &= found;
+        anyLegacy |= found;
     }
-    return allPatched;
+    return name ? allPatched : anyLegacy;
 }
 
-int KsignIPAFileHasPatchLibrary(const char *file, const char *name,
+static int inspectPatchFile(const char *file, const char *name,
                                char *error, size_t errorSize) {
     if (error && errorSize) error[0] = 0;
-    if (!file || !name || !*name || strchr(name, '/'))
+    if (!file || (name && (!*name || strchr(name, '/'))))
         return fail(error, errorSize, "Invalid IPA patch detection input.");
     int descriptor = open(file, O_RDONLY | O_NOFOLLOW);
     if (descriptor < 0) return fail(error, errorSize, "Cannot open the executable for patch detection.");
@@ -309,6 +345,16 @@ int KsignIPAFileHasPatchLibrary(const char *file, const char *name,
     if (close(descriptor) != 0 && result >= 0)
         result = fail(error, errorSize, "Cannot close the executable after patch detection.");
     return result;
+}
+
+int KsignIPAFileHasPatchLibrary(const char *file, const char *name,
+                               char *error, size_t errorSize) {
+    if (!name) return fail(error, errorSize, "Invalid IPA patch detection input.");
+    return inspectPatchFile(file, name, error, errorSize);
+}
+
+int KsignIPAFileHasLegacyPatchLibrary(const char *file, char *error, size_t errorSize) {
+    return inspectPatchFile(file, NULL, error, errorSize);
 }
 
 int KsignPatchIPAFile(const char *file, const char *path,

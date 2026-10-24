@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
             size_t used = iteration % 4 ? size : random32() % size;
             memcpy(snapshot, input, size);
             char error[256];
-            const char *path = iteration % 2 ? "@executable_path/Frameworks/blatantsPatch.dylib" :
+            const char *path = iteration % 2 ? "@executable_path/Frameworks/asignpatch.dylib" :
                                              "@executable_path/Frameworks/asignIdentity.dylib";
             int result = KsignPatchIPALoadCommands(input, used, path, NULL, NULL, error, sizeof(error));
             if (result < 0) {

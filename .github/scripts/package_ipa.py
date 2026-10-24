@@ -56,14 +56,17 @@ def validate_extension_identifiers(app):
 
 
 def validate_patch_library(app):
-    name = "blatantsPatch.dylib.bin"
-    bundled = app / name
-    source = ROOT / "Asign/Resources" / name
-    if not bundled.is_file() or bundled.read_bytes() != source.read_bytes():
-        raise RuntimeError("The app is missing the current bundled Blatant’s patch library")
-    identity = app / "asignIdentity.dylib.bin"
-    if not identity.is_file() or b"AsignIdentityPatch/v1\0" not in identity.read_bytes():
-        raise RuntimeError("The app is missing the built original bundle identity patch")
+    bundled = app / "asignpatch.dylib.bin"
+    if not bundled.is_file():
+        raise RuntimeError("The app is missing asignpatch.dylib.bin")
+    data = bundled.read_bytes()
+    if not all(marker in data for marker in (b"AsignPatch/v1\0", b"AsignCompatibilityPatch/v1\0",
+                                             b"@rpath/asignpatch.dylib\0")):
+        raise RuntimeError("The app is missing the built unified Asign compatibility patch")
+    # Cached Xcode products may still contain the old resources. Only remove
+    # these generated patch resources after validating their replacement.
+    for name in ("blatantsPatch.dylib.bin", "asignIdentity.dylib.bin"):
+        (app / name).unlink(missing_ok=True)
 
 
 def make_resignable(app):

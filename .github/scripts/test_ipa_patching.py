@@ -16,8 +16,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-LOAD_PATH = b"@executable_path/../../Frameworks/blatantsPatch.dylib"
-COMPACT_PATH = b"@rpath/blatantsPatch.dylib"
+LOAD_PATH = b"@executable_path/../../Frameworks/asignpatch.dylib"
+COMPACT_PATH = b"@rpath/asignpatch.dylib"
 RUNPATH_RESOLVER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 
 
@@ -78,8 +78,8 @@ def fat(slices, endian=">", wide=False):
 def identity_fixtures(directory):
     (directory / "plain").write_bytes(thin())
     (directory / "blatant-only").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib")]))
-    (directory / "blatant").write_bytes(b"Blatant fixture")
-    (directory / "identity").write_bytes(b"Identity fixture")
+    (directory / "patch").write_bytes(b"Unified patch fixture")
+    (directory / "legacy-pair").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib"), dylib(b"@rpath/asignIdentity.dylib")]))
     def signed(entitlements, **kwargs):
         xml = plistlib.dumps(entitlements)
         blob = struct.pack(">2I", 0xFADE7171, 8 + len(xml)) + xml
@@ -126,7 +126,7 @@ def sections(blob):
 
 
 def tight_linked_image():
-    data = bytearray((ROOT / "Asign/Resources/blatantsPatch.dylib.bin").read_bytes())
+    data = bytearray((ROOT / "Tests/IPAPatching/linked-arm64.dylib.fixture").read_bytes())
     struct.pack_into("<I", data, 12, 2)
     count, size = struct.unpack_from("<2I", data, 16)
     cursor = 32 + size
@@ -222,12 +222,42 @@ class PatchingTests(unittest.TestCase):
 
     def test_repatch_normalizes_duplicate_and_old_paths(self):
         other = dylib(b"/System/Library/Frameworks/Foundation.framework/Foundation")
-        original = thin([dylib(b"@rpath/blatantsPatch.dylib"), other,
-                         dylib(b"@executable_path/blatantsPatch.dylib", weak=False)])
-        result, output, error = self.patch(original)
+        original = thin([dylib(b"@rpath/otherPatch.dylib"), other,
+                         dylib(b"@executable_path/otherPatch.dylib", weak=False)])
+        result, output, error = self.patch(original, path=b"@executable_path/otherPatch.dylib")
         self.assertEqual((result, error), (0, ""))
-        self.assertEqual(output.count(b"blatantsPatch.dylib"), 1)
+        self.assertEqual(output.count(b"otherPatch.dylib"), 1)
         self.assertIn(other, output)
+
+    def test_unified_upgrade_preserves_dependency_ordinals(self):
+        for endian in ("<", ">"):
+            for wide in (False, True):
+                loads = [b"@rpath/blatantsPatch.dylib", b"/usr/lib/libSystem.B.dylib",
+                         b"@rpath/asignIdentity.dylib", b"/usr/lib/libobjc.A.dylib"]
+                original = thin([dylib(path, False, endian, wide) for path in loads], endian, wide)
+                result, output, error = self.patch(original)
+                self.assertEqual((result, error), (0, ""))
+                cursor = 32 if wide else 28
+                paths = []
+                for _ in range(struct.unpack_from(endian + "I", output, 16)[0]):
+                    kind, size = struct.unpack_from(endian + "2I", output, cursor)
+                    if kind in (0xC, 0x80000018):
+                        offset = struct.unpack_from(endian + "I", output, cursor + 8)[0]
+                        paths.append(output[cursor + offset:cursor + size].split(b"\0")[0])
+                    cursor += size
+                self.assertEqual(paths, [LOAD_PATH, loads[1], LOAD_PATH, loads[3]])
+                payload = original.index(b"UNCHANGED_EXECUTABLE_CODE")
+                self.assertEqual(output[payload:], original[payload:])
+                self.assertEqual(self.patch(output), (0, output, ""))
+
+    def test_unified_upgrade_uses_resolved_compact_path(self):
+        original = thin([dylib(b"@rpath/blatantsPatch.dylib"), dylib(b"@rpath/asignIdentity.dylib"),
+                         runpath(b"@executable_path/../../Frameworks")])
+        result, output, error = self.patch(original, resolver=lambda _: 1)
+        self.assertEqual((result, error), (0, ""))
+        self.assertEqual(output.count(COMPACT_PATH + b"\0"), 2)
+        self.assertNotIn(b"blatantsPatch.dylib", output)
+        self.assertNotIn(b"asignIdentity.dylib", output)
 
     def test_compact_path_fits_where_the_original_extension_path_does_not(self):
         original = thin([runpath(b"@executable_path/../../Frameworks")], padding=64)
@@ -288,7 +318,7 @@ class PatchingTests(unittest.TestCase):
                 result, output, error = self.patch(original, resolver=lambda _: 1)
                 self.assertEqual((result, error), (0, ""))
                 self.assertIn(COMPACT_PATH, output)
-        original = thin([runpath(b"@loader_path/../../Frameworks")], padding=48)
+        original = thin([runpath(b"@loader_path/../../Frameworks")], padding=40)
         result, output, error = self.patch(original, resolver=lambda _: 1)
         self.assertEqual(result, -2)
         self.assertEqual(output, original)
@@ -346,14 +376,14 @@ class PatchingTests(unittest.TestCase):
             struct.pack_into(">I", blob, offset, value)
             self.assert_rejected(bytes(blob))
 
-    def test_patch_library_is_the_supplied_arm64_blatants_binary(self):
-        data = (ROOT / "Asign/Resources/blatantsPatch.dylib.bin").read_bytes()
+    def test_linked_regression_fixture_is_unchanged(self):
+        data = (ROOT / "Tests/IPAPatching/linked-arm64.dylib.fixture").read_bytes()
         self.assertEqual(struct.unpack_from("<4I", data), (0xFEEDFACF, 0x100000C, 0, 6))
         self.assertIn(b"blatantsPatch", data)
         self.assertEqual(hashlib.sha256(data).hexdigest(), "4fb1f1d688a795bd3fb63aec01cf238ed48834fb95733cdaa280ee0618401f5a")
 
     def test_real_linked_macho_keeps_its_code_and_signature(self):
-        original = bytearray((ROOT / "Asign/Resources/blatantsPatch.dylib.bin").read_bytes())
+        original = bytearray((ROOT / "Tests/IPAPatching/linked-arm64.dylib.fixture").read_bytes())
         # Exercise a real linker-produced section/command layout as an executable.
         struct.pack_into("<I", original, 12, 2)
         result, output, error = self.patch(bytes(original))
