@@ -7,6 +7,7 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
+import plistlib
 import shutil
 import struct
 import subprocess
@@ -31,7 +32,7 @@ def runpath(path, endian="<", wide=True):
     return struct.pack(endian + "3I", 0x8000001C, size, 12) + path + bytes(size - 12 - len(path))
 
 
-def thin(extra=(), endian="<", wide=True, padding=256, encrypted=False):
+def thin(extra=(), endian="<", wide=True, padding=256, encrypted=False, signature=None):
     header_size, section_base, section_size = (32, 72, 80) if wide else (28, 56, 68)
     segment = bytearray(section_base + section_size)
     struct.pack_into(endian + "2I", segment, 0, 0x19 if wide else 1, len(segment))
@@ -43,7 +44,7 @@ def thin(extra=(), endian="<", wide=True, padding=256, encrypted=False):
     # Include an existing signature carrying recognizable entitlement data.
     code_offset = header_size + sum(map(len, commands)) + 16 + padding
     payload = b"UNCHANGED_EXECUTABLE_CODE" * 4
-    signature = b"ORIGINAL_SIGNATURE_XML_AND_DER_ENTITLEMENTS"
+    signature = b"ORIGINAL_SIGNATURE_XML_AND_DER_ENTITLEMENTS" if signature is None else signature
     signature_offset = code_offset + len(payload)
     file_size = signature_offset + len(signature)
     if wide:
@@ -72,6 +73,31 @@ def fat(slices, endian=">", wide=False):
         data[8 + index * entry_size:8 + (index + 1) * entry_size] = entry
         data.extend(blob)
     return bytes(data)
+
+
+def identity_fixtures(directory):
+    (directory / "plain").write_bytes(thin())
+    (directory / "blatant-only").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib")]))
+    (directory / "blatant").write_bytes(b"Blatant fixture")
+    (directory / "identity").write_bytes(b"Identity fixture")
+    def signed(entitlements, **kwargs):
+        xml = plistlib.dumps(entitlements)
+        blob = struct.pack(">2I", 0xFADE7171, 8 + len(xml)) + xml
+        seal = struct.pack(">5I", 0xFADE0CC0, 20 + len(blob), 1, 5, 20) + blob
+        return thin(signature=seal, **kwargs)
+    local = signed({"application-identifier": "OLD.org.example.app",
+                    "com.apple.security.application-groups": ["group.org.example.app"]})
+    cloud = signed({"com.apple.developer.icloud-container-identifiers": ["iCloud.org.example.app"],
+                    "com.apple.developer.icloud-services": ["CloudKit"]})
+    (directory / "cloud-local").write_bytes(local)
+    (directory / "cloud-enabled").write_bytes(cloud)
+    (directory / "cloud-kvs").write_bytes(signed({"com.apple.developer.ubiquity-kvstore-identifier": "OLD.org.example.app"}))
+    (directory / "cloud-fat").write_bytes(fat([local, signed({}, wide=False)]))
+    (directory / "cloud-fat-disagreement").write_bytes(fat([local, cloud], wide=True))
+    (directory / "cloud-big-endian").write_bytes(signed({}, endian=">"))
+    (directory / "cloud-truncated").write_bytes(local[:-1])
+    der = struct.pack(">7I", 0xFADE0CC0, 28, 1, 7, 20, 0xFADE7172, 8)
+    (directory / "cloud-der-only").write_bytes(thin(signature=der))
 
 
 def commands(blob):
@@ -555,10 +581,7 @@ def main():
                         str(ROOT / "Asign/Utilities/Handlers/IPAPatcher.swift"),
                         str(swift_main), str(native_object), str(growth_object), archive, *cpp_runtime,
                         "-o", str(executable)], check=True)
-        (directory / "plain").write_bytes(thin())
-        (directory / "blatant-only").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib")]))
-        (directory / "blatant").write_bytes(b"Blatant fixture")
-        (directory / "identity").write_bytes(b"Identity fixture")
+        identity_fixtures(directory)
         subprocess.run([str(executable), str(directory)], check=True)
     return 0
 

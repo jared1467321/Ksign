@@ -253,8 +253,9 @@ final class SigningHandler: NSObject {
         )
         try await handler.disinject()
 
+        var cloudEntitlementPolicy: [String: [String]] = [:]
         if _options.ipaPatching == true {
-            do { try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier) }
+            do { cloudEntitlementPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier) }
             catch let error as IPAPatcher.RecoveryFailure {
                 onPatchingFailure?(error.localizedDescription)
                 throw error
@@ -269,7 +270,8 @@ final class SigningHandler: NSObject {
                 cert: appCertificate,
                 archiveContext: archiveContext,
                 session: _signingSession,
-                credentials: credentials
+                credentials: credentials,
+                cloudEntitlementPolicy: cloudEntitlementPolicy
             )
 			
 			if _options.doAdhocSigning {

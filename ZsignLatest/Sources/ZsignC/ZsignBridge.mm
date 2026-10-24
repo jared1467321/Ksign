@@ -252,6 +252,7 @@ int zsign(
     NSData *archiveManifest,
     NSData *archiveResourceDigests,
     void *session,
+    NSDictionary<NSString *, NSArray<NSString *> *> *cloudEntitlementPolicy,
     void (^ _Nullable completionHandler)(BOOL success)
 ) {
     @autoreleasepool {
@@ -299,6 +300,13 @@ int zsign(
             archiveDeleted.push_back(ToString(path));
         }
         ZBundle bundle;
+        map<string, vector<string>> cloudPolicy;
+        for (NSString *path in cloudEntitlementPolicy) {
+            vector<string> keys;
+            for (NSString *key in cloudEntitlementPolicy[path]) keys.push_back(ToString(key));
+            cloudPolicy.emplace(ToString(path), std::move(keys));
+        }
+        bundle.SetCloudEntitlementPolicy(cloudPolicy);
         const string archive = ToString(archivePath);
         const string archiveRoot = ToString(archiveRootPath);
         if (!archive.empty() && !archiveRoot.empty()) {

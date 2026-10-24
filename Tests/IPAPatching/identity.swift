@@ -33,7 +33,8 @@ func fixture(_ name: String, binary: Data? = nil, identifier: String = "com.exam
     try (binary ?? plain).write(to: app.appendingPathComponent("Main"))
     return app
 }
-func apply(_ app: URL, original: String? = nil, replace: ((URL, URL) throws -> Void)? = nil) throws {
+@discardableResult
+func apply(_ app: URL, original: String? = nil, replace: ((URL, URL) throws -> Void)? = nil) throws -> [String: [String]] {
     try IPAPatcher.apply(to: app, library: libraries[0], identityLibrary: libraries[1],
                          originalRootIdentifier: original, replace: replace)
 }
@@ -103,3 +104,45 @@ let missing = try fixture("MissingCompanion")
 try expectFailure { try IPAPatcher.apply(to: missing, library: libraries[0], identityLibrary: nil) }
 try check(Data(contentsOf: missing.appendingPathComponent("Main")) == plain, "Missing companion modified executable")
 print("General original-identity staging, re-signing, extension and rollback tests passed")
+
+let cloudKey = IPAPatcher.originalCloudEntitlementKeys
+let cloudKeys = ["com.apple.developer.icloud-container-identifiers", "com.apple.developer.icloud-services"]
+for (file, expected) in [("cloud-local", [String]()), ("cloud-enabled", cloudKeys),
+                         ("cloud-kvs", ["com.apple.developer.ubiquity-kvstore-identifier"]),
+                         ("cloud-fat", []), ("cloud-big-endian", [])] {
+    try check(OriginalCloudEntitlements.read(fixtures.appendingPathComponent(file)) == expected,
+              "Wrong original cloud capability snapshot: \(file)")
+}
+for file in ["plain", "cloud-fat-disagreement", "cloud-truncated", "cloud-der-only"] {
+    try check(OriginalCloudEntitlements.read(fixtures.appendingPathComponent(file)) == nil,
+              "Inconclusive signature acquired a cloud policy: \(file)")
+}
+let localBytes = try Data(contentsOf: fixtures.appendingPathComponent("cloud-local"))
+let cloudBytes = try Data(contentsOf: fixtures.appendingPathComponent("cloud-enabled"))
+let local = try fixture("LocalDatabase", binary: localBytes)
+let cloudExtension = local.appendingPathComponent("PlugIns/Cloud.appex", isDirectory: true)
+try manager.createDirectory(at: cloudExtension, withIntermediateDirectories: true)
+try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "org.example.cloud.extension", "CFBundleExecutable": "Cloud"],
+                                  format: .xml, options: 0).write(to: cloudExtension.appendingPathComponent("Info.plist"))
+try cloudBytes.write(to: cloudExtension.appendingPathComponent("Cloud"))
+let policy = try apply(local)
+try check(policy["Main"] == [], "Local app did not suppress added cloud capabilities")
+try check(policy["PlugIns/Cloud.appex/Cloud"] == cloudKeys, "Root policy leaked into CloudKit extension")
+try check(plist(local.appendingPathComponent("Info.plist"))[cloudKey] as? [String] == [], "Missing local snapshot")
+try check(plist(cloudExtension.appendingPathComponent("Info.plist"))[cloudKey] as? [String] == cloudKeys, "Missing CloudKit snapshot")
+// Simulate re-signing with a profile that added iCloud to a local executable.
+try cloudBytes.write(to: local.appendingPathComponent("Main"))
+try check(apply(local)["Main"] == [], "Re-signing forgot that the original app was local-only")
+let cloudApp = try fixture("CloudDatabase", binary: cloudBytes)
+try check(apply(cloudApp)["Main"] == cloudKeys, "Legitimate CloudKit app lost its capabilities")
+let cloudRollback = try fixture("CloudRollback", binary: localBytes)
+let rollbackPlist = try Data(contentsOf: cloudRollback.appendingPathComponent("Info.plist"))
+try expectFailure {
+    try apply(cloudRollback, replace: { source, destination in
+        if destination.lastPathComponent == "Info.plist" { throw Failure(message: "Cloud snapshot publication failed") }
+        if rename(source.path, destination.path) != 0 { throw Failure(message: "rename failed") }
+    })
+}
+try check(Data(contentsOf: cloudRollback.appendingPathComponent("Main")) == localBytes, "Cloud rollback changed executable")
+try check(Data(contentsOf: cloudRollback.appendingPathComponent("Info.plist")) == rollbackPlist, "Cloud rollback left metadata")
+print("Original cloud capability capture, per-extension policy and rollback tests passed")

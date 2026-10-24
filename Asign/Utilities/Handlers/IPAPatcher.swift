@@ -14,6 +14,7 @@ enum IPAPatcher {
     static let identityLibraryRelativePath = "Frameworks/" + identityLibraryName
     static let libraryRelativePaths: Set<String> = [libraryRelativePath, identityLibraryRelativePath]
     static let originalIdentifierKey = "AsignOriginalBundleIdentifier"
+    static let originalCloudEntitlementKeys = "AsignOriginalCloudEntitlementKeys"
 
     struct Target {
         let executable: URL
@@ -111,11 +112,12 @@ enum IPAPatcher {
         }
     }
 
+    @discardableResult
     static func apply(to app: URL,
                       library: URL? = Bundle.main.url(forResource: "blatantsPatch.dylib", withExtension: "bin"),
                       identityLibrary: URL? = Bundle.main.url(forResource: "asignIdentity.dylib", withExtension: "bin"),
                       originalRootIdentifier: String? = nil,
-                      replace: ((URL, URL) throws -> Void)? = nil) throws {
+                      replace: ((URL, URL) throws -> Void)? = nil) throws -> [String: [String]] {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
         let targets = try Self.targets(in: root)
@@ -165,6 +167,7 @@ enum IPAPatcher {
         }
 
         var identityPlists: [(URL, Data)] = []
+        var cloudPolicy: [String: [String]] = [:]
         for target in targets {
             try requireInside(target.infoPlist.resolvingSymlinksInPath(), root: root)
             let data = try Data(contentsOf: target.infoPlist)
@@ -180,13 +183,26 @@ enum IPAPatcher {
             let captured = isRootPlist ? originalRootIdentifier : nil
             guard let identifier = (info[originalIdentifierKey] as? String) ?? captured ?? (info["CFBundleIdentifier"] as? String),
                   !identifier.isEmpty else { throw Failure(detail: "Cannot determine the original bundle identifier.") }
-            if info[originalIdentifierKey] as? String != identifier {
-                info[originalIdentifierKey] = identifier
+            var metadataChanged = info[originalIdentifierKey] as? String != identifier
+            info[originalIdentifierKey] = identifier
+            // Capture before injecting or re-signing, and keep the first
+            // snapshot when this app is signed again with another profile.
+            if info[originalCloudEntitlementKeys] == nil,
+               let keys = try OriginalCloudEntitlements.read(target.executable) {
+                info[originalCloudEntitlementKeys] = keys
+                metadataChanged = true
+            }
+            if let keys = info[originalCloudEntitlementKeys] as? [String],
+               keys.allSatisfy(OriginalCloudEntitlements.isCloudKey) {
+                let relative = String(target.executable.path.dropFirst(root.path.count + 1))
+                cloudPolicy[relative] = keys
+            }
+            if metadataChanged {
                 identityPlists.append((target.infoPlist,
                     try PropertyListSerialization.data(fromPropertyList: info, format: format, options: 0)))
             }
         }
-        guard !injections.isEmpty || !libraryCopies.isEmpty || !identityPlists.isEmpty else { return }
+        guard !injections.isEmpty || !libraryCopies.isEmpty || !identityPlists.isEmpty else { return cloudPolicy }
         let scratch = root.deletingLastPathComponent().appendingPathComponent(".IPAPatch_" + UUID().uuidString)
         try manager.createDirectory(at: scratch, withIntermediateDirectories: false)
         defer { try? manager.removeItem(at: scratch) }
@@ -271,6 +287,7 @@ enum IPAPatcher {
             }
             throw patchError
         }
+        return cloudPolicy
     }
 
     private static func requireInside(_ url: URL, root: URL) throws {
@@ -284,6 +301,118 @@ enum IPAPatcher {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
                           userInfo: [NSFilePathErrorKey: destination.path])
         }
+    }
+}
+
+/// Read original capability names from the executable, never from the new
+/// signing profile. Unknown/DER-only signatures are inconclusive; an empty
+/// result means a valid input with no cloud entitlements. Bound every read so
+/// a large app does not need to be copied into memory just to inspect its seal.
+enum OriginalCloudEntitlements {
+    static func isCloudKey(_ key: String) -> Bool {
+        key.hasPrefix("com.apple.developer.icloud-") || key.hasPrefix("com.apple.developer.ubiquity-")
+    }
+
+    static func read(_ url: URL) throws -> [String]? {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        let length = try file.seekToEnd()
+        func bytes(_ offset: UInt64, _ count: Int) throws -> Data? {
+            guard count >= 0, offset <= length, UInt64(count) <= length - offset else { return nil }
+            try file.seek(toOffset: offset)
+            guard let data = try file.read(upToCount: count), data.count == count else { return nil }
+            return data
+        }
+        guard let first = try bytes(0, 8) else { return nil }
+        let magic = first.cloudU32(0, big: true)
+        var slices: [(UInt64, UInt64)] = [(0, length)]
+        if [UInt32(0xcafebabe), 0xcafebabf, 0xbebafeca, 0xbfbafeca].contains(magic) {
+            let big = magic == 0xcafebabe || magic == 0xcafebabf
+            let wide = magic == 0xcafebabf || magic == 0xbfbafeca
+            let count = Int(first.cloudU32(4, big: big))
+            let stride = wide ? 32 : 20
+            guard count > 0, count <= 64, let table = try bytes(8, count * stride) else { return nil }
+            slices = []
+            for index in 0..<count {
+                let cursor = index * stride
+                let offset = wide ? table.cloudU64(cursor + 8, big: big) : UInt64(table.cloudU32(cursor + 8, big: big))
+                let size = wide ? table.cloudU64(cursor + 16, big: big) : UInt64(table.cloudU32(cursor + 12, big: big))
+                guard offset >= UInt64(8 + count * stride), offset <= length, size <= length - offset else { return nil }
+                slices.append((offset, size))
+            }
+        }
+        var snapshots: [[String]] = []
+        for (base, size) in slices {
+            guard size >= 28, let prefix = try bytes(base, 28) else { return nil }
+            let magic = prefix.cloudU32(0, big: true)
+            guard [UInt32(0xfeedface), 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].contains(magic) else { return nil }
+            let big = magic == 0xfeedface || magic == 0xfeedfacf
+            let headerSize = magic == 0xfeedfacf || magic == 0xcffaedfe ? 32 : 28
+            let count = Int(prefix.cloudU32(16, big: big))
+            let commandBytes = Int(prefix.cloudU32(20, big: big))
+            guard count <= 65_536, commandBytes <= 4 * 1024 * 1024,
+                  UInt64(headerSize + commandBytes) <= size,
+                  let commands = try bytes(base + UInt64(headerSize), commandBytes) else { return nil }
+            var cursor = 0
+            var signature: Data?
+            for _ in 0..<count {
+                guard cursor <= commands.count - 8 else { return nil }
+                let command = commands.cloudU32(cursor, big: big)
+                let commandSize = Int(commands.cloudU32(cursor + 4, big: big))
+                guard commandSize >= 8, commandSize <= commands.count - cursor else { return nil }
+                if command == 0x1d {
+                    guard signature == nil, commandSize >= 16 else { return nil }
+                    let offset = UInt64(commands.cloudU32(cursor + 8, big: big))
+                    let signatureSize = Int(commands.cloudU32(cursor + 12, big: big))
+                    guard offset >= UInt64(headerSize + commandBytes), offset <= size,
+                          signatureSize <= 16 * 1024 * 1024, UInt64(signatureSize) <= size - offset,
+                          let data = try bytes(base + offset, signatureSize) else { return nil }
+                    signature = data
+                }
+                cursor += commandSize
+            }
+            guard cursor == commandBytes else { return nil }
+            if let signature {
+                guard let keys = parseSignature(signature) else { return nil }
+                snapshots.append(keys)
+            } else {
+                snapshots.append([])
+            }
+        }
+        guard let first = snapshots.first, snapshots.allSatisfy({ $0 == first }) else { return nil }
+        return first
+    }
+
+    private static func parseSignature(_ data: Data) -> [String]? {
+        guard data.count >= 12, data.cloudU32(0, big: true) == 0xfade0cc0 else { return nil }
+        let length = Int(data.cloudU32(4, big: true)), count = Int(data.cloudU32(8, big: true))
+        guard length >= 12, length <= data.count, count <= (length - 12) / 8 else { return nil }
+        var keys: [String]?
+        var hasDER = false
+        for index in 0..<count {
+            let slot = data.cloudU32(12 + index * 8, big: true)
+            if slot == 7 { hasDER = true }
+            guard slot == 5 else { continue }
+            let offset = Int(data.cloudU32(16 + index * 8, big: true))
+            guard keys == nil, offset >= 12 + count * 8, offset <= length - 8,
+                  data.cloudU32(offset, big: true) == 0xfade7171 else { return nil }
+            let size = Int(data.cloudU32(offset + 4, big: true))
+            guard size >= 8, size <= length - offset,
+                  let plist = try? PropertyListSerialization.propertyList(
+                    from: data.subdata(in: offset + 8..<offset + size), options: [], format: nil) as? [String: Any]
+            else { return nil }
+            keys = plist.keys.filter(isCloudKey).sorted()
+        }
+        return keys ?? (hasDER ? nil : [])
+    }
+}
+
+private extension Data {
+    func cloudU32(_ offset: Int, big: Bool) -> UInt32 {
+        (0..<4).reduce(UInt32(0)) { $0 | UInt32(self[offset + $1]) << ((big ? 3 - $1 : $1) * 8) }
+    }
+    func cloudU64(_ offset: Int, big: Bool) -> UInt64 {
+        (0..<8).reduce(UInt64(0)) { $0 | UInt64(self[offset + $1]) << ((big ? 7 - $1 : $1) * 8) }
     }
 }
 

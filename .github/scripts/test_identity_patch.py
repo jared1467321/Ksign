@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_ipa_patching import ROOT, dylib, thin
+from test_ipa_patching import ROOT, identity_fixtures
 
 
 def main():
@@ -39,10 +39,7 @@ int KsignPatchIPAFileWithGrowth(const char *file, const char *path,
 ''')
         adapter_object = directory / "growth.o"
         subprocess.run(["clang", "-I", str(native.parent), "-c", str(adapter), "-o", str(adapter_object)], check=True)
-        (directory / "plain").write_bytes(thin())
-        (directory / "blatant-only").write_bytes(thin([dylib(b"@rpath/blatantsPatch.dylib")]))
-        (directory / "blatant").write_bytes(b"Blatant fixture")
-        (directory / "identity").write_bytes(b"Identity fixture")
+        identity_fixtures(directory)
         swift_main = directory / "main.swift"
         shutil.copyfile(ROOT / "Tests/IPAPatching/identity.swift", swift_main)
         transaction = directory / "transaction"

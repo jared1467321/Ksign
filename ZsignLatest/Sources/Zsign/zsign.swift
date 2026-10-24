@@ -49,6 +49,7 @@ public enum Zsign {
         archiveManifest: Data? = nil,
         archiveResourceDigests: Data? = nil,
         session: ZsignSigningSession? = nil,
+        cloudEntitlementPolicy: [String: [String]] = [:],
         completion: ((Bool) -> Void)? = nil
     ) -> Bool {
         withExtendedLifetime(session) { zsign(
@@ -68,6 +69,7 @@ public enum Zsign {
             archiveManifest,
             archiveResourceDigests,
             session?.handle,
+            cloudEntitlementPolicy,
             completion.map { callback in
                 { success in callback(success) }
             }

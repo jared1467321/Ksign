@@ -35,6 +35,7 @@ int zsign(
     NSData * _Nullable archiveManifest,
     NSData * _Nullable archiveResourceDigests,
     void * _Nullable session,
+    NSDictionary<NSString *, NSArray<NSString *> *> *cloudEntitlementPolicy,
     void (^ _Nullable completionHandler)(BOOL success)
 );
 

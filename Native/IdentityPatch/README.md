@@ -12,6 +12,25 @@ captured before `onlyModify` edits. The first captured value survives subsequent
 signing. A previously renamed input without this metadata provides no reliable
 way to recover its earlier identity.
 
+With compatibility patching enabled, signing also prevents accidental iCloud
+enablement. `IPAPatcher` reads the original executable's XML signing entitlements
+and records the cloud capability key names in `AsignOriginalCloudEntitlementKeys`
+for each app/extension. Before signing that executable, zsign removes iCloud and
+ubiquity keys from the selected profile when those keys weren't present in the
+original app. Values for originally used keys still come from the selected
+profile; this does not grant access to the original developer's containers.
+Identity, keychain and app-group entitlements are left alone.
+
+This avoids SwiftData's automatic CloudKit selection being enabled for a local
+schema merely because the signing profile contains iCloud containers. Each bundle
+gets its own policy, including when root and extension capabilities differ. The
+first snapshot survives re-signing; publication rolls back with the dylib/identity
+transaction. Unknown, malformed, conflicting universal or DER-only signatures
+don't establish a policy. A previously re-signed input without a snapshot can't
+reveal which cloud capabilities its original developer used: start with the
+original IPA. An explicit custom entitlements file remains the user's override.
+Disabling compatibility patching doesn't apply this signing policy.
+
 The companion installs from Objective-C `+load`, before app initializers:
 
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,

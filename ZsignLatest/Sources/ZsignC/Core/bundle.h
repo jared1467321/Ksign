@@ -19,6 +19,7 @@ public:
 	ZBundle& operator=(const ZBundle&) = delete;
 
 public:
+	void SetCloudEntitlementPolicy(const map<string, vector<string>>& policy) { m_cloudEntitlementPolicy = policy; }
 	void SetArchiveBacking(const string& archivePath,
 						 const string& archiveRootPath,
 						 const vector<string>& deletedPaths,
@@ -89,6 +90,7 @@ private:
 	vector<string>	m_indexedFolders;
 	unordered_set<string> m_indexedFileSet;
 	unordered_set<string> m_indexedFolderSet;
+	map<string, vector<string>> m_cloudEntitlementPolicy;
 	set<string> m_sortedFiles;
 	struct OverlayFile {
 		bool isSymlink = false;

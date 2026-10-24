@@ -1,6 +1,7 @@
 #include "bundle.h"
 #include "common.h"
 #include "macho.h"
+#include "cloud_entitlements.h"
 #include "sys/stat.h"
 #include "sys/types.h"
 #include "mz.h"
@@ -1277,16 +1278,32 @@ bool ZBundle::SignNode(jvalue& jvNode, vector<function<bool()>>* deferred)
     ZSHA::SHA(strCodeResData, resourceHashes.sha1, resourceHashes.sha256);
     jbase64 resourceBase64;
     m_resourceDigests[strCodeResFile] = {resourceBase64.encode(resourceHashes.sha1), resourceBase64.encode(resourceHashes.sha256)};
-    if (deferred != NULL) {
-        auto asset = make_shared<ZSignAsset>();
+    const string relativeExecutable = "/" == strFolder ? strBundleExe : strFolder + "/" + strBundleExe;
+    auto policy = m_cloudEntitlementPolicy.find(relativeExecutable);
+    shared_ptr<ZSignAsset> asset;
+    if (deferred != NULL || policy != m_cloudEntitlementPolicy.end()) {
+        asset = make_shared<ZSignAsset>();
         if (!asset->CloneFrom(*m_pSignAsset)) return false;
+        if (policy != m_cloudEntitlementPolicy.end()) {
+            string filtered;
+            if (!FilterCloudEntitlements(asset->m_strEntitleData, policy->second, filtered)) {
+                ZLog::ErrorV(">>> Can't prepare cloud compatibility entitlements: %s\n", strExePath.c_str());
+                return false;
+            }
+            if (filtered != asset->m_strEntitleData) {
+                asset->m_strEntitleData = std::move(filtered);
+                bForceSign = true;
+            }
+        }
+    }
+    if (deferred != NULL) {
         // All index/cache updates above happen on the coordinator. Worker jobs
         // own their Mach-O and mutable crypto metadata and only write that file.
         deferred->push_back([executable, asset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256,
                              strCodeResData = std::move(strCodeResData), resourceHashes = std::move(resourceHashes)]() {
             return executable->Sign(asset.get(), bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData, &resourceHashes);
         });
-    } else if (!macho.Sign(m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData, &resourceHashes)) {
+    } else if (!macho.Sign(asset ? asset.get() : m_pSignAsset, bForceSign, strBundleId, strInfoSHA1, strInfoSHA256, strCodeResData, &resourceHashes)) {
         return false;
     }
 

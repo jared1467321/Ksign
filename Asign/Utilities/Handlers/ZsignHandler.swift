@@ -36,6 +36,7 @@ final class ZsignHandler {
 	private var _archiveContext: ArchiveSigningContext?
     private let _session: ZsignSigningSession?
     private let _credentials: SigningCredentials?
+    private let _cloudEntitlementPolicy: [String: [String]]
 	
 	init(
 		appUrl: URL,
@@ -43,7 +44,8 @@ final class ZsignHandler {
 		cert: CertificatePair? = nil,
 		archiveContext: ArchiveSigningContext? = nil,
         session: ZsignSigningSession? = nil,
-        credentials: SigningCredentials? = nil
+        credentials: SigningCredentials? = nil,
+        cloudEntitlementPolicy: [String: [String]] = [:]
 	) {
 		self._appUrl = appUrl
 		self._options = options
@@ -51,6 +53,8 @@ final class ZsignHandler {
 		self._archiveContext = archiveContext
         self._session = session
         self._credentials = credentials
+        // An explicit entitlement file remains the user's complete override.
+        self._cloudEntitlementPolicy = options.appEntitlementsFile == nil ? cloudEntitlementPolicy : [:]
 	}
 	
 	func disinject() async throws {
@@ -87,7 +91,8 @@ final class ZsignHandler {
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
             archiveManifest: _archiveContext?.manifest,
             archiveResourceDigests: _archiveContext?.resourceDigests,
-            session: _session
+            session: _session,
+            cloudEntitlementPolicy: _cloudEntitlementPolicy
         ) else {
             throw SigningFileHandlerError.signFailed
         }
@@ -107,7 +112,8 @@ final class ZsignHandler {
             archiveDeletedPaths: Array(_archiveContext?.deletedPaths ?? []).sorted(),
             archiveManifest: _archiveContext?.manifest,
             archiveResourceDigests: _archiveContext?.resourceDigests,
-            session: _session
+            session: _session,
+            cloudEntitlementPolicy: _cloudEntitlementPolicy
         ) else {
             throw SigningFileHandlerError.signFailed
         }
