@@ -67,18 +67,31 @@ int main(int argc, const char **argv) {
 
         BOOL expected = [fixture[@"hooks"] boolValue];
         Class container = NSClassFromString(@"CKContainer");
-        Method containerMethod = class_getClassMethod(container, @selector(containerWithIdentifier:));
-        Method storeMethod = class_getInstanceMethod(NSPersistentCloudKitContainer.class,
-            @selector(loadPersistentStoresWithCompletionHandler:));
+        SEL containerSelector = NSSelectorFromString(@"containerWithIdentifier:");
+        Class storeClass = NSPersistentCloudKitContainer.class;
+        SEL storeSelector = @selector(loadPersistentStoresWithCompletionHandler:);
+        Method containerMethod = class_getClassMethod(container, containerSelector);
+        Method storeMethod = class_getInstanceMethod(storeClass, storeSelector);
+        Method parentStoreMethod = class_getInstanceMethod(class_getSuperclass(storeClass), storeSelector);
         Require(containerMethod != NULL && storeMethod != NULL, "Missing public SDK methods");
         IMP containerBefore = method_getImplementation(containerMethod);
         IMP storeBefore = method_getImplementation(storeMethod);
+        IMP parentBefore = parentStoreMethod ? method_getImplementation(parentStoreMethod) : NULL;
 
         AsignInstallCloudKitPatch();
-        Require((method_getImplementation(containerMethod) != containerBefore) == expected,
+        // Hook may add an override for an inherited method. A Method captured
+        // before installation still refers to the superclass in that case.
+        // Resolve the effective method again on the class actually being used.
+        IMP containerAfter = method_getImplementation(class_getClassMethod(container, containerSelector));
+        IMP storeAfter = method_getImplementation(class_getInstanceMethod(storeClass, storeSelector));
+        Require((containerAfter != containerBefore) == expected,
                 "CloudKit method installation disagrees with expected policy");
-        Require((method_getImplementation(storeMethod) != storeBefore) == expected,
+        Require((storeAfter != storeBefore) == expected,
                 "Core Data method installation disagrees with expected policy");
+        Require(!parentStoreMethod || method_getImplementation(parentStoreMethod) == parentBefore,
+                "CloudKit override modified the superclass implementation");
+        Require(expected ? (IMP)OriginalLoadPersistentStores == storeBefore : OriginalLoadPersistentStores == NULL,
+                "Core Data forwarding implementation disagrees with installation policy");
         AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
         Require((automatic.replacement != NULL) == [fixture[@"automatic"] boolValue],
                 "SwiftData import selection disagrees with expected policy");
