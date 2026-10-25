@@ -96,25 +96,7 @@ skips authenticated pointer sections rather than writing unsigned pointers into
 them. It does not claim to conceal an installed identifier from every possible
 inspection mechanism or grant capabilities associated with an original ID.
 
-Run on macOS with Xcode and Swift installed:
-
-```sh
-python3 .github/scripts/test_identity_patch.py --require-apple
-```
-
-The suite compiles the production Swift transaction and the unified native patch.
-It covers generic IDs, extension IDs, repeat signing, migrating the old pair,
-unified library refresh and publication rollback. A host app checks `+load` and C
-initializers, Foundation/CF getters and dictionary copies, nested bundles, the
-unchanged on-disk installed ID, and late-loaded dylibs with chained and legacy
-fixups. The cached manual build workflow requires this suite before building.
-The host checks one patch image, then runs deterministic SDK stand-ins for
-authorized, unavailable and unknown capability states, construction isolation,
-real setup, database identity, async completion and cancellation. A public-API
-SwiftData/CloudKit probe with an unentitled signature exercises discovery,
-CKSyncEngine construction, async errors and persistence in a local SQLite file.
-The native suite also tests the Swift indirect-result ABI bridge on Linux/macOS.
-iOS Appboard launch/relaunch, device-specific private SDK behavior, keychain,
-shared-group and extension behavior still require device validation. Inputs
-already carrying the older key-only snapshot cannot reliably recover original
-container IDs; start with the original IPA when adding this fallback.
+iOS launch/relaunch, device-specific private SDK behavior, keychain,
+shared-group and extension behavior require device validation. Inputs already
+carrying the older key-only snapshot cannot reliably recover original container
+IDs; start with the original IPA when adding this fallback.

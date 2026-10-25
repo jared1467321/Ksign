@@ -56,17 +56,5 @@ Before opening Xcode directly, run:
 python3 .github/scripts/prepare_ipa_patch_lief.py --target ios
 ```
 
-Run the native and optional Swift tests with:
-
-```sh
-python3 .github/scripts/test_ipa_patching.py
-```
-
-Run the standalone read-only detection regressions with:
-
-```sh
-python3 .github/scripts/test_ipa_patch_detection.py
-```
-
 LIEF is Apache-2.0 licensed. Its license and attribution are bundled in app
 resources. See https://lief.re/doc/stable/tutorials/11_macho_modification.html.
