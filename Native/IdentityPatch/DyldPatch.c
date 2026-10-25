@@ -1,7 +1,6 @@
 #include "DyldPatch.h"
 #include "DyldPatchMatch.h"
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -10,9 +9,9 @@ const char AsignDyldPatchVersion[] = "AsignDyldPatch/v1";
 
 #if defined(__arm64__)
 static int readMemory(uint64_t address, void *output, size_t size) {
-    mach_vm_size_t copied = 0;
-    return mach_vm_read_overwrite(mach_task_self(), address, size,
-                                 (mach_vm_address_t)(uintptr_t)output, &copied) == KERN_SUCCESS && copied == size;
+    vm_size_t copied = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)address, (vm_size_t)size,
+                             (vm_address_t)(uintptr_t)output, &copied) == KERN_SUCCESS && copied == size;
 }
 
 static int unsafeModuleTrace(uintptr_t caller) {

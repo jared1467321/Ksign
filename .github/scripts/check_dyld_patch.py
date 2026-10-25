@@ -49,18 +49,19 @@ typedef unsigned task_name_t;
 typedef int task_flavor_t;
 typedef int *task_info_t;
 typedef unsigned mach_msg_type_number_t;
-typedef uint64_t mach_vm_address_t;
-typedef uint64_t mach_vm_size_t;
+typedef uintptr_t vm_address_t;
+typedef uintptr_t vm_size_t;
 #define KERN_SUCCESS 0
 #define KERN_FAILURE 5
 #define TASK_DYLD_INFO 17
 task_name_t mach_task_self(void);
 kern_return_t task_info(task_name_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
-kern_return_t mach_vm_read_overwrite(task_name_t, mach_vm_address_t, mach_vm_size_t,
-                                   mach_vm_address_t, mach_vm_size_t *);
+kern_return_t vm_read_overwrite(task_name_t, vm_address_t, vm_size_t,
+                              vm_address_t, vm_size_t *);
 #endif
 """)
-        (root / "mach/mach_vm.h").write_text('#include "mach.h"\n')
+        # The public iOS SDK deliberately rejects this macOS-only header.
+        (root / "mach/mach_vm.h").write_text('#error mach_vm.h unsupported.\n')
         (root / "shim.c").write_text("""
 #include "DyldPatch.c"
 static uintptr_t start;
@@ -74,8 +75,8 @@ kern_return_t task_info(task_name_t task, task_flavor_t flavor, task_info_t info
     if (!originalStatus && info && count) { info[0] = 123; *count = 5; }
     return originalStatus;
 }
-kern_return_t mach_vm_read_overwrite(task_name_t task, mach_vm_address_t address,
-    mach_vm_size_t size, mach_vm_address_t output, mach_vm_size_t *copied) {
+kern_return_t vm_read_overwrite(task_name_t task, vm_address_t address,
+    vm_size_t size, vm_address_t output, vm_size_t *copied) {
     (void)task; ++reads;
     if (failReads || address < start || size > length || address - start > length - size) return 5;
     memcpy((void *)(uintptr_t)output, (void *)(uintptr_t)address, (size_t)size);
