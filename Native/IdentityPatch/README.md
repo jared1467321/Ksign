@@ -15,11 +15,19 @@ The original probe account/service and folder layout are retained for upgrades.
 The four Security imports keep the legacy process-wide coverage, while
 identity imports remain scoped to the app and its embedded code.
 
-CloudKit handling is conditional. `CloudKitPatch.m` reads the running process's
-signed capabilities through SecTask, independently of any SDK compatibility
-view. A requested container passes through unchanged when its exact identifier
-is permitted and the signature enables CloudKit. A failed capability lookup is
-unknown, not a denial, and retains normal SDK behavior.
+CloudKit hooks install only when the process's captured original CloudKit
+container list is valid and nonempty, and the installed signature is known to
+lack permission for at least one of those containers. Apps without original
+CloudKit containers, fully authorized apps and unknown or malformed snapshots
+get no CloudKit/Core Data method swizzles. Older inputs without the container
+snapshot retain normal SDK behavior; use the original IPA to capture it.
+`CloudKitPatch.m` reads the running process's signed capabilities through SecTask,
+independently of any SDK compatibility view. When hooks are needed for a mixed
+configuration, an authorized requested container still passes through unchanged.
+Run `python3 .github/scripts/check_cloudkit_patch.py` on macOS for installation
+and SwiftData-binding regression checks; the manual build workflow runs these
+automatically. They inspect real method implementations without making cloud
+requests, and do not replace iOS launch testing.
 
 For a known unavailable container, the patch still runs the real container and
 database initializers. A thread-local SDK entitlement view permits local object
@@ -45,6 +53,7 @@ The original CloudKit container IDs are captured per app/extension in
 Default-container requests can use that identity in local mode. On iOS 17+,
 the app's imported SwiftData `CloudKitDatabase.automatic` getter uses an explicit
 original container only when the installed signature has no usable container.
+The SwiftData import is left untouched when that fallback is unnecessary.
 This lets SQLiteData discover a container during database startup. Explicit
 `.none` configurations and usable signed CloudKit configurations are preserved.
 A small Swift helper constructs the configuration using the public API, with

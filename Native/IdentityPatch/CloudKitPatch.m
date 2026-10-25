@@ -127,6 +127,30 @@ static BOOL NeedsLocal(NSString *identifier) {
     return signedValues && ValidIdentifier(identifier) && !Authorized(signedValues, identifier);
 }
 
+static NSArray *OriginalContainers(void) {
+    id identifiers = NSBundle.mainBundle.infoDictionary[@"AsignOriginalCloudContainerIdentifiers"];
+    if (![identifiers isKindOfClass:NSArray.class]) return nil;
+    for (id identifier in identifiers) if (!ValidIdentifier(identifier)) return nil;
+    return identifiers;
+}
+
+static BOOL NeedsCloudKitPatch(void) {
+    // Installing a forwarding swizzle still changes the SDK's method tables.
+    // Require evidence of lost CloudKit capabilities before touching them.
+    // Empty, missing and malformed snapshots never establish that need.
+    NSArray *originals = OriginalContainers();
+    if (!originals.count) return NO;
+    NSDictionary *signedValues = SignedEntitlements();
+    if (![signedValues isKindOfClass:NSDictionary.class]) return NO;
+    id services = signedValues[ServicesKey], containers = signedValues[ContainersKey];
+    if (services && ![services isKindOfClass:NSArray.class]) return NO;
+    if (containers && ![containers isKindOfClass:NSArray.class]) return NO;
+    for (id service in services) if (![service isKindOfClass:NSString.class] || ![service length]) return NO;
+    for (id identifier in containers) if (!ValidIdentifier(identifier)) return NO;
+    for (NSString *identifier in originals) if (!Authorized(signedValues, identifier)) return YES;
+    return NO;
+}
+
 static NSString *DefaultIdentifier(void) {
     NSDictionary *signedValues = SignedEntitlements();
     if (!signedValues) return nil;
@@ -136,11 +160,7 @@ static NSString *DefaultIdentifier(void) {
             if (ValidIdentifier(identifier) && Authorized(signedValues, identifier)) return identifier;
         }
     }
-    id originals = NSBundle.mainBundle.infoDictionary[@"AsignOriginalCloudContainerIdentifiers"];
-    if ([originals isKindOfClass:NSArray.class]) {
-        for (id identifier in originals) if (ValidIdentifier(identifier)) return identifier;
-    }
-    return nil;
+    return [OriginalContainers() firstObject];
 }
 
 static NSDictionary *ConstructionEntitlements(NSDictionary *original) {
@@ -194,6 +214,9 @@ static void __attribute__((swiftcall)) Automatic(void *result __attribute__((swi
 }
 
 AsignIdentityBinding AsignCloudKitAutomaticBinding(void) {
+    // Even a forwarding import replacement is unnecessary when .automatic can
+    // use a signed container. Keep that import pointing at the real getter.
+    if (!NeedsCloudKitPatch() || !NeedsLocal(DefaultIdentifier())) return (AsignIdentityBinding){0};
     const char *symbol = "$s9SwiftData18ModelConfigurationV16CloudKitDatabaseV9automaticAEvgZ";
     OriginalAutomatic = dlsym(RTLD_DEFAULT, symbol);
     return (AsignIdentityBinding){symbol, (void *)OriginalAutomatic, (void *)Automatic, 0};
@@ -342,6 +365,9 @@ static void LoadPersistentStores(NSPersistentCloudKitContainer *self, SEL select
 }
 
 void AsignInstallCloudKitPatch(void) {
+    // Check before dispatch_once and class lookup: apps that did not use
+    // CloudKit, authorized apps and unknown snapshots get no SDK swizzles.
+    if (!NeedsCloudKitPatch()) return;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class container = NSClassFromString(@"CKContainer"), meta = object_getClass(container);

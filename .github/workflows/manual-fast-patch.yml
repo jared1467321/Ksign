@@ -93,6 +93,9 @@ jobs:
           path: .build/ipa-patch-lief
           key: ipa-patch-lief-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Native/IPAPatch/lief.json', '.github/scripts/prepare_ipa_patch_lief.py') }}
 
+      - name: Check CloudKit patch installation policy
+        run: python3 .github/scripts/check_cloudkit_patch.py
+
       - name: Build
         run: |
           DERIVED_DATA="$PWD/DerivedData" make
