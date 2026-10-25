@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CoreData/CoreData.h>
 #import <Security/Security.h>
 #import <dlfcn.h>
 #import <objc/message.h>
@@ -23,6 +24,7 @@ typedef id (*Initializer)(id __attribute__((ns_consumed)), SEL, id) __attribute_
 typedef id (*EnvironmentInitializer)(id __attribute__((ns_consumed)), SEL, id, NSInteger) __attribute__((ns_returns_retained));
 typedef id (*OptionsInitializer)(id __attribute__((ns_consumed)), SEL, id, id) __attribute__((ns_returns_retained));
 typedef void (*OperationMethod)(id, SEL, NSOperation *);
+typedef void (^StoreCompletion)(NSPersistentStoreDescription *, NSError *);
 static ObjectArgument OriginalContainer, OriginalEntitlement, OriginalContainerEntitlement;
 static ObjectGetter OriginalDefault, OriginalDefaultIdentifier;
 static Initializer OriginalInit, OriginalPublicInit, OriginalEntitlementsInit;
@@ -35,6 +37,7 @@ static ObjectGetter OriginalPrivateDatabase, OriginalPublicDatabase, OriginalSha
 static id (*OriginalDatabaseScope)(id, SEL, NSInteger);
 static OperationMethod OriginalContainerOperation, OriginalContainerConvenience;
 static OperationMethod OriginalDatabaseOperation, OriginalDatabaseConvenience;
+static void (*OriginalLoadPersistentStores)(NSPersistentCloudKitContainer *, SEL, StoreCompletion);
 static struct {
     const char *name;
     NSString *key;
@@ -324,6 +327,20 @@ static void ContainerConvenience(id self, SEL selector, NSOperation *operation) 
 static void DatabaseOperation(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseOperation); }
 static void DatabaseConvenience(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseConvenience); }
 
+static void LoadPersistentStores(NSPersistentCloudKitContainer *self, SEL selector, StoreCompletion completion) {
+    // Core Data can initialize CloudKit (including its logging/entitlement
+    // checks) before it constructs a CKContainer. Handle unavailable stores
+    // before that path starts, instead of catching an exception and retrying a
+    // partially loaded container. Keep each store and its local options intact.
+    for (NSPersistentStoreDescription *description in self.persistentStoreDescriptions) {
+        if (NeedsLocal(description.cloudKitContainerOptions.containerIdentifier)) {
+            description.cloudKitContainerOptions = nil;
+        }
+    }
+    // Preserve Core Data's own loading, errors and asynchronous callbacks.
+    OriginalLoadPersistentStores(self, selector, completion);
+}
+
 void AsignInstallCloudKitPatch(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -352,6 +369,8 @@ void AsignInstallCloudKitPatch(void) {
         INSTALL(container, "_scheduleConvenienceOperation:", ContainerConvenience, OriginalContainerConvenience, 'v', 3);
         INSTALL(database, "addOperation:", DatabaseOperation, OriginalDatabaseOperation, 'v', 3);
         INSTALL(database, "_scheduleConvenienceOperation:", DatabaseConvenience, OriginalDatabaseConvenience, 'v', 3);
+        INSTALL(NSPersistentCloudKitContainer.class, "loadPersistentStoresWithCompletionHandler:",
+                LoadPersistentStores, OriginalLoadPersistentStores, 'v', 3);
 #undef INSTALL
         for (size_t i = 0; i < sizeof(EntitlementGetters) / sizeof(EntitlementGetters[0]); ++i) {
             Hook(entitlements, @(EntitlementGetters[i].name), (IMP)EntitlementGetter,

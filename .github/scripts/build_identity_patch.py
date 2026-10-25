@@ -50,6 +50,7 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
             library = scratch / f"{arch}.dylib"
             subprocess.run([swift, "-emit-library", "-target", target, "-sdk", sdk_path, *objects,
                             "-framework", "Foundation", "-framework", "CoreFoundation", "-framework", "Security", "-framework", "CloudKit",
+                            "-framework", "CoreData",
                             "-Xlinker", "-weak_framework", "-Xlinker", "SwiftData",
                             "-Xlinker", "-install_name", "-Xlinker", "@rpath/asignpatch.dylib",
                             "-Xlinker", "-headerpad_max_install_names", "-o", str(library)], check=True)

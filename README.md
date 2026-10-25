@@ -80,8 +80,10 @@ CloudKit requests use the normal SDK when the installed signature permits the
 requested container. Known unavailable containers use local initialization with
 cloud requests reporting restricted access or cancellation. The original
 CloudKit IDs are captured before re-signing so database startup can retain its
-container identity. This preserves local operation; it does not grant iCloud
-access or restore data that exists only in the cloud.
+container identity. Core Data stores whose requested CloudKit container is known
+to be unavailable load locally with cloud mirroring disabled; authorized stores
+keep their cloud configuration. This preserves local operation; it does not
+grant iCloud access or restore data that exists only in the cloud.
 
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit

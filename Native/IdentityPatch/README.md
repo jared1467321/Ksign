@@ -30,6 +30,16 @@ and a not-authenticated error for user-record requests. Container/database
 operations are cancelled before original SDK queuing, so SDK completion handling
 still runs and remote writes are not reported as successful.
 
+Core Data's `NSPersistentCloudKitContainer` gets a per-store check before
+`loadPersistentStoresWithCompletionHandler:` starts. When a store's requested
+CloudKit container is known to be unavailable under the installed signature,
+its `cloudKitContainerOptions` is cleared so Core Data loads the local store
+without initializing cloud mirroring. Authorized containers, already-local
+stores and unknown capability lookups retain normal behavior, including in
+containers with a mixture of local and cloud-backed stores. Store URLs,
+configurations, migration settings and completion handlers are retained. The
+library links Core Data so this hook is available when the patch installs.
+
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
 Default-container requests can use that identity in local mode. On iOS 17+,
