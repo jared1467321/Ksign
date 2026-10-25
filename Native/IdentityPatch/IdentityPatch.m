@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dlfcn.h>
 #import <objc/runtime.h>
+#import <string.h>
 #import "Rebind.h"
 #import "CompatibilityPatch.h"
 #import "CloudKitPatch.h"
@@ -16,6 +18,39 @@ static NSString *(*GetIdentifier)(NSBundle *, SEL);
 static id (*GetValue)(NSBundle *, SEL, NSString *);
 static NSBundle *(*FindBundle)(id, SEL, NSString *);
 static char ViewKey;
+// Background Assets validates the installed app using its registered identity.
+// Its Swift shared-manager getter can enter Foundation/LaunchServices helpers
+// before returning, so preserve this view through the whole synchronous call.
+static _Thread_local BOOL InstalledIdentityRequested;
+typedef void *(*AssetManagerGetter)(void *metadata __attribute__((swift_context)))
+    __attribute__((swiftcall));
+static AssetManagerGetter GetAssetManager;
+
+static BOOL NeedsInstalledIdentity(void *caller) {
+    if (InstalledIdentityRequested) return YES;
+    Dl_info image;
+    if (!dladdr(caller, &image) || !image.dli_fname) return NO;
+    // Also cover later SDK work outside the initial shared-manager lookup.
+    // Include the system directory so an embedded framework with a similar
+    // name cannot change the identity view for app-owned code.
+    return strstr(image.dli_fname, "/System/Library/Frameworks/BackgroundAssets.framework/") ||
+        strstr(image.dli_fname, "/System/Library/PrivateFrameworks/ManagedBackgroundAssetsHelper.framework/");
+}
+
+// Restore the prior view for nested calls and Objective-C exceptions. Keep
+// the view thread-local: concurrent app lookups must still see the original ID.
+#define RETURN_INSTALLED_IDENTITY(expression) do { \
+    BOOL previous = InstalledIdentityRequested; \
+    InstalledIdentityRequested = YES; \
+    @try { return (expression); } \
+    @finally { InstalledIdentityRequested = previous; } \
+} while (0)
+
+static void *__attribute__((swiftcall)) AssetManager(void *metadata __attribute__((swift_context))) {
+    // Forward the Swift metatype/self register and the SDK's retained result
+    // unchanged. Never return nil or a substitute for a Swift actor instance.
+    RETURN_INSTALLED_IDENTITY(GetAssetManager(metadata));
+}
 
 static NSString *OriginalIdentifier(NSDictionary *info) {
     id value = info[OriginalKey];
@@ -45,20 +80,32 @@ static NSDictionary *IdentityView(NSDictionary *info, NSString *identifier) {
 }
 
 static NSDictionary *BundleInfo(NSBundle *bundle, SEL selector) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(GetInfo(bundle, selector));
+    }
     NSDictionary *info = GetInfo(bundle, selector);
     return IdentityView(info, OriginalIdentifier(info));
 }
 
 static NSDictionary *BundleLocalizedInfo(NSBundle *bundle, SEL selector) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(GetLocalizedInfo(bundle, selector));
+    }
     NSDictionary *info = GetInfo(bundle, @selector(infoDictionary));
     return IdentityView(GetLocalizedInfo(bundle, selector), OriginalIdentifier(info));
 }
 
 static NSString *BundleIdentifier(NSBundle *bundle, SEL selector) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(GetIdentifier(bundle, selector));
+    }
     return OriginalIdentifier(GetInfo(bundle, @selector(infoDictionary))) ?: GetIdentifier(bundle, selector);
 }
 
 static id BundleValue(NSBundle *bundle, SEL selector, NSString *key) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(GetValue(bundle, selector, key));
+    }
     if ([key isEqualToString:@"CFBundleIdentifier"]) {
         NSString *identifier = OriginalIdentifier(GetInfo(bundle, @selector(infoDictionary)));
         if (identifier) return identifier;
@@ -67,6 +114,9 @@ static id BundleValue(NSBundle *bundle, SEL selector, NSString *key) {
 }
 
 static NSBundle *BundleForIdentifier(id cls, SEL selector, NSString *identifier) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(FindBundle(cls, selector, identifier));
+    }
     NSBundle *found = FindBundle(cls, selector, identifier);
     if (found || !identifier) return found;
     NSBundle *main = NSBundle.mainBundle;
@@ -179,6 +229,7 @@ static void InstallIdentityPatch(void) {
         { "SecItemCopyMatching", (void *)SecItemCopyMatching, (void *)AsignSecItemCopyMatching, 1 },
         { "SecItemUpdate", (void *)SecItemUpdate, (void *)AsignSecItemUpdate, 1 },
         { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 },
+        { NULL, NULL, NULL, 0 },
         { NULL, NULL, NULL, 0 }
     };
 #undef BIND
@@ -186,9 +237,14 @@ static void InstallIdentityPatch(void) {
     for (NSURL *parent = scope; parent.path.length > 1; parent = parent.URLByDeletingLastPathComponent) {
         if ([parent.pathExtension isEqualToString:@"app"]) { scope = parent; break; }
     }
-    size_t count = sizeof(bindings) / sizeof(bindings[0]);
-    bindings[count - 1] = AsignCloudKitAutomaticBinding();
-    if (!bindings[count - 1].original) --count;
+    size_t count = sizeof(bindings) / sizeof(bindings[0]) - 2;
+    AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
+    if (automatic.original) bindings[count++] = automatic;
+    const char *assetManager = "$s16BackgroundAssets16AssetPackManagerC6sharedACvgZ";
+    GetAssetManager = dlsym(RTLD_DEFAULT, assetManager);
+    if (GetAssetManager) {
+        bindings[count++] = (AsignIdentityBinding){assetManager, (void *)GetAssetManager, (void *)AssetManager, 0};
+    }
     AsignIdentityRebind(bindings, count, scope.path.fileSystemRepresentation);
 }
 

@@ -86,6 +86,14 @@ The patch installs from Objective-C `+load`, before app initializers:
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,
   `objectForInfoDictionaryKey:` and `bundleWithIdentifier:` expose the original
   identity for annotated bundles. Other bundles retain their own identities.
+- Background Assets and its managed helper see the installed identity for
+  bundle lookups so SDK validation can find the registered app. The app's
+  imported Swift `AssetPackManager.shared` getter also uses this view for its
+  synchronous initialization, including nested Foundation/LaunchServices calls.
+  This scope is thread-local and restored on return or an Objective-C exception;
+  concurrent app lookups retain their original identity. The getter forwards the
+  Swift metatype and the real SDK object unchanged. No asset manager is fabricated,
+  no Swift trap is suppressed, and signed capabilities remain authoritative.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and
@@ -107,6 +115,9 @@ them. It does not claim to conceal an installed identifier from every possible
 inspection mechanism or grant capabilities associated with an original ID.
 
 iOS launch/relaunch, device-specific private SDK behavior, keychain,
-shared-group and extension behavior require device validation. Inputs already
-carrying the older key-only snapshot cannot reliably recover original container
-IDs; start with the original IPA when adding this fallback.
+shared-group, extension and Background Assets behavior require device validation.
+The installed-identity view addresses an SDK identity mismatch; it does not
+grant access to the original developer's Apple-hosted asset packs or guarantee
+that missing app groups, extensions or other validation failures can be repaired.
+Inputs already carrying the older key-only snapshot cannot reliably recover
+original container IDs; start with the original IPA when adding this fallback.

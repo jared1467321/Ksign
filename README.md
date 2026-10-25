@@ -64,6 +64,11 @@ and repeat signing preserves the first captured identity. Installation and
 signing still use the selected identifier. This applies to all patched apps;
 there are no app-specific configuration-file substitutions.
 
+Background Assets uses the installed identity when validating its host app,
+including during Swift asset-manager initialization. App identity lookups keep
+their original view. This avoids presenting the SDK with a bundle ID that iOS
+has not registered; it does not authorize access to Apple-hosted asset packs.
+
 The original identity must be captured before the first identifier change.
 If an input was already renamed by another tool, its earlier identity cannot
 be reliably inferred. Direct reads of the installed Info.plist, signing
