@@ -3,7 +3,7 @@
 `asignpatch.dylib` contains the bundle identity, keychain, app-group,
 NSUserDefaults and CloudKit compatibility code in one source-built library.
 The main Xcode target's **Build Asign patch** phase bundles it as
-`asignpatch.dylib.bin`; the packaging script requires both implementation
+`asignpatch.dylib.bin`; the packaging script requires all implementation
 version markers and removes stale two-library resources from cached products.
 There is no runtime dependency on either former patch library.
 
@@ -106,6 +106,34 @@ The patch installs from Objective-C `+load`, before app initializers:
   Legacy lazy imports use their indirect symbols; resolved ordinary GOT imports
   can also be matched by address for chained-fixup images. Matched pointer pages
   regain their previous protection after a write.
+
+`DyldPatch.c` handles an ARM64 Unreal module-tracing startup race across apps.
+Some builds walk `dyld_all_image_infos.infoArray` without a null check while
+another thread loads a bundle. Apple's [dyld header](https://github.com/apple-oss-distributions/dyld/blob/main/include/mach-o/dyld_images.h)
+documents that the pointer can temporarily be null during a loader update.
+Checking it once inside a `task_info` hook cannot protect a later traversal.
+
+The app-scoped `task_info` import hook instead recognizes the affected optional
+diagnostic initializer and takes its existing checked error exit. Recognition
+requires the ARM64 call setup, heap-trace/path preparation, unchecked 24-byte
+image-array traversal, normal stack-protected error return, and referenced
+`Program`/`__LINKEDIT` diagnostic strings. Addresses, app identifiers and
+callee-saved registers are not hardcoded. A successful matching self-task
+`TASK_DYLD_INFO` query returns `KERN_FAILURE`, skipping module tracing. Other
+queries and original API errors pass through. The tradeoff is missing module
+metadata and associated image-allocation events in Unreal diagnostic traces.
+
+This is a mitigation for the recognized compiler pattern, not a replacement
+loader or a general exception handler. It leaves unknown or guarded instruction
+patterns and non-ARM64 builds alone. Code/string inspection uses checked Mach
+reads; unreadable or incomplete matches pass through. No code pages or dyld
+structures are modified, no image is hidden, and no image-list snapshot or
+classification cache survives an unload. The existing rebinder also covers
+later-loaded embedded code, with the same import-path limitations below.
+
+Run `python3 .github/scripts/check_dyld_patch.py` for the portable matcher and
+mocked-Mach routing checks. Apple SDK compilation and repeated launch tests on
+a device are still required; host checks cannot establish a device-level fix.
 
 This is an API compatibility layer. Direct file reads, signing entitlement
 queries, external services, function pointers obtained via `dlsym`, and private

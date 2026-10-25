@@ -6,6 +6,7 @@
 #import "Rebind.h"
 #import "CompatibilityPatch.h"
 #import "CloudKitPatch.h"
+#import "DyldPatch.h"
 
 // Written to each app/extension Info.plist before zsign changes its identity.
 static NSString *const OriginalKey = @"AsignOriginalBundleIdentifier";
@@ -230,6 +231,7 @@ static void InstallIdentityPatch(void) {
         { "SecItemUpdate", (void *)SecItemUpdate, (void *)AsignSecItemUpdate, 1 },
         { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 },
         { NULL, NULL, NULL, 0 },
+        { NULL, NULL, NULL, 0 },
         { NULL, NULL, NULL, 0 }
     };
 #undef BIND
@@ -237,7 +239,9 @@ static void InstallIdentityPatch(void) {
     for (NSURL *parent = scope; parent.path.length > 1; parent = parent.URLByDeletingLastPathComponent) {
         if ([parent.pathExtension isEqualToString:@"app"]) { scope = parent; break; }
     }
-    size_t count = sizeof(bindings) / sizeof(bindings[0]) - 2;
+    size_t count = sizeof(bindings) / sizeof(bindings[0]) - 3;
+    AsignIdentityBinding dyld = AsignDyldTaskInfoBinding();
+    if (dyld.original) bindings[count++] = dyld;
     AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
     if (automatic.original) bindings[count++] = automatic;
     const char *assetManager = "$s16BackgroundAssets16AssetPackManagerC6sharedACvgZ";
