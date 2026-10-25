@@ -91,6 +91,9 @@ def identity_fixtures(directory):
                     "com.apple.developer.icloud-services": ["CloudKit"]})
     (directory / "cloud-local").write_bytes(local)
     (directory / "cloud-enabled").write_bytes(cloud)
+    (directory / "cloud-multiple").write_bytes(signed({
+        "com.apple.developer.icloud-container-identifiers": ["iCloud.org.example.z", "iCloud.org.example.a"],
+        "com.apple.developer.icloud-services": ["CloudKit"]}))
     (directory / "cloud-kvs").write_bytes(signed({"com.apple.developer.ubiquity-kvstore-identifier": "OLD.org.example.app"}))
     (directory / "cloud-fat").write_bytes(fat([local, signed({}, wide=False)]))
     (directory / "cloud-fat-disagreement").write_bytes(fat([local, cloud], wide=True))

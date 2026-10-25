@@ -13,8 +13,38 @@ folders live below the first available shared group, or Documents when no
 shared group exists; group defaults use the shared folder when available.
 The original probe account/service and folder layout are retained for upgrades.
 The four Security imports keep the legacy process-wide coverage, while
-identity imports remain scoped to the app and its embedded code. The CloudKit hooks retain the former local compatibility behavior; they do
-not restore access to the original developer's iCloud containers.
+identity imports remain scoped to the app and its embedded code.
+
+CloudKit handling is conditional. `CloudKitPatch.m` reads the running process's
+signed capabilities through SecTask, independently of any SDK compatibility
+view. A requested container passes through unchanged when its exact identifier
+is permitted and the signature enables CloudKit. A failed capability lookup is
+unknown, not a denial, and retains normal SDK behavior.
+
+For a known unavailable container, the patch still runs the real container and
+database initializers. A thread-local SDK entitlement view permits local object
+construction; it does not change the signature, profile, Security entitlement
+queries, or Apple's service authorization. Unlike the old nil/no-setup hooks,
+Swift receives valid objects. Local containers report a restricted cloud account
+and a not-authenticated error for user-record requests. Container/database
+operations are cancelled before original SDK queuing, so SDK completion handling
+still runs and remote writes are not reported as successful.
+
+The original CloudKit container IDs are captured per app/extension in
+`AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
+Default-container requests can use that identity in local mode. On iOS 17+,
+the app's imported SwiftData `CloudKitDatabase.automatic` getter uses an explicit
+original container only when the installed signature has no usable container.
+This lets SQLiteData discover a container during database startup. Explicit
+`.none` configurations and usable signed CloudKit configurations are preserved.
+A small Swift helper constructs the configuration using the public API, with
+SwiftData weakly linked for older systems. All code remains in `asignpatch.dylib`.
+
+This is a local compatibility path, not a cloud storage implementation. It
+does not recover existing remote-only data, enable sharing, grant access to the
+original developer's containers, or promise that an app requiring successful
+remote requests can run offline. Private SDK selectors are checked before
+hooking and absent or incompatible selectors are left alone.
 
 Each app and extension gets its own `AsignOriginalBundleIdentifier` in its
 Info.plist. Capture happens before native signing; the root identifier is also
@@ -78,6 +108,13 @@ unified library refresh and publication rollback. A host app checks `+load` and 
 initializers, Foundation/CF getters and dictionary copies, nested bundles, the
 unchanged on-disk installed ID, and late-loaded dylibs with chained and legacy
 fixups. The cached manual build workflow requires this suite before building.
-The host also checks that only one patch image loads and exercises the CloudKit
-hooks with stand-in classes. iOS device launch, keychain, shared-group and
-extension behavior still require device validation.
+The host checks one patch image, then runs deterministic SDK stand-ins for
+authorized, unavailable and unknown capability states, construction isolation,
+real setup, database identity, async completion and cancellation. A public-API
+SwiftData/CloudKit probe with an unentitled signature exercises discovery,
+CKSyncEngine construction, async errors and persistence in a local SQLite file.
+The native suite also tests the Swift indirect-result ABI bridge on Linux/macOS.
+iOS Appboard launch/relaunch, device-specific private SDK behavior, keychain,
+shared-group and extension behavior still require device validation. Inputs
+already carrying the older key-only snapshot cannot reliably recover original
+container IDs; start with the original IPA when adding this fallback.

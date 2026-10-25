@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import "Rebind.h"
 #import "CompatibilityPatch.h"
+#import "CloudKitPatch.h"
 
 // Written to each app/extension Info.plist before zsign changes its identity.
 static NSString *const OriginalKey = @"AsignOriginalBundleIdentifier";
@@ -169,7 +170,7 @@ static void InstallIdentityPatch(void) {
     // Our own imports retain the real implementations. Identity is scoped to
     // app code; Security keeps the legacy patch's process-wide import coverage.
 #define BIND(name) { #name, (void *)name, (void *)Identity##name, 0 }
-    static const AsignIdentityBinding bindings[] = {
+    static AsignIdentityBinding bindings[] = {
         BIND(CFBundleGetIdentifier), BIND(CFBundleGetInfoDictionary),
         BIND(CFBundleGetLocalInfoDictionary), BIND(CFBundleGetValueForInfoDictionaryKey),
         BIND(CFBundleCopyInfoDictionaryForURL), BIND(CFBundleCopyInfoDictionaryInDirectory),
@@ -177,14 +178,18 @@ static void InstallIdentityPatch(void) {
         { "SecItemAdd", (void *)SecItemAdd, (void *)AsignSecItemAdd, 1 },
         { "SecItemCopyMatching", (void *)SecItemCopyMatching, (void *)AsignSecItemCopyMatching, 1 },
         { "SecItemUpdate", (void *)SecItemUpdate, (void *)AsignSecItemUpdate, 1 },
-        { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 }
+        { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 },
+        { NULL, NULL, NULL, 0 }
     };
 #undef BIND
     NSURL *scope = NSBundle.mainBundle.bundleURL;
     for (NSURL *parent = scope; parent.path.length > 1; parent = parent.URLByDeletingLastPathComponent) {
         if ([parent.pathExtension isEqualToString:@"app"]) { scope = parent; break; }
     }
-    AsignIdentityRebind(bindings, sizeof(bindings) / sizeof(bindings[0]), scope.path.fileSystemRepresentation);
+    size_t count = sizeof(bindings) / sizeof(bindings[0]);
+    bindings[count - 1] = AsignCloudKitAutomaticBinding();
+    if (!bindings[count - 1].original) --count;
+    AsignIdentityRebind(bindings, count, scope.path.fileSystemRepresentation);
 }
 
 // +load runs before app initializers; waiting for a later lifecycle callback

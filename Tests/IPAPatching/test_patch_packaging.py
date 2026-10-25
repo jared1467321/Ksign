@@ -16,7 +16,7 @@ class PatchPackagingTests(unittest.TestCase):
             app = Path(temporary)
             for name in ("blatantsPatch.dylib.bin", "asignIdentity.dylib.bin"):
                 (app / name).write_bytes(b"old")
-            data = b"AsignPatch/v1\0AsignCompatibilityPatch/v1\0@rpath/asignpatch.dylib\0"
+            data = b"AsignPatch/v1\0AsignCompatibilityPatch/v1\0AsignCloudKitPatch/v1\0@rpath/asignpatch.dylib\0"
             (app / "asignpatch.dylib.bin").write_bytes(data)
             packager.validate_patch_library(app)
             self.assertEqual([p.name for p in app.iterdir()], ["asignpatch.dylib.bin"])

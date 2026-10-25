@@ -366,6 +366,10 @@
 				"$(SRCROOT)/Native/IdentityPatch/IdentityPatch.m",
 				"$(SRCROOT)/Native/IdentityPatch/CompatibilityPatch.m",
 				"$(SRCROOT)/Native/IdentityPatch/CompatibilityPatch.h",
+				"$(SRCROOT)/Native/IdentityPatch/CloudKitPatch.m",
+				"$(SRCROOT)/Native/IdentityPatch/CloudKitPatch.h",
+				"$(SRCROOT)/Native/IdentityPatch/CloudKitABI.h",
+				"$(SRCROOT)/Native/IdentityPatch/CloudKitConfiguration.swift",
 				"$(SRCROOT)/Native/IdentityPatch/Rebind.c",
 				"$(SRCROOT)/Native/IdentityPatch/Rebind.h",
 			);

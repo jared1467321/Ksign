@@ -78,6 +78,40 @@ int KsignPatchIPAFileWithGrowth(const char *file, const char *path,
             late_libraries.append(str(late))
         environment = dict(os.environ, DYLD_INSERT_LIBRARIES=str(identity))
         subprocess.run([str(executable), str(nested), *late_libraries], env=environment, check=True)
+
+        # Execute the production Objective-C hooks against deterministic SDK
+        # stand-ins; no keychain/cloud entitlement changes to the host are needed.
+        cloud_app = directory / "CloudProbe.app"
+        cloud_contents = cloud_app / "Contents"
+        cloud_executable = cloud_contents / "MacOS/CloudProbe"
+        cloud_executable.parent.mkdir(parents=True)
+        cloud_info = {"CFBundleExecutable": "CloudProbe", "CFBundleIdentifier": "org.example.cloudprobe",
+                      "CFBundlePackageType": "APPL",
+                      "AsignOriginalCloudContainerIdentifiers": ["iCloud.org.example.original"]}
+        (cloud_contents / "Info.plist").write_bytes(plistlib.dumps(cloud_info))
+        subprocess.run(["xcrun", "clang", *flags, "-Wall", "-Wextra", "-Werror", "-fobjc-arc", "-fblocks",
+                        "-DASIGN_CLOUDKIT_TESTING=1", "-I", str(ROOT / "Native/IdentityPatch"),
+                        str(ROOT / "Native/IdentityPatch/CloudKitPatch.m"), str(ROOT / "Tests/IdentityPatch/cloud.m"),
+                        "-framework", "Foundation", "-framework", "Security", "-o", str(cloud_executable)], check=True)
+        subprocess.run([str(cloud_executable)], check=True, timeout=30)
+
+        # Public SwiftData/CloudKit APIs must also work with the real SDK and an
+        # explicitly unentitled signature. In particular, a CKSyncEngine must
+        # accept the database and cancelled async requests must finish.
+        runtime_app = directory / "CloudRuntime.app"
+        runtime_contents = runtime_app / "Contents"
+        runtime = runtime_contents / "MacOS/CloudRuntime"
+        runtime.parent.mkdir(parents=True)
+        runtime_info = dict(cloud_info, CFBundleExecutable="CloudRuntime", CFBundleIdentifier="org.example.cloudruntime")
+        (runtime_contents / "Info.plist").write_bytes(plistlib.dumps(runtime_info))
+        subprocess.run(["swiftc", "-parse-as-library", "-swift-version", "5",
+                        "-target", platform.machine() + "-apple-macosx14.0",
+                        str(ROOT / "Tests/IdentityPatch/cloud-runtime.swift"), "-o", str(runtime)], check=True)
+        entitlements = directory / "cloud-probe.entitlements"
+        entitlements.write_bytes(plistlib.dumps({"app.asign.cloud-probe": True}))
+        subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(entitlements), str(runtime)], check=True)
+        subprocess.run([str(runtime)], env=environment, check=True, timeout=45)
+
     return 0
 
 

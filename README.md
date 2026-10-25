@@ -76,6 +76,13 @@ refreshes the unified patch and migrates the old `blatantsPatch.dylib` /
 and bundle identity metadata is installed in the same rollback transaction.
 Archive rebuilds retain those removals.
 
+CloudKit requests use the normal SDK when the installed signature permits the
+requested container. Known unavailable containers use local initialization with
+cloud requests reporting restricted access or cancellation. The original
+CloudKit IDs are captured before re-signing so database startup can retain its
+container identity. This preserves local operation; it does not grant iCloud
+access or restore data that exists only in the cloud.
+
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit
 relative path. This reduces the header space required for compatible extensions.

@@ -23,6 +23,7 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
     sdk_path = sdk if Path(sdk).is_dir() else subprocess.check_output(
         ["xcrun", "--sdk", sdk, "--show-sdk-path"], text=True).strip()
     clang = subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip()
+    swift = subprocess.check_output(["xcrun", "--find", "swiftc"], text=True).strip()
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="asign-patch-", dir=os.environ.get("TEMP_DIR")) as scratch:
@@ -35,16 +36,23 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
             flags = ["-target", target, "-isysroot", sdk_path, "-std=gnu11", "-Oz",
                      "-Wall", "-Wextra", "-Werror", "-fvisibility=hidden"]
             objects = []
-            for source in (SOURCE / "Rebind.c", SOURCE / "IdentityPatch.m", SOURCE / "CompatibilityPatch.m"):
+            for source in (SOURCE / "Rebind.c", SOURCE / "IdentityPatch.m", SOURCE / "CompatibilityPatch.m", SOURCE / "CloudKitPatch.m"):
                 obj = scratch / f"{arch}-{source.stem}.o"
                 arc = ["-fobjc-arc", "-fblocks"] if source.suffix == ".m" else []
                 subprocess.run([clang, *flags, *arc, "-c", str(source), "-o", str(obj)], check=True)
                 objects.append(str(obj))
+            configuration = scratch / f"{arch}-CloudKitConfiguration.o"
+            subprocess.run([swift, "-parse-as-library", "-swift-version", "5", "-Osize", "-emit-object",
+                            "-module-name", "AsignPatchCloudKit", "-target", target, "-sdk", sdk_path,
+                            "-Xfrontend", "-disable-autolink-framework", "-Xfrontend", "SwiftData",
+                            str(SOURCE / "CloudKitConfiguration.swift"), "-o", str(configuration)], check=True)
+            objects.append(str(configuration))
             library = scratch / f"{arch}.dylib"
-            subprocess.run([clang, "-target", target, "-isysroot", sdk_path, "-dynamiclib", *objects,
-                            "-framework", "Foundation", "-framework", "CoreFoundation", "-framework", "Security",
-                            "-Wl,-install_name,@rpath/asignpatch.dylib", "-Wl,-headerpad_max_install_names",
-                            "-o", str(library)], check=True)
+            subprocess.run([swift, "-emit-library", "-target", target, "-sdk", sdk_path, *objects,
+                            "-framework", "Foundation", "-framework", "CoreFoundation", "-framework", "Security", "-framework", "CloudKit",
+                            "-Xlinker", "-weak_framework", "-Xlinker", "SwiftData",
+                            "-Xlinker", "-install_name", "-Xlinker", "@rpath/asignpatch.dylib",
+                            "-Xlinker", "-headerpad_max_install_names", "-o", str(library)], check=True)
             slices.append(library)
         library = scratch / "asignpatch.dylib"
         if len(slices) == 1:
@@ -52,7 +60,7 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
         else:
             subprocess.run(["xcrun", "lipo", "-create", *map(str, slices), "-output", str(library)], check=True)
         data = library.read_bytes()
-        if VERSION not in data or b"AsignCompatibilityPatch/v1\0" not in data:
+        if not all(marker in data for marker in (VERSION, b"AsignCompatibilityPatch/v1\0", b"AsignCloudKitPatch/v1\0")):
             raise RuntimeError("Asign patch version marker was stripped")
         if not output.exists() or output.read_bytes() != data:
             # Publish beside the destination so rename remains atomic even if

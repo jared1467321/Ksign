@@ -15,6 +15,7 @@ enum IPAPatcher {
     static let libraryRelativePaths = Set([libraryRelativePath] + legacyLibraryNames.map { "Frameworks/" + $0 })
     static let originalIdentifierKey = "AsignOriginalBundleIdentifier"
     static let originalCloudEntitlementKeys = "AsignOriginalCloudEntitlementKeys"
+    static let originalCloudContainerIdentifiers = "AsignOriginalCloudContainerIdentifiers"
 
     struct Target {
         let executable: URL
@@ -203,8 +204,9 @@ enum IPAPatcher {
             // Capture before injecting or re-signing, and keep the first
             // snapshot when this app is signed again with another profile.
             if info[originalCloudEntitlementKeys] == nil,
-               let keys = try OriginalCloudEntitlements.read(target.executable) {
-                info[originalCloudEntitlementKeys] = keys
+               let snapshot = try OriginalCloudEntitlements.snapshot(target.executable) {
+                info[originalCloudEntitlementKeys] = snapshot.keys
+                info[originalCloudContainerIdentifiers] = snapshot.containers
                 metadataChanged = true
             }
             if let keys = info[originalCloudEntitlementKeys] as? [String],
@@ -339,7 +341,14 @@ enum OriginalCloudEntitlements {
         key.hasPrefix("com.apple.developer.icloud-") || key.hasPrefix("com.apple.developer.ubiquity-")
     }
 
-    static func read(_ url: URL) throws -> [String]? {
+    struct Snapshot: Equatable {
+        let keys: [String]
+        let containers: [String]
+    }
+
+    static func read(_ url: URL) throws -> [String]? { try snapshot(url)?.keys }
+
+    static func snapshot(_ url: URL) throws -> Snapshot? {
         let file = try FileHandle(forReadingFrom: url)
         defer { try? file.close() }
         let length = try file.seekToEnd()
@@ -367,7 +376,7 @@ enum OriginalCloudEntitlements {
                 slices.append((offset, size))
             }
         }
-        var snapshots: [[String]] = []
+        var snapshots: [Snapshot] = []
         for (base, size) in slices {
             guard size >= 28, let prefix = try bytes(base, 28) else { return nil }
             let magic = prefix.cloudU32(0, big: true)
@@ -402,34 +411,41 @@ enum OriginalCloudEntitlements {
                 guard let keys = parseSignature(signature) else { return nil }
                 snapshots.append(keys)
             } else {
-                snapshots.append([])
+                snapshots.append(Snapshot(keys: [], containers: []))
             }
         }
         guard let first = snapshots.first, snapshots.allSatisfy({ $0 == first }) else { return nil }
         return first
     }
 
-    private static func parseSignature(_ data: Data) -> [String]? {
+    private static func parseSignature(_ data: Data) -> Snapshot? {
         guard data.count >= 12, data.cloudU32(0, big: true) == 0xfade0cc0 else { return nil }
         let length = Int(data.cloudU32(4, big: true)), count = Int(data.cloudU32(8, big: true))
         guard length >= 12, length <= data.count, count <= (length - 12) / 8 else { return nil }
-        var keys: [String]?
+        var snapshot: Snapshot?
         var hasDER = false
         for index in 0..<count {
             let slot = data.cloudU32(12 + index * 8, big: true)
             if slot == 7 { hasDER = true }
             guard slot == 5 else { continue }
             let offset = Int(data.cloudU32(16 + index * 8, big: true))
-            guard keys == nil, offset >= 12 + count * 8, offset <= length - 8,
+            guard snapshot == nil, offset >= 12 + count * 8, offset <= length - 8,
                   data.cloudU32(offset, big: true) == 0xfade7171 else { return nil }
             let size = Int(data.cloudU32(offset + 4, big: true))
             guard size >= 8, size <= length - offset,
                   let plist = try? PropertyListSerialization.propertyList(
                     from: data.subdata(in: offset + 8..<offset + size), options: [], format: nil) as? [String: Any]
             else { return nil }
-            keys = plist.keys.filter(isCloudKey).sorted()
+            let containerValue = plist["com.apple.developer.icloud-container-identifiers"]
+            guard containerValue == nil || containerValue is [String] else { return nil }
+            let containers = containerValue as? [String] ?? []
+            guard containers.allSatisfy({ $0.hasPrefix("iCloud.") && $0.count > 7 && !$0.contains("*") }) else { return nil }
+            let services = plist["com.apple.developer.icloud-services"] as? [String] ?? []
+            var seenContainers = Set<String>()
+            snapshot = Snapshot(keys: plist.keys.filter(isCloudKey).sorted(),
+                                containers: services.contains("CloudKit") ? containers.filter { seenContainers.insert($0).inserted } : [])
         }
-        return keys ?? (hasDER ? nil : [])
+        return snapshot ?? (hasDER ? nil : Snapshot(keys: [], containers: []))
     }
 }
 

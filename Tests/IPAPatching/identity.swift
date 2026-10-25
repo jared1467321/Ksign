@@ -173,6 +173,24 @@ try cloudBytes.write(to: local.appendingPathComponent("Main"))
 try check(apply(local)["Main"] == [], "Re-signing forgot that the original app was local-only")
 let cloudApp = try fixture("CloudDatabase", binary: cloudBytes)
 try check(apply(cloudApp)["Main"] == cloudKeys, "Legitimate CloudKit app lost its capabilities")
+let containersKey = IPAPatcher.originalCloudContainerIdentifiers
+try check(OriginalCloudEntitlements.snapshot(fixtures.appendingPathComponent("cloud-multiple"))?.containers ==
+          ["iCloud.org.example.z", "iCloud.org.example.a"], "Original default container order changed")
+try check(plist(cloudApp.appendingPathComponent("Info.plist"))[containersKey] as? [String] == ["iCloud.org.example.app"],
+          "Original cloud container was not captured")
+try check(plist(local.appendingPathComponent("Info.plist"))[containersKey] as? [String] == [],
+          "Re-signing invented an original cloud container for a local app")
+try check(plist(cloudExtension.appendingPathComponent("Info.plist"))[containersKey] as? [String] == ["iCloud.org.example.app"],
+          "Extension cloud container snapshot was not independent")
+// An old snapshot without original container values cannot recover those values
+// from a subsequently re-signed executable. Do not claim the new profile's ID.
+var historical = try plist(cloudApp.appendingPathComponent("Info.plist"))
+historical.removeValue(forKey: containersKey)
+try PropertyListSerialization.data(fromPropertyList: historical, format: .binary, options: 0)
+    .write(to: cloudApp.appendingPathComponent("Info.plist"))
+try apply(cloudApp)
+try check(plist(cloudApp.appendingPathComponent("Info.plist"))[containersKey] == nil, "Historical cloud snapshot invented an original ID")
+
 let cloudRollback = try fixture("CloudRollback", binary: localBytes)
 let rollbackPlist = try Data(contentsOf: cloudRollback.appendingPathComponent("Info.plist"))
 try expectFailure {

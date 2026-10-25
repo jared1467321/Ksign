@@ -60,7 +60,7 @@ def validate_patch_library(app):
     if not bundled.is_file():
         raise RuntimeError("The app is missing asignpatch.dylib.bin")
     data = bundled.read_bytes()
-    if not all(marker in data for marker in (b"AsignPatch/v1\0", b"AsignCompatibilityPatch/v1\0",
+    if not all(marker in data for marker in (b"AsignPatch/v1\0", b"AsignCompatibilityPatch/v1\0", b"AsignCloudKitPatch/v1\0",
                                              b"@rpath/asignpatch.dylib\0")):
         raise RuntimeError("The app is missing the built unified Asign compatibility patch")
     # Cached Xcode products may still contain the old resources. Only remove

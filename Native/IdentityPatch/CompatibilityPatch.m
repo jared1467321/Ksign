@@ -3,6 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import "CompatibilityPatch.h"
+#import "CloudKitPatch.h"
 
 // Source-built equivalents of the legacy patch's keychain, app-group,
 // defaults and CloudKit hooks. They share one image and rebinder with identity.
@@ -11,9 +12,7 @@ const char AsignCompatibilityPatchVersion[] = "AsignCompatibilityPatch/v1";
 
 static NSString *AccessGroup;
 static NSURL *GroupRoot;
-typedef id (*InitDictionary)(id __attribute__((ns_consumed)), SEL, NSDictionary *) __attribute__((ns_returns_retained));
 typedef id (*InitSuite)(id __attribute__((ns_consumed)), SEL, NSString *, NSURL *) __attribute__((ns_returns_retained));
-static InitDictionary OriginalEntitlements;
 static InitSuite OriginalDefaults;
 
 static id SendObject(id object, NSString *selector) {
@@ -111,28 +110,12 @@ static id Defaults(id self __attribute__((ns_consumed)), SEL selector, NSString 
     return OriginalDefaults(self, selector, suite, container);
 }
 
-static id Entitlements(id self __attribute__((ns_consumed)), SEL selector, NSDictionary *dictionary) __attribute__((ns_returns_retained));
-static id Entitlements(id self __attribute__((ns_consumed)), SEL selector, NSDictionary *dictionary) {
-    NSMutableDictionary *local = [dictionary mutableCopy];
-    [local removeObjectForKey:@"com.apple.developer.icloud-container-environment"];
-    [local removeObjectForKey:@"com.apple.developer.icloud-services"];
-    return OriginalEntitlements(self, selector, [local copy]);
-}
-
-static id CloudContainer(__unused id self __attribute__((ns_consumed)), __unused SEL selector, __unused id identifier)
-    __attribute__((ns_returns_retained));
-static id CloudContainer(__unused id self __attribute__((ns_consumed)), __unused SEL selector, __unused id identifier) { return nil; }
-static void CloudSetup(__unused id self, __unused SEL selector, __unused id identifier, __unused id options) {}
-
 void AsignInstallCompatibilityPatch(void) {
 #if TARGET_OS_IPHONE
     // macOS is only a runtime test host; leave its login keychain alone.
     FindAccessGroup();
 #endif
-    Hook(NSClassFromString(@"CKEntitlements"), @"initWithEntitlementsDict:", (IMP)Entitlements,
-         (IMP *)&OriginalEntitlements);
-    Hook(NSClassFromString(@"CKContainer"), @"_initWithContainerIdentifier:", (IMP)CloudContainer, NULL);
-    Hook(NSClassFromString(@"CKContainer"), @"_setupWithContainerID:options:", (IMP)CloudSetup, NULL);
+    AsignInstallCloudKitPatch();
     Hook(NSFileManager.class, @"containerURLForSecurityApplicationGroupIdentifier:", (IMP)GroupContainer, NULL);
     Hook(NSUserDefaults.class, @"_initWithSuiteName:container:", (IMP)Defaults, (IMP *)&OriginalDefaults);
 }
