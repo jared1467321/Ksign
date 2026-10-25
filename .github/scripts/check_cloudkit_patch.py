@@ -107,8 +107,9 @@ class CloudKitPatchChecks(unittest.TestCase):
         source = root / "checks.m"
         source.write_text(FIXTURE)
         cls.executable = root / "checks"
-        compiler = subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip()
-        subprocess.run([compiler, "-std=gnu11", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror",
+        sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+        compiler = subprocess.check_output(["xcrun", "--sdk", "macosx", "--find", "clang"], text=True).strip()
+        subprocess.run([compiler, "-isysroot", sdk, "-std=gnu11", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror",
                         "-I", str(SOURCE), str(source), "-framework", "Foundation", "-framework", "Security",
                         "-framework", "CoreData", "-framework", "CloudKit", "-o", str(cls.executable)], check=True)
 
