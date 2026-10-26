@@ -24,10 +24,6 @@ snapshot retain normal SDK behavior; use the original IPA to capture it.
 `CloudKitPatch.m` reads the running process's signed capabilities through SecTask,
 independently of any SDK compatibility view. When hooks are needed for a mixed
 configuration, an authorized requested container still passes through unchanged.
-Run `python3 .github/scripts/check_cloudkit_patch.py` on macOS for installation
-and SwiftData-binding regression checks; the manual build workflow runs these
-automatically. They inspect real method implementations without making cloud
-requests, and do not replace iOS launch testing.
 
 For a known unavailable container, the patch still runs the real container and
 database initializers. A thread-local SDK entitlement view permits local object
@@ -53,8 +49,6 @@ stores and unknown capability lookups retain normal behavior, including in
 containers with a mixture of local and cloud-backed stores. Store URLs,
 configurations, migration settings and completion handlers are retained. The
 library links Core Data so these hooks are available when the patch installs.
-The macOS checks also exercise both entries with intercepted SDK loading to
-verify mixed-store handling, option preservation and completion forwarding.
 
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
@@ -151,9 +145,8 @@ structures are modified, no image is hidden, and no image-list snapshot or
 classification cache survives an unload. The existing rebinder also covers
 later-loaded embedded code, with the same import-path limitations below.
 
-Run `python3 .github/scripts/check_dyld_patch.py` for the portable matcher and
-mocked-Mach routing checks. Apple SDK compilation and repeated launch tests on
-a device are still required; host checks cannot establish a device-level fix.
+The manual build workflow compiles and packages the app without running test
+suites. Runtime behavior requires validation on a device.
 
 This is an API compatibility layer. Direct file reads, signing entitlement
 queries, external services, function pointers obtained via `dlsym`, and private

@@ -74,10 +74,6 @@ static BOOL Hook(Class cls, NSString *name, IMP replacement, IMP *original, char
 }
 
 static NSDictionary *SignedEntitlements(void) {
-#ifdef ASIGN_CLOUDKIT_TESTING
-    extern NSDictionary *AsignTestCloudEntitlements(void);
-    return AsignTestCloudEntitlements();
-#else
     static NSDictionary *entitlements;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -101,7 +97,6 @@ static NSDictionary *SignedEntitlements(void) {
         CFRelease(task);
     });
     return entitlements;
-#endif
 }
 
 static BOOL ValidIdentifier(id identifier) {

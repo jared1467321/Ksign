@@ -33,8 +33,8 @@ markers survive repeat signing. These plist edits share the executable/library
 staging and rollback transaction. Sparse workspaces already include the plists;
 current and legacy library paths are included in mutation and resource-hash exclusions.
 
-See [the unified patch](../IdentityPatch/README.md) for runtime coverage,
-build integration and its Apple-platform regression tests.
+See [the unified patch](../IdentityPatch/README.md) for runtime coverage and
+build integration.
 
 SDK archives are pinned by version and SHA256 in `lief.json`. `make native`
 prepares the iOS static SDK; host tests prepare a matching host SDK. Both live
