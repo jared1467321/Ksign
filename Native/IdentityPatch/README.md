@@ -18,9 +18,13 @@ identity imports remain scoped to the app and its embedded code.
 CloudKit hooks install only when the process's captured original CloudKit
 container list is valid and nonempty, and the installed signature is known to
 lack permission for at least one of those containers. Apps without original
-CloudKit containers, fully authorized apps and unknown or malformed snapshots
-get no CloudKit/Core Data method swizzles. Older inputs without the container
-snapshot retain normal SDK behavior; use the original IPA to capture it.
+CloudKit containers, fully authorized apps, unreadable signatures and invalid
+original-container snapshots get no CloudKit/Core Data method swizzles.
+An unusable value in a successfully read signature, such as the profile's literal
+`icloud-services = "*"`, does not authorize CloudKit and enables the fallback
+for unavailable original containers. It is not treated as a failed signature read.
+Older inputs without the container snapshot retain normal SDK behavior; use the
+original IPA to capture it.
 `CloudKitPatch.m` reads the running process's signed capabilities through SecTask,
 independently of any SDK compatibility view. When hooks are needed for a mixed
 configuration, an authorized requested container still passes through unchanged.

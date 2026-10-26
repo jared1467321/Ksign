@@ -133,16 +133,17 @@ static NSArray *OriginalContainers(void) {
 static BOOL NeedsCloudKitPatch(void) {
     // Installing a forwarding swizzle still changes the SDK's method tables.
     // Require evidence of lost CloudKit capabilities before touching them.
-    // Empty, missing and malformed snapshots never establish that need.
+    // Empty, missing and malformed original-container snapshots never
+    // establish that need. A failed signature read is also inconclusive.
     NSArray *originals = OriginalContainers();
     if (!originals.count) return NO;
     NSDictionary *signedValues = SignedEntitlements();
     if (![signedValues isKindOfClass:NSDictionary.class]) return NO;
-    id services = signedValues[ServicesKey], containers = signedValues[ContainersKey];
-    if (services && ![services isKindOfClass:NSArray.class]) return NO;
-    if (containers && ![containers isKindOfClass:NSArray.class]) return NO;
-    for (id service in services) if (![service isKindOfClass:NSString.class] || ![service length]) return NO;
-    for (id identifier in containers) if (!ValidIdentifier(identifier)) return NO;
+    // A readable signature can contain provisioning-profile values such as
+    // icloud-services = "*". That is not a usable CloudKit service array, not
+    // an unknown signature. Use the same exact authorization rule as each
+    // request so unusable signed values enable the fallback instead of
+    // disabling every hook. Wildcards never grant container access here.
     for (NSString *identifier in originals) if (!Authorized(signedValues, identifier)) return YES;
     return NO;
 }
