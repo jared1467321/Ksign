@@ -41,6 +41,16 @@ def fat(first, second):
 
 
 class BuildControls(unittest.TestCase):
+    def test_abi_and_import_preservation(self):
+        compiler = shutil.which("cc") or shutil.which("clang")
+        if not compiler:
+            self.skipTest("C compiler unavailable")
+        with tempfile.TemporaryDirectory(prefix="asign-portable-") as scratch:
+            executable = Path(scratch) / "Portable"
+            subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                            str(HERE / "Portable.c"), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_compiled_hook_selection(self):
         """Compile the real header to verify Python/C flag agreement for every subset."""
         compiler = shutil.which("cc") or shutil.which("clang")
@@ -73,6 +83,15 @@ class BuildControls(unittest.TestCase):
 
 @unittest.skipUnless(APPLE_HOST, "Requires macOS and Xcode; these checks were not run on this host")
 class AppleRuntime(unittest.TestCase):
+    def test_cloud_scoping_and_pass_through(self):
+        with tempfile.TemporaryDirectory(prefix="asign-cloud-") as scratch:
+            executable = Path(scratch) / "CloudRuntime"
+            subprocess.run(["xcrun", "--sdk", "macosx", "clang", "-std=gnu11", "-O0", "-Wall", "-Wextra", "-Werror",
+                            "-fobjc-arc", "-fblocks", str(HERE / "CloudRuntime.m"), "-framework", "Foundation",
+                            "-framework", "Security", "-framework", "CoreData", "-o", str(executable)], check=True)
+            for scenario in ("mixed", "authorized", "missing-snapshot", "empty-snapshot", "invalid-snapshot", "unreadable"):
+                subprocess.run([str(executable), scenario], check=True)
+
     def test_native_policies_and_storage(self):
         with tempfile.TemporaryDirectory(prefix="asign-runtime-") as scratch:
             executable = Path(scratch) / "Runtime"
@@ -94,6 +113,9 @@ class AppleRuntime(unittest.TestCase):
                         "malformed-id": thin({**original, "application-identifier": 42}),
                         "mixed-groups": fat(original_bytes, thin({**original, "com.apple.security.application-groups": ["group.other"]})),
                         "mixed-cloud": fat(original_bytes, thin({**original, "com.apple.developer.icloud-services": []})),
+                        "mixed-cloud-keys": fat(original_bytes, thin({k: v for k, v in original.items() if "icloud-" not in k})),
+                        "malformed-cloud": thin({**original, "com.apple.developer.icloud-container-identifiers": 42}),
+                        "malformed-services": thin({**original, "com.apple.developer.icloud-services": "*"}),
                         "der-only": thin(der=True)}
             for name, data in fixtures.items():
                 (scratch / name).write_bytes(data)

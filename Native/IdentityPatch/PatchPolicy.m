@@ -75,12 +75,18 @@ BOOL AsignOriginalAppGroup(NSString *identifier) {
 BOOL AsignAppGroupNeedsFallback(NSString *identifier) {
     if (!AsignOriginalAppGroup(identifier) || !SignedCapabilities) return NO;
     id value = SignedCapabilities[@"com.apple.security.application-groups"];
-    NSArray *groups = value ? Identifiers(value) : @[];
-    return groups && ![groups containsObject:identifier];
+    // A readable signature containing profile wildcards or other unusable
+    // entries does not grant the original group. Do not let one such entry
+    // disable fallback for every group, or erase a concrete authorized group.
+    return ![value isKindOfClass:NSArray.class] || ![value containsObject:identifier];
 }
 
 NSArray *AsignInstalledAppGroups(void) {
-    return Identifiers(SignedCapabilities[@"com.apple.security.application-groups"]);
+    id value = SignedCapabilities[@"com.apple.security.application-groups"];
+    if (![value isKindOfClass:NSArray.class]) return nil;
+    NSMutableArray *groups = [NSMutableArray array];
+    for (id identifier in value) if (ConcreteIdentifier(identifier)) [groups addObject:identifier];
+    return groups;
 }
 
 NSString *AsignKeychainReplacementGroup(id identifier) {
@@ -88,14 +94,18 @@ NSString *AsignKeychainReplacementGroup(id identifier) {
         ![Identifiers(OriginalInfo[@"AsignOriginalKeychainAccessGroups"]) containsObject:identifier]) return nil;
     id keychainValue = SignedCapabilities[@"keychain-access-groups"];
     id appGroupValue = SignedCapabilities[@"com.apple.security.application-groups"];
-    NSArray *keychain = keychainValue ? Identifiers(keychainValue) : @[];
-    NSArray *appGroups = appGroupValue ? Identifiers(appGroupValue) : @[];
+    NSArray *keychain = [keychainValue isKindOfClass:NSArray.class] ? keychainValue : nil;
+    NSArray *appGroups = [appGroupValue isKindOfClass:NSArray.class] ? appGroupValue : nil;
     id appID = SignedCapabilities[@"application-identifier"];
-    if (!keychain || !appGroups || (appID && !ConcreteIdentifier(appID))) return nil;
-    if ([keychain containsObject:identifier] || [appGroups containsObject:identifier] || [appID isEqual:identifier]) return nil;
+    if ([keychain containsObject:@"*"] || [keychain containsObject:identifier] ||
+        [appGroups containsObject:identifier] || [appID isEqual:identifier]) return nil;
     // Match Keychain Services' default without creating a probe item. Queries
     // that omit an access group must keep their native all-groups semantics.
-    return keychain.firstObject ?: appID;
+    // An unrelated malformed app-group entry must not disable this repair.
+    // Do not guess a default when the first keychain entry itself is unusable.
+    if (keychainValue && !keychain) return nil;
+    id fallback = keychain.count ? keychain.firstObject : appID;
+    return ConcreteIdentifier(fallback) ? fallback : nil;
 }
 
 BOOL AsignNeedsKeychainPatch(void) {
@@ -106,8 +116,9 @@ BOOL AsignNeedsKeychainPatch(void) {
 }
 
 BOOL AsignNeedsAppGroupPatch(void) {
-    id snapshot = OriginalInfo[@"AsignOriginalAppGroupIdentifiers"];
-    if (snapshot) return Identifiers(snapshot).count > 0;
+    for (NSString *identifier in Identifiers(OriginalInfo[@"AsignOriginalAppGroupIdentifiers"])) {
+        if (AsignAppGroupNeedsFallback(identifier)) return YES;
+    }
     // Older patches did not snapshot groups. Keep read-only discovery of
     // existing legacy folders, but do not create new fallback directories.
     return AsignPreservesLegacyGroupDirectories();

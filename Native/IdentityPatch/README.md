@@ -8,11 +8,17 @@ version markers and removes stale two-library resources from cached products.
 There is no runtime dependency on either former patch library.
 
 `PatchPolicy.m` compares captured original groups with the running process's
-actual signed capabilities. `CompatibilityPatch.m` preserves default keychain
+actual signed capabilities. `CompatibilityPatch.m` tries each native keychain
+operation first and retries only an `errSecMissingEntitlement` failure with a
+known original group that can be remapped. Success, item-not-found, duplicate,
+authentication, interaction and parameter errors retain their native behavior.
+It preserves default keychain
 queries (which can search every authorized group), explicit authorized groups,
 and unknown groups. Only a known original group that is now unavailable is
 remapped to the installed default keychain group. Both `SecItemUpdate` dictionaries
-use this rule. No probe item is created, no item is moved or deleted by setup,
+use this rule on retry. An unusable app-group entry or unrelated signing value
+does not disable a known keychain mapping; the default destination itself must
+still be concrete. No probe item is created, no item is moved or deleted by setup,
 and Security imports are rebound only in app-owned code. Apple frameworks keep
 their native imports.
 
@@ -23,7 +29,7 @@ permits reusing an existing legacy directory for app callers to keep saved data
 reachable. A coincidentally named folder alone never overrides a native group.
 New fallback
 directories are created only for known original groups missing from a readable
-installed signature, below the first signed group's native container when
+installed signature, below the first usable signed group's native container when
 available, or Documents.
 Existing directories in either legacy location are reused without moving or
 merging files; symlinks and file collisions are rejected. Group defaults use the
@@ -31,14 +37,28 @@ same path decision, including the Documents fallback. An explicit defaults
 container and system-created suites are preserved. App provenance is carried
 through the public suite initializer only for that suite; unrelated nested suite
 initialization is not redirected. Private hook signatures are checked first.
+File-container repair uses the public `NSFileManager` method independently of
+the private defaults initializer. If that private initializer is absent or has
+an unsupported ABI, file-container repair remains available and defaults retain
+their native behavior. Group-defaults redirection is unavailable on that SDK;
+the file repair alone does not establish that shared preferences work.
+No app-group methods are hooked when every captured original group is still
+authorized, or the installed signature cannot be read, unless a recorded legacy
+upgrade requires discovery of existing compatibility directories. Unusable
+entries in a readable signed group list do not authorize a group or disable
+fallback for other known original groups; concrete authorized entries are kept.
 
 `AsignOriginalAppGroupIdentifiers` and `AsignOriginalKeychainAccessGroups` are
 captured per executable before tweak injection and signing. They are metadata,
 not custom entitlements or grants of access. The keychain snapshot includes
 original keychain groups, the original application identifier and app groups.
 Each capability family requires its own conclusive snapshot. Empty groups and
-unknown groups are distinct; a group disagreement across architecture slices
-does not erase an otherwise valid cloud signing policy. First snapshots are
+unknown groups are distinct. Cloud keys, cloud containers, app groups and
+keychain groups are captured independently: disagreement or malformed data in
+one family does not erase evidence for another. Known keychain identifiers from
+valid source families survive a malformed sibling family. A removed signature
+is unknown, rather than proof that the original app had no cloud capabilities.
+First snapshots are
 preserved on subsequent signing. Older prepatched inputs cannot reliably recover
 their original groups: existing compatibility directories can still be reused,
 but new remapping requires starting with the original IPA. A fresh original IPA
@@ -61,12 +81,17 @@ Older inputs without the container snapshot retain normal SDK behavior; use the
 original IPA to capture it.
 `CloudKitPatch.m` reads the running process's signed capabilities through SecTask,
 independently of any SDK compatibility view. When hooks are needed for a mixed
-configuration, an authorized requested container still passes through unchanged.
+configuration, authorized and uncaptured requested containers still pass through
+unchanged. The same original-container restriction applies to each Core Data
+store; one unavailable container never makes all stores eligible for local mode.
 
 For a known unavailable container, the patch still runs the real container and
 database initializers. A thread-local SDK entitlement view permits local object
 construction; it does not change the signature, profile, Security entitlement
-queries, or Apple's service authorization. Unlike the old nil/no-setup hooks,
+queries, or Apple's service authorization. Instance entitlement/database calls
+use the matching container's scope, including its initializer before tagging;
+nested calls on a different authorized container do not inherit that view.
+Unlike the old nil/no-setup hooks,
 Swift receives valid objects. Local containers report a restricted cloud account
 and a not-authenticated error for user-record requests. Container/database
 operations are cancelled before original SDK queuing, so SDK completion handling
@@ -87,6 +112,9 @@ stores and unknown capability lookups retain normal behavior, including in
 containers with a mixture of local and cloud-backed stores. Store URLs,
 configurations, migration settings and completion handlers are retained. The
 library links Core Data so these hooks are available when the patch installs.
+Every hooked method's result and argument types are checked, distinguishing
+objects, blocks and integer widths. Object class annotations and type qualifiers
+are accepted when the ABI matches.
 
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
@@ -126,8 +154,10 @@ This avoids SwiftData's automatic CloudKit selection being enabled for a local
 schema merely because the signing profile contains iCloud containers. Each bundle
 gets its own policy, including when root and extension capabilities differ. The
 first snapshot survives re-signing; publication rolls back with the dylib/identity
-transaction. Unknown, malformed, conflicting universal or DER-only signatures
-don't establish a policy. A previously re-signed input without a snapshot can't
+transaction. Missing or unreadable seals, conflicting cloud-key lists across
+universal slices and DER-only signatures don't establish a signing policy.
+Malformed container values do not erase an otherwise readable cloud-key list.
+A previously re-signed input without a snapshot can't
 reveal which cloud capabilities its original developer used: start with the
 original IPA. An explicit custom entitlements file remains the user's override.
 The signing policy still applies when compatibility patching is disabled or
@@ -156,12 +186,17 @@ The patch installs from Objective-C `+load`, before app initializers:
   nested synchronous calls through the asset manager.
 - Immutable dictionary views are cached per source dictionary and original ID.
   CF Get/Copy ownership is retained. Foundation's real dictionaries are not
-  mutated; signing and installation still use the selected identifier.
+  mutated; signing and installation still use the selected identifier. Localized
+  dictionaries without an identifier keep that key absent.
 - Bundle C imports are rebound only inside the containing app and its embedded code,
   excluding the patch itself. A dyld callback includes later-loaded code.
   Legacy lazy imports use their indirect symbols; resolved ordinary GOT imports
   can also be matched by address for chained-fixup images. Matched pointer pages
-  regain their previous protection after a write.
+  regain their previous protection after a write. Known symbol names take
+  precedence over address aliases. Resolved slots already replaced by another
+  hook, and null weak imports, are preserved. A named unresolved lazy import can
+  still be replaced when its target lies inside that image's stub-helper section.
+  Symbol-table reads are bounded by the mapped `__LINKEDIT` segment.
 
 `DyldPatch.c` handles an ARM64 Unreal module-tracing startup race across apps.
 Some builds walk `dyld_all_image_infos.infoArray` without a null check while
@@ -194,11 +229,14 @@ suites. Optional manual checks are available with:
 python3 Native/IdentityPatch/Tests/check.py
 ```
 
-The portable checks compile all 128 combinations of the actual diagnostic
-options header and validate bad option combinations. On macOS, the same command
-also compiles/runs the production policy, container, defaults and identity code
-against controlled snapshots and temporary folders, plus Swift fixtures that
-exercise the actual original-capability signature reader. On other hosts those
+The portable checks exercise ABI type matching, preservation of existing import
+hooks and weak imports, symbol aliases and bounded ranges. They also compile all
+128 combinations of the diagnostic options header and validate bad options.
+On macOS, the same command compiles/runs the production policy, keychain retry,
+container, defaults, identity and CloudKit scoping code against controlled
+snapshots and temporary folders, plus Swift fixtures that exercise the actual
+original-capability signature reader. Keychain calls are simulated; the checks
+do not access the host keychain or perform cloud requests. On other hosts those
 Apple checks explicitly report a skip. They do not replace device validation.
 
 For diagnosis, the manual workflow accepts `patch_disabled_hooks`, a comma-separated

@@ -3,10 +3,23 @@
 // Services or install import hooks in the test process.
 #import <Foundation/Foundation.h>
 #import <TargetConditionals.h>
+#import <Security/Security.h>
+static OSStatus TestSecItemAdd(CFDictionaryRef, CFTypeRef *);
+static OSStatus TestSecItemCopyMatching(CFDictionaryRef, CFTypeRef *);
+static OSStatus TestSecItemUpdate(CFDictionaryRef, CFDictionaryRef);
+static OSStatus TestSecItemDelete(CFDictionaryRef);
 #undef TARGET_OS_IPHONE
 #define TARGET_OS_IPHONE 1
 #include "../PatchPolicy.m"
+#define SecItemAdd TestSecItemAdd
+#define SecItemCopyMatching TestSecItemCopyMatching
+#define SecItemUpdate TestSecItemUpdate
+#define SecItemDelete TestSecItemDelete
 #include "../CompatibilityPatch.m"
+#undef SecItemAdd
+#undef SecItemCopyMatching
+#undef SecItemUpdate
+#undef SecItemDelete
 // Keep the loader callable without running its +load during test startup.
 #define load asign_test_load
 #include "../IdentityPatch.m"
@@ -28,6 +41,68 @@ void AsignIdentityRebind(const AsignIdentityBinding *bindings, size_t count, con
 void AsignInstallCloudKitPatch(void) {}
 AsignIdentityBinding AsignCloudKitAutomaticBinding(void) { return (AsignIdentityBinding){0}; }
 AsignIdentityBinding AsignDyldTaskInfoBinding(void) { return (AsignIdentityBinding){0}; }
+
+static OSStatus NativeStatus;
+static NSMutableArray *SeenQueries, *SeenAttributes;
+static OSStatus TestSecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
+    [SeenQueries addObject:(__bridge id)query];
+    OSStatus status = SeenQueries.count == 1 ? NativeStatus : errSecSuccess;
+    if (result) *result = status == errSecSuccess ? CFRetain(SeenQueries.count == 1 ? CFSTR("native") : CFSTR("repaired")) : NULL;
+    return status;
+}
+static OSStatus TestSecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) { return TestSecItemAdd(query, result); }
+static OSStatus TestSecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributes) {
+    [SeenAttributes addObject:(__bridge id)attributes];
+    return TestSecItemAdd(query, NULL);
+}
+static OSStatus TestSecItemDelete(CFDictionaryRef query) { return TestSecItemAdd(query, NULL); }
+
+static void KeychainChecks(void) {
+    NSDictionary *lost = @{(__bridge id)kSecAttrAccessGroup: @"OLD.app", @"account": @"keep"};
+    NSDictionary *plain = @{@"account": @"keep"};
+    NSDictionary *unknown = @{(__bridge id)kSecAttrAccessGroup: @"UNKNOWN"};
+    NSDictionary *authorized = @{(__bridge id)kSecAttrAccessGroup: @"NEW.allowed"};
+    OSStatus statuses[] = {errSecSuccess, errSecItemNotFound, errSecDuplicateItem, errSecAuthFailed,
+                          errSecInteractionNotAllowed, errSecParam, errSecMissingEntitlement};
+    for (NSUInteger i = 0; i < sizeof(statuses) / sizeof(statuses[0]); ++i) {
+        NativeStatus = statuses[i];
+        for (NSDictionary *query in @[lost, plain, unknown, authorized]) {
+            BOOL retry = NativeStatus == errSecMissingEntitlement && query == lost;
+            for (unsigned operation = 0; operation < 4; ++operation) {
+                SeenQueries = [NSMutableArray array];
+                SeenAttributes = [NSMutableArray array];
+                CFTypeRef result = NULL;
+                OSStatus status;
+                CFDictionaryRef raw = (__bridge CFDictionaryRef)query;
+                if (operation == 0) status = AsignSecItemAdd(raw, &result);
+                else if (operation == 1) status = AsignSecItemCopyMatching(raw, &result);
+                else if (operation == 2) status = AsignSecItemUpdate(raw, raw);
+                else status = AsignSecItemDelete(raw);
+                CHECK(status == (retry ? errSecSuccess : NativeStatus));
+                CHECK(SeenQueries.count == (retry ? 2 : 1));
+                CHECK(SeenQueries.firstObject == query);
+                if (retry) {
+                    CHECK([SeenQueries.lastObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.default"]);
+                    CHECK([SeenQueries.lastObject[@"account"] isEqual:@"keep"]);
+                }
+                if (operation < 2 && status == errSecSuccess) CHECK(CFEqual(result, retry ? CFSTR("repaired") : CFSTR("native")));
+                if (result) CFRelease(result);
+                if (operation == 2) {
+                    CHECK(SeenAttributes.firstObject == query);
+                    if (retry) CHECK([SeenAttributes.lastObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.default"]);
+                }
+            }
+        }
+    }
+    // An authorized query can fail because the requested update destination
+    // lost permission. Repair only that attributes dictionary on the retry.
+    SeenQueries = [NSMutableArray array];
+    SeenAttributes = [NSMutableArray array];
+    CHECK(AsignSecItemUpdate((__bridge CFDictionaryRef)authorized, (__bridge CFDictionaryRef)lost) == errSecSuccess);
+    CHECK(SeenQueries.count == 2 && SeenQueries.lastObject == authorized);
+    CHECK([SeenAttributes.lastObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.default"]);
+    CHECK([lost[(__bridge id)kSecAttrAccessGroup] isEqual:@"OLD.app"]);
+}
 
 static NSURL *Documents, *Shared, *Native, *SeenDefaultsContainer;
 static NSFileManager *FixtureManager;
@@ -60,6 +135,7 @@ static void PolicyChecks(void) {
                            @"application-identifier": @"NEW.app",
                            @"com.apple.security.application-groups": @[@"group.signed", @"group.authorized"]};
     CHECK(AsignAppGroupNeedsFallback(@"group.lost"));
+    CHECK(AsignNeedsAppGroupPatch());
     CHECK(!AsignAppGroupNeedsFallback(@"group.authorized"));
     CHECK(!AsignAppGroupNeedsFallback(@"group.unknown"));
     CHECK(AsignNeedsKeychainPatch());
@@ -80,12 +156,27 @@ static void PolicyChecks(void) {
     NSDictionary *saved = SignedCapabilities;
     SignedCapabilities = nil;
     CHECK(!AsignAppGroupNeedsFallback(@"group.lost"));
+    CHECK(!AsignNeedsAppGroupPatch());
     CHECK(!AsignNeedsKeychainPatch());
     CHECK(KeychainQuery((__bridge CFDictionaryRef)lost) == lost);
     SignedCapabilities = @{@"keychain-access-groups": @[@"*"], @"application-identifier": @"NEW.app"};
     CHECK(!AsignNeedsKeychainPatch());
     SignedCapabilities = @{@"application-identifier": @"NEW.app"};
     CHECK([AsignKeychainReplacementGroup(@"OLD.app") isEqual:@"NEW.app"]);
+    SignedCapabilities = @{@"com.apple.security.application-groups": @[@"*", @"group.authorized", @42]};
+    CHECK(AsignAppGroupNeedsFallback(@"group.lost"));
+    CHECK(!AsignAppGroupNeedsFallback(@"group.authorized"));
+    CHECK([AsignInstalledAppGroups() isEqual:@[@"group.authorized"]]);
+    SignedCapabilities = @{@"com.apple.security.application-groups": @"*",
+                           @"keychain-access-groups": @[@"NEW.default", @42], @"application-identifier": @42};
+    CHECK([AsignKeychainReplacementGroup(@"OLD.app") isEqual:@"NEW.default"]);
+    SignedCapabilities = @{@"keychain-access-groups": @[@"NEW.default", @"*"]};
+    CHECK(!AsignNeedsKeychainPatch());
+    SignedCapabilities = @{@"com.apple.security.application-groups": @"*"};
+    CHECK(AsignAppGroupNeedsFallback(@"group.lost"));
+    CHECK(AsignInstalledAppGroups() == nil);
+    SignedCapabilities = @{@"com.apple.security.application-groups": @[@"group.lost", @"group.authorized"]};
+    CHECK(!AsignNeedsAppGroupPatch());
     SignedCapabilities = saved;
     NSDictionary *original = OriginalInfo;
     OriginalInfo = @{};
@@ -97,6 +188,67 @@ static void PolicyChecks(void) {
     CHECK(AsignNeedsAppGroupPatch());
     CHECK(!AsignAppGroupNeedsFallback(@"group.lost"));
     OriginalInfo = original;
+}
+
+static id TestPublicDefaults(id self __attribute__((ns_consumed)), __unused SEL selector,
+                             __unused NSString *suite) __attribute__((ns_returns_retained));
+static id TestPublicDefaults(id self __attribute__((ns_consumed)), __unused SEL selector,
+                             __unused NSString *suite) {
+    return self;
+}
+
+static void InstallationChecks(void) {
+    NSDictionary *savedInfo = OriginalInfo, *savedCapabilities = SignedCapabilities;
+    OriginalInfo = @{@"AsignOriginalAppGroupIdentifiers": @[@"group.lost"]};
+    SEL group = @selector(containerURLForSecurityApplicationGroupIdentifier:);
+    SEL internal = NSSelectorFromString(@"_initWithSuiteName:container:");
+    SEL public = @selector(initWithSuiteName:);
+    for (unsigned scenario = 0; scenario < 6; ++scenario) {
+        Class manager = objc_allocateClassPair(NSObject.class,
+            [[NSString stringWithFormat:@"AsignFixtureManager%u", scenario] UTF8String], 0);
+        Class defaults = objc_allocateClassPair(NSObject.class,
+            [[NSString stringWithFormat:@"AsignFixtureDefaults%u", scenario] UTF8String], 0);
+        CHECK(manager && defaults);
+        CHECK(class_addMethod(manager, group, (IMP)NativeGroup,
+                              scenario == 4 ? "v@:@" : (scenario == 5 ? "@\"NSURL\"@:@\"NSString\"" : "@@:@")));
+        if (scenario != 1) CHECK(class_addMethod(defaults, internal, (IMP)TestDefaults,
+                                                scenario == 2 ? "v@:@@" : "@@:@@"));
+        if (scenario != 3) CHECK(class_addMethod(defaults, public, (IMP)TestPublicDefaults, "@@:@"));
+        objc_registerClassPair(manager);
+        objc_registerClassPair(defaults);
+        Method nativeGroup = class_getInstanceMethod(manager, group);
+        Method nativeInternal = class_getInstanceMethod(defaults, internal);
+        Method nativePublic = class_getInstanceMethod(defaults, public);
+        IMP groupBefore = method_getImplementation(nativeGroup);
+        IMP internalBefore = nativeInternal ? method_getImplementation(nativeInternal) : NULL;
+        IMP publicBefore = nativePublic ? method_getImplementation(nativePublic) : NULL;
+        // A conclusive original snapshot alone is not reason to swizzle a
+        // working app. Unknown signatures must also leave method tables alone.
+        for (id capabilities in @[@{@"com.apple.security.application-groups": @[@"group.lost"]}, NSNull.null]) {
+            SignedCapabilities = capabilities == NSNull.null ? nil : capabilities;
+            InstallAppGroupPatch(manager, defaults);
+            CHECK(method_getImplementation(nativeGroup) == groupBefore);
+            CHECK(!nativeInternal || method_getImplementation(nativeInternal) == internalBefore);
+            CHECK(!nativePublic || method_getImplementation(nativePublic) == publicBefore);
+        }
+        // Reproduce the missing/changed-private-ABI condition: the supported
+        // file API must still be repaired, without touching unsupported defaults.
+        SignedCapabilities = @{};
+        InstallAppGroupPatch(manager, defaults);
+        CHECK(method_getImplementation(nativeGroup) == (scenario == 4 ? groupBefore : (IMP)GroupContainer));
+        if (scenario == 0 || scenario == 5) {
+            CHECK(method_getImplementation(nativeInternal) == (IMP)Defaults);
+            CHECK(method_getImplementation(nativePublic) == (IMP)PublicDefaults);
+        } else {
+            CHECK(!nativeInternal || method_getImplementation(nativeInternal) == internalBefore);
+            CHECK(!nativePublic || method_getImplementation(nativePublic) == publicBefore);
+        }
+    }
+    OriginalGroupContainer = NULL;
+    OriginalDefaults = NULL;
+    OriginalPublicDefaults = NULL;
+    OriginalInfo = savedInfo;
+    SignedCapabilities = savedCapabilities;
 }
 
 static void StorageChecks(NSURL *root) {
@@ -112,6 +264,12 @@ static void StorageChecks(NSURL *root) {
     IMP originalManager = method_setImplementation(managerMethod, (IMP)TestDefaultManager);
     OriginalGroupContainer = NativeGroup;
     OriginalDefaults = TestDefaults;
+    // The first listed signed group may have no registered native container.
+    // A later usable group should still provide shared storage.
+    NSDictionary *savedCapabilities = SignedCapabilities;
+    NSMutableDictionary *capabilities = [SignedCapabilities mutableCopy];
+    capabilities[@"com.apple.security.application-groups"] = @[@"group.unavailable", @"group.signed", @"group.authorized"];
+    SignedCapabilities = capabilities;
     CHECK([GroupContainer(FixtureManager, NULL, @"group.authorized") isEqual:Native]);
     CHECK(![realManager fileExistsAtPath:[Shared URLByAppendingPathComponent:@"group.authorized"].path]);
     CHECK(GroupContainer(FixtureManager, NULL, @"group.unknown") == nil);
@@ -156,6 +314,7 @@ static void StorageChecks(NSURL *root) {
     CHECK(GroupContainer(FixtureManager, NULL, @"group.other") == nil);
     CHECK([[NSString stringWithContentsOfURL:data encoding:NSUTF8StringEncoding error:NULL] isEqual:@"saved"]);
     OriginalInfo = originalPolicy;
+    SignedCapabilities = savedCapabilities;
     // A legacy-looking symlink must not be used as a compatibility folder.
     NSURL *link = [Shared URLByAppendingPathComponent:@"group.symlink"];
     CHECK([realManager createSymbolicLinkAtURL:link withDestinationURL:Native error:NULL]);
@@ -176,6 +335,8 @@ static void *__attribute__((swiftcall)) ThrowingAssetManager(__unused void *meta
 }
 
 static void IdentityChecks(NSURL *root) {
+    NSDictionary *localized = @{@"CFBundleDisplayName": @"Fixture"};
+    CHECK(IdentityView(localized, @"test.original") == localized);
     CHECK(OriginalIdentifier(@{@"CFBundleIdentifier": @"same", @"AsignOriginalBundleIdentifier": @"same"}) == nil);
     CHECK(OriginalIdentifier(@{@"CFBundleIdentifier": @"same", @"AsignOriginalBundleIdentifier": @42}) == nil);
     NSURL *bundleURL = [root URLByAppendingPathComponent:@"Fixture.bundle" isDirectory:YES];
@@ -253,6 +414,8 @@ int main(void) {
         CHECK(!AsignPatchCallerIsApp((void *)&printf));
         CHECK(!InsideScope("/app-other/file", "/app"));
         PolicyChecks();
+        KeychainChecks();
+        InstallationChecks();
         NSURL *root = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
         StorageChecks(root);
         IdentityChecks(root);

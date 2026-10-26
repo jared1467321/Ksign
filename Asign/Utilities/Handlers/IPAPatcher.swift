@@ -87,8 +87,9 @@ enum IPAPatcher {
                       originalKeys.allSatisfy(OriginalCloudEntitlements.isCloudKey) else { continue }
                 keys = originalKeys
             } else {
-                guard let snapshot = try? OriginalCloudEntitlements.snapshot(target.executable) else { continue }
-                keys = snapshot.keys
+                guard let snapshot = try? OriginalCloudEntitlements.snapshot(target.executable),
+                      let originalKeys = snapshot.keys else { continue }
+                keys = originalKeys
             }
             let relative = String(target.executable.path.dropFirst(root.path.count + 1))
             policy[relative] = keys
@@ -266,9 +267,12 @@ enum IPAPatcher {
             info[originalIdentifierKey] = identifier
             // Capture before injecting or re-signing, and keep the first
             // snapshot when this app is signed again with another profile.
-            if info[originalCloudEntitlementKeys] == nil, let snapshot = snapshots[relative] {
-                info[originalCloudEntitlementKeys] = snapshot.keys
-                info[originalCloudContainerIdentifiers] = snapshot.containers
+            if info[originalCloudEntitlementKeys] == nil, let keys = snapshots[relative]?.keys {
+                info[originalCloudEntitlementKeys] = keys
+                metadataChanged = true
+            }
+            if info[originalCloudContainerIdentifiers] == nil, let containers = snapshots[relative]?.containers {
+                info[originalCloudContainerIdentifiers] = containers
                 metadataChanged = true
             }
             if info[originalAppGroupIdentifiers] == nil, let groups = snapshots[relative]?.appGroups {
@@ -412,8 +416,8 @@ enum OriginalCloudEntitlements {
     }
 
     struct Snapshot: Equatable {
-        let keys: [String]
-        let containers: [String]
+        let keys: [String]?
+        let containers: [String]?
         // nil is unknown/malformed; [] is a known empty capability list.
         var appGroups: [String]? = []
         var keychainGroups: [String]? = []
@@ -484,14 +488,17 @@ enum OriginalCloudEntitlements {
                 guard let keys = parseSignature(signature) else { return nil }
                 snapshots.append(keys)
             } else {
-                snapshots.append(Snapshot(keys: [], containers: []))
+                // A removed seal cannot establish what the original developer
+                // requested. In particular, it must not authorize stripping
+                // every cloud entitlement from the new signature.
+                return nil
             }
         }
-        guard let first = snapshots.first,
-              snapshots.allSatisfy({ $0.keys == first.keys && $0.containers == first.containers }) else { return nil }
-        // A disagreement about groups must not erase an otherwise conclusive
-        // cloud signing policy. Each capability family has its own evidence.
-        return Snapshot(keys: first.keys, containers: first.containers,
+        guard let first = snapshots.first else { return nil }
+        // Each family stands on its own evidence, in both directions. A cloud
+        // disagreement must not disable otherwise valid group repairs either.
+        return Snapshot(keys: snapshots.allSatisfy({ $0.keys == first.keys }) ? first.keys : nil,
+                        containers: snapshots.allSatisfy({ $0.containers == first.containers }) ? first.containers : nil,
                         appGroups: snapshots.allSatisfy({ $0.appGroups == first.appGroups }) ? first.appGroups : nil,
                         keychainGroups: snapshots.allSatisfy({ $0.keychainGroups == first.keychainGroups }) ? first.keychainGroups : nil)
     }
@@ -515,10 +522,20 @@ enum OriginalCloudEntitlements {
                     from: data.subdata(in: offset + 8..<offset + size), options: [], format: nil) as? [String: Any]
             else { return nil }
             let containerValue = plist["com.apple.developer.icloud-container-identifiers"]
-            guard containerValue == nil || containerValue is [String] else { return nil }
-            let containers = containerValue as? [String] ?? []
-            guard containers.allSatisfy({ $0.hasPrefix("iCloud.") && $0.count > 7 && !$0.contains("*") }) else { return nil }
-            let services = plist["com.apple.developer.icloud-services"] as? [String] ?? []
+            let serviceValue = plist["com.apple.developer.icloud-services"]
+            let services = serviceValue as? [String]
+            let containers = containerValue as? [String]
+            let cloudCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-")
+            let cloudContainers: [String]?
+            if (serviceValue != nil && services == nil) || (containerValue != nil && containers == nil) ||
+                !(containers ?? []).allSatisfy({ $0.hasPrefix("iCloud.") && $0.count > 7 &&
+                    $0.rangeOfCharacter(from: cloudCharacters.inverted) == nil }) {
+                cloudContainers = nil
+            } else {
+                var seen = Set<String>()
+                cloudContainers = (services ?? []).contains("CloudKit")
+                    ? (containers ?? []).filter { seen.insert($0).inserted } : []
+            }
             func identifiers(_ value: Any?) -> [String]? {
                 guard let value else { return [] }
                 guard let values = value as? [String], values.allSatisfy({
@@ -531,15 +548,13 @@ enum OriginalCloudEntitlements {
             let keychain = identifiers(plist["keychain-access-groups"])
             let appID = plist["application-identifier"]
             let appIDs = identifiers(appID.map { [$0] })
-            let keychainGroups: [String]?
-            if let appGroups, let keychain, let appIDs {
-                keychainGroups = Array(Set(appGroups + keychain + appIDs)).sorted()
-            } else {
-                keychainGroups = nil
-            }
-            var seenContainers = Set<String>()
+            // A malformed family cannot erase known identifiers supplied by
+            // another one. Missing identifiers are never inferred from this set.
+            let knownKeychainGroups = Array(Set((appGroups ?? []) + (keychain ?? []) + (appIDs ?? []))).sorted()
+            let keychainGroups: [String]? = !knownKeychainGroups.isEmpty || (appGroups != nil && keychain != nil && appIDs != nil)
+                ? knownKeychainGroups : nil
             snapshot = Snapshot(keys: plist.keys.filter(isCloudKey).sorted(),
-                                containers: services.contains("CloudKit") ? containers.filter { seenContainers.insert($0).inserted } : [],
+                                containers: cloudContainers,
                                 appGroups: appGroups, keychainGroups: keychainGroups)
         }
         return snapshot ?? (hasDER ? nil : Snapshot(keys: [], containers: []))

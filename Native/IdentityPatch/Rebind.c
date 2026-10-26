@@ -1,5 +1,6 @@
 #include "Rebind.h"
 #include "PatchOptions.h"
+#include "RebindSupport.h"
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
@@ -17,6 +18,16 @@ static char *Scope;
 static char *CanonicalScope;
 static size_t ScopeLength;
 static const struct mach_header *SelfImage;
+
+static const void *linkeditData(const struct segment_command_64 *segment, intptr_t slide,
+                                uint64_t offset, uint64_t size) {
+    if (!AsignRangeWithin(offset, size, segment->fileoff, segment->filesize) ||
+        !AsignRangeWithin(offset, size, segment->fileoff, segment->vmsize)) return NULL;
+    uintptr_t mapped = (uintptr_t)slide + segment->vmaddr;
+    uint64_t relative = offset - segment->fileoff;
+    if (relative > UINTPTR_MAX - mapped || size > UINTPTR_MAX - (mapped + relative)) return NULL;
+    return (const void *)(mapped + relative);
+}
 
 static void replacePointer(void **slot, void *replacement) {
     vm_address_t address = (vm_address_t)slot;
@@ -56,6 +67,8 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
     const struct symtab_command *symbols = NULL;
     const struct dysymtab_command *indirect = NULL;
     const struct segment_command_64 *linkedit = NULL;
+    uintptr_t lazyStubs = 0;
+    uint64_t lazyStubSize = 0;
     const uint8_t *cursor = start;
     for (uint32_t i = 0; i < mh->ncmds; ++i) {
         if ((size_t)(end - cursor) < sizeof(struct load_command)) return;
@@ -64,6 +77,18 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
         if (cmd->cmd == LC_SEGMENT_64 && cmd->cmdsize >= sizeof(struct segment_command_64)) {
             const struct segment_command_64 *seg = (const struct segment_command_64 *)cmd;
             if (!strncmp(seg->segname, SEG_LINKEDIT, 16)) linkedit = seg;
+            if ((seg->initprot & VM_PROT_EXECUTE) &&
+                seg->nsects <= (cmd->cmdsize - sizeof(*seg)) / sizeof(struct section_64)) {
+                const struct section_64 *sections = (const void *)(seg + 1);
+                for (uint32_t j = 0; j < seg->nsects; ++j) {
+                    const struct section_64 *section = &sections[j];
+                    if (!strncmp(section->sectname, "__stub_helper", 16) &&
+                        AsignRangeWithin(section->addr, section->size, seg->vmaddr, seg->vmsize)) {
+                        lazyStubs = (uintptr_t)slide + section->addr;
+                        lazyStubSize = section->size;
+                    }
+                }
+            }
         } else if (cmd->cmd == LC_SYMTAB && cmd->cmdsize >= sizeof(*symbols)) symbols = (const void *)cmd;
         else if (cmd->cmd == LC_DYSYMTAB && cmd->cmdsize >= sizeof(*indirect)) indirect = (const void *)cmd;
         cursor += cmd->cmdsize;
@@ -72,10 +97,12 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
     const char *strings = NULL;
     const uint32_t *indices = NULL;
     if (linkedit && symbols && indirect) {
-        uintptr_t base = (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
-        names = (const void *)(base + symbols->symoff);
-        strings = (const void *)(base + symbols->stroff);
-        indices = (const void *)(base + indirect->indirectsymoff);
+        names = linkeditData(linkedit, slide, symbols->symoff, (uint64_t)symbols->nsyms * sizeof(*names));
+        strings = linkeditData(linkedit, slide, symbols->stroff, symbols->strsize);
+        indices = linkeditData(linkedit, slide, indirect->indirectsymoff, (uint64_t)indirect->nindirectsyms * sizeof(*indices));
+        // A stripped or inconsistent symbol table must not crash the app just
+        // because the patch inspected it. Resolved-address matching still works.
+        if (!names || !strings) indices = NULL;
     }
     cursor = start;
     for (uint32_t i = 0; i < mh->ncmds; ++i) {
@@ -95,7 +122,10 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
             if (!strncmp(section->sectname, "__auth", 6) || section->addr < seg->vmaddr ||
                 section->addr - seg->vmaddr > seg->vmsize ||
                 section->size > seg->vmsize - (section->addr - seg->vmaddr)) continue;
-            void **slots = (void **)((uintptr_t)slide + section->addr);
+            uintptr_t slotsAddress = (uintptr_t)slide + section->addr;
+            if (slotsAddress % sizeof(void *) || section->size % sizeof(void *) ||
+                section->size > UINTPTR_MAX - slotsAddress) continue;
+            void **slots = (void **)slotsAddress;
             for (uint64_t k = 0; k < section->size / sizeof(void *); ++k) {
                 const char *name = NULL;
                 uint64_t n = (uint64_t)section->reserved1 + k;
@@ -113,8 +143,11 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
                 for (size_t b = 0; b < BindingCount; ++b) {
                     const AsignIdentityBinding *binding = &Bindings[b];
                     if (!inScope && !binding->includeSystemImages) continue;
-                    if ((name && !strcmp(name, binding->name)) || current == binding->original) {
-                        if (current != binding->replacement) replacePointer(&slots[k], binding->replacement);
+                    int unresolvedLazy = type == S_LAZY_SYMBOL_POINTERS && lazyStubs &&
+                        AsignRangeWithin((uintptr_t)current, 1, lazyStubs, lazyStubSize);
+                    if (AsignImportNeedsReplacement(name, binding->name, current, binding->original,
+                                                    binding->replacement, unresolvedLazy)) {
+                        replacePointer(&slots[k], binding->replacement);
                         break;
                     }
                 }

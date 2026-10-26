@@ -6,6 +6,7 @@
 #import "CloudKitPatch.h"
 #import "PatchPolicy.h"
 #import "PatchOptions.h"
+#import "MethodHook.h"
 
 // Source-built equivalents of the legacy patch's keychain, app-group,
 // defaults and CloudKit hooks. They share one image and rebinder with identity.
@@ -21,30 +22,14 @@ static NSURL *(*OriginalGroupContainer)(id, SEL, NSString *);
 static _Thread_local __unsafe_unretained NSString *AppDefaultsSuite;
 
 static BOOL CompatibleMethod(Method method, unsigned arguments) {
-    if (!method || method_getNumberOfArguments(method) != arguments) return NO;
-    char type[16] = {0};
-    method_getReturnType(method, type, sizeof(type));
-    if (strcmp(type, "@")) return NO;
-    for (unsigned i = 2; i < arguments; ++i) {
-        method_getArgumentType(method, i, type, sizeof(type));
-        if (strcmp(type, "@")) return NO;
-    }
-    return YES;
+    return (arguments == 3 || arguments == 4) &&
+        AsignMethodMatches(method, "@", "@", arguments == 4 ? "@" : NULL);
 }
 
 static void Hook(Class cls, NSString *name, IMP replacement, IMP *original, unsigned arguments) {
-    if (!cls) return;
-    SEL selector = NSSelectorFromString(name);
-    Method method = class_getInstanceMethod(cls, selector);
-    if (!CompatibleMethod(method, arguments)) return;
-    IMP previous = method_getImplementation(method);
-    // Publish the forwarding target before exposing the replacement to other
-    // threads, including system threads already running during app startup.
-    if (original) *original = previous;
-    if (!class_addMethod(cls, selector, replacement, method_getTypeEncoding(method))) {
-        previous = method_setImplementation(method, replacement);
-        if (original) *original = previous;
-    }
+    if (arguments != 3 && arguments != 4) return;
+    AsignHookMethod(cls, NSSelectorFromString(name), replacement, original,
+                    "@", "@", arguments == 4 ? "@" : NULL);
 }
 
 static NSDictionary *KeychainQuery(CFDictionaryRef query) {
@@ -61,27 +46,49 @@ static NSDictionary *KeychainQuery(CFDictionaryRef query) {
 #endif
 }
 
+static OSStatus KeychainResult(OSStatus (*original)(CFDictionaryRef, CFTypeRef *),
+                               CFDictionaryRef query, CFTypeRef *result) {
+    CFTypeRef value = NULL;
+    OSStatus status = original(query, result ? &value : NULL);
+    if (status == errSecMissingEntitlement) {
+        NSDictionary *repaired = KeychainQuery(query);
+        if ((__bridge CFDictionaryRef)repaired != query) {
+            if (value) { CFRelease(value); value = NULL; }
+            status = original((__bridge CFDictionaryRef)repaired, result ? &value : NULL);
+        }
+    }
+    if (result) *result = value;
+    return status;
+}
+
 OSStatus AsignSecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    return SecItemAdd((__bridge CFDictionaryRef)KeychainQuery(attributes), result);
+    return KeychainResult(SecItemAdd, attributes, result);
 }
 OSStatus AsignSecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    return SecItemCopyMatching((__bridge CFDictionaryRef)KeychainQuery(query), result);
+    return KeychainResult(SecItemCopyMatching, query, result);
 }
 OSStatus AsignSecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributes) {
-    return SecItemUpdate((__bridge CFDictionaryRef)KeychainQuery(query),
-                         (__bridge CFDictionaryRef)KeychainQuery(attributes));
+    OSStatus status = SecItemUpdate(query, attributes);
+    if (status != errSecMissingEntitlement) return status;
+    NSDictionary *repairedQuery = KeychainQuery(query), *repairedAttributes = KeychainQuery(attributes);
+    if ((__bridge CFDictionaryRef)repairedQuery == query && (__bridge CFDictionaryRef)repairedAttributes == attributes) return status;
+    return SecItemUpdate((__bridge CFDictionaryRef)repairedQuery, (__bridge CFDictionaryRef)repairedAttributes);
 }
 OSStatus AsignSecItemDelete(CFDictionaryRef query) {
-    return SecItemDelete((__bridge CFDictionaryRef)KeychainQuery(query));
+    OSStatus status = SecItemDelete(query);
+    if (status != errSecMissingEntitlement) return status;
+    NSDictionary *repaired = KeychainQuery(query);
+    return (__bridge CFDictionaryRef)repaired == query ? status : SecItemDelete((__bridge CFDictionaryRef)repaired);
 }
 
 static NSURL *SharedRoot(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *group = AsignInstalledAppGroups().firstObject;
-        if (group && OriginalGroupContainer) {
+        if (!OriginalGroupContainer) return;
+        for (NSString *group in AsignInstalledAppGroups()) {
             GroupRoot = OriginalGroupContainer(NSFileManager.defaultManager,
                 @selector(containerURLForSecurityApplicationGroupIdentifier:), group);
+            if (GroupRoot) break;
         }
     });
     return GroupRoot;
@@ -148,18 +155,25 @@ static id Defaults(id self __attribute__((ns_consumed)), SEL selector, NSString 
     return OriginalDefaults(self, selector, suite, container);
 }
 
+static void InstallAppGroupPatch(Class manager, Class defaults) {
+    if (!AsignNeedsAppGroupPatch()) return;
+    Method group = class_getInstanceMethod(manager, @selector(containerURLForSecurityApplicationGroupIdentifier:));
+    if (!CompatibleMethod(group, 3)) return;
+    // File access is a public API. An absent or changed private defaults
+    // initializer must not silently remove the file-container repair too:
+    // apps can require that container while initializing their startup logs.
+    Hook(manager, @"containerURLForSecurityApplicationGroupIdentifier:",
+         (IMP)GroupContainer, (IMP *)&OriginalGroupContainer, 3);
+    // The public initializer carries app provenance through Foundation's
+    // internal call. Install these together only when both ABIs are supported.
+    Method internal = defaults ? class_getInstanceMethod(defaults, NSSelectorFromString(@"_initWithSuiteName:container:")) : NULL;
+    Method public = defaults ? class_getInstanceMethod(defaults, @selector(initWithSuiteName:)) : NULL;
+    if (!CompatibleMethod(internal, 4) || !CompatibleMethod(public, 3)) return;
+    Hook(defaults, @"_initWithSuiteName:container:", (IMP)Defaults, (IMP *)&OriginalDefaults, 4);
+    Hook(defaults, @"initWithSuiteName:", (IMP)PublicDefaults, (IMP *)&OriginalPublicDefaults, 3);
+}
+
 void AsignInstallCompatibilityPatch(void) {
     if (AsignPatchEnabled(AsignPatchCloudKit)) AsignInstallCloudKitPatch();
-    if (!AsignPatchEnabled(AsignPatchAppGroups) || !AsignNeedsAppGroupPatch()) return;
-    // The public initializer carries app provenance through Foundation's
-    // internal call. Require all three ABIs before installing this family so
-    // file access and defaults cannot select inconsistent fallback locations.
-    Method group = class_getInstanceMethod(NSFileManager.class, @selector(containerURLForSecurityApplicationGroupIdentifier:));
-    Method internal = class_getInstanceMethod(NSUserDefaults.class, NSSelectorFromString(@"_initWithSuiteName:container:"));
-    Method public = class_getInstanceMethod(NSUserDefaults.class, @selector(initWithSuiteName:));
-    if (!CompatibleMethod(group, 3) || !CompatibleMethod(internal, 4) || !CompatibleMethod(public, 3)) return;
-    Hook(NSFileManager.class, @"containerURLForSecurityApplicationGroupIdentifier:",
-         (IMP)GroupContainer, (IMP *)&OriginalGroupContainer, 3);
-    Hook(NSUserDefaults.class, @"_initWithSuiteName:container:", (IMP)Defaults, (IMP *)&OriginalDefaults, 4);
-    Hook(NSUserDefaults.class, @"initWithSuiteName:", (IMP)PublicDefaults, (IMP *)&OriginalPublicDefaults, 3);
+    if (AsignPatchEnabled(AsignPatchAppGroups)) InstallAppGroupPatch(NSFileManager.class, NSUserDefaults.class);
 }

@@ -6,6 +6,7 @@
 #import <objc/runtime.h>
 #import "CloudKitPatch.h"
 #import "CloudKitABI.h"
+#import "MethodHook.h"
 
 __attribute__((used, visibility("default")))
 const char AsignCloudKitPatchVersion[] = "AsignCloudKitPatch/v1";
@@ -17,6 +18,7 @@ static char LocalIdentifierKey;
 // Only synchronous SDK construction sees this view. Other threads and the
 // Security entitlement APIs continue to see the real signed capabilities.
 static _Thread_local __unsafe_unretained NSString *ConstructingLocalIdentifier;
+static _Thread_local __unsafe_unretained id ConstructingLocalReceiver;
 
 typedef id (*ObjectGetter)(id, SEL);
 typedef id (*ObjectArgument)(id, SEL, id);
@@ -53,24 +55,8 @@ static AsignCloudAutomaticGetter OriginalAutomatic;
 
 static id Object(id receiver, NSString *name) {
     SEL selector = NSSelectorFromString(name);
-    return [receiver respondsToSelector:selector] ? ((ObjectGetter)objc_msgSend)(receiver, selector) : nil;
-}
-
-// Match the ABI before touching a private selector. An absent or changed SDK
-// method is left alone, rather than installing a replacement of the wrong type.
-static BOOL Hook(Class cls, NSString *name, IMP replacement, IMP *original, char returnType, unsigned arguments) {
-    SEL selector = NSSelectorFromString(name);
-    Method method = cls ? class_getInstanceMethod(cls, selector) : NULL;
-    if (!method || method_getNumberOfArguments(method) != arguments) return NO;
-    char type[16] = {0};
-    method_getReturnType(method, type, sizeof(type));
-    if (type[0] != returnType) return NO;
-    if (original) *original = method_getImplementation(method);
-    if (!class_addMethod(cls, selector, replacement, method_getTypeEncoding(method))) {
-        IMP previous = method_setImplementation(method, replacement);
-        if (original) *original = previous;
-    }
-    return YES;
+    Method method = receiver ? class_getInstanceMethod(object_getClass(receiver), selector) : NULL;
+    return AsignMethodMatches(method, "@", NULL, NULL) ? ((ObjectGetter)objc_msgSend)(receiver, selector) : nil;
 }
 
 static NSDictionary *SignedEntitlements(void) {
@@ -116,18 +102,19 @@ static BOOL Authorized(NSDictionary *entitlements, NSString *identifier) {
         [containers isKindOfClass:NSArray.class] && [containers containsObject:identifier];
 }
 
-static BOOL NeedsLocal(NSString *identifier) {
-    NSDictionary *signedValues = SignedEntitlements();
-    // Unknown is distinct from a known missing entitlement. Preserve the SDK's
-    // behavior when the process signature cannot be inspected reliably.
-    return signedValues && ValidIdentifier(identifier) && !Authorized(signedValues, identifier);
-}
-
 static NSArray *OriginalContainers(void) {
     id identifiers = NSBundle.mainBundle.infoDictionary[@"AsignOriginalCloudContainerIdentifiers"];
     if (![identifiers isKindOfClass:NSArray.class]) return nil;
     for (id identifier in identifiers) if (!ValidIdentifier(identifier)) return nil;
     return identifiers;
+}
+
+static BOOL NeedsLocal(NSString *identifier) {
+    NSDictionary *signedValues = SignedEntitlements();
+    // Enabling this family for one lost container is not permission to change
+    // arbitrary container requests or turn unrelated Core Data stores local.
+    return signedValues && ValidIdentifier(identifier) &&
+        [OriginalContainers() containsObject:identifier] && !Authorized(signedValues, identifier);
 }
 
 static BOOL NeedsCloudKitPatch(void) {
@@ -186,10 +173,12 @@ static NSDictionary *ConstructionEntitlements(NSDictionary *original) {
     return [view copy];
 }
 
-static id Construct(NSString *identifier, id (^original)(void)) {
+static id Construct(NSString *identifier, id receiver, id (^original)(void)) {
     BOOL local = NeedsLocal(identifier);
     NSString *previous = ConstructingLocalIdentifier;
+    id previousReceiver = ConstructingLocalReceiver;
     ConstructingLocalIdentifier = local ? identifier : nil;
+    ConstructingLocalReceiver = local ? receiver : nil;
     @try {
         // Always use the real SDK initializer and its real database objects.
         // Skipping setup or returning an NSObject substitute breaks Swift and
@@ -199,6 +188,7 @@ static id Construct(NSString *identifier, id (^original)(void)) {
         return container;
     } @finally {
         ConstructingLocalIdentifier = previous;
+        ConstructingLocalReceiver = previousReceiver;
     }
 }
 
@@ -220,30 +210,41 @@ AsignIdentityBinding AsignCloudKitAutomaticBinding(void) {
 }
 
 static id Container(id cls, SEL selector, NSString *identifier) {
-    return Construct(identifier, ^{ return OriginalContainer(cls, selector, identifier); });
+    return Construct(identifier, nil, ^{ return OriginalContainer(cls, selector, identifier); });
 }
 static id DefaultContainer(id cls, SEL selector) {
     NSString *identifier = DefaultIdentifier();
     if (NeedsLocal(identifier) && OriginalContainer) {
-        return Construct(identifier, ^{ return OriginalContainer(cls, @selector(containerWithIdentifier:), identifier); });
+        return Construct(identifier, nil, ^{ return OriginalContainer(cls, @selector(containerWithIdentifier:), identifier); });
     }
     return OriginalDefault(cls, selector);
 }
 static id Init(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier) __attribute__((ns_returns_retained));
 static id Init(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier) {
-    return Construct(identifier, ^{ return OriginalInit(self, selector, identifier); });
+    return Construct(identifier, self, ^{ return OriginalInit(self, selector, identifier); });
 }
 static id PublicInit(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier) __attribute__((ns_returns_retained));
 static id PublicInit(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier) {
-    return Construct(identifier, ^{ return OriginalPublicInit(self, selector, identifier); });
+    return Construct(identifier, self, ^{ return OriginalPublicInit(self, selector, identifier); });
 }
 static id EnvironmentInit(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier, NSInteger environment) __attribute__((ns_returns_retained));
 static id EnvironmentInit(id self __attribute__((ns_consumed)), SEL selector, NSString *identifier, NSInteger environment) {
-    return Construct(identifier, ^{ return OriginalEnvironmentInit(self, selector, identifier, environment); });
+    return Construct(identifier, self, ^{ return OriginalEnvironmentInit(self, selector, identifier, environment); });
 }
 static id OptionsInit(id self __attribute__((ns_consumed)), SEL selector, id containerID, id options) __attribute__((ns_returns_retained));
 static id OptionsInit(id self __attribute__((ns_consumed)), SEL selector, id containerID, id options) {
-    return Construct(Object(containerID, @"containerIdentifier"), ^{ return OriginalOptionsInit(self, selector, containerID, options); });
+    return Construct(Object(containerID, @"containerIdentifier"), self, ^{ return OriginalOptionsInit(self, selector, containerID, options); });
+}
+
+static NSString *LocalIdentifier(id containerOrDatabase) {
+    return objc_getAssociatedObject(containerOrDatabase, &LocalIdentifierKey);
+}
+
+static NSString *ReceiverIdentifier(id receiver) {
+    // An initializer may ask its own instance for entitlements/databases before
+    // Construct has returned and tagged it. Preserve that exact receiver's
+    // construction scope, without lending it to another container on the thread.
+    return LocalIdentifier(receiver) ?: (receiver && receiver == ConstructingLocalReceiver ? ConstructingLocalIdentifier : nil);
 }
 
 static id EntitlementsInit(id self __attribute__((ns_consumed)), SEL selector, NSDictionary *values) __attribute__((ns_returns_retained));
@@ -265,8 +266,7 @@ static id Entitlement(id cls, SEL selector, NSString *key) {
 }
 static id ContainerEntitlement(id self, SEL selector, NSString *key) {
     NSString *previous = ConstructingLocalIdentifier;
-    NSString *identifier = objc_getAssociatedObject(self, &LocalIdentifierKey);
-    if (identifier) ConstructingLocalIdentifier = identifier;
+    ConstructingLocalIdentifier = ReceiverIdentifier(self);
     @try {
         if (ConstructingLocalIdentifier) {
             id value = ConstructionEntitlements(SignedEntitlements())[key];
@@ -292,12 +292,9 @@ static id EntitlementGetter(id self, SEL selector) {
     return nil;
 }
 
-static NSString *LocalIdentifier(id containerOrDatabase) {
-    return objc_getAssociatedObject(containerOrDatabase, &LocalIdentifierKey);
-}
 static id Database(id container, SEL selector, ObjectGetter original) {
-    NSString *identifier = LocalIdentifier(container), *previous = ConstructingLocalIdentifier;
-    if (identifier) ConstructingLocalIdentifier = identifier;
+    NSString *identifier = ReceiverIdentifier(container), *previous = ConstructingLocalIdentifier;
+    ConstructingLocalIdentifier = identifier;
     @try {
         id database = original(container, selector);
         if (identifier && database) objc_setAssociatedObject(database, &LocalIdentifierKey, identifier, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -308,8 +305,8 @@ static id PrivateDatabase(id self, SEL selector) { return Database(self, selecto
 static id PublicDatabase(id self, SEL selector) { return Database(self, selector, OriginalPublicDatabase); }
 static id SharedDatabase(id self, SEL selector) { return Database(self, selector, OriginalSharedDatabase); }
 static id DatabaseScope(id self, SEL selector, NSInteger scope) {
-    NSString *identifier = LocalIdentifier(self), *previous = ConstructingLocalIdentifier;
-    if (identifier) ConstructingLocalIdentifier = identifier;
+    NSString *identifier = ReceiverIdentifier(self), *previous = ConstructingLocalIdentifier;
+    ConstructingLocalIdentifier = identifier;
     @try {
         id database = OriginalDatabaseScope(self, selector, scope);
         if (identifier && database) objc_setAssociatedObject(database, &LocalIdentifierKey, identifier, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -332,10 +329,8 @@ static void UserRecord(id self, SEL selector, void (^completion)(id, NSError *))
 }
 static void Operation(id self, SEL selector, NSOperation *operation, OperationMethod original) {
     NSString *identifier = LocalIdentifier(self), *previous = ConstructingLocalIdentifier;
-    if (identifier) {
-        [operation cancel];
-        ConstructingLocalIdentifier = identifier;
-    }
+    if (identifier) [operation cancel];
+    ConstructingLocalIdentifier = identifier;
     @try {
         // Let CloudKit own queuing, cancellation and completion delivery. Simply
         // dropping the operation leaves Swift continuations suspended forever.
@@ -377,16 +372,8 @@ static void LoadStoreDescriptions(NSPersistentCloudKitContainer *self, SEL selec
 
 static void InstallStoreDescriptionsHook(void) {
     Class cls = NSPersistentCloudKitContainer.class;
-    NSString *name = @"_loadStoreDescriptions:withCompletionHandler:";
-    Method method = class_getInstanceMethod(cls, NSSelectorFromString(name));
-    if (!method || method_getNumberOfArguments(method) != 4) return;
-    // In addition to Hook's return/count checks, require an object array and
-    // block argument. Leave SDKs with a different private ABI untouched.
-    char descriptionsType[16] = {0}, completionType[16] = {0};
-    method_getArgumentType(method, 2, descriptionsType, sizeof(descriptionsType));
-    method_getArgumentType(method, 3, completionType, sizeof(completionType));
-    if (strcmp(descriptionsType, "@") || strcmp(completionType, "@?")) return;
-    Hook(cls, name, (IMP)LoadStoreDescriptions, (IMP *)&OriginalLoadStoreDescriptions, 'v', 4);
+    AsignHookMethod(cls, NSSelectorFromString(@"_loadStoreDescriptions:withCompletionHandler:"),
+                    (IMP)LoadStoreDescriptions, (IMP *)&OriginalLoadStoreDescriptions, "v", "@", "@?");
 }
 
 void AsignInstallCloudKitPatch(void) {
@@ -397,36 +384,36 @@ void AsignInstallCloudKitPatch(void) {
     dispatch_once(&once, ^{
         Class container = NSClassFromString(@"CKContainer"), meta = object_getClass(container);
         Class entitlements = NSClassFromString(@"CKEntitlements"), database = NSClassFromString(@"CKDatabase");
-#define INSTALL(cls, name, replacement, original, type, argc) \
-        Hook(cls, @name, (IMP)replacement, (IMP *)&original, type, argc)
-        INSTALL(meta, "containerWithIdentifier:", Container, OriginalContainer, '@', 3);
-        INSTALL(meta, "defaultContainer", DefaultContainer, OriginalDefault, '@', 2);
-        INSTALL(container, "_initWithContainerIdentifier:", Init, OriginalInit, '@', 3);
-        INSTALL(container, "initWithContainerIdentifier:", PublicInit, OriginalPublicInit, '@', 3);
-        INSTALL(container, "_initWithContainerIdentifier:environment:", EnvironmentInit, OriginalEnvironmentInit, '@', 4);
-        INSTALL(container, "initWithContainerID:options:", OptionsInit, OriginalOptionsInit, '@', 4);
-        INSTALL(entitlements, "initWithEntitlementsDict:", EntitlementsInit, OriginalEntitlementsInit, '@', 3);
-        INSTALL(meta, "_checkSelfCloudServicesEntitlement", CheckServices, OriginalCheckServices, 'v', 2);
-        INSTALL(meta, "_checkSelfContainerIdentifier", CheckDefaultIdentifier, OriginalDefaultIdentifier, '@', 2);
-        INSTALL(meta, "_untrustedEntitlementForKey:", Entitlement, OriginalEntitlement, '@', 3);
-        INSTALL(container, "_untrustedContainerEntitlementsForKey:", ContainerEntitlement, OriginalContainerEntitlement, '@', 3);
-        INSTALL(container, "privateCloudDatabase", PrivateDatabase, OriginalPrivateDatabase, '@', 2);
-        INSTALL(container, "publicCloudDatabase", PublicDatabase, OriginalPublicDatabase, '@', 2);
-        INSTALL(container, "sharedCloudDatabase", SharedDatabase, OriginalSharedDatabase, '@', 2);
-        INSTALL(container, "databaseWithDatabaseScope:", DatabaseScope, OriginalDatabaseScope, '@', 3);
-        INSTALL(container, "accountStatusWithCompletionHandler:", AccountStatus, OriginalAccountStatus, 'v', 3);
-        INSTALL(container, "fetchUserRecordIDWithCompletionHandler:", UserRecord, OriginalUserRecord, 'v', 3);
-        INSTALL(container, "addOperation:", ContainerOperation, OriginalContainerOperation, 'v', 3);
-        INSTALL(container, "_scheduleConvenienceOperation:", ContainerConvenience, OriginalContainerConvenience, 'v', 3);
-        INSTALL(database, "addOperation:", DatabaseOperation, OriginalDatabaseOperation, 'v', 3);
-        INSTALL(database, "_scheduleConvenienceOperation:", DatabaseConvenience, OriginalDatabaseConvenience, 'v', 3);
+#define INSTALL(cls, name, replacement, original, type, first, second) \
+        AsignHookMethod(cls, NSSelectorFromString(@name), (IMP)replacement, (IMP *)&original, type, first, second)
+        INSTALL(meta, "containerWithIdentifier:", Container, OriginalContainer, "@", "@", NULL);
+        INSTALL(meta, "defaultContainer", DefaultContainer, OriginalDefault, "@", NULL, NULL);
+        INSTALL(container, "_initWithContainerIdentifier:", Init, OriginalInit, "@", "@", NULL);
+        INSTALL(container, "initWithContainerIdentifier:", PublicInit, OriginalPublicInit, "@", "@", NULL);
+        INSTALL(container, "_initWithContainerIdentifier:environment:", EnvironmentInit, OriginalEnvironmentInit, "@", "@", @encode(NSInteger));
+        INSTALL(container, "initWithContainerID:options:", OptionsInit, OriginalOptionsInit, "@", "@", "@");
+        INSTALL(entitlements, "initWithEntitlementsDict:", EntitlementsInit, OriginalEntitlementsInit, "@", "@", NULL);
+        INSTALL(meta, "_checkSelfCloudServicesEntitlement", CheckServices, OriginalCheckServices, "v", NULL, NULL);
+        INSTALL(meta, "_checkSelfContainerIdentifier", CheckDefaultIdentifier, OriginalDefaultIdentifier, "@", NULL, NULL);
+        INSTALL(meta, "_untrustedEntitlementForKey:", Entitlement, OriginalEntitlement, "@", "@", NULL);
+        INSTALL(container, "_untrustedContainerEntitlementsForKey:", ContainerEntitlement, OriginalContainerEntitlement, "@", "@", NULL);
+        INSTALL(container, "privateCloudDatabase", PrivateDatabase, OriginalPrivateDatabase, "@", NULL, NULL);
+        INSTALL(container, "publicCloudDatabase", PublicDatabase, OriginalPublicDatabase, "@", NULL, NULL);
+        INSTALL(container, "sharedCloudDatabase", SharedDatabase, OriginalSharedDatabase, "@", NULL, NULL);
+        INSTALL(container, "databaseWithDatabaseScope:", DatabaseScope, OriginalDatabaseScope, "@", @encode(NSInteger), NULL);
+        INSTALL(container, "accountStatusWithCompletionHandler:", AccountStatus, OriginalAccountStatus, "v", "@?", NULL);
+        INSTALL(container, "fetchUserRecordIDWithCompletionHandler:", UserRecord, OriginalUserRecord, "v", "@?", NULL);
+        INSTALL(container, "addOperation:", ContainerOperation, OriginalContainerOperation, "v", "@", NULL);
+        INSTALL(container, "_scheduleConvenienceOperation:", ContainerConvenience, OriginalContainerConvenience, "v", "@", NULL);
+        INSTALL(database, "addOperation:", DatabaseOperation, OriginalDatabaseOperation, "v", "@", NULL);
+        INSTALL(database, "_scheduleConvenienceOperation:", DatabaseConvenience, OriginalDatabaseConvenience, "v", "@", NULL);
         INSTALL(NSPersistentCloudKitContainer.class, "loadPersistentStoresWithCompletionHandler:",
-                LoadPersistentStores, OriginalLoadPersistentStores, 'v', 3);
+                LoadPersistentStores, OriginalLoadPersistentStores, "v", "@?", NULL);
         InstallStoreDescriptionsHook();
 #undef INSTALL
         for (size_t i = 0; i < sizeof(EntitlementGetters) / sizeof(EntitlementGetters[0]); ++i) {
-            Hook(entitlements, @(EntitlementGetters[i].name), (IMP)EntitlementGetter,
-                 (IMP *)&EntitlementGetters[i].original, '@', 2);
+            AsignHookMethod(entitlements, sel_registerName(EntitlementGetters[i].name), (IMP)EntitlementGetter,
+                            (IMP *)&EntitlementGetters[i].original, "@", NULL, NULL);
         }
     });
 }

@@ -9,6 +9,7 @@
 #import "DyldPatch.h"
 #import "PatchPolicy.h"
 #import "PatchOptions.h"
+#import "MethodHook.h"
 
 // Written to each app/extension Info.plist before zsign changes its identity.
 static NSString *const OriginalKey = @"AsignOriginalBundleIdentifier";
@@ -62,7 +63,10 @@ static NSString *OriginalIdentifier(NSDictionary *info) {
 // Associate one immutable view with the real dictionary rather than handing
 // back a temporary copy or modifying Foundation's actual signing metadata.
 static NSDictionary *IdentityView(NSDictionary *info, NSString *identifier) {
-    if (!info || !identifier || [info[@"CFBundleIdentifier"] isEqual:identifier]) return info;
+    id native = info[@"CFBundleIdentifier"];
+    // Localized dictionaries often contain only display strings. Preserve a
+    // missing key instead of inventing an identifier in an otherwise valid view.
+    if (!identifier || ![native isKindOfClass:NSString.class] || [native isEqual:identifier]) return info;
     @synchronized (info) {
         NSMutableDictionary *views = objc_getAssociatedObject(info, &ViewKey);
         if (!views) {
@@ -221,9 +225,19 @@ static CFBundleRef IdentityCFBundleGetBundleWithIdentifier(CFStringRef identifie
     return NULL;
 }
 
+static BOOL IdentityMethodsCompatible(void) {
+    Class cls = NSBundle.class;
+    return AsignMethodMatches(class_getInstanceMethod(cls, @selector(infoDictionary)), "@", NULL, NULL) &&
+        AsignMethodMatches(class_getInstanceMethod(cls, @selector(localizedInfoDictionary)), "@", NULL, NULL) &&
+        AsignMethodMatches(class_getInstanceMethod(cls, @selector(bundleIdentifier)), "@", NULL, NULL) &&
+        AsignMethodMatches(class_getInstanceMethod(cls, @selector(objectForInfoDictionaryKey:)), "@", "@", NULL) &&
+        AsignMethodMatches(class_getClassMethod(cls, @selector(bundleWithIdentifier:)), "@", "@", NULL);
+}
+
 static void InstallIdentityPatch(void) {
     BOOL identityNeeded = AsignPatchEnabled(AsignPatchIdentity) &&
-        OriginalIdentifier((__bridge NSDictionary *)CFBundleGetInfoDictionary(CFBundleGetMainBundle())) != nil;
+        OriginalIdentifier((__bridge NSDictionary *)CFBundleGetInfoDictionary(CFBundleGetMainBundle())) != nil &&
+        IdentityMethodsCompatible();
     if (identityNeeded) {
         Class cls = NSBundle.class;
         Method info = class_getInstanceMethod(cls, @selector(infoDictionary));
