@@ -25,7 +25,8 @@ struct FeatherApp: App {
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @AppStorage("Feather.userInterfaceStyle") private var userInterfaceStyle = 0
     @StateObject var extractManager = ExtractManager.shared
-	@StateObject var logsManager = LogsManager.shared
+	// LogsView observes log batches; capture does not need scene-wide updates.
+	private let logsManager = LogsManager.shared
 	let storage = Storage.shared
 
 	var body: some Scene {

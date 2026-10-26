@@ -354,8 +354,8 @@ extension BulkSigningView {
             // Duplicate inputs retain serial behavior, including remove-after-sign.
             let unique = identities.count == configs.count && Set(identities).count == identities.count && Set(sources).count == sources.count
             // Workers wait on one process-wide memory governor. It ramps actual
-            // admissions every 250 ms when stable, up to five live operations.
-            let width = min(unique ? ArchiveMemoryCoordinator.admissionCeiling : 1, configs.count)
+            // admissions every 250 ms when stable, up to three live signers.
+            let width = min(unique ? ArchiveMemoryCoordinator.signingAdmissionCeiling : 1, configs.count)
             var completedIDs: [Int: String] = [:]
             var indexedFailures: [Int: (String, Error)] = [:]
             await withTaskGroup(of: (Int, Result<String, Error>).self) { group in

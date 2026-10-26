@@ -38,6 +38,7 @@ struct ArchiveWorkload: Sendable {
 final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	static let shared = ArchiveMemoryCoordinator()
 	static let admissionCeiling = 5
+	static let signingAdmissionCeiling = 3
 
 	struct Lease: Sendable { fileprivate let id: UUID }
 	private struct Snapshot {
@@ -337,7 +338,8 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		else if let source = request.source, active.values.contains(where: { $0.request.source == source }) {
 			reason = "signing source already in use"
 		}
-		else if active.count >= ceiling { reason = "signing concurrency ceiling" }
+		else if signing.count >= Self.signingAdmissionCeiling { reason = "signing concurrency ceiling" }
+		else if active.count >= ceiling { reason = "operation concurrency ceiling" }
 		else if !active.isEmpty && (!stable || now - lastSigningAdmission < 0.25) { reason = "observing signing ramp" }
 		else if !active.isEmpty && (!request.workload.complete || signing.contains { !$0.request.workload.complete }) {
 			reason = "unknown signing workload requires isolation"
@@ -469,7 +471,7 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 	private func mb(_ bytes: Double) -> Int { Int(bytes / 1_048_576) }
 	private func log(_ reason: String, id: UUID? = nil, snapshot: Snapshot?, candidate: Double = 0, job: UUID? = nil) {
 		let jobID = job ?? id.flatMap { active[$0]?.request.job }
-		let message = "Archive gate \(reason); job=\(jobID?.uuidString ?? "-") attempt=\(id?.uuidString ?? "-") builds=\(buildCount) operations=\(active.count) signers=\(active.values.filter { $0.request.workload.operation == .signing }.count)/\(ceiling) archiveLimit=\(concurrency) queued=\(waiting.count) footprint=\(snapshot.map { mb($0.footprint) } ?? -1) available=\(snapshot.map { mb($0.available) } ?? -1) budget=\(snapshot.map { mb($0.budget) } ?? -1) candidate=\(mb(candidate)) learnedIsolated=\(mb(learnedIsolatedPeak)) observedPeak=\(mb(observedPeak)) reservations=\(mb(reservations)) reserve=\(snapshot.map { mb(reserve($0)) } ?? -1) pressure=\(pressure) recovering=\(now < recoveryUntil) [MiB]"
+		let message = "Archive gate \(reason); job=\(jobID?.uuidString ?? "-") attempt=\(id?.uuidString ?? "-") builds=\(buildCount) operations=\(active.count) signers=\(active.values.filter { $0.request.workload.operation == .signing }.count)/\(Self.signingAdmissionCeiling) archiveLimit=\(concurrency) queued=\(waiting.count) footprint=\(snapshot.map { mb($0.footprint) } ?? -1) available=\(snapshot.map { mb($0.available) } ?? -1) budget=\(snapshot.map { mb($0.budget) } ?? -1) candidate=\(mb(candidate)) learnedIsolated=\(mb(learnedIsolatedPeak)) observedPeak=\(mb(observedPeak)) reservations=\(mb(reservations)) reserve=\(snapshot.map { mb(reserve($0)) } ?? -1) pressure=\(pressure) recovering=\(now < recoveryUntil) [MiB]"
 		Logger.misc.info("\(message, privacy: .public)")
 	}
 
