@@ -7,6 +7,8 @@
 #import "CompatibilityPatch.h"
 #import "CloudKitPatch.h"
 #import "DyldPatch.h"
+#import "PatchPolicy.h"
+#import "PatchOptions.h"
 
 // Written to each app/extension Info.plist before zsign changes its identity.
 static NSString *const OriginalKey = @"AsignOriginalBundleIdentifier";
@@ -29,13 +31,9 @@ static AssetManagerGetter GetAssetManager;
 
 static BOOL NeedsInstalledIdentity(void *caller) {
     if (InstalledIdentityRequested) return YES;
-    Dl_info image;
-    if (!dladdr(caller, &image) || !image.dli_fname) return NO;
-    // Also cover later SDK work outside the initial shared-manager lookup.
-    // Include the system directory so an embedded framework with a similar
-    // name cannot change the identity view for app-owned code.
-    return strstr(image.dli_fname, "/System/Library/Frameworks/BackgroundAssets.framework/") ||
-        strstr(image.dli_fname, "/System/Library/PrivateFrameworks/ManagedBackgroundAssetsHelper.framework/");
+    // A process-wide NSBundle swizzle must still preserve the native identity
+    // for system callers, including calls made through Foundation helpers.
+    return !AsignPatchCallerIsApp(caller);
 }
 
 // Restore the prior view for nested calls and Objective-C exceptions. Keep
@@ -55,7 +53,9 @@ static void *__attribute__((swiftcall)) AssetManager(void *metadata __attribute_
 
 static NSString *OriginalIdentifier(NSDictionary *info) {
     id value = info[OriginalKey];
-    return [value isKindOfClass:NSString.class] && [value length] ? value : nil;
+    id installed = info[@"CFBundleIdentifier"];
+    return [value isKindOfClass:NSString.class] && [value length] &&
+        [installed isKindOfClass:NSString.class] && ![value isEqual:installed] ? value : nil;
 }
 
 // CF's Get APIs require a borrowed result that remains alive after returning.
@@ -144,21 +144,33 @@ static NSString *CFOriginalIdentifier(CFBundleRef bundle) {
 }
 
 static CFStringRef IdentityCFBundleGetIdentifier(CFBundleRef bundle) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleGetIdentifier(bundle));
+    }
     NSString *identifier = CFOriginalIdentifier(bundle);
     return identifier ? (__bridge CFStringRef)identifier : CFBundleGetIdentifier(bundle);
 }
 
 static CFDictionaryRef IdentityCFBundleGetInfoDictionary(CFBundleRef bundle) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleGetInfoDictionary(bundle));
+    }
     NSDictionary *info = (__bridge NSDictionary *)CFBundleGetInfoDictionary(bundle);
     return (__bridge CFDictionaryRef)IdentityView(info, OriginalIdentifier(info));
 }
 
 static CFDictionaryRef IdentityCFBundleGetLocalInfoDictionary(CFBundleRef bundle) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleGetLocalInfoDictionary(bundle));
+    }
     NSDictionary *info = (__bridge NSDictionary *)CFBundleGetLocalInfoDictionary(bundle);
     return (__bridge CFDictionaryRef)IdentityView(info, CFOriginalIdentifier(bundle));
 }
 
 static CFTypeRef IdentityCFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleGetValueForInfoDictionaryKey(bundle, key));
+    }
     if (key && CFEqual(key, CFSTR("CFBundleIdentifier"))) {
         NSString *identifier = CFOriginalIdentifier(bundle);
         if (identifier) return (__bridge CFStringRef)identifier;
@@ -178,15 +190,24 @@ static CFDictionaryRef CopyIdentityView(CFDictionaryRef info) {
 
 static CFDictionaryRef IdentityCFBundleCopyInfoDictionaryForURL(CFURLRef url) CF_RETURNS_RETAINED;
 static CFDictionaryRef IdentityCFBundleCopyInfoDictionaryForURL(CFURLRef url) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleCopyInfoDictionaryForURL(url));
+    }
     return CopyIdentityView(CFBundleCopyInfoDictionaryForURL(url));
 }
 
 static CFDictionaryRef IdentityCFBundleCopyInfoDictionaryInDirectory(CFURLRef url) CF_RETURNS_RETAINED;
 static CFDictionaryRef IdentityCFBundleCopyInfoDictionaryInDirectory(CFURLRef url) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleCopyInfoDictionaryInDirectory(url));
+    }
     return CopyIdentityView(CFBundleCopyInfoDictionaryInDirectory(url));
 }
 
 static CFBundleRef IdentityCFBundleGetBundleWithIdentifier(CFStringRef identifier) {
+    if (NeedsInstalledIdentity(__builtin_return_address(0))) {
+        RETURN_INSTALLED_IDENTITY(CFBundleGetBundleWithIdentifier(identifier));
+    }
     CFBundleRef found = CFBundleGetBundleWithIdentifier(identifier);
     if (found || !identifier) return found;
     NSString *requested = (__bridge NSString *)identifier;
@@ -201,55 +222,64 @@ static CFBundleRef IdentityCFBundleGetBundleWithIdentifier(CFStringRef identifie
 }
 
 static void InstallIdentityPatch(void) {
-    Class cls = NSBundle.class;
-    Method info = class_getInstanceMethod(cls, @selector(infoDictionary));
-    Method localized = class_getInstanceMethod(cls, @selector(localizedInfoDictionary));
-    Method identifier = class_getInstanceMethod(cls, @selector(bundleIdentifier));
-    Method value = class_getInstanceMethod(cls, @selector(objectForInfoDictionaryKey:));
-    Method find = class_getClassMethod(cls, @selector(bundleWithIdentifier:));
-    GetInfo = (void *)method_getImplementation(info);
-    GetLocalizedInfo = (void *)method_getImplementation(localized);
-    GetIdentifier = (void *)method_getImplementation(identifier);
-    GetValue = (void *)method_getImplementation(value);
-    FindBundle = (void *)method_getImplementation(find);
-    method_setImplementation(info, (IMP)BundleInfo);
-    method_setImplementation(localized, (IMP)BundleLocalizedInfo);
-    method_setImplementation(identifier, (IMP)BundleIdentifier);
-    method_setImplementation(value, (IMP)BundleValue);
-    method_setImplementation(find, (IMP)BundleForIdentifier);
+    BOOL identityNeeded = AsignPatchEnabled(AsignPatchIdentity) &&
+        OriginalIdentifier((__bridge NSDictionary *)CFBundleGetInfoDictionary(CFBundleGetMainBundle())) != nil;
+    if (identityNeeded) {
+        Class cls = NSBundle.class;
+        Method info = class_getInstanceMethod(cls, @selector(infoDictionary));
+        Method localized = class_getInstanceMethod(cls, @selector(localizedInfoDictionary));
+        Method identifier = class_getInstanceMethod(cls, @selector(bundleIdentifier));
+        Method value = class_getInstanceMethod(cls, @selector(objectForInfoDictionaryKey:));
+        Method find = class_getClassMethod(cls, @selector(bundleWithIdentifier:));
+        GetInfo = (void *)method_getImplementation(info);
+        GetLocalizedInfo = (void *)method_getImplementation(localized);
+        GetIdentifier = (void *)method_getImplementation(identifier);
+        GetValue = (void *)method_getImplementation(value);
+        FindBundle = (void *)method_getImplementation(find);
+        method_setImplementation(info, (IMP)BundleInfo);
+        method_setImplementation(localized, (IMP)BundleLocalizedInfo);
+        method_setImplementation(identifier, (IMP)BundleIdentifier);
+        method_setImplementation(value, (IMP)BundleValue);
+        method_setImplementation(find, (IMP)BundleForIdentifier);
+    }
 
-    // Our own imports retain the real implementations. Identity is scoped to
-    // app code; Security keeps the legacy patch's process-wide import coverage.
-#define BIND(name) { #name, (void *)name, (void *)Identity##name, 0 }
-    static AsignIdentityBinding bindings[] = {
-        BIND(CFBundleGetIdentifier), BIND(CFBundleGetInfoDictionary),
-        BIND(CFBundleGetLocalInfoDictionary), BIND(CFBundleGetValueForInfoDictionaryKey),
-        BIND(CFBundleCopyInfoDictionaryForURL), BIND(CFBundleCopyInfoDictionaryInDirectory),
-        BIND(CFBundleGetBundleWithIdentifier),
-        { "SecItemAdd", (void *)SecItemAdd, (void *)AsignSecItemAdd, 1 },
-        { "SecItemCopyMatching", (void *)SecItemCopyMatching, (void *)AsignSecItemCopyMatching, 1 },
-        { "SecItemUpdate", (void *)SecItemUpdate, (void *)AsignSecItemUpdate, 1 },
-        { "SecItemDelete", (void *)SecItemDelete, (void *)AsignSecItemDelete, 1 },
-        { NULL, NULL, NULL, 0 },
-        { NULL, NULL, NULL, 0 },
-        { NULL, NULL, NULL, 0 }
-    };
+    // All imports are scoped to embedded app code, excluding this library.
+    // Never rewrite Security imports in Apple's frameworks.
+    static AsignIdentityBinding bindings[14];
+    size_t count = 0;
+#define BIND(name) bindings[count++] = (AsignIdentityBinding){ #name, (void *)name, (void *)Identity##name, 0 }
+    if (identityNeeded) {
+        BIND(CFBundleGetIdentifier); BIND(CFBundleGetInfoDictionary);
+        BIND(CFBundleGetLocalInfoDictionary); BIND(CFBundleGetValueForInfoDictionaryKey);
+        BIND(CFBundleCopyInfoDictionaryForURL); BIND(CFBundleCopyInfoDictionaryInDirectory);
+        BIND(CFBundleGetBundleWithIdentifier);
+    }
 #undef BIND
+    if (AsignPatchEnabled(AsignPatchKeychain) && AsignNeedsKeychainPatch()) {
+#define SECURITY(name) bindings[count++] = (AsignIdentityBinding){ #name, (void *)name, (void *)Asign##name, 0 }
+        SECURITY(SecItemAdd); SECURITY(SecItemCopyMatching); SECURITY(SecItemUpdate); SECURITY(SecItemDelete);
+#undef SECURITY
+    }
     NSURL *scope = NSBundle.mainBundle.bundleURL;
     for (NSURL *parent = scope; parent.path.length > 1; parent = parent.URLByDeletingLastPathComponent) {
         if ([parent.pathExtension isEqualToString:@"app"]) { scope = parent; break; }
     }
-    size_t count = sizeof(bindings) / sizeof(bindings[0]) - 3;
-    AsignIdentityBinding dyld = AsignDyldTaskInfoBinding();
-    if (dyld.original) bindings[count++] = dyld;
-    AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
-    if (automatic.original) bindings[count++] = automatic;
-    const char *assetManager = "$s16BackgroundAssets16AssetPackManagerC6sharedACvgZ";
-    GetAssetManager = dlsym(RTLD_DEFAULT, assetManager);
-    if (GetAssetManager) {
-        bindings[count++] = (AsignIdentityBinding){assetManager, (void *)GetAssetManager, (void *)AssetManager, 0};
+    if (AsignPatchEnabled(AsignPatchModuleTrace)) {
+        AsignIdentityBinding dyld = AsignDyldTaskInfoBinding();
+        if (dyld.original) bindings[count++] = dyld;
     }
-    AsignIdentityRebind(bindings, count, scope.path.fileSystemRepresentation);
+    if (AsignPatchEnabled(AsignPatchCloudKit)) {
+        AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
+        if (automatic.original) bindings[count++] = automatic;
+    }
+    if (identityNeeded && AsignPatchEnabled(AsignPatchBackgroundAssets)) {
+        const char *assetManager = "$s16BackgroundAssets16AssetPackManagerC6sharedACvgZ";
+        GetAssetManager = dlsym(RTLD_DEFAULT, assetManager);
+        if (GetAssetManager) {
+            bindings[count++] = (AsignIdentityBinding){assetManager, (void *)GetAssetManager, (void *)AssetManager, 0};
+        }
+    }
+    if (count) AsignIdentityRebind(bindings, count, scope.path.fileSystemRepresentation);
 }
 
 // +load runs before app initializers; waiting for a later lifecycle callback
@@ -259,6 +289,7 @@ static void InstallIdentityPatch(void) {
 @implementation AsignOriginalIdentityLoader
 + (void)load {
     @autoreleasepool {
+        AsignInitializePatchPolicy();
         AsignInstallCompatibilityPatch();
         InstallIdentityPatch();
     }

@@ -16,6 +16,9 @@ enum IPAPatcher {
     static let originalIdentifierKey = "AsignOriginalBundleIdentifier"
     static let originalCloudEntitlementKeys = "AsignOriginalCloudEntitlementKeys"
     static let originalCloudContainerIdentifiers = "AsignOriginalCloudContainerIdentifiers"
+    static let originalAppGroupIdentifiers = "AsignOriginalAppGroupIdentifiers"
+    static let originalKeychainAccessGroups = "AsignOriginalKeychainAccessGroups"
+    static let preserveLegacyGroupDirectories = "AsignPreserveLegacyGroupDirectories"
 
     struct Target {
         let executable: URL
@@ -93,6 +96,26 @@ enum IPAPatcher {
         return policy
     }
 
+    /// Capture before tweaks can replace the original seal. Never infer new
+    /// original groups from a previously patched app's current signature.
+    static func compatibilitySnapshots(in app: URL) -> [String: OriginalCloudEntitlements.Snapshot] {
+        let root = app.resolvingSymlinksInPath().standardizedFileURL
+        guard let targets = try? Self.targets(in: root) else { return [:] }
+        var snapshots: [String: OriginalCloudEntitlements.Snapshot] = [:]
+        for target in targets {
+            guard let data = try? Data(contentsOf: target.infoPlist),
+                  let info = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any],
+                  info[originalIdentifierKey] == nil, info[originalCloudEntitlementKeys] == nil else { continue }
+            var error = [CChar](repeating: 0, count: 512)
+            let errorSize = error.count
+            guard KsignIPAFileHasPatchLibrary(target.executable.path, libraryName, &error, errorSize) == 0,
+                  KsignIPAFileHasLegacyPatchLibrary(target.executable.path, &error, errorSize) == 0,
+                  let snapshot = try? OriginalCloudEntitlements.snapshot(target.executable) else { continue }
+            snapshots[String(target.executable.path.dropFirst(root.path.count + 1))] = snapshot
+        }
+        return snapshots
+    }
+
     static func targets(in app: URL) throws -> [Target] {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
@@ -145,11 +168,13 @@ enum IPAPatcher {
     static func apply(to app: URL,
                       library: URL? = Bundle.main.url(forResource: "asignpatch.dylib", withExtension: "bin"),
                       originalRootIdentifier: String? = nil,
+                      originalSnapshots: [String: OriginalCloudEntitlements.Snapshot]? = nil,
                       didRemoveLibrary: ((String) -> Void)? = nil,
                       replace: ((URL, URL) throws -> Void)? = nil) throws -> [String: [String]] {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL
         let targets = try Self.targets(in: root)
+        let snapshots = originalSnapshots ?? compatibilitySnapshots(in: root)
         struct Library {
             let name: String
             let source: URL?
@@ -158,6 +183,7 @@ enum IPAPatcher {
         let libraries = [Library(name: libraryName, source: library,
                                  destination: root.appendingPathComponent(libraryRelativePath))]
         var injections: [URL: [Library]] = [:]
+        var previouslyPatched = Set<URL>()
         for target in targets {
             for patch in libraries {
                 var error = [CChar](repeating: 0, count: 512)
@@ -169,6 +195,7 @@ enum IPAPatcher {
                 }
                 let legacy = KsignIPAFileHasLegacyPatchLibrary(target.executable.path, &error, errorSize)
                 guard legacy >= 0 else { throw Failure(detail: String(cString: error)) }
+                if result == 1 || legacy == 1 { previouslyPatched.insert(target.executable) }
                 if result == 0 || legacy == 1 { injections[target.executable, default: []].append(patch) }
             }
         }
@@ -227,14 +254,29 @@ enum IPAPatcher {
             let captured = isRootPlist ? originalRootIdentifier : nil
             guard let identifier = (info[originalIdentifierKey] as? String) ?? captured ?? (info["CFBundleIdentifier"] as? String),
                   !identifier.isEmpty else { throw Failure(detail: "Cannot determine the original bundle identifier.") }
+            let relative = String(target.executable.path.dropFirst(root.path.count + 1))
             var metadataChanged = info[originalIdentifierKey] as? String != identifier
+            if info[preserveLegacyGroupDirectories] == nil {
+                // Older patch inputs used blanket group redirection. Record
+                // that evidence before adding the new capability snapshots.
+                info[preserveLegacyGroupDirectories] = previouslyPatched.contains(target.executable) &&
+                    info[originalAppGroupIdentifiers] == nil && snapshots[relative] == nil
+                metadataChanged = true
+            }
             info[originalIdentifierKey] = identifier
             // Capture before injecting or re-signing, and keep the first
             // snapshot when this app is signed again with another profile.
-            if info[originalCloudEntitlementKeys] == nil,
-               let snapshot = try OriginalCloudEntitlements.snapshot(target.executable) {
+            if info[originalCloudEntitlementKeys] == nil, let snapshot = snapshots[relative] {
                 info[originalCloudEntitlementKeys] = snapshot.keys
                 info[originalCloudContainerIdentifiers] = snapshot.containers
+                metadataChanged = true
+            }
+            if info[originalAppGroupIdentifiers] == nil, let groups = snapshots[relative]?.appGroups {
+                info[originalAppGroupIdentifiers] = groups
+                metadataChanged = true
+            }
+            if info[originalKeychainAccessGroups] == nil, let groups = snapshots[relative]?.keychainGroups {
+                info[originalKeychainAccessGroups] = groups
                 metadataChanged = true
             }
             if let keys = info[originalCloudEntitlementKeys] as? [String],
@@ -372,6 +414,9 @@ enum OriginalCloudEntitlements {
     struct Snapshot: Equatable {
         let keys: [String]
         let containers: [String]
+        // nil is unknown/malformed; [] is a known empty capability list.
+        var appGroups: [String]? = []
+        var keychainGroups: [String]? = []
     }
 
     static func read(_ url: URL) throws -> [String]? { try snapshot(url)?.keys }
@@ -442,8 +487,13 @@ enum OriginalCloudEntitlements {
                 snapshots.append(Snapshot(keys: [], containers: []))
             }
         }
-        guard let first = snapshots.first, snapshots.allSatisfy({ $0 == first }) else { return nil }
-        return first
+        guard let first = snapshots.first,
+              snapshots.allSatisfy({ $0.keys == first.keys && $0.containers == first.containers }) else { return nil }
+        // A disagreement about groups must not erase an otherwise conclusive
+        // cloud signing policy. Each capability family has its own evidence.
+        return Snapshot(keys: first.keys, containers: first.containers,
+                        appGroups: snapshots.allSatisfy({ $0.appGroups == first.appGroups }) ? first.appGroups : nil,
+                        keychainGroups: snapshots.allSatisfy({ $0.keychainGroups == first.keychainGroups }) ? first.keychainGroups : nil)
     }
 
     private static func parseSignature(_ data: Data) -> Snapshot? {
@@ -469,9 +519,28 @@ enum OriginalCloudEntitlements {
             let containers = containerValue as? [String] ?? []
             guard containers.allSatisfy({ $0.hasPrefix("iCloud.") && $0.count > 7 && !$0.contains("*") }) else { return nil }
             let services = plist["com.apple.developer.icloud-services"] as? [String] ?? []
+            func identifiers(_ value: Any?) -> [String]? {
+                guard let value else { return [] }
+                guard let values = value as? [String], values.allSatisfy({
+                    !$0.isEmpty && $0 != "." && $0 != ".." &&
+                    $0.rangeOfCharacter(from: CharacterSet(charactersIn: "*/\\")) == nil
+                }) else { return nil }
+                return Array(Set(values)).sorted()
+            }
+            let appGroups = identifiers(plist["com.apple.security.application-groups"])
+            let keychain = identifiers(plist["keychain-access-groups"])
+            let appID = plist["application-identifier"]
+            let appIDs = identifiers(appID.map { [$0] })
+            let keychainGroups: [String]?
+            if let appGroups, let keychain, let appIDs {
+                keychainGroups = Array(Set(appGroups + keychain + appIDs)).sorted()
+            } else {
+                keychainGroups = nil
+            }
             var seenContainers = Set<String>()
             snapshot = Snapshot(keys: plist.keys.filter(isCloudKey).sorted(),
-                                containers: services.contains("CloudKit") ? containers.filter { seenContainers.insert($0).inserted } : [])
+                                containers: services.contains("CloudKit") ? containers.filter { seenContainers.insert($0).inserted } : [],
+                                appGroups: appGroups, keychainGroups: keychainGroups)
         }
         return snapshot ?? (hasDER ? nil : Snapshot(keys: [], containers: []))
     }

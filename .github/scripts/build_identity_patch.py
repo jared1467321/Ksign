@@ -11,9 +11,23 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "Native/IdentityPatch"
 VERSION = b"AsignPatch/v1\0"
+HOOKS = ("identity", "keychain", "app-groups", "cloudkit", "background-assets", "module-trace", "image-callbacks")
 
 
-def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None):
+def diagnostic_flags(disabled_hooks=(), defer_image_callbacks=False):
+    unknown = set(disabled_hooks) - set(HOOKS)
+    if unknown:
+        raise ValueError("Unknown Asign patch hook: " + ", ".join(sorted(unknown)))
+    if defer_image_callbacks and "image-callbacks" in disabled_hooks:
+        raise ValueError("Cannot both disable and defer image callbacks")
+    mask = sum(1 << index for index, hook in enumerate(HOOKS) if hook in disabled_hooks)
+    return [f"-DASIGN_PATCH_DISABLED_HOOKS={mask}",
+            f"-DASIGN_PATCH_DEFER_IMAGE_CALLBACKS={int(defer_image_callbacks)}"]
+
+
+def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None,
+          disabled_hooks=(), defer_image_callbacks=False):
+    diagnostics = diagnostic_flags(disabled_hooks, defer_image_callbacks)
     default_arch = "arm64" if target_platform == "iphoneos" else platform.machine()
     architectures = architectures or os.environ.get("ARCHS", default_arch).split()
     if not architectures or any(arch not in ("arm64", "x86_64") for arch in architectures):
@@ -34,10 +48,10 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
                       "iphonesimulator": f"{arch}-apple-ios14.0-simulator",
                       "macosx": f"{arch}-apple-macosx12.0"}[target_platform]
             flags = ["-target", target, "-isysroot", sdk_path, "-std=gnu11", "-Oz",
-                     "-Wall", "-Wextra", "-Werror", "-fvisibility=hidden"]
+                     "-Wall", "-Wextra", "-Werror", "-fvisibility=hidden", *diagnostics]
             objects = []
             for source in (SOURCE / "Rebind.c", SOURCE / "IdentityPatch.m", SOURCE / "CompatibilityPatch.m",
-                           SOURCE / "CloudKitPatch.m", SOURCE / "DyldPatch.c", SOURCE / "DyldPatchMatch.c"):
+                           SOURCE / "CloudKitPatch.m", SOURCE / "PatchPolicy.m", SOURCE / "DyldPatch.c", SOURCE / "DyldPatchMatch.c"):
                 obj = scratch / f"{arch}-{source.stem}.o"
                 arc = ["-fobjc-arc", "-fblocks"] if source.suffix == ".m" else []
                 subprocess.run([clang, *flags, *arc, "-c", str(source), "-o", str(obj)], check=True)
@@ -86,8 +100,14 @@ def main():
     parser.add_argument("--platform", choices=("iphoneos", "iphonesimulator", "macosx"),
                         default=os.environ.get("PLATFORM_NAME", "iphoneos"))
     parser.add_argument("--arch", action="append")
+    parser.add_argument("--disable-hook", action="append", choices=HOOKS,
+                        default=[hook.strip() for hook in os.environ.get("ASIGN_PATCH_DISABLED_HOOKS", "").split(",") if hook.strip()],
+                        help="Diagnostic only: omit this hook family (repeatable)")
+    parser.add_argument("--defer-image-callbacks", action="store_true",
+                        default=os.environ.get("ASIGN_PATCH_DEFER_IMAGE_CALLBACKS", "0") == "1",
+                        help="Diagnostic only: register imports on the main queue after launch initialization")
     args = parser.parse_args()
-    print(build(args.output, args.sdk, args.platform, args.arch))
+    print(build(args.output, args.sdk, args.platform, args.arch, args.disable_hook, args.defer_image_callbacks))
 
 
 if __name__ == "__main__":

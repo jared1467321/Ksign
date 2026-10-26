@@ -16,6 +16,16 @@ on:
         type: boolean
         required: false
         default: false
+      patch_disabled_hooks:
+        description: "Diagnostic only: comma-separated identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks"
+        type: string
+        required: false
+        default: ""
+      patch_defer_image_callbacks:
+        description: "Diagnostic only: delay patch import registration until the main queue runs"
+        type: boolean
+        required: false
+        default: false
 
 run-name: Manual Build ${{ inputs.note && format('— {0}', inputs.note) || '' }}
 
@@ -94,6 +104,9 @@ jobs:
           key: ipa-patch-lief-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Native/IPAPatch/lief.json', '.github/scripts/prepare_ipa_patch_lief.py') }}
 
       - name: Build
+        env:
+          ASIGN_PATCH_DISABLED_HOOKS: ${{ inputs.patch_disabled_hooks }}
+          ASIGN_PATCH_DEFER_IMAGE_CALLBACKS: ${{ inputs.patch_defer_image_callbacks && '1' || '0' }}
         run: |
           DERIVED_DATA="$PWD/DerivedData" make
 

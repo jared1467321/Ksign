@@ -198,6 +198,8 @@ final class SigningHandler: NSObject {
         // policy even with IPA Patching off or if a later injection fails.
         var cloudEntitlementPolicy = !_options.onlyModify && _options.appEntitlementsFile == nil
             ? IPAPatcher.cloudEntitlementPolicy(in: movedAppPath) : [:]
+        let compatibilitySnapshots = _options.ipaPatching == true
+            ? IPAPatcher.compatibilitySnapshots(in: movedAppPath) : [:]
 		
 		try await _modifyDict(using: infoDictionary, with: _options, to: movedAppPath)
 		
@@ -262,6 +264,7 @@ final class SigningHandler: NSObject {
         if _options.ipaPatching == true {
             do {
                 let patchPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier,
+                    originalSnapshots: compatibilitySnapshots,
                     didRemoveLibrary: { self._archiveExplicitDeletedPaths.insert($0) })
                 // Retain the pre-tweak snapshot when both captures succeeded.
                 cloudEntitlementPolicy.merge(patchPolicy) { original, _ in original }

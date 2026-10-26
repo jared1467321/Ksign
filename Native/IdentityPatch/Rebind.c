@@ -1,4 +1,6 @@
 #include "Rebind.h"
+#include "PatchOptions.h"
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
@@ -42,6 +44,11 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
     if (!inScope && CanonicalScope) {
         size_t length = strlen(CanonicalScope);
         inScope = !strncmp(image.dli_fname, CanonicalScope, length) && image.dli_fname[length] == '/';
+    }
+    if (!inScope) {
+        int includesSystem = 0;
+        for (size_t b = 0; b < BindingCount; ++b) includesSystem |= Bindings[b].includeSystemImages;
+        if (!includesSystem) return;
     }
     const struct mach_header_64 *mh = (const struct mach_header_64 *)header;
     if (mh->sizeofcmds > 16 * 1024 * 1024) return;
@@ -116,8 +123,13 @@ static void rebindImage(const struct mach_header *header, intptr_t slide) {
     }
 }
 
+static void registerImages(void *unused) {
+    (void)unused;
+    _dyld_register_func_for_add_image(rebindImage);
+}
+
 void AsignIdentityRebind(const AsignIdentityBinding *bindings, size_t count, const char *scope) {
-    if (!scope || !*scope || Scope) return;
+    if (!AsignPatchEnabled(AsignPatchImageCallbacks) || !count || !scope || !*scope || Scope) return;
     Scope = strdup(scope);
     if (!Scope) return;
     CanonicalScope = realpath(scope, NULL);
@@ -128,5 +140,8 @@ void AsignIdentityRebind(const AsignIdentityBinding *bindings, size_t count, con
     if (!dladdr((const void *)&AsignIdentityRebind, &self)) return;
     SelfImage = self.dli_fbase;
     // Includes already loaded images and frameworks/plugins loaded later.
-    _dyld_register_func_for_add_image(rebindImage);
+    // Deferral is diagnostic only: it deliberately misses app-initializer
+    // imports so we can distinguish startup registration from later work.
+    if (ASIGN_PATCH_DEFER_IMAGE_CALLBACKS) dispatch_async_f(dispatch_get_main_queue(), NULL, registerImages);
+    else registerImages(NULL);
 }

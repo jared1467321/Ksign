@@ -7,13 +7,47 @@ The main Xcode target's **Build Asign patch** phase bundles it as
 version markers and removes stale two-library resources from cached products.
 There is no runtime dependency on either former patch library.
 
-`CompatibilityPatch.m` carries the legacy patch's behavior: keychain queries
-use the signing profile's accessible group discovered by a probe; app-group
-folders live below the first available shared group, or Documents when no
-shared group exists; group defaults use the shared folder when available.
-The original probe account/service and folder layout are retained for upgrades.
-The four Security imports keep the legacy process-wide coverage, while
-identity imports remain scoped to the app and its embedded code.
+`PatchPolicy.m` compares captured original groups with the running process's
+actual signed capabilities. `CompatibilityPatch.m` preserves default keychain
+queries (which can search every authorized group), explicit authorized groups,
+and unknown groups. Only a known original group that is now unavailable is
+remapped to the installed default keychain group. Both `SecItemUpdate` dictionaries
+use this rule. No probe item is created, no item is moved or deleted by setup,
+and Security imports are rebound only in app-owned code. Apple frameworks keep
+their native imports.
+
+App-group requests call the native method first. System callers always get that
+result. App callers retain valid native containers. When signing an older
+prepatched input, `AsignPreserveLegacyGroupDirectories` records the upgrade and
+permits reusing an existing legacy directory for app callers to keep saved data
+reachable. A coincidentally named folder alone never overrides a native group.
+New fallback
+directories are created only for known original groups missing from a readable
+installed signature, below the first signed group's native container when
+available, or Documents.
+Existing directories in either legacy location are reused without moving or
+merging files; symlinks and file collisions are rejected. Group defaults use the
+same path decision, including the Documents fallback. An explicit defaults
+container and system-created suites are preserved. App provenance is carried
+through the public suite initializer only for that suite; unrelated nested suite
+initialization is not redirected. Private hook signatures are checked first.
+
+`AsignOriginalAppGroupIdentifiers` and `AsignOriginalKeychainAccessGroups` are
+captured per executable before tweak injection and signing. They are metadata,
+not custom entitlements or grants of access. The keychain snapshot includes
+original keychain groups, the original application identifier and app groups.
+Each capability family requires its own conclusive snapshot. Empty groups and
+unknown groups are distinct; a group disagreement across architecture slices
+does not erase an otherwise valid cloud signing policy. First snapshots are
+preserved on subsequent signing. Older prepatched inputs cannot reliably recover
+their original groups: existing compatibility directories can still be reused,
+but new remapping requires starting with the original IPA. A fresh original IPA
+installed over an older patched app does not carry evidence of the previous
+redirection; legacy data is left on disk and may need a separate migration.
+Keychain items already
+placed in a default group by the older patch are not migrated to other groups;
+an app that explicitly switches to an authorized group may need a separate,
+validated migration. Default all-group queries remain unchanged.
 
 CloudKit hooks install only when the process's captured original CloudKit
 container list is valid and nonempty, and the installed signature is known to
@@ -103,8 +137,10 @@ The patch installs from Objective-C `+load`, before app initializers:
 
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,
   `objectForInfoDictionaryKey:` and `bundleWithIdentifier:` expose the original
-  identity for annotated bundles. Other bundles retain their own identities.
-- Background Assets and its managed helper see the installed identity for
+  identity for renamed annotated bundles when called from app-owned code. If
+  the process's original and installed IDs match, identity hooks are not installed.
+  System callers and other bundles retain their native identities.
+- Background Assets and other system frameworks see the installed identity for
   bundle lookups so SDK validation can find the registered app. The app's
   imported Swift `AssetPackManager.shared` getter also uses this view for its
   synchronous initialization, including nested Foundation/LaunchServices calls.
@@ -115,7 +151,9 @@ The patch installs from Objective-C `+load`, before app initializers:
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and
-  `CFBundleCopyInfoDictionaryInDirectory` get matching views.
+  `CFBundleCopyInfoDictionaryInDirectory` get matching views. Every C wrapper
+  honors the same installed-identity scope as the Objective-C hooks, including
+  nested synchronous calls through the asset manager.
 - Immutable dictionary views are cached per source dictionary and original ID.
   CF Get/Copy ownership is retained. Foundation's real dictionaries are not
   mutated; signing and installation still use the selected identifier.
@@ -150,7 +188,40 @@ classification cache survives an unload. The existing rebinder also covers
 later-loaded embedded code, with the same import-path limitations below.
 
 The manual build workflow compiles and packages the app without running test
-suites. Runtime behavior requires validation on a device.
+suites. Optional manual checks are available with:
+
+```sh
+python3 Native/IdentityPatch/Tests/check.py
+```
+
+The portable checks compile all 128 combinations of the actual diagnostic
+options header and validate bad option combinations. On macOS, the same command
+also compiles/runs the production policy, container, defaults and identity code
+against controlled snapshots and temporary folders, plus Swift fixtures that
+exercise the actual original-capability signature reader. On other hosts those
+Apple checks explicitly report a skip. They do not replace device validation.
+
+For diagnosis, the manual workflow accepts `patch_disabled_hooks`, a comma-separated
+list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks`,
+and `patch_defer_image_callbacks`. Leave both at their defaults for a normal build.
+Equivalent standalone options are repeatable `--disable-hook NAME` and
+`--defer-image-callbacks` on `.github/scripts/build_identity_patch.py`.
+Environment equivalents are `ASIGN_PATCH_DISABLED_HOOKS` and
+`ASIGN_PATCH_DEFER_IMAGE_CALLBACKS=1`. Unknown names and conflicting disable/defer
+requests fail before compilation. Diagnostic libraries contain an
+`AsignPatchDiagnostic/v1` marker. The small patch build phase runs every build so
+cached products cannot silently retain a previous diagnostic configuration.
+
+Disabling `image-callbacks` omits all import rebinding, while retaining enabled
+Objective-C hooks. Deferral registers the same import callback on the main queue,
+so it deliberately misses early initializer calls; it is an isolation tool for
+SignNow's dyld report, not a production fix or proof of its cause. Normal builds
+retain early registration. For Dokus, compare normal builds with `app-groups`
+disabled, then `background-assets` disabled separately. Use a freshly signed
+original IPA with the same profile/options for each comparison; also compare
+patching off. Confirm launches, asset loading, extension access and an update
+over an existing installation with saved group data. Keep a working app and an
+app that needs compatibility fixes in the comparison to check for regressions.
 
 This is an API compatibility layer. Direct file reads, signing entitlement
 queries, external services, function pointers obtained via `dlsym`, and private
