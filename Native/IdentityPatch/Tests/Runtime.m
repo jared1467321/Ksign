@@ -42,20 +42,76 @@ void AsignInstallCloudKitPatch(void) {}
 AsignIdentityBinding AsignCloudKitAutomaticBinding(void) { return (AsignIdentityBinding){0}; }
 AsignIdentityBinding AsignDyldTaskInfoBinding(void) { return (AsignIdentityBinding){0}; }
 
-static OSStatus NativeStatus;
+static OSStatus NativeStatus, NativeRetryStatus = errSecSuccess;
 static NSMutableArray *SeenQueries, *SeenAttributes;
-static OSStatus TestSecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
+static NSMutableArray<NSMutableDictionary *> *StoredItems;
+
+// Model Security independently of the patch's mapping policy: an unauthorized
+// add fails with missing-entitlement, while searches in that group find no
+// items. Stored items remain in their actual group across API calls.
+static BOOL FixtureAuthorizedGroup(id group) {
+    return !group || [group isEqual:@"NEW.default"] || [group isEqual:@"NEW.allowed"];
+}
+
+static NSMutableDictionary *FixtureItem(NSDictionary *query) {
+    id group = query[(__bridge id)kSecAttrAccessGroup];
+    if (!FixtureAuthorizedGroup(group)) return nil;
+    for (NSMutableDictionary *item in StoredItems) {
+        BOOL matches = YES;
+        for (id key in @[(__bridge id)kSecClass, (__bridge id)kSecAttrAccessGroup,
+                          (__bridge id)kSecAttrService, (__bridge id)kSecAttrAccount]) {
+            if (query[key] && ![query[key] isEqual:item[key]]) { matches = NO; break; }
+        }
+        if (matches) return item;
+    }
+    return nil;
+}
+
+static OSStatus StoredKeychainCall(unsigned operation, NSDictionary *query,
+                                  NSDictionary *attributes, CFTypeRef *result) {
+    if (result) *result = NULL;
+    if (operation == 0) {
+        if (!FixtureAuthorizedGroup(query[(__bridge id)kSecAttrAccessGroup])) return errSecMissingEntitlement;
+        NSMutableDictionary *item = [query mutableCopy];
+        if (!item[(__bridge id)kSecAttrAccessGroup]) item[(__bridge id)kSecAttrAccessGroup] = @"NEW.default";
+        if (FixtureItem(item)) return errSecDuplicateItem;
+        [StoredItems addObject:item];
+        return errSecSuccess;
+    }
+    NSMutableDictionary *item = FixtureItem(query);
+    if (!item) return errSecItemNotFound;
+    if (operation == 1) {
+        if (result) *result = CFRetain((__bridge CFTypeRef)item[(__bridge id)kSecValueData]);
+    } else if (operation == 2) {
+        if (!FixtureAuthorizedGroup(attributes[(__bridge id)kSecAttrAccessGroup])) return errSecMissingEntitlement;
+        [item addEntriesFromDictionary:attributes];
+    } else {
+        [StoredItems removeObjectIdenticalTo:item];
+    }
+    return errSecSuccess;
+}
+
+static OSStatus TestKeychainCall(unsigned operation, CFDictionaryRef query,
+                                CFDictionaryRef attributes, CFTypeRef *result) {
     [SeenQueries addObject:(__bridge id)query];
-    OSStatus status = SeenQueries.count == 1 ? NativeStatus : errSecSuccess;
+    if (operation == 2) [SeenAttributes addObject:(__bridge id)attributes];
+    if (StoredItems) return StoredKeychainCall(operation, (__bridge id)query, (__bridge id)attributes, result);
+    OSStatus status = SeenQueries.count == 1 ? NativeStatus : NativeRetryStatus;
     if (result) *result = status == errSecSuccess ? CFRetain(SeenQueries.count == 1 ? CFSTR("native") : CFSTR("repaired")) : NULL;
     return status;
 }
-static OSStatus TestSecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) { return TestSecItemAdd(query, result); }
-static OSStatus TestSecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributes) {
-    [SeenAttributes addObject:(__bridge id)attributes];
-    return TestSecItemAdd(query, NULL);
+static OSStatus TestSecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
+    return TestKeychainCall(0, query, NULL, result);
 }
-static OSStatus TestSecItemDelete(CFDictionaryRef query) { return TestSecItemAdd(query, NULL); }
+static OSStatus TestSecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    return TestKeychainCall(1, query, NULL, result);
+}
+static OSStatus TestSecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributes) {
+    return TestKeychainCall(2, query, attributes, NULL);
+}
+static OSStatus TestSecItemDelete(CFDictionaryRef query) {
+    return TestKeychainCall(3, query, NULL, NULL);
+}
 
 static void KeychainChecks(void) {
     NSDictionary *lost = @{(__bridge id)kSecAttrAccessGroup: @"OLD.app", @"account": @"keep"};
@@ -67,8 +123,9 @@ static void KeychainChecks(void) {
     for (NSUInteger i = 0; i < sizeof(statuses) / sizeof(statuses[0]); ++i) {
         NativeStatus = statuses[i];
         for (NSDictionary *query in @[lost, plain, unknown, authorized]) {
-            BOOL retry = NativeStatus == errSecMissingEntitlement && query == lost;
             for (unsigned operation = 0; operation < 4; ++operation) {
+                BOOL retry = query == lost && (NativeStatus == errSecMissingEntitlement ||
+                                               (operation != 0 && NativeStatus == errSecItemNotFound));
                 SeenQueries = [NSMutableArray array];
                 SeenAttributes = [NSMutableArray array];
                 CFTypeRef result = NULL;
@@ -102,6 +159,128 @@ static void KeychainChecks(void) {
     CHECK(SeenQueries.count == 2 && SeenQueries.lastObject == authorized);
     CHECK([SeenAttributes.lastObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.default"]);
     CHECK([lost[(__bridge id)kSecAttrAccessGroup] isEqual:@"OLD.app"]);
+
+    // Attributes alone cannot justify retrying an item-not-found query.
+    NativeStatus = errSecItemNotFound;
+    for (NSDictionary *query in @[plain, unknown, authorized]) {
+        SeenQueries = [NSMutableArray array];
+        SeenAttributes = [NSMutableArray array];
+        CHECK(AsignSecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)lost) == errSecItemNotFound);
+        CHECK(SeenQueries.count == 1 && SeenAttributes.count == 1);
+    }
+
+    // Preserve failures from the fallback, with no third attempt and no
+    // fabricated result. Add keeps its narrower missing-entitlement retry.
+    for (NSUInteger i = 0; i < sizeof(statuses) / sizeof(statuses[0]); ++i) {
+        NativeRetryStatus = statuses[i];
+        for (unsigned operation = 0; operation < 4; ++operation) {
+            NativeStatus = operation == 0 ? errSecMissingEntitlement : errSecItemNotFound;
+            SeenQueries = [NSMutableArray array];
+            SeenAttributes = [NSMutableArray array];
+            CFDictionaryRef raw = (__bridge CFDictionaryRef)lost;
+            CFTypeRef result = NULL;
+            OSStatus status;
+            if (operation == 0) status = AsignSecItemAdd(raw, &result);
+            else if (operation == 1) status = AsignSecItemCopyMatching(raw, &result);
+            else if (operation == 2) status = AsignSecItemUpdate(raw, raw);
+            else status = AsignSecItemDelete(raw);
+            CHECK(status == NativeRetryStatus && SeenQueries.count == 2);
+            if (operation < 2) {
+                CHECK(NativeRetryStatus == errSecSuccess ? result != NULL : result == NULL);
+                if (result) CFRelease(result);
+            }
+        }
+    }
+    NativeRetryStatus = errSecSuccess;
+
+    // Unreadable signatures and absent/invalid original snapshots never
+    // broaden an explicit group, even for the new item-not-found path.
+    NSDictionary *savedInfo = OriginalInfo, *savedCapabilities = SignedCapabilities;
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        OriginalInfo = scenario == 0 ? savedInfo : scenario == 1 ? @{} :
+            @{@"AsignOriginalKeychainAccessGroups": scenario == 2 ? @[] : @[@"*"]};
+        SignedCapabilities = scenario == 0 ? nil : savedCapabilities;
+        for (NSUInteger i = 0; i < sizeof(statuses) / sizeof(statuses[0]); ++i) {
+            NativeStatus = statuses[i];
+            for (unsigned operation = 0; operation < 4; ++operation) {
+                SeenQueries = [NSMutableArray array];
+                SeenAttributes = [NSMutableArray array];
+                CFDictionaryRef raw = (__bridge CFDictionaryRef)lost;
+                OSStatus status;
+                if (operation == 0) status = AsignSecItemAdd(raw, NULL);
+                else if (operation == 1) status = AsignSecItemCopyMatching(raw, NULL);
+                else if (operation == 2) status = AsignSecItemUpdate(raw, raw);
+                else status = AsignSecItemDelete(raw);
+                CHECK(status == NativeStatus && SeenQueries.count == 1);
+            }
+        }
+    }
+    OriginalInfo = savedInfo;
+    SignedCapabilities = savedCapabilities;
+}
+
+static void KeychainLifecycleChecks(void) {
+    StoredItems = [NSMutableArray array];
+    SeenQueries = [NSMutableArray array];
+    SeenAttributes = [NSMutableArray array];
+    NSData *first = [@"first" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *second = [@"second" dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                            (__bridge id)kSecAttrService: @"fixture",
+                            (__bridge id)kSecAttrAccount: @"account",
+                            (__bridge id)kSecAttrAccessGroup: @"OLD.app"};
+    NSMutableDictionary *add = [query mutableCopy];
+    add[(__bridge id)kSecValueData] = first;
+    CHECK(AsignSecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess);
+    CHECK(SeenQueries.count == 2 && StoredItems.count == 1);
+    CHECK([StoredItems.firstObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.default"]);
+    CHECK([add[(__bridge id)kSecAttrAccessGroup] isEqual:@"OLD.app"]);
+
+    NSMutableDictionary *read = [query mutableCopy];
+    read[(__bridge id)kSecReturnData] = @YES;
+    CFTypeRef result = NULL;
+    CHECK(AsignSecItemCopyMatching((__bridge CFDictionaryRef)read, &result) == errSecSuccess);
+    CHECK([(__bridge id)result isEqual:first]);
+    if (result) CFRelease(result);
+
+    // A duplicate write must not overwrite the existing value or reset it.
+    CHECK(AsignSecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecDuplicateItem);
+    NSDictionary *update = @{(__bridge id)kSecValueData: second};
+    CHECK(AsignSecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)update) == errSecSuccess);
+    result = NULL;
+    CHECK(AsignSecItemCopyMatching((__bridge CFDictionaryRef)read, &result) == errSecSuccess);
+    CHECK([(__bridge id)result isEqual:second]);
+    if (result) CFRelease(result);
+
+    // Default queries retain their all-groups search. An authorized or
+    // unknown explicit group cannot read or delete the remapped item.
+    NSMutableDictionary *other = [read mutableCopy];
+    [other removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    CHECK(AsignSecItemCopyMatching((__bridge CFDictionaryRef)other, NULL) == errSecSuccess);
+    for (NSString *group in @[@"NEW.allowed", @"UNKNOWN"]) {
+        other[(__bridge id)kSecAttrAccessGroup] = group;
+        CHECK(AsignSecItemCopyMatching((__bridge CFDictionaryRef)other, NULL) == errSecItemNotFound);
+        CHECK(AsignSecItemUpdate((__bridge CFDictionaryRef)other, (__bridge CFDictionaryRef)update) == errSecItemNotFound);
+        CHECK(AsignSecItemDelete((__bridge CFDictionaryRef)other) == errSecItemNotFound);
+        CHECK(StoredItems.count == 1);
+    }
+
+    // Deleting through the original group must leave a same-account item in
+    // another authorized group untouched.
+    NSMutableDictionary *allowed = [add mutableCopy];
+    allowed[(__bridge id)kSecAttrAccessGroup] = @"NEW.allowed";
+    CHECK(AsignSecItemAdd((__bridge CFDictionaryRef)allowed, NULL) == errSecSuccess);
+    CHECK(StoredItems.count == 2);
+    CHECK(AsignSecItemDelete((__bridge CFDictionaryRef)query) == errSecSuccess);
+    CHECK(StoredItems.count == 1);
+    CHECK([StoredItems.firstObject[(__bridge id)kSecAttrAccessGroup] isEqual:@"NEW.allowed"]);
+    result = NULL;
+    CHECK(AsignSecItemCopyMatching((__bridge CFDictionaryRef)read, &result) == errSecItemNotFound);
+    CHECK(result == NULL);
+    CHECK(AsignSecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)update) == errSecItemNotFound);
+    CHECK(AsignSecItemDelete((__bridge CFDictionaryRef)query) == errSecItemNotFound);
+    CHECK(StoredItems.count == 1);
+    StoredItems = nil;
 }
 
 static NSURL *Documents, *Shared, *Native, *SeenDefaultsContainer;
@@ -415,6 +594,7 @@ int main(void) {
         CHECK(!InsideScope("/app-other/file", "/app"));
         PolicyChecks();
         KeychainChecks();
+        KeychainLifecycleChecks();
         InstallationChecks();
         NSURL *root = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
         StorageChecks(root);

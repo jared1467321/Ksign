@@ -9,9 +9,16 @@ There is no runtime dependency on either former patch library.
 
 `PatchPolicy.m` compares captured original groups with the running process's
 actual signed capabilities. `CompatibilityPatch.m` tries each native keychain
-operation first and retries only an `errSecMissingEntitlement` failure with a
-known original group that can be remapped. Success, item-not-found, duplicate,
-authentication, interaction and parameter errors retain their native behavior.
+operation first. Adds retry only an `errSecMissingEntitlement` failure with a
+known original group that can be remapped. Searches, updates and deletes also
+retry `errSecItemNotFound` when the query's explicit group has that conclusive
+mapping: Security can hide an unauthorized group's items with that status.
+This keeps reads, updates and deletes consistent with fallback writes.
+An update's unavailable destination alone cannot trigger an item-not-found
+retry. Success, duplicate, authentication, interaction and parameter errors
+retain their native behavior; a fallback failure is returned without another
+attempt. Item-not-found results for default, authorized and unknown group
+queries remain unchanged.
 It preserves default keychain
 queries (which can search every authorized group), explicit authorized groups,
 and unknown groups. Only a known original group that is now unavailable is
@@ -232,6 +239,10 @@ python3 Native/IdentityPatch/Tests/check.py
 The portable checks exercise ABI type matching, preservation of existing import
 hooks and weak imports, symbol aliases and bounded ranges. They also compile all
 128 combinations of the diagnostic options header and validate bad options.
+An additional portable harness compiles the production keychain retry functions
+against a simulated store to exercise add/read/update/delete consistency, error
+propagation and preservation of unrelated groups. Its group-mapping callback is
+a fixture; actual snapshot and dictionary mapping checks require the Apple SDK.
 On macOS, the same command compiles/runs the production policy, keychain retry,
 container, defaults, identity and CloudKit scoping code against controlled
 snapshots and temporary folders, plus Swift fixtures that exercise the actual

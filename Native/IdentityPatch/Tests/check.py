@@ -41,6 +41,22 @@ def fat(first, second):
 
 
 class BuildControls(unittest.TestCase):
+    def test_keychain_retry_lifecycle(self):
+        compiler = shutil.which("clang")
+        if not compiler:
+            self.skipTest("Clang unavailable for the portable Objective-C harness")
+        implementation = (HERE.parent / "CompatibilityPatch.m").read_text()
+        wrappers = implementation[implementation.index("static OSStatus KeychainResult("):
+                                  implementation.index("static NSURL *SharedRoot(")]
+        fixture = (HERE / "KeychainRetry.m").read_text()
+        with tempfile.TemporaryDirectory(prefix="asign-keychain-") as scratch:
+            source = Path(scratch) / "KeychainRetry.m"
+            executable = Path(scratch) / "KeychainRetry"
+            source.write_text(fixture.replace("// PRODUCTION_KEYCHAIN_WRAPPERS", wrappers))
+            subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                            "-fobjc-runtime=macosx-10.12", str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_abi_and_import_preservation(self):
         compiler = shutil.which("cc") or shutil.which("clang")
         if not compiler:

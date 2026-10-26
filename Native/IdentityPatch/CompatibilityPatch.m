@@ -47,10 +47,13 @@ static NSDictionary *KeychainQuery(CFDictionaryRef query) {
 }
 
 static OSStatus KeychainResult(OSStatus (*original)(CFDictionaryRef, CFTypeRef *),
-                               CFDictionaryRef query, CFTypeRef *result) {
+                               CFDictionaryRef query, CFTypeRef *result, BOOL search) {
     CFTypeRef value = NULL;
     OSStatus status = original(query, result ? &value : NULL);
-    if (status == errSecMissingEntitlement) {
+    // An unauthorized explicit group can be reported as item-not-found by
+    // searches, even when Add reported missing-entitlement for that group.
+    // Still require KeychainQuery's conclusive original/signed group mapping.
+    if (status == errSecMissingEntitlement || (search && status == errSecItemNotFound)) {
         NSDictionary *repaired = KeychainQuery(query);
         if ((__bridge CFDictionaryRef)repaired != query) {
             if (value) { CFRelease(value); value = NULL; }
@@ -62,21 +65,25 @@ static OSStatus KeychainResult(OSStatus (*original)(CFDictionaryRef, CFTypeRef *
 }
 
 OSStatus AsignSecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    return KeychainResult(SecItemAdd, attributes, result);
+    return KeychainResult(SecItemAdd, attributes, result, NO);
 }
 OSStatus AsignSecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    return KeychainResult(SecItemCopyMatching, query, result);
+    return KeychainResult(SecItemCopyMatching, query, result, YES);
 }
 OSStatus AsignSecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributes) {
     OSStatus status = SecItemUpdate(query, attributes);
-    if (status != errSecMissingEntitlement) return status;
-    NSDictionary *repairedQuery = KeychainQuery(query), *repairedAttributes = KeychainQuery(attributes);
+    if (status != errSecMissingEntitlement && status != errSecItemNotFound) return status;
+    NSDictionary *repairedQuery = KeychainQuery(query);
+    // A missing item in an authorized/default/unknown query is not repaired
+    // merely because the update attributes name an unavailable destination.
+    if (status == errSecItemNotFound && (__bridge CFDictionaryRef)repairedQuery == query) return status;
+    NSDictionary *repairedAttributes = KeychainQuery(attributes);
     if ((__bridge CFDictionaryRef)repairedQuery == query && (__bridge CFDictionaryRef)repairedAttributes == attributes) return status;
     return SecItemUpdate((__bridge CFDictionaryRef)repairedQuery, (__bridge CFDictionaryRef)repairedAttributes);
 }
 OSStatus AsignSecItemDelete(CFDictionaryRef query) {
     OSStatus status = SecItemDelete(query);
-    if (status != errSecMissingEntitlement) return status;
+    if (status != errSecMissingEntitlement && status != errSecItemNotFound) return status;
     NSDictionary *repaired = KeychainQuery(query);
     return (__bridge CFDictionaryRef)repaired == query ? status : SecItemDelete((__bridge CFDictionaryRef)repaired);
 }
