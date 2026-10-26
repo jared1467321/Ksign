@@ -96,6 +96,9 @@ jobs:
       - name: Check CloudKit patch installation policy
         run: python3 .github/scripts/check_cloudkit_patch.py
 
+      - name: Check cloud entitlement preservation
+        run: python3 .github/scripts/check_cloud_entitlements.py
+
       - name: Build
         run: |
           DERIVED_DATA="$PWD/DerivedData" make

@@ -3,7 +3,8 @@
 
 Requires macOS and Apple's SDK. Each scenario runs in a fresh process so a
 previous swizzle or dispatch_once cannot conceal an installation-policy error.
-No containers are constructed and no account, keychain or network APIs are used.
+Store-loading checks replace SDK loading with a recorder before installing the
+patch. No cloud containers, accounts, keychain or network APIs are used.
 """
 import json
 from pathlib import Path
@@ -28,6 +29,10 @@ static NSDictionary *TestEntitlements, *TestInfo;
 static NSBundle *TestBundle;
 static NSDictionary *(*RealInfo)(NSBundle *, SEL);
 static unsigned EntitlementReads;
+static NSArray *ExpectedDescriptions;
+static StoreCompletion ExpectedCompletion;
+static unsigned ForwardedLoads;
+static BOOL AllowDescriptionCopy;
 
 NSDictionary *AsignTestCloudEntitlements(void) {
     ++EntitlementReads;
@@ -45,6 +50,81 @@ static NSDictionary *Info(NSBundle *self, SEL selector) {
 
 static void Require(BOOL success, const char *message) {
     if (!success) { fprintf(stderr, "%s\n", message); exit(1); }
+}
+
+static void RecordLoad(id self, SEL selector, NSArray *descriptions, StoreCompletion completion) {
+    (void)self; (void)selector;
+    Require(AllowDescriptionCopy ? [descriptions isEqual:ExpectedDescriptions] : descriptions == ExpectedDescriptions,
+            "Store description argument was replaced");
+    Require(AllowDescriptionCopy || completion == ExpectedCompletion, "Store completion handler was replaced");
+    ++ForwardedLoads;
+    for (NSPersistentStoreDescription *description in descriptions) completion(description, nil);
+}
+
+static void RecordPublicLoad(NSPersistentCloudKitContainer *self, SEL selector, StoreCompletion completion) {
+    RecordLoad(self, selector, self.persistentStoreDescriptions, completion);
+}
+
+static void CheckStoreLoading(NSString *entry, BOOL local) {
+    NSPersistentCloudKitContainer *container = [[NSPersistentCloudKitContainer alloc]
+        initWithName:@"PatchChecks" managedObjectModel:[[NSManagedObjectModel alloc] init]];
+    NSPersistentStoreDescription *unavailable = [NSPersistentStoreDescription persistentStoreDescriptionWithURL:
+        [NSURL fileURLWithPath:@"/unused/unavailable.sqlite"]];
+    NSPersistentStoreDescription *authorized = [NSPersistentStoreDescription persistentStoreDescriptionWithURL:
+        [NSURL fileURLWithPath:@"/unused/authorized.sqlite"]];
+    NSPersistentStoreDescription *plain = [NSPersistentStoreDescription persistentStoreDescriptionWithURL:
+        [NSURL fileURLWithPath:@"/unused/local.sqlite"]];
+    unavailable.cloudKitContainerOptions = [[NSPersistentCloudKitContainerOptions alloc]
+        initWithContainerIdentifier:@"iCloud.example.other"];
+    authorized.cloudKitContainerOptions = [[NSPersistentCloudKitContainerOptions alloc]
+        initWithContainerIdentifier:@"iCloud.example.original"];
+    unavailable.configuration = @"PreservedConfiguration";
+    unavailable.shouldMigrateStoreAutomatically = NO;
+    unavailable.shouldInferMappingModelAutomatically = NO;
+    [unavailable setOption:@YES forKey:NSPersistentHistoryTrackingKey];
+    NSURL *url = unavailable.URL;
+    NSDictionary *options = unavailable.options;
+    NSPersistentCloudKitContainerOptions *unavailableOptions = unavailable.cloudKitContainerOptions;
+    NSPersistentCloudKitContainerOptions *authorizedOptions = authorized.cloudKitContainerOptions;
+    ExpectedDescriptions = @[unavailable, authorized, plain];
+    __block unsigned completions = 0;
+    ExpectedCompletion = ^(NSPersistentStoreDescription *description, NSError *error) {
+        Require([ExpectedDescriptions containsObject:description] && !error, "Store callback changed");
+        Require(local ? unavailable.cloudKitContainerOptions == nil :
+                       unavailable.cloudKitContainerOptions == unavailableOptions,
+                "Store options were not prepared before forwarding");
+        ++completions;
+    };
+    // For the internal entry, the explicit array must win over the property.
+    NSPersistentStoreDescription *unused = [[NSPersistentStoreDescription alloc] init];
+    unused.cloudKitContainerOptions = unavailableOptions;
+    container.persistentStoreDescriptions = [entry isEqual:@"internal"] ? @[unused] : ExpectedDescriptions;
+    if ([entry isEqual:@"public"]) {
+        [container loadPersistentStoresWithCompletionHandler:ExpectedCompletion];
+    } else if ([entry isEqual:@"base"]) {
+        // Reproduce a caller entering the superclass implementation directly.
+        // The public subclass hook cannot help; only the internal hook can
+        // prepare these stores before our stand-in mirroring entry runs.
+        AllowDescriptionCopy = YES;
+        IMP baseLoad = method_getImplementation(class_getInstanceMethod(NSPersistentContainer.class,
+            @selector(loadPersistentStoresWithCompletionHandler:)));
+        ((void (*)(id, SEL, StoreCompletion))baseLoad)(container,
+            @selector(loadPersistentStoresWithCompletionHandler:), ExpectedCompletion);
+    } else {
+        ((void (*)(id, SEL, NSArray *, StoreCompletion))objc_msgSend)(container,
+            NSSelectorFromString(@"_loadStoreDescriptions:withCompletionHandler:"),
+            ExpectedDescriptions, ExpectedCompletion);
+    }
+    Require(ForwardedLoads == 1 && completions == 3, "Store loading was dropped or duplicated");
+    Require(authorized.cloudKitContainerOptions == authorizedOptions && !plain.cloudKitContainerOptions,
+            "Authorized or local store options changed");
+    Require(unused.cloudKitContainerOptions == unavailableOptions, "Unrequested store was changed");
+    Require([unavailable.URL isEqual:url] && [unavailable.options isEqual:options] &&
+            [unavailable.configuration isEqual:@"PreservedConfiguration"] &&
+            !unavailable.shouldMigrateStoreAutomatically && !unavailable.shouldInferMappingModelAutomatically,
+            "Local store location, configuration, migration or history options changed");
+    ExpectedCompletion = nil;
+    ExpectedDescriptions = nil;
 }
 
 int main(int argc, const char **argv) {
@@ -70,6 +150,17 @@ int main(int argc, const char **argv) {
         SEL containerSelector = NSSelectorFromString(@"containerWithIdentifier:");
         Class storeClass = NSPersistentCloudKitContainer.class;
         SEL storeSelector = @selector(loadPersistentStoresWithCompletionHandler:);
+        SEL descriptionsSelector = NSSelectorFromString(@"_loadStoreDescriptions:withCompletionHandler:");
+        Method descriptionsMethod = class_getInstanceMethod(storeClass, descriptionsSelector);
+        NSString *storeEntry = fixture[@"store_entry"];
+        if (storeEntry) {
+            Require(descriptionsMethod != NULL, "SDK lacks the internal store-loading entry");
+            class_replaceMethod(storeClass, storeSelector, (IMP)RecordPublicLoad,
+                method_getTypeEncoding(class_getInstanceMethod(storeClass, storeSelector)));
+            class_replaceMethod(storeClass, descriptionsSelector, (IMP)RecordLoad,
+                method_getTypeEncoding(descriptionsMethod));
+            descriptionsMethod = class_getInstanceMethod(storeClass, descriptionsSelector);
+        }
         Method containerMethod = class_getClassMethod(container, containerSelector);
         Method storeMethod = class_getInstanceMethod(storeClass, storeSelector);
         Method parentStoreMethod = class_getInstanceMethod(class_getSuperclass(storeClass), storeSelector);
@@ -77,6 +168,7 @@ int main(int argc, const char **argv) {
         IMP containerBefore = method_getImplementation(containerMethod);
         IMP storeBefore = method_getImplementation(storeMethod);
         IMP parentBefore = parentStoreMethod ? method_getImplementation(parentStoreMethod) : NULL;
+        IMP descriptionsBefore = descriptionsMethod ? method_getImplementation(descriptionsMethod) : NULL;
 
         AsignInstallCloudKitPatch();
         // Hook may add an override for an inherited method. A Method captured
@@ -92,6 +184,14 @@ int main(int argc, const char **argv) {
                 "CloudKit override modified the superclass implementation");
         Require(expected ? (IMP)OriginalLoadPersistentStores == storeBefore : OriginalLoadPersistentStores == NULL,
                 "Core Data forwarding implementation disagrees with installation policy");
+        if (descriptionsMethod) {
+            IMP after = method_getImplementation(class_getInstanceMethod(storeClass, descriptionsSelector));
+            Require((after != descriptionsBefore) == expected,
+                    "Internal Core Data installation disagrees with expected policy");
+            Require(expected ? (IMP)OriginalLoadStoreDescriptions == descriptionsBefore :
+                               OriginalLoadStoreDescriptions == NULL,
+                    "Internal Core Data forwarding implementation changed");
+        }
         AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
         Require((automatic.replacement != NULL) == [fixture[@"automatic"] boolValue],
                 "SwiftData import selection disagrees with expected policy");
@@ -104,6 +204,7 @@ int main(int argc, const char **argv) {
             Require(!NeedsLocal(fixture[@"authorized_request"]), "Authorized container changed to local mode");
             Require(NeedsLocal(fixture[@"unavailable_request"]), "Unavailable container lost its local fallback");
         }
+        if (storeEntry) CheckStoreLoading(storeEntry, expected);
     }
     return 0;
 }
@@ -159,6 +260,18 @@ class CloudKitPatchChecks(unittest.TestCase):
     def test_mixed_containers_preserve_authorized_requests(self):
         self.check([CONTAINER, OTHER], {SERVICES: ["CloudKit"], CONTAINERS: [CONTAINER]}, hooks=True,
                    authorized_request=CONTAINER, unavailable_request=OTHER)
+
+    def test_store_loading_preserves_mixed_stores_and_callbacks(self):
+        for entry in ("public", "internal", "base"):
+            with self.subTest(entry=entry):
+                self.check([CONTAINER, OTHER], {SERVICES: ["CloudKit"], CONTAINERS: [CONTAINER]},
+                           hooks=True, store_entry=entry)
+
+    def test_authorized_and_unknown_store_loading_passes_through(self):
+        for entry in ("public", "internal", "base"):
+            for signed in (None, {SERVICES: ["CloudKit"], CONTAINERS: [CONTAINER, OTHER]}):
+                with self.subTest(entry=entry, signed=signed):
+                    self.check([CONTAINER, OTHER], signed, store_entry=entry)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 #include "common/json.h"
 #include <set>
 
-// A compatibility-patched local app must not accidentally opt into CloudKit
+// A local app must not accidentally opt into CloudKit when re-signed,
 // simply because its signing profile contains somebody else's cloud containers.
 // Keep profile values for cloud capability keys that the original app used.
 // Other entitlements (identity, keychain, app groups, etc.) are untouched.

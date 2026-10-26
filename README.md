@@ -90,6 +90,11 @@ to be unavailable load locally with cloud mirroring disabled; authorized stores
 keep their cloud configuration. This preserves local operation; it does not
 grant iCloud access or restore data that exists only in the cloud.
 
+Signing also removes cloud capability keys that the input app did not use,
+so a local SwiftData app stays local even if the signing profile supports
+iCloud. This applies with IPA Patching enabled or disabled; a custom
+entitlements file remains an explicit override.
+
 The patcher uses IPAPatch's shorter `@rpath` reference when the executable's
 search paths resolve it to the bundled library. Otherwise it keeps an explicit
 relative path. This reduces the header space required for compatible extensions.

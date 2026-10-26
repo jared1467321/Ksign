@@ -39,14 +39,22 @@ operations are cancelled before original SDK queuing, so SDK completion handling
 still runs and remote writes are not reported as successful.
 
 Core Data's `NSPersistentCloudKitContainer` gets a per-store check before
-`loadPersistentStoresWithCompletionHandler:` starts. When a store's requested
-CloudKit container is known to be unavailable under the installed signature,
+`loadPersistentStoresWithCompletionHandler:` starts, and at its internal
+`_loadStoreDescriptions:withCompletionHandler:` entry when the SDK exposes the
+expected object/block ABI. SwiftData's `NSPersistentContainer(CoreDataSPI) load:`
+path can enter the base public implementation directly and bypass a public
+subclass override. The Trace 3.25.1 iOS 27 report shows this loading stack reaching
+CloudKit mirroring despite the patch being loaded. The internal hook checks the
+descriptions passed to that call before mirroring starts.
+When a store's requested CloudKit container is known to be unavailable under the installed signature,
 its `cloudKitContainerOptions` is cleared so Core Data loads the local store
 without initializing cloud mirroring. Authorized containers, already-local
 stores and unknown capability lookups retain normal behavior, including in
 containers with a mixture of local and cloud-backed stores. Store URLs,
 configurations, migration settings and completion handlers are retained. The
-library links Core Data so this hook is available when the patch installs.
+library links Core Data so these hooks are available when the patch installs.
+The macOS checks also exercise both entries with intercepted SDK loading to
+verify mixed-store handling, option preservation and completion forwarding.
 
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
@@ -71,9 +79,11 @@ captured before `onlyModify` edits. The first captured value survives subsequent
 signing. A previously renamed input without this metadata provides no reliable
 way to recover its earlier identity.
 
-With compatibility patching enabled, signing also prevents accidental iCloud
-enablement. `IPAPatcher` reads the original executable's XML signing entitlements
-and records the cloud capability key names in `AsignOriginalCloudEntitlementKeys`
+Signing also prevents accidental iCloud enablement, independently of the IPA
+Patching option and runtime patch installation. Before any tweak can rewrite an
+executable's signature, `IPAPatcher.cloudEntitlementPolicy` reads its XML signing
+entitlements. When compatibility patching is enabled, `IPAPatcher` also
+records the cloud capability key names in `AsignOriginalCloudEntitlementKeys`
 for each app/extension. Before signing that executable, zsign removes iCloud and
 ubiquity keys from the selected profile when those keys weren't present in the
 original app. Values for originally used keys still come from the selected
@@ -88,7 +98,8 @@ transaction. Unknown, malformed, conflicting universal or DER-only signatures
 don't establish a policy. A previously re-signed input without a snapshot can't
 reveal which cloud capabilities its original developer used: start with the
 original IPA. An explicit custom entitlements file remains the user's override.
-Disabling compatibility patching doesn't apply this signing policy.
+The signing policy still applies when compatibility patching is disabled or
+patch injection fails. Modify-only operations do not apply a signing policy.
 
 The patch installs from Objective-C `+load`, before app initializers:
 

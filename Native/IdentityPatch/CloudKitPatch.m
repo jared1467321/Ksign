@@ -38,6 +38,7 @@ static id (*OriginalDatabaseScope)(id, SEL, NSInteger);
 static OperationMethod OriginalContainerOperation, OriginalContainerConvenience;
 static OperationMethod OriginalDatabaseOperation, OriginalDatabaseConvenience;
 static void (*OriginalLoadPersistentStores)(NSPersistentCloudKitContainer *, SEL, StoreCompletion);
+static void (*OriginalLoadStoreDescriptions)(NSPersistentCloudKitContainer *, SEL, NSArray *, StoreCompletion);
 static struct {
     const char *name;
     NSString *key;
@@ -350,18 +351,46 @@ static void ContainerConvenience(id self, SEL selector, NSOperation *operation) 
 static void DatabaseOperation(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseOperation); }
 static void DatabaseConvenience(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseConvenience); }
 
-static void LoadPersistentStores(NSPersistentCloudKitContainer *self, SEL selector, StoreCompletion completion) {
+static void PrepareLocalStores(NSArray<NSPersistentStoreDescription *> *descriptions) {
     // Core Data can initialize CloudKit (including its logging/entitlement
     // checks) before it constructs a CKContainer. Handle unavailable stores
     // before that path starts, instead of catching an exception and retrying a
     // partially loaded container. Keep each store and its local options intact.
-    for (NSPersistentStoreDescription *description in self.persistentStoreDescriptions) {
+    for (NSPersistentStoreDescription *description in descriptions) {
         if (NeedsLocal(description.cloudKitContainerOptions.containerIdentifier)) {
             description.cloudKitContainerOptions = nil;
         }
     }
+}
+
+static void LoadPersistentStores(NSPersistentCloudKitContainer *self, SEL selector, StoreCompletion completion) {
+    PrepareLocalStores(self.persistentStoreDescriptions);
     // Preserve Core Data's own loading, errors and asynchronous callbacks.
     OriginalLoadPersistentStores(self, selector, completion);
+}
+
+static void LoadStoreDescriptions(NSPersistentCloudKitContainer *self, SEL selector,
+                                  NSArray *descriptions, StoreCompletion completion) {
+    // SwiftData's CoreDataSPI load: can call NSPersistentContainer's public
+    // implementation directly, bypassing our subclass override. Intercept the
+    // cloud subclass's internal entry before it constructs a mirroring delegate.
+    // Use the actual argument: it need not be self.persistentStoreDescriptions.
+    PrepareLocalStores(descriptions);
+    OriginalLoadStoreDescriptions(self, selector, descriptions, completion);
+}
+
+static void InstallStoreDescriptionsHook(void) {
+    Class cls = NSPersistentCloudKitContainer.class;
+    NSString *name = @"_loadStoreDescriptions:withCompletionHandler:";
+    Method method = class_getInstanceMethod(cls, NSSelectorFromString(name));
+    if (!method || method_getNumberOfArguments(method) != 4) return;
+    // In addition to Hook's return/count checks, require an object array and
+    // block argument. Leave SDKs with a different private ABI untouched.
+    char descriptionsType[16] = {0}, completionType[16] = {0};
+    method_getArgumentType(method, 2, descriptionsType, sizeof(descriptionsType));
+    method_getArgumentType(method, 3, completionType, sizeof(completionType));
+    if (strcmp(descriptionsType, "@") || strcmp(completionType, "@?")) return;
+    Hook(cls, name, (IMP)LoadStoreDescriptions, (IMP *)&OriginalLoadStoreDescriptions, 'v', 4);
 }
 
 void AsignInstallCloudKitPatch(void) {
@@ -397,6 +426,7 @@ void AsignInstallCloudKitPatch(void) {
         INSTALL(database, "_scheduleConvenienceOperation:", DatabaseConvenience, OriginalDatabaseConvenience, 'v', 3);
         INSTALL(NSPersistentCloudKitContainer.class, "loadPersistentStoresWithCompletionHandler:",
                 LoadPersistentStores, OriginalLoadPersistentStores, 'v', 3);
+        InstallStoreDescriptionsHook();
 #undef INSTALL
         for (size_t i = 0; i < sizeof(EntitlementGetters) / sizeof(EntitlementGetters[0]); ++i) {
             Hook(entitlements, @(EntitlementGetters[i].name), (IMP)EntitlementGetter,

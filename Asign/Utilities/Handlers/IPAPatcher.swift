@@ -65,6 +65,34 @@ enum IPAPatcher {
         var errorDescription: String? { detail }
     }
 
+    /// Signing must not enable cloud storage just because the selected profile
+    /// supports it. Capture this before tweak injection can rewrite signatures,
+    /// independently of whether runtime compatibility patching is requested.
+    static func cloudEntitlementPolicy(in app: URL) -> [String: [String]] {
+        let root = app.resolvingSymlinksInPath().standardizedFileURL
+        guard let targets = try? Self.targets(in: root) else { return [:] }
+        var policy: [String: [String]] = [:]
+        for target in targets {
+            guard let data = try? Data(contentsOf: target.infoPlist),
+                  let info = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any]
+            else { continue }
+            let keys: [String]
+            if let captured = info[originalCloudEntitlementKeys] {
+                // A malformed first snapshot is inconclusive. Do not replace
+                // it with capabilities from a later signing profile.
+                guard let originalKeys = captured as? [String],
+                      originalKeys.allSatisfy(OriginalCloudEntitlements.isCloudKey) else { continue }
+                keys = originalKeys
+            } else {
+                guard let snapshot = try? OriginalCloudEntitlements.snapshot(target.executable) else { continue }
+                keys = snapshot.keys
+            }
+            let relative = String(target.executable.path.dropFirst(root.path.count + 1))
+            policy[relative] = keys
+        }
+        return policy
+    }
+
     static func targets(in app: URL) throws -> [Target] {
         let manager = FileManager.default
         let root = app.resolvingSymlinksInPath().standardizedFileURL

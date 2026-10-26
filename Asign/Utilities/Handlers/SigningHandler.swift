@@ -192,6 +192,12 @@ final class SigningHandler: NSObject {
         // its original identity now; extensions are still unchanged at patch time.
         let originalBundleIdentifier = (infoDictionary[IPAPatcher.originalIdentifierKey] as? String) ??
             (infoDictionary["CFBundleIdentifier"] as? String)
+
+        // A local SwiftData app can start CloudKit mirroring if re-signing adds
+        // the profile's cloud entitlements. Preserve the input's capability
+        // policy even with IPA Patching off or if a later injection fails.
+        var cloudEntitlementPolicy = !_options.onlyModify && _options.appEntitlementsFile == nil
+            ? IPAPatcher.cloudEntitlementPolicy(in: movedAppPath) : [:]
 		
 		try await _modifyDict(using: infoDictionary, with: _options, to: movedAppPath)
 		
@@ -253,11 +259,12 @@ final class SigningHandler: NSObject {
         )
         try await handler.disinject()
 
-        var cloudEntitlementPolicy: [String: [String]] = [:]
         if _options.ipaPatching == true {
             do {
-                cloudEntitlementPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier,
+                let patchPolicy = try IPAPatcher.apply(to: movedAppPath, originalRootIdentifier: originalBundleIdentifier,
                     didRemoveLibrary: { self._archiveExplicitDeletedPaths.insert($0) })
+                // Retain the pre-tweak snapshot when both captures succeeded.
+                cloudEntitlementPolicy.merge(patchPolicy) { original, _ in original }
             }
             catch let error as IPAPatcher.RecoveryFailure {
                 onPatchingFailure?(error.localizedDescription)
