@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-struct DownloadItem: Identifiable {
+struct DownloadItem: Identifiable, Equatable {
     let id = UUID()
     let title: String
     var url: URL

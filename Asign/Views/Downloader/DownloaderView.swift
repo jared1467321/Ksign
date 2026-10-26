@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 import NimbleExtensions
 import UniformTypeIdentifiers
 import NimbleViews
@@ -21,8 +22,12 @@ struct DownloaderView: View {
     }
 
     @ObservedObject private var themes = NBThemeManager.shared
-    @ObservedObject private var downloadManager = IPAVaultPresentationSession.shared.downloadManager
-    @StateObject private var libraryManager = DownloadManager.shared
+    private let downloadManager = IPAVaultPresentationSession.shared.downloadManager
+    private let libraryManager = DownloadManager.shared
+    @StateObject private var completedDownloads = CompletedDownloadsModel(
+        downloadManager: IPAVaultPresentationSession.shared.downloadManager,
+        libraryManager: DownloadManager.shared
+    )
     
     @State private var selectedItem: DownloadItem?
     @State private var webViewURL: URL?
@@ -40,7 +45,7 @@ struct DownloaderView: View {
     @State private var _tapGate = ToolbarTapGate()
     
     private var filteredDownloadItems: [DownloadItem] {
-        let items = downloadManager.finishedItems
+        let items = completedDownloads.items
         if _searchText.isEmpty {
             return items
         } else {
@@ -48,130 +53,26 @@ struct DownloaderView: View {
         }
     }
 
-    private var hasActiveIPAVaultDownloads: Bool {
-        downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
-    }
-
-    private var ipavaultLiveThroughputText: String {
-        guard downloadManager.ipavaultAdaptiveSpeedBPS > 0 else {
-            return "Measuring…"
-        }
-        return String(format: "%.1f MB/s", downloadManager.ipavaultAdaptiveSpeedBPS / 1_000_000)
-    }
-
-    private var ipavaultActiveStreamsText: String {
-        let count = downloadManager.ipavaultAdaptiveStreamCount
-        return "\(count) stream\(count == 1 ? "" : "s")"
-    }
-
-    // Shared by a real IPA Vault download and the inspector's non-networked
-    // sample, so the inspected separator has precisely the production layout.
-    private func ipaVaultStatusRow(speed: String, streams: String, isSample: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
-                .fontWeight(.semibold)
-            LabeledContent("Live throughput", value: speed)
-            LabeledContent("Batch tuning", value: isSample ? "Optimized" : downloadManager.ipavaultAdaptiveStatus)
-            LabeledContent("Target concurrent files", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveConcurrentCount)")
-            LabeledContent("Target streams / file", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveStreamsPerFile)")
-            LabeledContent("Active streams (all jobs)", value: streams)
-        }
-        .font(.caption)
-        .nbThemeForeground(.textSecondary)
-        .nbThemeTextRow()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
-    }
-
     var body: some View {
         let _ = themes.previewRevision
+        let visibleFinishedItems = filteredDownloadItems
         NBNavigationView(.localized("Downloads"), adaptsContainerText: false) {
             List {
                 Group {
-                if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
-                    NBSection("Downloading", secondary: "Sample") {
-                        ipaVaultStatusRow(speed: "12.4 MB/s", streams: "4 streams", isSample: true)
-                        HStack(spacing: 12) {
-                            Image(systemName: "arrow.down.document")
-                                .nbThemeForeground(.accent)
-                                .font(.title2)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Example.ipa")
-                                    .nbThemeForeground(.text)
-                                Text("62 MB / 100 MB (62%)")
-                                    .font(.caption)
-                                    .nbThemeForeground(.textSecondary)
-                            }
-                            Spacer()
-                            ProgressView(value: 0.62)
-                                .frame(width: 52)
-                                .nbThemeTint(.warning)
-                        }
-                        .nbThemeTextRow()
-                        Text("Inspector sample only · no download started")
-                            .font(.caption2)
-                            .nbThemeForeground(.textSecondary)
-                    }
-                }
+                DownloadTransferSection(
+                    inspectorSampleDownloadStatus: inspectorSampleDownloadStatus,
+                    downloadManager: downloadManager,
+                    libraryManager: libraryManager,
+                    shareItems: $shareItems,
+                    importIpaToLibrary: importIpaToLibrary,
+                    exportToFiles: exportToFiles,
+                    cryptCheck: runCryptCheck,
+                    pauseResumeDownload: togglePauseResume,
+                    deleteItem: deleteItem
+                )
 
-                if libraryManager.isImporting {
-                    // One static row for the whole batch.
-                    //
-                    // This section used to render `libraryManager.downloads`
-                    // directly. A bulk import appends a Download per app and
-                    // removes it on completion, so importing 60 apps meant 60
-                    // row inserts + 60 row deletes at the TOP of the list —
-                    // shoving everything below it up and down — plus the whole
-                    // section collapsing and reappearing whenever the array
-                    // briefly emptied between apps, plus a re-render per
-                    // extraction-progress tick. That is the flickering.
-                    //
-                    // The finished list underneath is only a selection surface
-                    // during an import, so it now stays completely still.
-                    NBSection(.localized("Importing")) {
-                        // Keep live batch statistics visible while completed files import.
-                        if hasActiveIPAVaultDownloads {
-                            ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
-                                              streams: ipavaultActiveStreamsText)
-                        }
-                        HStack(spacing: 12) {
-                            ProgressView()
-                            .nbThemeTint(.accent)
-                            Text(.localized("Importing apps, please wait"))
-                                .nbThemeForeground(.textSecondary)
-                            Spacer()
-                        }
-                        .nbThemeTextRow()
-                    }
-                } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
-                    NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
-                        if hasActiveIPAVaultDownloads {
-                            ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
-                                              streams: ipavaultActiveStreamsText)
-                        }
-
-                        ForEach(libraryManager.downloads) { download in
-                            AppStoreDownloadItemRow(download: download)
-                        }
-                        ForEach(downloadManager.activeItems) { item in
-                            DownloadItemRow(
-                                item: item,
-                                shareItems: $shareItems,
-                                isSelected: false,
-                                onToggleSelection: {},
-                                selectable: false,
-                                importIpaToLibrary: { item in importIpaToLibrary(item) },
-                                exportToFiles: { item in exportToFiles(item) },
-                                cryptCheck: { item in runCryptCheck(item) },
-                                pauseResumeDownload: { item in togglePauseResume(item) },
-                                deleteItem: { item in deleteItem(item) }
-                            )
-                        }
-                    }
-                }
-                
-                NBSection(.localized("Downloaded"), secondary: filteredDownloadItems.count.description) {
-                    ForEach(filteredDownloadItems) { item in
+                NBSection(.localized("Downloaded"), secondary: visibleFinishedItems.count.description) {
+                    ForEach(visibleFinishedItems) { item in
                         DownloadItemRow(
                             item: item,
                             shareItems: $shareItems,
@@ -198,7 +99,7 @@ struct DownloaderView: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
                         .nbThemeBackground(.overlaySurface, in: RoundedRectangle(cornerRadius: 14))
-                } else if !inspectorSampleDownloadStatus && downloadManager.finishedItems.isEmpty && downloadManager.activeItems.isEmpty && libraryManager.downloads.isEmpty {
+                } else if !inspectorSampleDownloadStatus && !completedDownloads.hasDownloads {
                     if #available(iOS 17, *) {
                         ContentUnavailableView {
                             Label(.localized("No downloaded IPAs"), systemImage: "square.and.arrow.down.fill")
@@ -219,7 +120,7 @@ struct DownloaderView: View {
             .searchable(text: $_searchText, placement: .platform())
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
-                    if !downloadManager.finishedItems.isEmpty || _isEditMode.isEditing {
+                    if !completedDownloads.items.isEmpty || _isEditMode.isEditing {
                         _editButton
                     }
                     if _isEditMode.isEditing {
@@ -270,13 +171,6 @@ struct DownloaderView: View {
                     _selectedDownloads.removeAll()
                 }
             }
-            .onChange(of: libraryManager.downloads.count) { _ in
-                // Importing adds/removes entries in `downloads` too. Don't let
-                // that rebuild and reorder this list — it only needs to refresh
-                // when a real download finishes, not while importing.
-                guard !inspectorSampleDownloadStatus, !libraryManager.isImporting else { return }
-                downloadManager.loadDownloadedIPAs()
-            }
             // IPADownloadManager publishes its own completed rows. Rescanning
             // those files here caused a second list update while SwiftUI was
             // moving the last row out of the disappearing Downloading section.
@@ -301,6 +195,172 @@ struct DownloaderView: View {
     }
 }
 
+
+// Observe completed files separately from transport progress and tuning statistics.
+// The screen only rebuilds for a changed completed list or empty-state transition.
+private final class CompletedDownloadsModel: ObservableObject {
+    @Published private(set) var items: [DownloadItem] = []
+    @Published private(set) var hasDownloads = false
+    private var subscriptions: Set<AnyCancellable> = []
+
+    init(downloadManager: IPADownloadManager, libraryManager: DownloadManager) {
+        downloadManager.$downloadItems
+            .map { $0.filter(\.isFinished) }
+            .removeDuplicates()
+            .sink { [weak self] in self?.items = $0 }
+            .store(in: &subscriptions)
+
+        Publishers.CombineLatest(
+            downloadManager.$downloadItems.map { !$0.isEmpty }.removeDuplicates(),
+            libraryManager.$downloads.map { !$0.isEmpty }.removeDuplicates()
+        )
+        .map { $0.0 || $0.1 }
+        .removeDuplicates()
+        .sink { [weak self] in self?.hasDownloads = $0 }
+        .store(in: &subscriptions)
+    }
+}
+
+// Live updates stay inside this section instead of invalidating the finished list.
+private struct DownloadTransferSection: View {
+    let inspectorSampleDownloadStatus: Bool
+    @ObservedObject var downloadManager: IPADownloadManager
+    @ObservedObject var libraryManager: DownloadManager
+    @Binding var shareItems: [Any]
+    let importIpaToLibrary: (DownloadItem) -> Void
+    let exportToFiles: (DownloadItem) -> Void
+    let cryptCheck: (DownloadItem) -> Void
+    let pauseResumeDownload: (DownloadItem) -> Void
+    let deleteItem: (DownloadItem) -> Void
+
+    private var hasActiveIPAVaultDownloads: Bool {
+        downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
+    }
+
+    private var ipavaultLiveThroughputText: String {
+        guard downloadManager.ipavaultAdaptiveSpeedBPS > 0 else {
+            return "Measuring…"
+        }
+        return String(format: "%.1f MB/s", downloadManager.ipavaultAdaptiveSpeedBPS / 1_000_000)
+    }
+
+    private var ipavaultActiveStreamsText: String {
+        let count = downloadManager.ipavaultAdaptiveStreamCount
+        return "\(count) stream\(count == 1 ? "" : "s")"
+    }
+
+    // Shared by a real IPA Vault download and the inspector's non-networked
+    // sample, so the inspected separator has precisely the production layout.
+    private func ipaVaultStatusRow(speed: String, streams: String, isSample: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
+                .fontWeight(.semibold)
+            LabeledContent("Live throughput", value: speed)
+            LabeledContent("Batch tuning", value: isSample ? "Optimized" : downloadManager.ipavaultAdaptiveStatus)
+            LabeledContent("Target concurrent files", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveConcurrentCount)")
+            LabeledContent("Target streams / file", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveStreamsPerFile)")
+            LabeledContent("Active streams (all jobs)", value: streams)
+        }
+        .font(.caption)
+        .nbThemeForeground(.textSecondary)
+        .nbThemeTextRow()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isSample ? "IPA Vault sample download status" : "IPA Vault live download status")
+    }
+
+    var body: some View {
+        Group {
+            if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
+                NBSection("Downloading", secondary: "Sample") {
+                    ipaVaultStatusRow(speed: "12.4 MB/s", streams: "4 streams", isSample: true)
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.down.document")
+                            .nbThemeForeground(.accent)
+                            .font(.title2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Example.ipa")
+                                .nbThemeForeground(.text)
+                            Text("62 MB / 100 MB (62%)")
+                                .font(.caption)
+                                .nbThemeForeground(.textSecondary)
+                        }
+                        Spacer()
+                        ProgressView(value: 0.62)
+                            .frame(width: 52)
+                            .nbThemeTint(.warning)
+                    }
+                    .nbThemeTextRow()
+                    Text("Inspector sample only · no download started")
+                        .font(.caption2)
+                        .nbThemeForeground(.textSecondary)
+                }
+            }
+
+            if libraryManager.isImporting {
+                // One static row for the whole batch.
+                //
+                // This section used to render `libraryManager.downloads`
+                // directly. A bulk import appends a Download per app and
+                // removes it on completion, so importing 60 apps meant 60
+                // row inserts + 60 row deletes at the TOP of the list —
+                // shoving everything below it up and down — plus the whole
+                // section collapsing and reappearing whenever the array
+                // briefly emptied between apps, plus a re-render per
+                // extraction-progress tick. That is the flickering.
+                //
+                // The finished list underneath is only a selection surface
+                // during an import, so it now stays completely still.
+                NBSection(.localized("Importing")) {
+                    // Keep live batch statistics visible while completed files import.
+                    if hasActiveIPAVaultDownloads {
+                        ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
+                                          streams: ipavaultActiveStreamsText)
+                    }
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        .nbThemeTint(.accent)
+                        Text(.localized("Importing apps, please wait"))
+                            .nbThemeForeground(.textSecondary)
+                        Spacer()
+                    }
+                    .nbThemeTextRow()
+                }
+            } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
+                NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
+                    if hasActiveIPAVaultDownloads {
+                        ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
+                                          streams: ipavaultActiveStreamsText)
+                    }
+
+                    ForEach(libraryManager.downloads) { download in
+                        AppStoreDownloadItemRow(download: download)
+                    }
+                    ForEach(downloadManager.activeItems) { item in
+                        DownloadItemRow(
+                            item: item,
+                            shareItems: $shareItems,
+                            isSelected: false,
+                            onToggleSelection: {},
+                            selectable: false,
+                            importIpaToLibrary: { item in importIpaToLibrary(item) },
+                            exportToFiles: { item in exportToFiles(item) },
+                            cryptCheck: { item in cryptCheck(item) },
+                            pauseResumeDownload: { item in pauseResumeDownload(item) },
+                            deleteItem: { item in deleteItem(item) }
+                        )
+                    }
+                }
+            }
+        }
+        .onChange(of: libraryManager.downloads.count) { _ in
+            // Importing adds/removes entries in `downloads` too. Don't let
+            // that rebuild and reorder this list — it only needs to refresh
+            // when a real download finishes, not while importing.
+            guard !inspectorSampleDownloadStatus, !libraryManager.isImporting else { return }
+            downloadManager.loadDownloadedIPAs()
+        }
+    }
+}
 
 // MARK: - Alert & Sheet Content
 private extension DownloaderView {
