@@ -11,6 +11,7 @@ struct InstalledAppsView: View {
     @State private var isEditing = false
     @State private var selectedIDs: Set<String> = []
     @State private var removal: DeviceUninstallSelection?
+    @State private var confirmsRemoval = false
 
     private var unprotectedApps: [IDeviceInstalledApp] {
         model.apps.filter { !blacklist.contains($0.id) }
@@ -58,26 +59,39 @@ struct InstalledAppsView: View {
                     .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
                     .nbThemeForeground(.accent)
                 }
+                .disabled(model.isUninstalling)
                 if let error = model.error {
                     Text(error).font(.callout).nbThemeForeground(.danger)
+                }
+            }
+            if model.isUninstalling {
+                NBSection("Uninstalling", secondary: "\(model.uninstallCompleted)/\(model.uninstallTotal)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(model.uninstallStopRequested ? "Finishing current app…" : "Uninstalling \(model.uninstallCurrentAppName ?? "apps")…")
+                            .font(.callout).nbThemeForeground(.text)
+                        ProgressView(value: Double(model.uninstallCompleted), total: Double(model.uninstallTotal))
+                            .nbThemeTint(.accent)
+                    }
+                    Button("Stop After Current App") { model.stopUninstalling() }
+                        .disabled(model.uninstallStopRequested)
+                }
+            } else if let summary = model.uninstallSummary {
+                NBSection("Uninstall Results") {
+                    Text(summary).font(.callout).nbThemeForeground(.textSecondary)
                 }
             }
             if !visibleApps.isEmpty {
                 NBSection("Installed Apps", secondary: visibleApps.count.description) {
                     ForEach(visibleApps) { app in
-                        InstalledAppRow(app: app, restriction: restriction(app), isEditing: isEditing,
+                        InstalledAppRow(app: app, restriction: restriction(app), status: model.uninstallStatuses[app.id], isEditing: isEditing,
                             isSelected: selectedIDs.contains(app.id),
                             onToggle: { toggle(app) },
-                            onSelect: {
-                                isEditing = true
-                                selectedIDs = [app.id]
-                            },
                             onUninstall: { presentRemoval([app]) },
                             onBlacklist: { blacklist.add(app) })
-                            .allowsHitTesting(!model.isLoading)
+                            .allowsHitTesting(!model.isLoading && !model.isUninstalling)
                     }
                 }
-            } else if model.hasLoaded, !model.isLoading {
+            } else if model.hasLoaded, !model.isLoading, !model.isUninstalling {
                 NBSection("Installed Apps") {
                     Text(searchText.isEmpty
                          ? (model.apps.isEmpty ? "No verified Asign-installed apps are on this device." : "All loaded apps are blacklisted. Manage them in Settings → Blacklisted Apps.")
@@ -85,17 +99,18 @@ struct InstalledAppsView: View {
                         .nbThemeForeground(.textSecondary)
                 }
             }
-            DeviceConnectionSetupView(failureInstructions: "Once connected, tap Load Apps in Installed Apps.")
+            DeviceConnectionSetupView(failureInstructions: "Once connected, retry unfinished apps here or tap Load Apps to refresh.")
         }
         .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
         .refreshable { await refresh() }
         .toolbar {
             ToolbarItemGroup(placement: .topBarLeading) {
+                Button(isEditing ? "Done" : "Edit") {
+                    isEditing.toggle()
+                    if !isEditing { selectedIDs.removeAll() }
+                }
+                .disabled(!model.hasLoaded || model.isLoading || model.isUninstalling)
                 if isEditing {
-                    Button("Done") {
-                        isEditing = false
-                        selectedIDs.removeAll()
-                    }
                     Button {
                         let visible = selectableVisibleIDs
                         if visible.isSubset(of: selectedIDs) { selectedIDs.subtract(visible) }
@@ -104,7 +119,7 @@ struct InstalledAppsView: View {
                         SelectionCheckIcon(isSelected: !selectableVisibleIDs.isEmpty && selectableVisibleIDs.isSubset(of: selectedIDs))
                     }
                     .accessibilityLabel("Select or deselect all visible apps")
-                    .disabled(selectableVisibleIDs.isEmpty || model.isLoading)
+                    .disabled(selectableVisibleIDs.isEmpty || model.isLoading || model.isUninstalling)
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -114,15 +129,20 @@ struct InstalledAppsView: View {
                     } label: {
                         Label("Uninstall \(selectedApps.count)", systemImage: "minus.circle")
                     }
-                    .disabled(selectedApps.isEmpty || model.isLoading)
+                    .disabled(selectedApps.isEmpty || model.isLoading || model.isUninstalling)
                 }
             }
         }
-        .sheet(item: $removal) { selection in
-            UninstallAppsView(selection: selection) { bundleIdentifier in
-                model.remove(bundleIdentifier)
-                selectedIDs.remove(bundleIdentifier)
+        .alert("Uninstall selected apps?", isPresented: $confirmsRemoval, presenting: removal) { selection in
+            Button(selection.apps.count == 1 ? "Uninstall App" : "Uninstall \(selection.apps.count) Apps", role: .destructive) {
+                if model.uninstall(selection.apps) {
+                    isEditing = false
+                    selectedIDs.removeAll()
+                }
             }
+            Button("Cancel", role: .cancel) {}
+        } message: { selection in
+            Text("This permanently deletes \(selection.apps.count == 1 ? selection.apps[0].name : "the \(selection.apps.count) selected apps") and their data from this device. Files saved in Asign's library are kept.")
         }
         .onAppear {
             blacklist.reload()
@@ -137,12 +157,15 @@ struct InstalledAppsView: View {
     }
 
     private func presentRemoval(_ apps: [IDeviceInstalledApp]) {
+        guard !model.isLoading, !model.isUninstalling else { return }
         let eligible = apps.filter { !blacklist.contains($0.id) && restriction($0) == nil }
         guard !eligible.isEmpty else { return }
         removal = DeviceUninstallSelection(apps: eligible)
+        confirmsRemoval = true
     }
 
     private func refresh() async {
+        guard !model.isUninstalling else { return }
         selectedIDs.removeAll()
         model.load()
         // Let the model own the task across tab changes; keep pull-to-refresh
@@ -158,7 +181,7 @@ struct InstalledAppsView: View {
     }
 
     private func toggle(_ app: IDeviceInstalledApp) {
-        guard !model.isLoading, !blacklist.contains(app.id), restriction(app) == nil else { return }
+        guard !model.isLoading, !model.isUninstalling, !blacklist.contains(app.id), restriction(app) == nil else { return }
         if selectedIDs.contains(app.id) { selectedIDs.remove(app.id) }
         else { selectedIDs.insert(app.id) }
     }
@@ -167,10 +190,10 @@ struct InstalledAppsView: View {
 private struct InstalledAppRow: View {
     let app: IDeviceInstalledApp
     let restriction: String?
+    let status: String?
     let isEditing: Bool
     let isSelected: Bool
     let onToggle: () -> Void
-    let onSelect: () -> Void
     let onUninstall: () -> Void
     let onBlacklist: () -> Void
 
@@ -198,6 +221,9 @@ private struct InstalledAppRow: View {
                 if let restriction {
                     Text(restriction).font(.caption).nbThemeForeground(.textSecondary)
                 }
+                if let status {
+                    Text(status).font(.callout).nbThemeForeground(.textSecondary)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -210,7 +236,6 @@ private struct InstalledAppRow: View {
         .contextMenu {
             Button("Add to Blacklist", systemImage: "plus.shield", action: onBlacklist)
             if !isEditing, restriction == nil {
-                Button("Select Apps", systemImage: "checkmark.circle", action: onSelect)
                 Button("Uninstall from Device…", systemImage: "minus.circle", role: .destructive, action: onUninstall)
             }
         }
