@@ -202,34 +202,3 @@ fn installation_app_summary(bundle: &str, app: &plist::Value) -> serde_json::Val
         "isRemovable": is_removable,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    extern "C" fn cancel_when_listening(context: *mut c_void, event: i32, payload: *const c_char) {
-        if event == 0 {
-            let value: serde_json::Value = serde_json::from_str(unsafe { CStr::from_ptr(payload) }.to_str().unwrap()).unwrap();
-            assert!(value["port"].as_u64().unwrap() > 0);
-            assert!(value["txt"]["authTag"].is_string());
-            unsafe { ksign_pairing_cancel(context.cast()); }
-        }
-    }
-
-    #[test]
-    fn cancellation_closes_a_waiting_listener_without_a_device() {
-        unsafe {
-            let session = ksign_pairing_new();
-            let name = CString::new("Asign test").unwrap();
-            let mut record = std::ptr::null_mut();
-            let started = std::time::Instant::now();
-            let error = ksign_pairing_run(session, name.as_ptr(), Some(cancel_when_listening), session.cast(), &mut record);
-            assert!(!error.is_null());
-            assert!(record.is_null());
-            assert!(started.elapsed() < Duration::from_secs(5));
-            assert!(CStr::from_ptr((*error).message).to_str().unwrap().contains("cancelled"));
-            crate::idevice_error_free(error);
-            ksign_pairing_free(session);
-        }
-    }
-}

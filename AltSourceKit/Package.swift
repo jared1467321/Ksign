@@ -17,7 +17,7 @@ let package = Package(
             targets: ["AltSourceKit"]),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
+        // Targets are the basic building blocks of a package, defining a module.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "AltSourceKit"),

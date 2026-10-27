@@ -37,8 +37,8 @@ See [the unified patch](../IdentityPatch/README.md) for runtime coverage and
 build integration.
 
 SDK archives are pinned by version and SHA256 in `lief.json`. `make native`
-prepares the iOS static SDK; host tests prepare a matching host SDK. Both live
-in the ignored `.build/ipa-patch-lief` directory and are cached by CI. The SDK
+prepares the iOS static SDK in the ignored `.build/ipa-patch-lief` directory,
+which is cached by CI. The SDK
 is linked statically for devices. Simulator builds retain the header-only path.
 
 The iOS SDK's default logger opens `/tmp/lief.log` before any logging API can

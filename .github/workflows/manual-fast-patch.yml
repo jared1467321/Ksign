@@ -78,7 +78,7 @@ jobs:
           rustup toolchain install "$NATIVE_RUST_TOOLCHAIN" --profile minimal
 
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
-      # and actual Xcode/Rust versions. Swift overlays, tests and documentation
+      # and actual Xcode/Rust versions. Swift overlays and documentation
       # must not force both native targets to rebuild.
       - name: Identify native device cache
         id: native_cache_key

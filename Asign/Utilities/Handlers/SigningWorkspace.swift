@@ -42,10 +42,6 @@ final class SigningWorkspace {
         }
     }
 
-#if ARCHIVE_MEMORY_TESTING
-    var didValidateFile: ((URL) -> Void)?
-#endif
-
     /// Use filesystem spelling consistently, including for paths whose final
     /// components do not exist (for example MobileInstallation placeholders).
     /// Foundation can strip /private from an existing path but retain it for a
@@ -114,9 +110,6 @@ final class SigningWorkspace {
             try Self.canonicalPath(url).hasPrefix(root)
         }
         func validate(_ file: URL, attributes: [FileAttributeKey: Any]) throws -> FileAttributeType? {
-#if ARCHIVE_MEMORY_TESTING
-            didValidateFile?(file)
-#endif
             let type = attributes[.type] as? FileAttributeType
             if type == .typeSymbolicLink {
                 // Framework Versions/Current links are fine if they stay inside

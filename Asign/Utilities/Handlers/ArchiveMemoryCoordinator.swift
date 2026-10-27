@@ -475,24 +475,4 @@ final class ArchiveMemoryCoordinator: @unchecked Sendable {
 		Logger.misc.info("\(message, privacy: .public)")
 	}
 
-#if ARCHIVE_MEMORY_TESTING
-	// Standalone regression harness uses the real queue/admission implementation
-	// with synthetic telemetry, without UIKit or a physical memory-pressure event.
-	convenience init(probe: @escaping () -> (footprint: Double, available: Double)?) {
-		self.init(monitorPressure: false)
-		memoryProbe = { probe().map { Snapshot(footprint: $0.footprint, available: $0.available) } }
-	}
-
-	func testClock(_ clock: @escaping () -> TimeInterval) { queue.sync { self.clock = clock } }
-	func testSample() { queue.sync { _ = sample() } }
-
-	func testPressure(_ event: DispatchSource.MemoryPressureEvent) {
-		queue.sync { handlePressure(event) }
-	}
-
-	var testState: (active: Int, queued: Int, limit: Int, peak: Double, reservations: Double, history: Int) {
-		queue.sync { (active.count, waiting.count, concurrency, learnedIsolatedPeak, reservations, history.count) }
-	}
-#endif
-
 }

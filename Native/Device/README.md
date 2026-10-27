@@ -18,7 +18,7 @@ recreated by the scripts; the submodule commit is unchanged.
 
 The native framework cache uses the builder's own fingerprint: the pinned
 source manifest, Rust pairing bridge, native build script, and actual Xcode
-and Rust versions. Swift overlay, test, and documentation edits reuse it.
+and Rust versions. Swift overlay and documentation edits reuse it.
 The workflow also separates caches by runner OS and architecture. The first
 build with a new fingerprint compiles both native targets and saves the cache;
 later builds reuse it. Selecting **Ignore caches and build from scratch**
@@ -277,40 +277,9 @@ If the local VPN has not disconnected within 20 seconds, Asign skips the handoff
 Force quitting or replacing Asign during self-update can prevent completion
 cleanup from running and still requires a manual reconnect.
 
-## Verification status
+## Device validation
 
-The pre-build regression scripts have been removed. The following describes
-their historical coverage of production connection recovery against VPN and
-pairing doubles.
-The shared-tunnel check runs the production proxy against native FFI doubles,
-holds three uploads open concurrently, verifies one tunnel is used for all
-upload and installation clients, and checks lease cleanup after a cache reset.
-The queue checks verify the default five-app shared ceiling, lower and higher
-configured limits, live decreases/increases, number-field validation, preference
-bounds, pause/cancellation and both terminal-status/cleanup orderings.
-Native concurrency one is checked for initial admission, serial handoff and
-live reduction from a higher limit with a nonzero existing memory footprint.
-Capacity stays occupied until the install and its native worker
-finish. Upload checks verify that final progress cannot be overwritten by a
-delayed UI sample.
-The checks include foreground/background shortcut handoff, pending requests
-across relaunch, URL encoding, notification permission failure, stale taps,
-new work racing with cleanup, and waiting for the actual VPN disconnection.
-They also cover share sheet completion/cancellation, failed presentation,
-background notification activation, dismissing sheets for new work, stale
-sheet callbacks, and releasing installation cleanup before user selection.
-The drawer checks exercise 1,000 queued apps with no per-app reads during
-foreground refreshes, then verify active progress, removal, retries, failed-entry
-replacement, and terminal cleanup without polling the remaining queued apps.
-Preflight checks cover platform declarations, iPad-only eligibility, malformed
-and universal executables, signing-identity matches/conflicts and migration,
-deferred extraction, both signing review choices, and exact signed-ID handoff
-with preserved packages. Shared-tunnel tests verify read-only validation sends
-no upload or install command, local skips preserve active peers, and skipped
-rows support retry without being counted as installed.
-
-The Rust pairing cancellation test has passed on Linux. An iOS Xcode build and
-device testing are still required. Verify first-run consent/PIN, relaunch and
+An iOS Xcode build and device testing are still required. Verify first-run consent/PIN, relaunch and
 automatic reconnect, a multi-app install, cancellation during setup/upload,
 retry after a connection failure, self-update last, and the existing Server,
 Manual Setup, signing, and export paths on a real device before release. Also

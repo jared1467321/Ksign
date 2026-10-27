@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <TargetConditionals.h>
+#import <dlfcn.h>
 #import <objc/runtime.h>
 #import <string.h>
 #import "CompatibilityPatch.h"
@@ -137,10 +138,31 @@ static NSURL *CompatibilityGroupURL(NSString *identifier, NSURL *native) {
     return [[manager attributesOfItemAtPath:url.path error:NULL][NSFileType] isEqual:NSFileTypeDirectory] ? url : nil;
 }
 
-static NSURL *GroupContainer(id self, SEL selector, NSString *identifier) {
+static BOOL SwiftDataCaller(const void *caller) {
+    Dl_info source, sdk;
+    if (!caller || !dladdr(caller, &source) || !source.dli_fbase) return NO;
+    // Identify the loaded framework by a public metadata accessor, without
+    // calling Swift or depending on SDK paths/offsets. Resolve on demand so a
+    // failed lookup before SwiftData loads cannot disable later repairs.
+    void *configuration = dlsym(RTLD_DEFAULT, "$s9SwiftData18ModelConfigurationVMa");
+    return configuration && dladdr(configuration, &sdk) && sdk.dli_fbase &&
+        source.dli_fbase == sdk.dli_fbase;
+}
+
+static NSURL *GroupContainerForCaller(id self, SEL selector, NSString *identifier, const void *caller) {
     NSURL *native = OriginalGroupContainer(self, selector, identifier);
-    if (!AsignPatchCallerIsApp(__builtin_return_address(0))) return native;
+    if (!AsignPatchCallerIsApp(caller)) {
+        // SwiftData resolves explicit group-backed store URLs inside the SDK,
+        // before Core Data store loading. Only extend repair to that framework
+        // for a known lost group and a failed native lookup. In particular,
+        // legacy-directory discovery must never override its working container.
+        if (native || !AsignAppGroupNeedsFallback(identifier) || !SwiftDataCaller(caller)) return native;
+    }
     return CompatibilityGroupURL(identifier, native) ?: native;
+}
+
+static NSURL *GroupContainer(id self, SEL selector, NSString *identifier) {
+    return GroupContainerForCaller(self, selector, identifier, __builtin_return_address(0));
 }
 
 static id PublicDefaults(id self __attribute__((ns_consumed)), SEL selector, NSString *suite) __attribute__((ns_returns_retained));

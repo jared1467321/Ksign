@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch a pinned, SHA256-checked LIEF SDK for header growth or host tests."""
+"""Fetch a pinned, SHA256-checked LIEF SDK for header growth."""
 import argparse
 import hashlib
 import json

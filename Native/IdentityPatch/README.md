@@ -29,9 +29,18 @@ still be concrete. No probe item is created, no item is moved or deleted by setu
 and Security imports are rebound only in app-owned code. Apple frameworks keep
 their native imports.
 
-App-group requests call the native method first. System callers always get that
-result. App callers retain valid native containers. When signing an older
-prepatched input, `AsignPreserveLegacyGroupDirectories` records the upgrade and
+App-group requests call the native method first. SwiftData callers can use the
+same fallback directory as app callers only when the native lookup returns nil
+and a captured original group is missing from a readable installed signature.
+The caller must belong to the loaded image exporting SwiftData's public
+`ModelConfiguration` metadata accessor; no app identifiers, SDK offsets or
+framework paths are hardcoded. Missing symbols and unrelated framework callers
+retain the native result. A valid native SwiftData container always wins, even
+on a recorded legacy upgrade. CloudKit settings and group defaults are unchanged.
+This covers explicit SwiftData group configurations during URL construction,
+before `ModelContainer` creation or Core Data store loading. Other system callers
+always get the native result. App callers retain valid native containers. When
+signing an older prepatched input, `AsignPreserveLegacyGroupDirectories` records the upgrade and
 permits reusing an existing legacy directory for app callers to keep saved data
 reachable. A coincidentally named folder alone never overrides a native group.
 New fallback
@@ -228,27 +237,6 @@ reads; unreadable or incomplete matches pass through. No code pages or dyld
 structures are modified, no image is hidden, and no image-list snapshot or
 classification cache survives an unload. The existing rebinder also covers
 later-loaded embedded code, with the same import-path limitations below.
-
-The manual build workflow compiles and packages the app without running test
-suites. Optional manual checks are available with:
-
-```sh
-python3 Native/IdentityPatch/Tests/check.py
-```
-
-The portable checks exercise ABI type matching, preservation of existing import
-hooks and weak imports, symbol aliases and bounded ranges. They also compile all
-128 combinations of the diagnostic options header and validate bad options.
-An additional portable harness compiles the production keychain retry functions
-against a simulated store to exercise add/read/update/delete consistency, error
-propagation and preservation of unrelated groups. Its group-mapping callback is
-a fixture; actual snapshot and dictionary mapping checks require the Apple SDK.
-On macOS, the same command compiles/runs the production policy, keychain retry,
-container, defaults, identity and CloudKit scoping code against controlled
-snapshots and temporary folders, plus Swift fixtures that exercise the actual
-original-capability signature reader. Keychain calls are simulated; the checks
-do not access the host keychain or perform cloud requests. On other hosts those
-Apple checks explicitly report a skip. They do not replace device validation.
 
 For diagnosis, the manual workflow accepts `patch_disabled_hooks`, a comma-separated
 list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks`,

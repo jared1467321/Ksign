@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build one pinned idevice XCFramework with Asign's pairing bridge.
 
-Run before opening Xcode or resolving packages. --prepare-only is useful for
-Linux cargo tests; --archive accepts an already downloaded, hash-checked archive.
+Run before opening Xcode or resolving packages. --prepare-only prepares the
+source without compiling; --archive accepts an already downloaded, hash-checked archive.
 --cache-key prints the native build fingerprint without preparing or building.
 """
 import argparse
