@@ -472,10 +472,10 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
         let download = self.libraryManager.startArchive(from: file.url, id: id)
         libraryManager.handlePachageFile(url: file.url, dl: download) { err in
             DispatchQueue.main.async {
-                if (err != nil) {
+                if let error = err {
                     UIAlertController.showAlertWithOk(
-                        title: .localized("Error"),
-                        message: .localized("Whoops!, something went wrong when extracting the file. \nMaybe try switching the extraction library in the settings?"),
+                        title: .localized("Import Failed"),
+                        message: error.localizedDescription,
                     )
                 }
                 if let index = libraryManager.getDownloadIndex(by: download.id) {
@@ -729,8 +729,8 @@ private extension DownloaderView {
         } catch {
             await MainActor.run {
                 UIAlertController.showAlertWithOk(
-                    title: .localized("Error"),
-                    message: .localized("Whoops!, something went wrong when extracting the file. \nMaybe try switching the extraction library in the settings?")
+                    title: .localized("Import Failed"),
+                    message: error.localizedDescription
                 )
             }
         }

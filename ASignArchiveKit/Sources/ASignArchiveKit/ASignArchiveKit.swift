@@ -34,7 +34,7 @@ public enum ASignArchiveError: LocalizedError, Sendable {
              .overlayRebuildFailed(let status): code = status
         }
         if code == ASIGN_ARCHIVE_SOURCE_CHANGED {
-            return "The source IPA changed after it was opened. Please start signing again."
+            return "The source IPA changed while it was being read. Please try again once the file has finished downloading or copying."
         }
         switch self {
         case .extractionFailed(let code):

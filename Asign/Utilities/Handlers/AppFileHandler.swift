@@ -19,6 +19,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 	private var _cachedIconURL: URL?
 	private var _canonicalArchiveURL: URL?
 	private var _usedMove = false
+	private var _committed = false
 
 	init(
 		file ipa: URL,
@@ -40,22 +41,28 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 	/// be resolved) the primary icon used by the library UI.
 	func extract() async throws {
 		try Task.checkCancellation()
-		try _fileManager.createDirectoryIfNeeded(at: _uniqueWorkDir)
 
+		let archive = try ArchiveBackedApp(archiveURL: _ipa)
+		let metadata = try archive.metadata()
+		_metadata = metadata
+
+		// The library can use its placeholder icon. A damaged icon or a cache
+		// write failure must not prevent importing an otherwise readable IPA.
 		do {
-			let archive = try ArchiveBackedApp(archiveURL: _ipa)
-			_metadata = try archive.metadata()
-			_cachedIconURL = try archive.cachePrimaryIcon(in: _uniqueWorkDir)
+			_cachedIconURL = try archive.cachePrimaryIcon(in: _uniqueWorkDir, metadata: metadata)
 				.map { _uniqueWorkDir.appendingPathComponent($0) }
-			_reportProgress(1)
-			print("[\(_uuid)] Archive-backed import prepared; no Payload extraction performed")
-		} catch let error as ArchiveBackedAppError {
-			print("[\(_uuid)] Archive validation failed: \(error.localizedDescription)")
-			throw error
+		} catch is CancellationError {
+			throw CancellationError()
 		} catch {
-			print("[\(_uuid)] Archive validation failed: \(error.localizedDescription)")
-			throw ImportedFileHandlerError.extractionFailed
+			_cachedIconURL = nil
+			print("[\(_uuid)] Import continuing without an icon: \(error.localizedDescription)")
 		}
+		// Optional artwork failures may be ignored; a replaced or changing IPA
+		// must still fail rather than be saved with metadata from an older file.
+		try archive.archiveIndex.validate()
+		try Task.checkCancellation()
+		_reportProgress(1)
+		print("[\(_uuid)] Archive-backed import prepared; no Payload extraction performed")
 	}
 
 	/// Move the canonical IPA into Unsigned/<UUID>/Archive.ipa. Files/provider
@@ -96,9 +103,16 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		if let cachedIconURL = _cachedIconURL,
 			_fileManager.fileExists(atPath: cachedIconURL.path) {
 			let iconDestination = destinationDirectory.appendingPathComponent(cachedIconURL.lastPathComponent)
-			try _fileManager.removeFileIfNeeded(at: iconDestination)
-			try _fileManager.moveItem(at: cachedIconURL, to: iconDestination)
-			_cachedIconURL = iconDestination
+			do {
+				try _fileManager.moveItem(at: cachedIconURL, to: iconDestination)
+				_cachedIconURL = iconDestination
+			} catch {
+				_cachedIconURL = nil
+				try? _fileManager.removeFileIfNeeded(at: iconDestination)
+				print("[\(_uuid)] Import continuing without an icon: \(error.localizedDescription)")
+			}
+		} else {
+			_cachedIconURL = nil
 		}
 
 		try? _fileManager.removeItem(at: _uniqueWorkDir)
@@ -110,7 +124,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 		}
 
 		let iconName = _cachedIconURL?.lastPathComponent
-		await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
 			Storage.shared.addImported(
 				uuid: _uuid,
 				source: _canonicalArchiveURL ?? _ipa,
@@ -118,18 +132,42 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 				appIdentifier: metadata.identifier,
 				appVersion: metadata.version,
 				appIcon: iconName
-			) { _ in
+			) { error in
+				if let error {
+					continuation.resume(throwing: error)
+					return
+				}
 				print("[\(self._uuid)] Added archive-backed app to database (\(self._usedMove ? "move" : "copy"))")
 				continuation.resume()
 			}
 		}
+		_committed = true
 	}
 
 	private func _directory() async throws -> URL {
 		_fileManager.unsigned(_uuid)
 	}
 
+	var retainedArchiveURL: URL? {
+		guard let url = _canonicalArchiveURL,
+			_fileManager.fileExists(atPath: url.path) else { return nil }
+		return url
+	}
+
 	func clean() async throws {
+		if !_committed {
+			if _usedMove, let archiveURL = _canonicalArchiveURL {
+				// Restore the moved source before removing an uncommitted import.
+				// If restoration fails, retain the IPA and report its recovery path.
+				do {
+					try _fileManager.moveItem(at: archiveURL, to: _ipa)
+				} catch {
+					print("[\(_uuid)] Could not restore source; IPA retained at \(archiveURL.path): \(error.localizedDescription)")
+					throw error
+				}
+			}
+			try _fileManager.removeFileIfNeeded(at: _fileManager.unsigned(_uuid))
+		}
 		try _fileManager.removeFileIfNeeded(at: _uniqueWorkDir)
 	}
 
@@ -142,11 +180,34 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 	}
 }
 
-enum ImportedFileHandlerError: Error, CustomStringConvertible {
+struct AppImportError: LocalizedError {
+	enum Stage: String {
+		case reading = "reading the IPA metadata"
+		case storing = "saving the IPA to the library"
+		case registering = "saving the library record"
+	}
+
+	let fileName: String
+	let stage: Stage
+	let underlyingError: Error
+	var recoveryURL: URL? = nil
+
+	var errorDescription: String? {
+		var message = "Could not import \"\(fileName)\" while \(stage.rawValue).\n\n\(underlyingError.localizedDescription)"
+		if let recoveryURL {
+			message += "\n\nThe IPA has been kept at: \(recoveryURL.path)"
+		}
+		return message
+	}
+}
+
+enum ImportedFileHandlerError: LocalizedError, CustomStringConvertible {
 	case payloadNotFound
 	case notEnoughDiskSpace(needed: Int64, available: Int64)
 	case extractionFailed
 	case zipLibraryNotAvailable
+
+	var errorDescription: String? { description }
 	
 	var description: String {
 		switch self {

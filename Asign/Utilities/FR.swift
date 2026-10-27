@@ -54,10 +54,17 @@ enum FR {
 			}
 
 			let handler = AppFileHandler(file: ipa, download: download)
+			let accessingSource = ipa.startAccessingSecurityScopedResource()
+			defer {
+				if accessingSource { ipa.stopAccessingSecurityScopedResource() }
+			}
+			var importStage = AppImportError.Stage.reading
 			
 			do {
 				try await handler.extract()
+				importStage = .storing
 				try await handler.move()
+				importStage = .registering
 				try await handler.addToDatabase()
                 
 				try? await handler.clean()
@@ -80,7 +87,16 @@ enum FR {
 					completion(nil)
 				}
 			} catch {
-				try? await handler.clean()
+				var importError = AppImportError(fileName: ipa.lastPathComponent, stage: importStage, underlyingError: error)
+				do {
+					try await handler.clean()
+				} catch {
+					// Failed rollback must never hide the original import failure.
+					importError.recoveryURL = handler.retainedArchiveURL
+					print("Import cleanup failed: \(error.localizedDescription)")
+				}
+				let reportedError = importError
+				print("Import failed: \(reportedError.localizedDescription)")
 				await TempMaintenance.shared.endOperation()
 				if let liveActivityToken, let liveActivityItemID {
 					ImportLiveActivityReporter.shared.finishItem(
@@ -90,9 +106,9 @@ enum FR {
 					)
 					ImportLiveActivityReporter.shared.end(token: liveActivityToken)
 				}
-				backgroundCompletion?(error)
+				backgroundCompletion?(reportedError)
 				await MainActor.run {
-					completion(error)
+					completion(reportedError)
 				}
 			}
 		}

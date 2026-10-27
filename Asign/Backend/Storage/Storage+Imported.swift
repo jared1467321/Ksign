@@ -51,9 +51,16 @@ extension Storage {
 			new.icon = appIcon
 			new.version = appVersion
 			
-			self.saveContext()
-			UIImpactFeedbackGenerator(style: .light).impactOccurred()
-			completion(nil)
+			// Complete only after the record is persisted, so the importer can
+			// restore its source IPA if the save fails (for example, disk full).
+			do {
+				try self.context.save()
+				UIImpactFeedbackGenerator(style: .light).impactOccurred()
+				completion(nil)
+			} catch {
+				self.context.delete(new)
+				completion(error)
+			}
 		}
 	}
 }

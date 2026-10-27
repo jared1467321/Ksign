@@ -317,13 +317,7 @@ struct LibraryView: View {
                                 _exportManager.start(apps: _resolveSelectedApps())
                             }
 
-                            _barButton("lock.open", enabled: !_selectedApps.isEmpty && !_cryptCheckExtractedRunning) {
-                                _bulkCryptCheckExtractedSelected()
-                            }
-
-                            _barButton("trash", enabled: !_selectedApps.isEmpty) {
-                                _bulkDeleteSelectedApps()
-                            }
+                            _bulkActionsMenu
                         } else {
                             Menu {
                                 _importActions()
@@ -570,6 +564,32 @@ extension LibraryView {
         }
     }
 
+    // Keep the secondary actions in a real menu. Five separate toolbar buttons
+    // overflow on phone layouts, leaving iOS to reconstruct these custom-label
+    // buttons in its automatic overflow menu. An explicit menu preserves their
+    // titles, actions and availability, including when nothing is selected.
+    private var _bulkActionsMenu: some View {
+        Menu {
+            Button("Crypt Check Extracted", systemImage: "lock.open") {
+                guard !_selectedApps.isEmpty,
+                    !_cryptCheckExtractedRunning,
+                    _tapGate.allow("lock.open") else { return }
+                _bulkCryptCheckExtractedSelected()
+            }
+            .disabled(_selectedApps.isEmpty || _cryptCheckExtractedRunning)
+
+            Button(.localized("Delete"), systemImage: "trash", role: .destructive) {
+                guard !_selectedApps.isEmpty, _tapGate.allow("trash") else { return }
+                _bulkDeleteSelectedApps()
+            }
+            .disabled(_selectedApps.isEmpty)
+        } label: {
+            Label(.localized("More Actions"), systemImage: "ellipsis")
+                .labelStyle(.iconOnly)
+                .nbThemeForeground(.accent)
+        }
+    }
+
     // Select All / Deselect All. See SelectionCheckIcon for why this is drawn
     // from shapes rather than swapped between two SF Symbols.
     private var _selectAllButton: some View {
@@ -780,8 +800,8 @@ extension LibraryView {
         } catch {
             await MainActor.run {
                 UIAlertController.showAlertWithOk(
-                    title: "Error",
-                    message: .localized("Whoops!, something went wrong when extracting the file. \nMaybe try switching the extraction library in the settings?")
+                    title: .localized("Import Failed"),
+                    message: error.localizedDescription
                 )
             }
         }
