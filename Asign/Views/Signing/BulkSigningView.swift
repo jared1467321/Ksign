@@ -417,7 +417,6 @@ extension BulkSigningView {
 			let summary = sections.joined(separator: "\n\n")
 
 			await MainActor.run {
-				_isSigning = false
 				let finish = {
 					NotificationCenter.default.post(name: NSNotification.Name("asign.bulkSigningFinished"), object: nil)
 					if signAndInstall, !handoff.appIDs.isEmpty {
@@ -425,12 +424,13 @@ extension BulkSigningView {
 							NotificationCenter.default.post(name: NSNotification.Name("asign.bulkSignAndInstall"), object: handoff.appIDs)
 						}
 					}
-					dismiss()
 				}
 				if summary.isEmpty { finish() }
 				else { UIAlertController.showAlertWithOk(title: "Signing Results", message: summary, action: finish) }
 			}
 		}
+		// The detached batch continues after the configuration screen closes.
+		dismiss()
 	}
 
 	// Bridges completion independently of UI delivery, including in background.

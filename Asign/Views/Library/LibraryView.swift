@@ -385,9 +385,9 @@ struct LibraryView: View {
 			.fullScreenCover(item: $_bulkSignRequest) { request in
 				BulkSigningView(apps: request.apps, signAndInstall: request.signAndInstall)
 				.compatNavigationTransition(id: request.id.uuidString, ns: _namespace)
-				.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("asign.bulkSigningFinished"))) { notification in
-					_selectedTab = 1
-				}
+			}
+			.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("asign.bulkSigningFinished"))) { _ in
+				_selectedTab = 1
 			}
 			.sheet(isPresented: $_isImportingPresenting) {
 				FileImporterRepresentableView(
