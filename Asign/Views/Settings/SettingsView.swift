@@ -96,6 +96,11 @@ struct SettingsView: View {
                             .nbThemeForeground(.text)
                     }
                     .nbThemeRow(adaptsText: false)
+                    NavigationLink(destination: UninstallBlacklistView()) {
+                        Label("Blacklisted Apps", systemImage: "shield.lefthalf.filled")
+                            .nbThemeForeground(.text)
+                    }
+                    .nbThemeRow(adaptsText: false)
 				}
 				
 				_directories()

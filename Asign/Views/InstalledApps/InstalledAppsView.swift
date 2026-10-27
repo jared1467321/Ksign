@@ -11,7 +11,6 @@ struct InstalledAppsView: View {
     @State private var isEditing = false
     @State private var selectedIDs: Set<String> = []
     @State private var removal: DeviceUninstallSelection?
-    @State private var showsBlacklist = false
 
     private var unprotectedApps: [IDeviceInstalledApp] {
         model.apps.filter { !blacklist.contains($0.id) }
@@ -39,31 +38,25 @@ struct InstalledAppsView: View {
                     VPNReconnectBannerView()
                 }
             }
-            NBSection("On This Device", secondary: model.hasLoaded ? unprotectedApps.count.description : nil) {
-                Text("Only verified apps installed through Asign appear here. Their IPA files don't need to be kept in your library.")
-                    .font(.callout).nbThemeForeground(.textSecondary)
-                Text("Apps installed before tracking was added must be installed through Asign again to appear here.")
-                    .font(.caption).nbThemeForeground(.textSecondary)
-                Text("Use Blacklist to protect apps from accidental uninstallation. You can also swipe an app or use its menu to add it.")
-                    .font(.caption).nbThemeForeground(.textSecondary)
+            NBSection("On This Device") {
                 Button {
-                    showsBlacklist = true
+                    if model.isLoading {
+                        model.cancelLoading()
+                    } else {
+                        selectedIDs.removeAll()
+                        model.load()
+                    }
                 } label: {
-                    Label("Blacklist (\(blacklist.entries.count))", systemImage: "shield.lefthalf.filled")
-                }
-                if model.hasLoaded {
-                    Text(model.apps.contains(where: { $0.registrationDate != nil })
-                         ? "Newest first. Apps without an available date are listed last."
-                         : "iOS did not provide installation dates. Apps are listed by name.")
-                        .font(.caption).nbThemeForeground(.textSecondary)
-                }
-                if model.isLoading {
-                    ProgressView("Loading installed apps…").nbThemeTint(.accent)
-                    Button("Cancel Loading", role: .cancel) { model.cancelLoading() }
-                } else if !model.hasLoaded {
-                    Text("Uses your iDevice connection. Select Built-in Connection or Manual Setup in Settings → Installation.")
-                        .font(.callout).nbThemeForeground(.textSecondary)
-                    Button("Load Installed Apps") { model.load() }
+                    HStack(spacing: 12) {
+                        if model.isLoading {
+                            ProgressView().nbThemeTint(.accent)
+                            Text("Cancel Loading")
+                        } else {
+                            Label("Load Apps", systemImage: "arrow.down.app")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                    .nbThemeForeground(.accent)
                 }
                 if let error = model.error {
                     Text(error).font(.callout).nbThemeForeground(.danger)
@@ -75,6 +68,10 @@ struct InstalledAppsView: View {
                         InstalledAppRow(app: app, restriction: restriction(app), isEditing: isEditing,
                             isSelected: selectedIDs.contains(app.id),
                             onToggle: { toggle(app) },
+                            onSelect: {
+                                isEditing = true
+                                selectedIDs = [app.id]
+                            },
                             onUninstall: { presentRemoval([app]) },
                             onBlacklist: { blacklist.add(app) })
                             .allowsHitTesting(!model.isLoading)
@@ -83,23 +80,22 @@ struct InstalledAppsView: View {
             } else if model.hasLoaded, !model.isLoading {
                 NBSection("Installed Apps") {
                     Text(searchText.isEmpty
-                         ? (model.apps.isEmpty ? "No verified Asign-installed apps are on this device." : "All loaded apps are blacklisted. Open Blacklist to manage them.")
+                         ? (model.apps.isEmpty ? "No verified Asign-installed apps are on this device." : "All loaded apps are blacklisted. Manage them in Settings → Blacklisted Apps.")
                          : "No apps match your search.")
                         .nbThemeForeground(.textSecondary)
                 }
             }
-            DeviceConnectionSetupView(failureInstructions: "Once connected, tap Refresh in Installed Apps.")
+            DeviceConnectionSetupView(failureInstructions: "Once connected, tap Load Apps in Installed Apps.")
         }
         .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
         .refreshable { await refresh() }
         .toolbar {
             ToolbarItemGroup(placement: .topBarLeading) {
-                Button(isEditing ? "Done" : "Edit") {
-                    isEditing.toggle()
-                    if !isEditing { selectedIDs.removeAll() }
-                }
-                .disabled(!model.hasLoaded || model.isLoading)
                 if isEditing {
+                    Button("Done") {
+                        isEditing = false
+                        selectedIDs.removeAll()
+                    }
                     Button {
                         let visible = selectableVisibleIDs
                         if visible.isSubset(of: selectedIDs) { selectedIDs.subtract(visible) }
@@ -120,13 +116,6 @@ struct InstalledAppsView: View {
                     }
                     .disabled(selectedApps.isEmpty || model.isLoading)
                 }
-                Button {
-                    selectedIDs.removeAll()
-                    model.load()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.isLoading)
             }
         }
         .sheet(item: $removal) { selection in
@@ -134,9 +123,6 @@ struct InstalledAppsView: View {
                 model.remove(bundleIdentifier)
                 selectedIDs.remove(bundleIdentifier)
             }
-        }
-        .sheet(isPresented: $showsBlacklist) {
-            UninstallBlacklistView(model: model)
         }
         .onAppear {
             blacklist.reload()
@@ -184,6 +170,7 @@ private struct InstalledAppRow: View {
     let isEditing: Bool
     let isSelected: Bool
     let onToggle: () -> Void
+    let onSelect: () -> Void
     let onUninstall: () -> Void
     let onBlacklist: () -> Void
 
@@ -223,12 +210,8 @@ private struct InstalledAppRow: View {
         .contextMenu {
             Button("Add to Blacklist", systemImage: "plus.shield", action: onBlacklist)
             if !isEditing, restriction == nil {
+                Button("Select Apps", systemImage: "checkmark.circle", action: onSelect)
                 Button("Uninstall from Device…", systemImage: "minus.circle", role: .destructive, action: onUninstall)
-            }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(action: onBlacklist) {
-                Label("Blacklist", systemImage: "plus.shield")
             }
         }
     }

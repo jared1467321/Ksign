@@ -50,7 +50,7 @@ final class UninstallBlacklist: ObservableObject {
         // Read the saved setting again after any connection/queue waits.
         reload()
         guard !contains(bundleIdentifier) else {
-            throw IDeviceInstallSkip(reason: "This app is on the uninstall blacklist. Remove it from Blacklist in Installed Apps before uninstalling.")
+            throw IDeviceInstallSkip(reason: "This app is on the uninstall blacklist. Remove it in Settings → Blacklisted Apps before uninstalling.")
         }
     }
 }

@@ -50,7 +50,7 @@ final class InstalledAppsModel: ObservableObject {
                 hasLoaded = true
                 succeeded = true
             } catch is CancellationError {
-                self.error = "Loading was cancelled. Tap Refresh to try again."
+                self.error = "Loading was cancelled. Tap Load Apps to try again."
             } catch {
                 self.error = error.localizedDescription
             }

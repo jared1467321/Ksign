@@ -1,11 +1,8 @@
 import SwiftUI
-import IDeviceSwift
 import NimbleViews
 import NimbleExtensions
 
 struct UninstallBlacklistView: View {
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var model: InstalledAppsModel
     @ObservedObject private var blacklist = UninstallBlacklist.shared
 
     private var protectedIDs: [String] {
@@ -15,60 +12,39 @@ struct UninstallBlacklistView: View {
         }
     }
 
-    private var availableApps: [IDeviceInstalledApp] {
-        model.apps.filter { !blacklist.contains($0.id) }
-    }
-
     var body: some View {
-        NBNavigationView("Uninstall Blacklist", adaptsContainerText: false) {
-            NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
-                NBSection("Protected Apps", secondary: protectedIDs.count.description) {
-                    Text("Blacklisted apps are hidden from the uninstall list and cannot be uninstalled through Asign. Protection is saved after refreshing or restarting Asign.")
-                        .font(.callout).nbThemeForeground(.textSecondary)
-                    if protectedIDs.isEmpty {
-                        Text("No apps are blacklisted yet.").nbThemeForeground(.textSecondary)
-                    }
-                    ForEach(protectedIDs, id: \.self) { id in
-                        VStack(alignment: .leading, spacing: 6) {
+        NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
+            NBSection("Protected Apps", secondary: protectedIDs.count.description) {
+                if protectedIDs.isEmpty {
+                    Text("No blacklisted apps.").nbThemeForeground(.textSecondary)
+                }
+                ForEach(protectedIDs, id: \.self) { id in
+                    HStack(spacing: 12) {
+                        Image(systemName: "shield.lefthalf.filled")
+                            .nbThemeForeground(.accent)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(blacklist.entries[id] ?? id).nbThemeForeground(.heading)
                             Text(id).font(.caption).nbThemeForeground(.textSecondary)
-                            Button("Remove from Blacklist", systemImage: "shield.slash") {
-                                blacklist.remove(id)
-                            }
-                            .buttonStyle(.borderless)
                         }
-                    }
-                }
-                NBSection("Add Apps") {
-                    if !model.hasLoaded {
-                        Text("Load Installed Apps, then return here to choose apps to protect.")
-                            .nbThemeForeground(.textSecondary)
-                    } else if availableApps.isEmpty {
-                        Text("No more loaded apps to add.").nbThemeForeground(.textSecondary)
-                    }
-                    ForEach(availableApps) { app in
+                        Spacer(minLength: 0)
                         Button {
-                            blacklist.add(app)
+                            blacklist.remove(id)
                         } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(app.name).nbThemeForeground(.heading)
-                                    Text(app.id).font(.caption).nbThemeForeground(.textSecondary)
-                                }
-                                Spacer()
-                                Image(systemName: "plus.shield").nbThemeForeground(.accent)
-                            }
+                            Image(systemName: "minus.circle")
+                                .font(.title3)
+                                .nbThemeForeground(.accent)
+                                .frame(minWidth: 44, minHeight: 44)
                         }
-                        .accessibilityLabel("Add \(app.name) to Blacklist")
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Remove \(blacklist.entries[id] ?? id) from Blacklist")
                     }
                 }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
+            } footer: {
+                Text("Blacklisted apps are hidden from Installed Apps and cannot be uninstalled through Asign. Long-press an installed app to add it here.")
             }
         }
+        .nbThemeNavigationTitle("Blacklisted Apps", displayMode: .inline)
         .onAppear { blacklist.reload() }
     }
 }
