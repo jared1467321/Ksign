@@ -171,6 +171,7 @@ final class DeviceInstallationManager: ObservableObject {
         guard request.bundleIdentifier != Bundle.main.bundleIdentifier else {
             throw IDeviceInstallSkip(reason: "Asign cannot uninstall itself.")
         }
+        try UninstallBlacklist.shared.checkRemovalAllowed(for: request.bundleIdentifier)
         let selectedMode = mode
         var removed = false
         try await enqueue {
@@ -184,6 +185,7 @@ final class DeviceInstallationManager: ObservableObject {
             }
             try await self.prepare(selectedMode)
             do {
+                try UninstallBlacklist.shared.checkRemovalAllowed(for: request.bundleIdentifier)
                 removed = try await InstallationProxy(viewModel: InstallerStatusViewModel()).uninstall(request)
             } catch {
                 if !(error is CancellationError), !(error is IDeviceInstallSkip),

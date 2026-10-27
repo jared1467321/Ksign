@@ -6,13 +6,19 @@ import NimbleExtensions
 struct InstalledAppsView: View {
     @ObservedObject var model: InstalledAppsModel
     @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
+    @ObservedObject private var blacklist = UninstallBlacklist.shared
     @State private var searchText = ""
     @State private var isEditing = false
     @State private var selectedIDs: Set<String> = []
     @State private var removal: DeviceUninstallSelection?
+    @State private var showsBlacklist = false
+
+    private var unprotectedApps: [IDeviceInstalledApp] {
+        model.apps.filter { !blacklist.contains($0.id) }
+    }
 
     private var visibleApps: [IDeviceInstalledApp] {
-        model.apps.filter {
+        unprotectedApps.filter {
             searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText) ||
                 $0.id.localizedCaseInsensitiveContains(searchText)
         }
@@ -22,6 +28,10 @@ struct InstalledAppsView: View {
         Set(visibleApps.filter { restriction($0) == nil }.map(\.id))
     }
 
+    private var selectedApps: [IDeviceInstalledApp] {
+        unprotectedApps.filter { selectedIDs.contains($0.id) && restriction($0) == nil }
+    }
+
     var body: some View {
         NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
             if reconnect.pendingShortcutName != nil {
@@ -29,11 +39,18 @@ struct InstalledAppsView: View {
                     VPNReconnectBannerView()
                 }
             }
-            NBSection("On This Device", secondary: model.hasLoaded ? model.apps.count.description : nil) {
+            NBSection("On This Device", secondary: model.hasLoaded ? unprotectedApps.count.description : nil) {
                 Text("Only verified apps installed through Asign appear here. Their IPA files don't need to be kept in your library.")
                     .font(.callout).nbThemeForeground(.textSecondary)
                 Text("Apps installed before tracking was added must be installed through Asign again to appear here.")
                     .font(.caption).nbThemeForeground(.textSecondary)
+                Text("Use Blacklist to protect apps from accidental uninstallation. You can also swipe an app or use its menu to add it.")
+                    .font(.caption).nbThemeForeground(.textSecondary)
+                Button {
+                    showsBlacklist = true
+                } label: {
+                    Label("Blacklist (\(blacklist.entries.count))", systemImage: "shield.lefthalf.filled")
+                }
                 if model.hasLoaded {
                     Text(model.apps.contains(where: { $0.registrationDate != nil })
                          ? "Newest first. Apps without an available date are listed last."
@@ -58,13 +75,16 @@ struct InstalledAppsView: View {
                         InstalledAppRow(app: app, restriction: restriction(app), isEditing: isEditing,
                             isSelected: selectedIDs.contains(app.id),
                             onToggle: { toggle(app) },
-                            onUninstall: { removal = DeviceUninstallSelection(apps: [app]) })
+                            onUninstall: { presentRemoval([app]) },
+                            onBlacklist: { blacklist.add(app) })
                             .allowsHitTesting(!model.isLoading)
                     }
                 }
             } else if model.hasLoaded, !model.isLoading {
                 NBSection("Installed Apps") {
-                    Text(searchText.isEmpty ? "No verified Asign-installed apps are on this device." : "No apps match your search.")
+                    Text(searchText.isEmpty
+                         ? (model.apps.isEmpty ? "No verified Asign-installed apps are on this device." : "All loaded apps are blacklisted. Open Blacklist to manage them.")
+                         : "No apps match your search.")
                         .nbThemeForeground(.textSecondary)
                 }
             }
@@ -94,11 +114,11 @@ struct InstalledAppsView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if isEditing {
                     Button(role: .destructive) {
-                        removal = DeviceUninstallSelection(apps: model.apps.filter { selectedIDs.contains($0.id) })
+                        presentRemoval(selectedApps)
                     } label: {
-                        Label("Uninstall \(selectedIDs.count)", systemImage: "minus.circle")
+                        Label("Uninstall \(selectedApps.count)", systemImage: "minus.circle")
                     }
-                    .disabled(selectedIDs.isEmpty || model.isLoading)
+                    .disabled(selectedApps.isEmpty || model.isLoading)
                 }
                 Button {
                     selectedIDs.removeAll()
@@ -115,6 +135,25 @@ struct InstalledAppsView: View {
                 selectedIDs.remove(bundleIdentifier)
             }
         }
+        .sheet(isPresented: $showsBlacklist) {
+            UninstallBlacklistView(model: model)
+        }
+        .onAppear {
+            blacklist.reload()
+            selectedIDs.subtract(blacklist.entries.keys)
+        }
+        .onChange(of: blacklist.entries) { entries in
+            selectedIDs.subtract(entries.keys)
+        }
+        .onChange(of: model.apps.map(\.id)) { ids in
+            selectedIDs.formIntersection(ids)
+        }
+    }
+
+    private func presentRemoval(_ apps: [IDeviceInstalledApp]) {
+        let eligible = apps.filter { !blacklist.contains($0.id) && restriction($0) == nil }
+        guard !eligible.isEmpty else { return }
+        removal = DeviceUninstallSelection(apps: eligible)
     }
 
     private func refresh() async {
@@ -133,7 +172,7 @@ struct InstalledAppsView: View {
     }
 
     private func toggle(_ app: IDeviceInstalledApp) {
-        guard !model.isLoading, restriction(app) == nil else { return }
+        guard !model.isLoading, !blacklist.contains(app.id), restriction(app) == nil else { return }
         if selectedIDs.contains(app.id) { selectedIDs.remove(app.id) }
         else { selectedIDs.insert(app.id) }
     }
@@ -146,6 +185,7 @@ private struct InstalledAppRow: View {
     let isSelected: Bool
     let onToggle: () -> Void
     let onUninstall: () -> Void
+    let onBlacklist: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -181,8 +221,14 @@ private struct InstalledAppRow: View {
             else if restriction == nil { onUninstall() }
         }
         .contextMenu {
+            Button("Add to Blacklist", systemImage: "plus.shield", action: onBlacklist)
             if !isEditing, restriction == nil {
                 Button("Uninstall from Device…", systemImage: "minus.circle", role: .destructive, action: onUninstall)
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(action: onBlacklist) {
+                Label("Blacklist", systemImage: "plus.shield")
             }
         }
     }
