@@ -29,6 +29,12 @@ not measurements of device power or frame time. Cached identity uniforms, cached
 noise, cached particle layouts, the 30 Hz clock, adaptive resolution, and inactive
 animation suspension remain in production.
 
+The quality monitor compares delivered callbacks with their scheduled duration
+(`targetTimestamp - timestamp`), rather than an unconditional 30 fps target.
+Steady system-selected 24 Hz delivery therefore does not reduce resolution or
+prevent recovery. Missed scheduled callbacks still reduce quality, and the
+thermal/Low Power caps and four-window recovery ramp remain in place.
+
 Layout-dependent shader arguments, pane optics and particle lookups are prepared
 outside the timeline callback. Only time-dependent rendering runs at 30 Hz;
 layout, identity and render-scale changes rebuild the captured inputs. Pane
@@ -131,6 +137,22 @@ foreground styles. Only small foreground views observe placement and paint.
 Library, Downloads, Settings and IPA Vault keep inherited adaptive paint disabled
 on grouping containers whose labels already have explicit foreground roles.
 Vault file/upload equality checks and progress throttling remain in place.
+
+`NBList` keeps the inherited adaptive foreground on rows and a static foreground
+on its outer canvas. This avoids a second animated foreground around the entire
+Form/List while retaining colors on controls that rely on inherited styles.
+Logs likewise animate their explicitly styled lines without an animated canvas.
+Capture keeps only a 1,000-entry / 1 MiB recent tail in memory; complete current
+session output is streamed to a cache file and exported in bounded chunks off
+the main queue. Closed/inactive Logs screens receive no automatic snapshots.
+Clearing resets both histories, and capped lists scroll by last-entry identity
+instead of count. The session cache is replaced on the next capture session
+after app launch, while pause/resume within a launch retains the history.
+
+Shake detection consumes the same 30 Hz readings and uses the same reversal
+threshold, timing and cooldown on a serial background operation queue. Only
+recognized shakes schedule main-actor work. Each capture owns a fresh detector,
+and a generation check rejects queued shakes from a disabled/restarted capture.
 
 Reduce Motion receives a separately cached frame at time 1.8, matching the
 backdrop. The attachment checks shader identity so shuffling also refreshes

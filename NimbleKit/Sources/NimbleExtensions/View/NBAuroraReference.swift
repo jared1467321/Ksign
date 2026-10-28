@@ -400,7 +400,7 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
     private var qualityIndex = 3
     private var displayLink: CADisplayLink?
     private var sampleStart: CFTimeInterval?
-    private var deliveredFrames = 0
+    private var scheduledFrameTime: CFTimeInterval = 0
     private var stableWindows = 0
 
     func start() {
@@ -432,21 +432,25 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
     fileprivate func displayLinkFired(_ link: CADisplayLink) {
         guard let start = sampleStart else {
             sampleStart = link.timestamp
-            deliveredFrames = 0
+            scheduledFrameTime = 0
             return
         }
 
-        deliveredFrames += 1
+        // A 24 Hz callback is permitted by our range and by system policy.
+        // Compare delivery with the scheduled cadence, not a fixed 30 Hz goal,
+        // so an intentional refresh-rate change isn't mistaken for overload.
+        let interval = link.targetTimestamp - link.timestamp
+        scheduledFrameTime += interval.isFinite && interval > 0 ? interval : 1.0 / 30.0
         let elapsed = link.timestamp - start
         guard elapsed >= 1.5 else { return }
 
-        let deliveredFPS = Double(deliveredFrames) / elapsed
+        let deliveredFraction = scheduledFrameTime / elapsed
         let processInfo = ProcessInfo.processInfo
 
         if processInfo.thermalState == .serious || processInfo.thermalState == .critical {
             lowerQuality(toAtMost: 1)
             stableWindows = 0
-        } else if deliveredFPS < 26.5 {
+        } else if deliveredFraction < 26.5 / 30.0 {
             lowerQuality()
             stableWindows = 0
         } else if processInfo.isLowPowerModeEnabled {
@@ -454,7 +458,7 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
             // sample window so activating it cannot interrupt a visible frame.
             lowerQuality(toAtMost: 2)
             stableWindows = 0
-        } else if deliveredFPS >= 29.2 {
+        } else if deliveredFraction >= 29.2 / 30.0 {
             stableWindows += 1
             if stableWindows >= 4 {
                 raiseQuality()
@@ -465,7 +469,7 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
         }
 
         sampleStart = link.timestamp
-        deliveredFrames = 0
+        scheduledFrameTime = 0
     }
 
     private func applySystemPressureCap() {
@@ -499,7 +503,7 @@ private final class AuroraPerformanceController: NSObject, ObservableObject {
 
     private func resetSampling() {
         sampleStart = nil
-        deliveredFrames = 0
+        scheduledFrameTime = 0
         stableWindows = 0
     }
 

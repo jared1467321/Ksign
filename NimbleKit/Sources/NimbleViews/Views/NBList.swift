@@ -65,7 +65,9 @@ public struct NBList<Content>: View where Content: View {
 		// It does not catch `.foregroundColor(.secondary)` — that's a fixed
 		// system colour rather than a hierarchical level, so those call sites
 		// still opt out and have to be converted individually.
-		.nbThemeCanvas()
+		// Rows already supply both inherited foreground levels. Animating the
+		// canvas as well would update the entire Form/List on every ink frame.
+		.nbThemeCanvas(adaptsText: false)
 		.nbThemeNavigationTitle(_title, displayMode: _mode)
 	}
 }

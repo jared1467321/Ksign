@@ -10,6 +10,8 @@ import NimbleExtensions
 
 struct LogsView: View {
 	@ObservedObject var manager: LogsManager
+	@State private var _isExporting = false
+	@State private var _presentationID = UUID()
 
 	private var _lastId: LogEntry.ID? { manager.entries.last?.id }
 
@@ -30,16 +32,24 @@ struct LogsView: View {
 						}
 					}
 				}
-				.nbThemeCanvas()
+				.nbThemeCanvas(adaptsText: false)
+                .safeAreaInset(edge: .bottom) {
+                    if manager.hasOlderEntries {
+                        Text("Showing recent logs. Export includes the full session.")
+                            .font(.caption)
+                            .nbThemeForeground(.textSecondary)
+                            .padding(8)
+                    }
+                }
                 .onAppear { if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) } }
-				.onChange(of: manager.entries.count) { _ in
+				.onChange(of: _lastId) { _ in
 					if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) }
 				}
 			}
 			.toolbar {
 				ToolbarItemGroup(placement: .navigationBarTrailing) {
 					Button { exportLogs() } label: { Image(systemName: "square.and.arrow.up") }
-						.disabled(manager.entries.isEmpty)
+						.disabled(manager.entries.isEmpty || _isExporting)
 					Button { manager.clear() } label: { Image(systemName: "trash") }
 					Button {
 						if manager.isCapturing { manager.stopCapture() } else { manager.startCapture() }
@@ -49,24 +59,22 @@ struct LogsView: View {
 				}
 			}
 		}
+		.onAppear { manager.setPresented(true, owner: _presentationID) }
+		.onDisappear { manager.setPresented(false, owner: _presentationID) }
 	}
 
 	private func exportLogs() {
-		let logText = manager.exportToText()
-
-		let dateFormatter = DateFormatter()
-		dateFormatter.dateFormat = "yyyy-MM-dd-HHmmss"
-		let timestamp = dateFormatter.string(from: Date())
-		let fileName = "Asign-Logs-\(timestamp).txt"
-
-		let tempDir = FileManager.default.temporaryDirectory
-		let fileURL = tempDir.appendingPathComponent(fileName)
-
-		do {
-			try logText.write(to: fileURL, atomically: true, encoding: .utf8)
-			UIActivityViewController.show(activityItems: [fileURL])
-		} catch {
-			print("Error exporting logs: \(error.localizedDescription)")
+		guard !_isExporting else { return }
+		_isExporting = true
+		Task { @MainActor in
+			defer { _isExporting = false }
+			do {
+				let fileURL = try await manager.export()
+				UIActivityViewController.show(activityItems: [fileURL])
+			} catch {
+				UIAlertController.showAlertWithOk(title: .localized("Export Failed"),
+					message: error.localizedDescription)
+			}
 		}
 	}
 }

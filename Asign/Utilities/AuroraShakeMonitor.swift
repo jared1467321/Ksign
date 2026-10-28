@@ -1,4 +1,5 @@
 import CoreMotion
+import Foundation
 import NimbleExtensions
 import SwiftUI
 
@@ -7,36 +8,60 @@ import SwiftUI
 @MainActor
 final class AuroraShakeMonitor: ObservableObject {
     private let motionManager = CMMotionManager()
-    private var gravity: SIMD3<Double>?
-    private var impulse: (acceleration: SIMD3<Double>, timestamp: TimeInterval)?
-    private var cooldownUntil: TimeInterval = 0
+    private let motionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "Asign aurora shake detection"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        return queue
+    }()
+    private var generation: UInt64 = 0
 
     func setEnabled(_ enabled: Bool) {
         guard enabled, motionManager.isAccelerometerAvailable else {
+            generation &+= 1
             motionManager.stopAccelerometerUpdates()
-            gravity = nil
-            impulse = nil
-            cooldownUntil = 0
+            motionQueue.cancelAllOperations()
             return
         }
         guard !motionManager.isAccelerometerActive else { return }
 
+        generation &+= 1
+        let generation = generation
+        // Each capture owns its detector. Late readings from an old capture
+        // cannot change the filter used after a disable/re-enable transition.
+        let detector = AuroraShakeDetector()
         motionManager.accelerometerUpdateInterval = 1.0 / 30.0
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+        motionManager.startAccelerometerUpdates(to: motionQueue) { [weak self] data, _ in
             guard let data else { return }
             let acceleration = SIMD3(data.acceleration.x, data.acceleration.y, data.acceleration.z)
             let timestamp = data.timestamp
+            guard detector.process(acceleration, at: timestamp) else { return }
             Task { @MainActor [weak self] in
-                guard let self, self.motionManager.isAccelerometerActive else { return }
-                self.process(acceleration, at: timestamp)
+                guard let self, self.generation == generation,
+                      self.motionManager.isAccelerometerActive else { return }
+                NBAurora.randomize()
             }
         }
     }
 
-    private func process(_ acceleration: SIMD3<Double>, at timestamp: TimeInterval) {
+    deinit {
+        motionManager.stopAccelerometerUpdates()
+        motionQueue.cancelAllOperations()
+    }
+}
+
+// Confined to one serial motion queue per capture. No UI or main-actor work is
+// scheduled for ordinary readings; only a recognized shake crosses that boundary.
+private final class AuroraShakeDetector: @unchecked Sendable {
+    private var gravity: SIMD3<Double>?
+    private var impulse: (acceleration: SIMD3<Double>, timestamp: TimeInterval)?
+    private var cooldownUntil: TimeInterval = 0
+
+    func process(_ acceleration: SIMD3<Double>, at timestamp: TimeInterval) -> Bool {
         guard let gravity else {
             self.gravity = acceleration
-            return
+            return false
         }
 
         // Remove gravity so a resting phone or a slow tilt can't shuffle.
@@ -44,7 +69,7 @@ final class AuroraShakeMonitor: ObservableObject {
         let movement = acceleration - gravity
         let strengthSquared = movement.x * movement.x
             + movement.y * movement.y + movement.z * movement.z
-        guard timestamp >= cooldownUntil, strengthSquared >= 1.25 * 1.25 else { return }
+        guard timestamp >= cooldownUntil, strengthSquared >= 1.25 * 1.25 else { return false }
 
         if let impulse {
             let elapsed = timestamp - impulse.timestamp
@@ -54,15 +79,11 @@ final class AuroraShakeMonitor: ObservableObject {
             if elapsed >= 0.05, elapsed <= 0.45, dot < 0 {
                 self.impulse = nil
                 cooldownUntil = timestamp + 1.0
-                NBAurora.randomize()
-                return
+                return true
             }
-            if elapsed <= 0.45 { return }
+            if elapsed <= 0.45 { return false }
         }
         impulse = (movement, timestamp)
-    }
-
-    deinit {
-        motionManager.stopAccelerometerUpdates()
+        return false
     }
 }
