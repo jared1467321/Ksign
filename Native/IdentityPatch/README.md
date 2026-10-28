@@ -128,6 +128,28 @@ stores and unknown capability lookups retain normal behavior, including in
 containers with a mixture of local and cloud-backed stores. Store URLs,
 configurations, migration settings and completion handlers are retained. The
 library links Core Data so these hooks are available when the patch installs.
+The Ironotes 1.246 iOS 27 report reaches CloudKit mirroring/logging initialization
+from inside the cloud subclass even though both loading hooks are active. For a
+batch containing at least one store downgraded by our known-missing-container
+check, and no remaining cloud options on any store, the internal hook calls the
+ABI-checked `NSPersistentContainer` base loading implementation directly. This
+avoids entering the cloud subclass's mirroring setup. The same receiver, selector,
+descriptions and completion block are passed through; no second container or
+store is created. A description carries the identifier cleared by our patch so
+the internal hook can recognize preparation already performed by the public
+hook. Replacing its cloud options clears that evidence unless the new request
+also independently qualifies for fallback.
+
+Already-local batches without a repaired store, authorized or uncaptured cloud
+requests, unknown capability lookups and mixed batches with any remaining cloud
+options retain the cloud subclass loader. Missing or incompatible base methods
+retain the previous option-clearing behavior. No additional SDK method is
+swizzled by this routing change, and the original CloudKit installation gate
+remains unchanged. The crash report does not include the requested container or
+exception reason, so Ironotes launch and note persistence still need device
+validation; this does not establish that every CloudKit initialization failure
+can use local mode.
+
 Every hooked method's result and argument types are checked, distinguishing
 objects, blocks and integer widths. Object class annotations and type qualifiers
 are accepted when the ABI matches.
