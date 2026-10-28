@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 #if canImport(Darwin)
 import Darwin
 #else
@@ -18,6 +19,7 @@ enum IPAPatcher {
     static let originalCloudContainerIdentifiers = "AsignOriginalCloudContainerIdentifiers"
     static let originalAppGroupIdentifiers = "AsignOriginalAppGroupIdentifiers"
     static let originalKeychainAccessGroups = "AsignOriginalKeychainAccessGroups"
+    static let originalSubscriptionRegistration = "AsignOriginalSubscriptionRegistration"
     static let preserveLegacyGroupDirectories = "AsignPreserveLegacyGroupDirectories"
 
     struct Target {
@@ -283,6 +285,11 @@ enum IPAPatcher {
                 info[originalKeychainAccessGroups] = groups
                 metadataChanged = true
             }
+            if info[originalSubscriptionRegistration] == nil,
+               let permitted = snapshots[relative]?.subscriptionRegistration {
+                info[originalSubscriptionRegistration] = permitted
+                metadataChanged = true
+            }
             if let keys = info[originalCloudEntitlementKeys] as? [String],
                keys.allSatisfy(OriginalCloudEntitlements.isCloudKey) {
                 let relative = String(target.executable.path.dropFirst(root.path.count + 1))
@@ -421,6 +428,8 @@ enum OriginalCloudEntitlements {
         // nil is unknown/malformed; [] is a known empty capability list.
         var appGroups: [String]? = []
         var keychainGroups: [String]? = []
+        // Only a real plist Boolean establishes the original permission.
+        var subscriptionRegistration: Bool? = nil
     }
 
     static func read(_ url: URL) throws -> [String]? { try snapshot(url)?.keys }
@@ -500,7 +509,9 @@ enum OriginalCloudEntitlements {
         return Snapshot(keys: snapshots.allSatisfy({ $0.keys == first.keys }) ? first.keys : nil,
                         containers: snapshots.allSatisfy({ $0.containers == first.containers }) ? first.containers : nil,
                         appGroups: snapshots.allSatisfy({ $0.appGroups == first.appGroups }) ? first.appGroups : nil,
-                        keychainGroups: snapshots.allSatisfy({ $0.keychainGroups == first.keychainGroups }) ? first.keychainGroups : nil)
+                        keychainGroups: snapshots.allSatisfy({ $0.keychainGroups == first.keychainGroups }) ? first.keychainGroups : nil,
+                        subscriptionRegistration: snapshots.allSatisfy({ $0.subscriptionRegistration == first.subscriptionRegistration })
+                            ? first.subscriptionRegistration : nil)
     }
 
     private static func parseSignature(_ data: Data) -> Snapshot? {
@@ -553,11 +564,22 @@ enum OriginalCloudEntitlements {
             let knownKeychainGroups = Array(Set((appGroups ?? []) + (keychain ?? []) + (appIDs ?? []))).sorted()
             let keychainGroups: [String]? = !knownKeychainGroups.isEmpty || (appGroups != nil && keychain != nil && appIDs != nil)
                 ? knownKeychainGroups : nil
+            let registration: Bool?
+            if let value = plist["com.apple.smoot.subscriptionservice"] {
+                if let boolean = value as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() {
+                    registration = boolean.boolValue
+                } else {
+                    registration = nil
+                }
+            } else {
+                registration = false
+            }
             snapshot = Snapshot(keys: plist.keys.filter(isCloudKey).sorted(),
                                 containers: cloudContainers,
-                                appGroups: appGroups, keychainGroups: keychainGroups)
+                                appGroups: appGroups, keychainGroups: keychainGroups,
+                                subscriptionRegistration: registration)
         }
-        return snapshot ?? (hasDER ? nil : Snapshot(keys: [], containers: []))
+        return snapshot ?? (hasDER ? nil : Snapshot(keys: [], containers: [], subscriptionRegistration: false))
     }
 }
 

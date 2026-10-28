@@ -5,6 +5,7 @@
 #import <string.h>
 #import "CompatibilityPatch.h"
 #import "CloudKitPatch.h"
+#import "SubscriptionPatch.h"
 #import "PatchPolicy.h"
 #import "PatchOptions.h"
 #import "MethodHook.h"
@@ -203,6 +204,7 @@ static void InstallAppGroupPatch(Class manager, Class defaults) {
 }
 
 void AsignInstallCompatibilityPatch(void) {
+    if (AsignPatchEnabled(AsignPatchSubscriptionRegistration)) AsignInstallSubscriptionPatch();
     if (AsignPatchEnabled(AsignPatchCloudKit)) AsignInstallCloudKitPatch();
     if (AsignPatchEnabled(AsignPatchAppGroups)) InstallAppGroupPatch(NSFileManager.class, NSUserDefaults.class);
 }

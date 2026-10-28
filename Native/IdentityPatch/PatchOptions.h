@@ -17,7 +17,8 @@ enum {
     AsignPatchCloudKit = 1 << 3,
     AsignPatchBackgroundAssets = 1 << 4,
     AsignPatchModuleTrace = 1 << 5,
-    AsignPatchImageCallbacks = 1 << 6
+    AsignPatchImageCallbacks = 1 << 6,
+    AsignPatchSubscriptionRegistration = 1 << 7
 };
 
 #if ASIGN_PATCH_DISABLED_HOOKS || ASIGN_PATCH_DEFER_IMAGE_CALLBACKS

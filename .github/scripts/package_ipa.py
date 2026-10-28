@@ -62,6 +62,7 @@ def validate_patch_library(app):
     data = bundled.read_bytes()
     if not all(marker in data for marker in (b"AsignPatch/v1\0", b"AsignCompatibilityPatch/v1\0", b"AsignCloudKitPatch/v1\0",
                                              b"AsignDyldPatch/v1\0",
+                                             b"AsignSubscriptionPatch/v1\0",
                                              b"@rpath/asignpatch.dylib\0")):
         raise RuntimeError("The app is missing the built unified Asign compatibility patch")
     # Cached Xcode products may still contain the old resources. Only remove

@@ -1,7 +1,7 @@
 # Unified Asign compatibility patch
 
 `asignpatch.dylib` contains the bundle identity, keychain, app-group,
-NSUserDefaults and CloudKit compatibility code in one source-built library.
+NSUserDefaults, CloudKit and subscription-registration compatibility code in one source-built library.
 The main Xcode target's **Build Asign patch** phase bundles it as
 `asignpatch.dylib.bin`; the packaging script requires all implementation
 version markers and removes stale two-library resources from cached products.
@@ -155,6 +155,30 @@ captured before `onlyModify` edits. The first captured value survives subsequent
 signing. A previously renamed input without this metadata provides no reliable
 way to recover its earlier identity.
 
+`SubscriptionPatch.m` covers the Pluto TV startup failure in
+`-[VSSubscriptionRegistrationCenter setCurrentSubscription:]`. The original
+`com.apple.smoot.subscriptionservice` Boolean is captured per executable before
+tweak injection and signing as `AsignOriginalSubscriptionRegistration`. This is
+metadata, not an entitlement. The first snapshot survives re-signing. Malformed
+values and disagreements between universal slices remain unknown independently
+of the other capability families. Older prepatched inputs without this snapshot
+need the original IPA; current signing permissions are not original evidence.
+
+The subscription hook installs only when that snapshot is exactly Boolean true,
+a successful SecTask read of the running signature proves the permission absent
+or Boolean false, and the loaded registration method has the expected void/object
+ABI. Authorized apps, apps without the original permission, unknown or malformed
+snapshots/signatures and absent or incompatible methods get no method swizzle.
+The optional framework is not loaded by setup. A framework loaded only after
+setup is not hooked. When enabled, only app-owned calls to this one method are
+skipped, including calls clearing a subscription with nil. System callers retain
+the original implementation. No exceptions are caught, no signed permissions are
+changed, and other VideoSubscriberAccount APIs are untouched. The tradeoff is
+missing subscription registration with Apple's TV app; this does not implement
+TV-provider authentication or guarantee that later app initialization/playback
+will succeed. Apple's [TV app integration guide](https://help.apple.com/itc/tvpumcstyleguide/en.lproj/static.html)
+documents this subscription-registration permission and API.
+
 Signing also prevents accidental iCloud enablement, independently of the IPA
 Patching option and runtime patch installation. Before any tweak can rewrite an
 executable's signature, `IPAPatcher.cloudEntitlementPolicy` reads its XML signing
@@ -239,7 +263,7 @@ classification cache survives an unload. The existing rebinder also covers
 later-loaded embedded code, with the same import-path limitations below.
 
 For diagnosis, the manual workflow accepts `patch_disabled_hooks`, a comma-separated
-list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks`,
+list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks,subscription-registration`,
 and `patch_defer_image_callbacks`. Leave both at their defaults for a normal build.
 Equivalent standalone options are repeatable `--disable-hook NAME` and
 `--defer-image-callbacks` on `.github/scripts/build_identity_patch.py`.
@@ -259,6 +283,13 @@ original IPA with the same profile/options for each comparison; also compare
 patching off. Confirm launches, asset loading, extension access and an update
 over an existing installation with saved group data. Keep a working app and an
 app that needs compatibility fixes in the comparison to check for regressions.
+
+For subscription registration, sign an original Pluto IPA with the normal patch
+and with `subscription-registration` disabled using the same profile/options.
+Check launch, relaunch, sign-in/out and playback. Compare an app retaining the
+subscription permission and an app without the original permission: neither
+should install this hook. Also verify unknown/malformed snapshots/signatures and
+unsupported method ABIs install no hook, and system callers still forward.
 
 This is an API compatibility layer. Direct file reads, signing entitlement
 queries, external services, function pointers obtained via `dlsym`, and private
