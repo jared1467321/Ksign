@@ -70,6 +70,8 @@ private struct NBAuroraTextShaderScope<Content: View>: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
+            .onAppear { attachment.setPresented(true) }
+            .onDisappear { attachment.setPresented(false) }
     }
 }
 

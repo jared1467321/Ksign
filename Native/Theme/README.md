@@ -89,8 +89,8 @@ cache, including when animated clients are also active.
 
 Adaptive labels now attach one transparent UIKit anchor to their background.
 The anchor explicitly accepts the proposed label size. A single shared 15 Hz
-layout clock measures attached labels directly in window coordinates. Changed
-window/local geometry immediately refreshes native clipping, hidden state and
+layout clock measures presented, attached labels directly in window coordinates.
+Changed window/local geometry immediately refreshes native clipping, hidden state and
 opacity on that tick. Stationary labels cache that result, including invisibility,
 for 0.25 seconds (rechecked on the next tick, about four times per second).
 This bounded recheck catches ancestor-only visibility/clipping changes without
@@ -103,14 +103,25 @@ Window/local sizes preserve alignment when selection scales a row.
 
 Layout ticks publish only changed visible placements and lease transitions.
 Offscreen anchors release paint and do not publish placement or receive animated
-frames. The layout clock has weak anchor references, cleans up abandoned anchors,
-and stops when no anchors remain or the application becomes inactive. The map
+frames. Disappeared SwiftUI scopes also unregister their anchors immediately,
+even if their native views remain attached to a window. They receive no geometry
+polling until they appear again. The layout clock has weak anchor references,
+cleans up abandoned anchors, and stops when no anchors remain or the application
+becomes inactive. The map
 still uses its separate shared 15 Hz clock, serial GPU worker, cached frames and
 weak leases. This adds one shared native geometry scan, not one timer or render
 per label; device performance still needs measurement with long lists.
 
-Text activation no longer waits for a SwiftUI scroll viewport, row-local frame,
-`onAppear`, scene-phase environment change, or one-shot recovery measurement.
+Text activation requires both SwiftUI presentation ownership and usable native
+layout. `onAppear` grants ownership and `onDisappear` clears paint and withdraws
+the anchor from the layout clock. Native attachment and appearance can happen
+in either order: the later event registers the anchor. A provisional zero-sized
+layout still recovers on its next usable tick without another appearance event.
+Queued updates and foregrounding cannot reactivate a disappeared scope. Native
+anchor rebinding retires the previous scope outside the SwiftUI update, and
+deferred cleanup checks ownership before touching a scope that has moved elsewhere.
+No SwiftUI scroll viewport, row-local frame, scene-phase environment change,
+or one-shot recovery measurement is required.
 The old geometry reporters, row trackers and session measurement revisions have
 been removed. `nbThemeTextRow()` and `nbThemeTextViewport()` remain as no-op source
 compatibility helpers; existing call sites do not install those observers.
@@ -156,13 +167,19 @@ overlay above the native compositing containers. Small alpha bitmaps are cached
 until text, selection, font, image, bounds or appearance changes; they never
 capture the aurora or read back the whole screen. A weak display-link target
 tracks known glyph geometry at up to 30 Hz and discovers/recycles native views
-at 4 Hz. It stops while inactive or disabled, restores original masks and search
-attributes, and cleans up orphaned owners on its next callback. Empty glyph
+at 4 Hz. It stops while inactive, disabled, or disappeared, restores original masks
+and search attributes, and cleans up orphaned owners on its next callback. Empty glyph
 captures leave native paint visible and retry at most four times per second. Unknown tab
 layouts keep their native paint. Each overlay scans only its own presentation's
 controller hierarchy. Glass sheets install a fresh presentation scope with
 `nbThemeAdaptiveChrome(inPresentation: true)`; separately presented system panels
 are excluded.
+
+Chrome presentation ownership persists independently of its display link. A
+queued layout callback may remember an anchor but cannot start tracking after
+`onDisappear` has revoked ownership. Reappearance resumes from the remembered
+anchor, including when the native update preceded `onAppear`. Dismantling fences
+pending anchor callbacks, and an old anchor's teardown cannot detach its replacement.
 
 Chrome discovery skips table/collection cell trees, including their retained
 reuse content. It still visits explicit table headers/footers and visible

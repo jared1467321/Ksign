@@ -177,8 +177,9 @@ private struct NBAuroraNativeChromeOverlay: View {
             .background(NBAuroraChromeAnchor(observer: observer, enabled: enabled))
         }
         .transaction { $0.animation = nil }
-        .onChange(of: enabled) { if !$0 { observer.stop() } }
-        .onDisappear { observer.stop() }
+        .onAppear { observer.setPresented(true, enabled: enabled) }
+        .onChange(of: enabled) { observer.setEnabled($0) }
+        .onDisappear { observer.setPresented(false, enabled: enabled) }
     }
 
     private func foregroundColor(for glyph: NBAuroraNativeGlyph) -> NBThemeColor {
@@ -205,12 +206,23 @@ private struct NBAuroraChromeAnchor: UIViewRepresentable {
         view.enabled = enabled
         view.scheduleUpdate()
     }
+
+    static func dismantleUIView(_ view: NBAuroraChromeAnchorView, coordinator: ()) {
+        view.dismantle()
+    }
 }
 
 private final class NBAuroraChromeAnchorView: UIView {
     weak var observer: NBAuroraChromeObserver?
     var enabled = false
     private var pending = false
+    private var isDismantled = false
+
+    func dismantle() {
+        isDismantled = true
+        observer?.detach(from: self)
+        observer = nil
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -223,10 +235,10 @@ private final class NBAuroraChromeAnchorView: UIView {
     }
 
     func scheduleUpdate() {
-        guard !pending else { return }
+        guard !pending, !isDismantled else { return }
         pending = true
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isDismantled else { return }
             self.pending = false
             if self.enabled, self.window != nil {
                 self.observer?.start(at: self)

@@ -221,13 +221,33 @@ final class NBAuroraChromeObserver: ObservableObject {
     private var link: CADisplayLink?
     private var displayTarget: NBAuroraChromeDisplayTarget?
     private var lastScan: CFTimeInterval = -.infinity
+    private var isPresented = false
+    private var isEnabled = false
+
+    func setPresented(_ presented: Bool, enabled: Bool) {
+        isPresented = presented
+        isEnabled = enabled
+        updateRunningState()
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        updateRunningState()
+    }
+
+    private func updateRunningState() {
+        guard isPresented, isEnabled else { stop(); return }
+        if let anchor { start(at: anchor) }
+    }
 
     func start(at anchor: UIView) {
         if self.anchor !== anchor {
             stop()
             self.anchor = anchor
         }
-        guard link == nil else { return }
+        // Layout/window callbacks can arrive after onDisappear. Remember the
+        // anchor for reentry, but never let those callbacks grant ownership.
+        guard isPresented, isEnabled, anchor.window != nil, link == nil else { return }
         let target = NBAuroraChromeDisplayTarget(owner: self)
         displayTarget = target
         let link = CADisplayLink(target: target, selector: #selector(NBAuroraChromeDisplayTarget.fire(_:)))
@@ -235,6 +255,12 @@ final class NBAuroraChromeObserver: ObservableObject {
         link.add(to: .main, forMode: .common)
         self.link = link
         update(at: CACurrentMediaTime())
+    }
+
+    func detach(from anchor: UIView) {
+        guard self.anchor === anchor else { return }
+        stop()
+        self.anchor = nil
     }
 
     func stop() {
@@ -249,7 +275,8 @@ final class NBAuroraChromeObserver: ObservableObject {
     }
 
     fileprivate func update(at time: CFTimeInterval) {
-        guard let anchor, let window = anchor.window else { stop(); return }
+        guard isPresented, isEnabled,
+              let anchor, let window = anchor.window else { stop(); return }
         // Discover/recycle views four times per second. Track only the known
         // glyph geometry between scans, including native title/tab animations.
         // Complementary colors themselves follow the compositor, not this link.

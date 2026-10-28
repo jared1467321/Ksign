@@ -18,9 +18,23 @@ final class NBAuroraTextPlacement: ObservableObject {
 final class NBAuroraTextAttachment: ObservableObject {
     let placement = NBAuroraTextPlacement()
     let lease = NBAuroraInkLease()
+    private(set) var isPresented = false
+    fileprivate weak var anchor: NBAuroraTextAnchorView?
     private var identity: NBAuroraShaderIdentity?
 
+    func setPresented(_ presented: Bool) {
+        guard isPresented != presented else { return }
+        isPresented = presented
+        if !presented {
+            // SwiftUI can retain both the scope and its native view after it
+            // disappears. Release paint before any queued layout can run.
+            receive(bounds: nil, reduceMotion: lease.reduceMotion)
+        }
+        anchor?.updateRegistration()
+    }
+
     func receive(bounds: CGRect?, reduceMotion: Bool) {
+        let bounds = isPresented ? bounds : nil
         if let bounds { placement.receive(bounds) }
         let visible = bounds != nil
         let identity = visible ? AuroraSession.shared.identity.shaderIdentity : nil
@@ -32,13 +46,19 @@ final class NBAuroraTextAttachment: ObservableObject {
 }
 
 /// UIKit owns both the label and clipping coordinates. Cheap placement checks
-/// follow movement at the ink cadence. Stationary labels reuse their clipping
-/// result between periodic checks, which also cover ancestor visibility changes
-/// without a SwiftUI geometry/appearance notification (including retained cells).
+/// follow movement at the ink cadence while the SwiftUI scope is presented.
+/// Disappeared scopes unregister even if UIKit retains them in a window.
+/// Stationary labels reuse their clipping result between periodic checks, which
+/// also cover ancestor visibility changes without a SwiftUI geometry/appearance
+/// notification (including retained cells).
 @available(iOS 17.0, tvOS 17.0, *)
 final class NBAuroraTextAnchorView: UIView {
-    weak var attachment: NBAuroraTextAttachment?
+    private(set) weak var attachment: NBAuroraTextAttachment?
     var reduceMotion = false
+
+    var canTrack: Bool {
+        window != nil && attachment?.isPresented == true && attachment?.anchor === self
+    }
 
     private struct Geometry: Equatable {
         let window: ObjectIdentifier
@@ -66,14 +86,62 @@ final class NBAuroraTextAnchorView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         invalidateGeometry()
-        if window != nil {
+        updateRegistration()
+    }
+
+    func updateRegistration() {
+        if canTrack {
             NBAuroraTextLayoutClock.shared.register(self)
         } else {
             NBAuroraTextLayoutClock.shared.remove(self)
         }
     }
 
+    func configure(attachment: NBAuroraTextAttachment, reduceMotion: Bool) {
+        if self.attachment !== attachment {
+            let previous = self.attachment
+            if previous?.anchor === self { previous?.anchor = nil }
+            self.attachment = attachment
+            // Retire a replaced scope outside updateUIView. It may have been
+            // rebound elsewhere before this callback; don't clear its new paint.
+            if let previous {
+                DispatchQueue.main.async { [weak previous] in
+                    guard let previous, previous.anchor == nil else { return }
+                    previous.receive(bounds: nil, reduceMotion: previous.lease.reduceMotion)
+                }
+            }
+        }
+        if let previousAnchor = attachment.anchor, previousAnchor !== self {
+            previousAnchor.attachment = nil
+            NBAuroraTextLayoutClock.shared.remove(previousAnchor)
+        }
+        attachment.anchor = self
+        self.reduceMotion = reduceMotion
+        invalidateGeometry()
+        // Registration never samples/publishes inside a SwiftUI update.
+        if canTrack {
+            NBAuroraTextLayoutClock.shared.register(self)
+        } else {
+            NBAuroraTextLayoutClock.shared.remove(self, suspending: false)
+            if attachment.lease.active {
+                DispatchQueue.main.async { [weak self, weak attachment] in
+                    guard let self, let attachment,
+                          self.attachment === attachment, attachment.anchor === self,
+                          !self.canTrack else { return }
+                    self.suspend()
+                }
+            }
+        }
+    }
+
+    func detach() {
+        NBAuroraTextLayoutClock.shared.remove(self)
+        if attachment?.anchor === self { attachment?.anchor = nil }
+        attachment = nil
+    }
+
     func sample(at time: CFTimeInterval) {
+        guard canTrack else { suspend(); return }
         attachment?.receive(bounds: inkBounds(at: time), reduceMotion: reduceMotion)
     }
 
@@ -147,14 +215,14 @@ final class NBAuroraTextLayoutClock {
     private var active = true
 
     func register(_ view: NBAuroraTextAnchorView) {
-        guard view.window != nil else { return }
+        guard view.canTrack else { return }
         anchors[ObjectIdentifier(view)] = WeakAnchor(value: view, attachment: view.attachment)
         startIfNeeded()
     }
 
-    func remove(_ view: NBAuroraTextAnchorView) {
+    func remove(_ view: NBAuroraTextAnchorView, suspending: Bool = true) {
         anchors.removeValue(forKey: ObjectIdentifier(view))
-        view.suspend()
+        if suspending { view.suspend() }
         if anchors.isEmpty { stop() }
     }
 
@@ -176,7 +244,7 @@ final class NBAuroraTextLayoutClock {
                 anchors.removeValue(forKey: key)
                 continue
             }
-            guard view.window != nil, view.attachment != nil else {
+            guard view.canTrack else {
                 view.suspend()
                 anchors.removeValue(forKey: key)
                 continue
@@ -230,16 +298,10 @@ struct NBAuroraTextAnchor: UIViewRepresentable {
     }
 
     func updateUIView(_ view: NBAuroraTextAnchorView, context: Context) {
-        view.attachment = attachment
-        view.reduceMotion = reduceMotion
-        view.invalidateGeometry()
-        // No observable writes inside a SwiftUI update. The next display tick
-        // reads actual layout, even if this update precedes window attachment.
-        NBAuroraTextLayoutClock.shared.register(view)
+        view.configure(attachment: attachment, reduceMotion: reduceMotion)
     }
 
     static func dismantleUIView(_ view: NBAuroraTextAnchorView, coordinator: ()) {
-        NBAuroraTextLayoutClock.shared.remove(view)
-        view.attachment = nil
+        view.detach()
     }
 }
