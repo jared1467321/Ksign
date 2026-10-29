@@ -536,10 +536,12 @@ enum OriginalCloudEntitlements {
             let serviceValue = plist["com.apple.developer.icloud-services"]
             let services = serviceValue as? [String]
             let containers = containerValue as? [String]
+            // Original signatures can contain older team-prefixed IDs.
+            // Capture their exact identity rather than requiring iCloud.*.
             let cloudCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-")
             let cloudContainers: [String]?
             if (serviceValue != nil && services == nil) || (containerValue != nil && containers == nil) ||
-                !(containers ?? []).allSatisfy({ $0.hasPrefix("iCloud.") && $0.count > 7 &&
+                !(containers ?? []).allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." &&
                     $0.rangeOfCharacter(from: cloudCharacters.inverted) == nil }) {
                 cloudContainers = nil
             } else {

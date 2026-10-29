@@ -86,7 +86,11 @@ static NSDictionary *SignedEntitlements(void) {
 }
 
 static BOOL ValidIdentifier(id identifier) {
-    if (![identifier isKindOfClass:NSString.class] || ![identifier hasPrefix:@"iCloud."] || [identifier length] <= 7) return NO;
+    // Preserve concrete IDs from the original signature, including older
+    // team-prefixed containers. Naming conventions do not establish access;
+    // OriginalContainers and Authorized enforce exact identity and permission.
+    if (![identifier isKindOfClass:NSString.class] || ![identifier length] ||
+        [identifier isEqualToString:@"."] || [identifier isEqualToString:@".."]) return NO;
     static NSCharacterSet *invalid;
     static dispatch_once_t once;
     dispatch_once(&once, ^{

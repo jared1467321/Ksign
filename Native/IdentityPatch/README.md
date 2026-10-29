@@ -134,6 +134,16 @@ are accepted when the ABI matches.
 
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
+Concrete IDs are preserved exactly, including older team-prefixed IDs such as
+Sygic's `LHXY425M9Z.com.sygic.world`; an `iCloud.` prefix is not required.
+Both capture and runtime validation reject empty, wildcard and malformed IDs.
+Fallback still requires an exact captured-original match and a readable signed
+capability set that does not authorize that container. Previously patched inputs
+whose container snapshot was omitted need to be imported from the original IPA;
+the replacement signing profile cannot recover their original container IDs.
+`python3 .github/scripts/check_cloudkit_containers.py` checks capture,
+metadata publication, re-signing and runtime eligibility on macOS; `--ipa`
+additionally checks the original Sygic IPA. The manual build runs this regression.
 Default-container requests can use that identity in local mode. On iOS 17+,
 the app's imported SwiftData `CloudKitDatabase.automatic` getter uses an explicit
 original container only when the installed signature has no usable container.
