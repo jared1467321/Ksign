@@ -404,15 +404,12 @@ final class DeviceInstallationManager: ObservableObject {
     private func cleanUpIfIdle() {
         guard pendingOperations == 0, workflows.isEmpty, cleanupTask == nil else { return }
         cleanupTask = Task { @MainActor in
-            VPNReconnectDiagnostics.record("installation cleanup started; mode=\(self.mode.rawValue)")
             await HeartbeatManager.shared.resetInstallationConnection()
             self.configuredMode = nil
             self.needsConnectionRecovery = false
             HeartbeatManager.configurePairingPath(nil)
             DevicePairingStore.removeWorkingCopy()
-            VPNReconnectDiagnostics.record("installation cleanup stopping local VPN")
             let restoreVPN = await self.vpn.finishSession()
-            VPNReconnectDiagnostics.record("installation cleanup VPN finished; restoreVPN=\(restoreVPN); pendingOperations=\(self.pendingOperations); workflows=\(self.workflows.count)")
             if case .ready = self.phase { self.phase = .configured }
             // New work waits for cleanup but can arrive while the tunnel is
             // stopping. Never reconnect another VPN underneath that work.
@@ -420,7 +417,6 @@ final class DeviceInstallationManager: ObservableObject {
                 await self.vpnReconnect.deviceWorkFinished(restoreVPN: restoreVPN && self.mode == .builtIn)
             }
             self.cleanupTask = nil
-            VPNReconnectDiagnostics.record("installation cleanup finished")
         }
     }
 }

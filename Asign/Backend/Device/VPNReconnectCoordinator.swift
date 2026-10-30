@@ -83,7 +83,6 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     func beginDeviceWork(requiresUserChoice: Bool = false) {
-        VPNReconnectDiagnostics.record("coordinator beginDeviceWork; requiresUserChoice=\(requiresUserChoice); pending=\(requestID ?? "nil"); sheetRequest=\(shareSheetRequestID ?? "nil")")
         deviceWorkActive = true
         // Inventory refreshes leave the existing reconnect reminder available
         // without presenting a sheet or opening Shortcuts automatically.
@@ -93,7 +92,6 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     func deviceWorkFinished(restoreVPN: Bool) async {
-        VPNReconnectDiagnostics.record("coordinator deviceWorkFinished; restoreVPN=\(restoreVPN); userChoiceRequested=\(userChoiceRequested)")
         deviceWorkActive = false
         let requiresChoice = userChoiceRequested
         userChoiceRequested = false
@@ -102,19 +100,16 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     func testShortcut() async {
-        VPNReconnectDiagnostics.record("coordinator testShortcut; deviceWorkActive=\(deviceWorkActive)")
         guard !deviceWorkActive else { return }
         await requestReconnect()
     }
 
     func disable() {
-        VPNReconnectDiagnostics.record("coordinator disable/dismiss reminder")
         clearPendingRequest()
         notice = nil
     }
 
     private func requestReconnect(automaticallyPresent: Bool = true) async {
-        VPNReconnectDiagnostics.record("coordinator requestReconnect; automaticallyPresent=\(automaticallyPresent); enabled=\(defaults.bool(forKey: Self.enabledKey)); deviceWorkActive=\(deviceWorkActive); openingShortcut=\(openingShortcut); method=\(presentation.rawValue)")
         guard defaults.bool(forKey: Self.enabledKey), !deviceWorkActive, !openingShortcut else { return }
         let name = (defaults.string(forKey: Self.shortcutNameKey) ?? Self.defaultShortcutName)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -125,7 +120,6 @@ final class VPNReconnectCoordinator: ObservableObject {
         clearPendingRequest()
         let id = UUID().uuidString
         requestID = id
-        VPNReconnectDiagnostics.record("coordinator new request=\(id); shortcut=\(name)")
         pendingShortcutName = name
         defaults.set(name, forKey: Self.pendingNameKey)
         defaults.set(id, forKey: Self.pendingIDKey)
@@ -148,7 +142,6 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     func runPendingShortcut() async {
-        VPNReconnectDiagnostics.record("coordinator runPendingShortcut; request=\(requestID ?? "nil"); sheetRequest=\(shareSheetRequestID ?? "nil"); deviceWorkActive=\(deviceWorkActive); openingShortcut=\(openingShortcut); enabled=\(defaults.bool(forKey: Self.enabledKey)); method=\(presentation.rawValue)")
         guard !deviceWorkActive, !openingShortcut, shareSheetRequestID == nil, isForeground(),
               defaults.bool(forKey: Self.enabledKey),
               let id = requestID, let name = pendingShortcutName else { return }
@@ -157,7 +150,6 @@ final class VPNReconnectCoordinator: ObservableObject {
             let presented = presentShareSheet(name) { [weak self] completed in
                 self?.shareSheetFinished(id: id, completed: completed)
             }
-            VPNReconnectDiagnostics.record("coordinator share sheet request=\(id); presentationAccepted=\(presented)")
             if presented {
                 notice = nil
             } else {
@@ -169,9 +161,7 @@ final class VPNReconnectCoordinator: ObservableObject {
         }
         guard let url = Self.shortcutURL(name: name) else { return }
         openingShortcut = true
-        VPNReconnectDiagnostics.record("coordinator opening Shortcuts; request=\(id)")
         let opened = await openShortcut(url)
-        VPNReconnectDiagnostics.record("coordinator Shortcuts open result; request=\(id); opened=\(opened); currentRequest=\(requestID ?? "nil")")
         openingShortcut = false
         guard requestID == id else { return }
         if opened {
@@ -183,7 +173,6 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     private func shareSheetFinished(id: String, completed: Bool) {
-        VPNReconnectDiagnostics.record("coordinator shareSheetFinished; callbackRequest=\(id); currentRequest=\(requestID ?? "nil"); sheetRequest=\(shareSheetRequestID ?? "nil"); completed=\(completed)")
         guard requestID == id, shareSheetRequestID == id else { return }
         shareSheetRequestID = nil
         if completed {
@@ -195,21 +184,18 @@ final class VPNReconnectCoordinator: ObservableObject {
     }
 
     func notificationTapped(id: String) async {
-        VPNReconnectDiagnostics.record("coordinator notificationTapped; callbackRequest=\(id); currentRequest=\(requestID ?? "nil"); deviceWorkActive=\(deviceWorkActive)")
         guard requestID == id, !deviceWorkActive else { return }
         tappedRequestID = id
         await appBecameActive()
     }
 
     func appBecameActive() async {
-        VPNReconnectDiagnostics.record("coordinator appBecameActive; request=\(requestID ?? "nil"); tappedRequest=\(tappedRequestID ?? "nil"); sheetRequest=\(shareSheetRequestID ?? "nil")")
         guard isForeground(), let tappedRequestID, tappedRequestID == requestID else { return }
         self.tappedRequestID = nil
         await runPendingShortcut()
     }
 
     private func clearPendingRequest() {
-        VPNReconnectDiagnostics.record("coordinator clearPendingRequest; request=\(requestID ?? "nil"); sheetRequest=\(shareSheetRequestID ?? "nil")")
         let hadShareSheet = shareSheetRequestID != nil
         shareSheetRequestID = nil
         if let requestID { removeNotification(requestID) }
