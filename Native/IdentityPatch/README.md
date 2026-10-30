@@ -189,7 +189,9 @@ empty arrays, non-string array elements are removed, and invalid environment
 values are removed using the SDK's native overlay semantics. Valid entries and
 unrelated keys are retained. This prevents profile placeholders such as the
 string `icloud-services = "*"` from failing SDK type validation; it adds no cloud
-permission. The raw getter, overlay method and initializer ABIs must all match.
+permission. The native `valueForEntitlement:` reader supplies the three raw
+fields; no `entitlementsDict` getter or private ivar layout is assumed. The
+per-key reader, overlay method and initializer ABIs must all match.
 The process-wide object is built outside temporary container scopes, so a
 container's compatibility capabilities cannot leak into the cached object.
 Signature reads and fallback eligibility continue to use the real signed values.
@@ -284,7 +286,7 @@ The patch installs from Objective-C `+load`, before app initializers:
   its report omits the assertion message, so this closes a coverage gap without
   proving that every Background Assets validation failure is repaired.
 - SDK group validation can also query LaunchServices directly. When available,
-  the ABI-checked `LSBundleRecord` getters for `groupContainerIdentifiers` and
+  the ABI-checked `LSApplicationRecord` getters for `groupContainerIdentifiers` and
   `groupContainerURLs` supply immutable local views to the same scoped callers,
   for the exact installed bundle identifier of the current process. Only the
   eligible original `BAAppGroupID` is added, and only if its real native or
@@ -292,6 +294,11 @@ The patch installs from Objective-C `+load`, before app initializers:
   are preserved; unrecognized result types pass through. Native file-container
   lookups and nested record reads suppress these views so native authorization
   checks, directory-root selection and preferences fallback remain independent.
+  Hook installation is attempted at startup and retried before shared-manager
+  initialization, after its native or compatibility directory is prepared.
+  A missing application-record class leaves installation retryable; once the
+  class is available, installation is serialized and targets its concrete
+  implementations or adds overrides for inherited getters.
   The registered record and signed permissions are never changed. Absent or
   incompatible getters are skipped. This repairs local SDK setup without
   implementing Apple's hosted-asset service or bypassing distribution checks.

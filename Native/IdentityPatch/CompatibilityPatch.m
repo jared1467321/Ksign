@@ -27,6 +27,8 @@ static _Thread_local __unsafe_unretained NSString *BackgroundAssetsGroup;
 static _Thread_local BOOL ReadingNativeGroupRecord;
 typedef id (*RecordGetter)(id, SEL);
 static RecordGetter OriginalRecordGroupIdentifiers, OriginalRecordGroupURLs;
+static NSURL *CompatibilityGroupURL(NSString *identifier, NSURL *native);
+static void InstallBackgroundAssetsRecordPatch(void);
 
 static NSURL *NativeGroupContainer(id manager, SEL selector, NSString *identifier) {
     if (!OriginalGroupContainer) return nil;
@@ -135,7 +137,18 @@ BOOL AsignNeedsBackgroundAssetsCompatibility(void) {
 void *AsignWithBackgroundAssetsCompatibility(void *(^operation)(void)) {
     NSString *previous = BackgroundAssetsGroup;
     BackgroundAssetsGroup = BackgroundAssetsFallbackGroup();
-    @try { return operation(); }
+    @try {
+        if (BackgroundAssetsGroup) {
+            // Native lookup and fallback-directory preparation can initialize
+            // LaunchServices after +load. Retry the record hooks now, before
+            // the SDK validates its registered group membership.
+            NSURL *native = NativeGroupContainer(NSFileManager.defaultManager,
+                @selector(containerURLForSecurityApplicationGroupIdentifier:), BackgroundAssetsGroup);
+            if (!native) (void)CompatibilityGroupURL(BackgroundAssetsGroup, nil);
+            InstallBackgroundAssetsRecordPatch();
+        }
+        return operation();
+    }
     @finally { BackgroundAssetsGroup = previous; }
 }
 
@@ -253,11 +266,17 @@ static id RecordGroupURLs(id self, SEL selector) {
 
 static void InstallBackgroundAssetsRecordPatch(void) {
     if (!AsignNeedsBackgroundAssetsCompatibility()) return;
-    Class record = NSClassFromString(@"LSBundleRecord");
-    AsignHookMethod(record, NSSelectorFromString(@"groupContainerIdentifiers"),
-                    (IMP)RecordGroupIdentifiers, (IMP *)&OriginalRecordGroupIdentifiers, "@", NULL, NULL);
-    AsignHookMethod(record, NSSelectorFromString(@"groupContainerURLs"),
-                    (IMP)RecordGroupURLs, (IMP *)&OriginalRecordGroupURLs, "@", NULL, NULL);
+    // Use the concrete app-record class so an SDK override cannot bypass a
+    // superclass hook. Inherited methods receive an override on this class.
+    Class record = NSClassFromString(@"LSApplicationRecord");
+    if (!record) return; // A later manager request can retry after it loads.
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        AsignHookMethod(record, NSSelectorFromString(@"groupContainerIdentifiers"),
+                        (IMP)RecordGroupIdentifiers, (IMP *)&OriginalRecordGroupIdentifiers, "@", NULL, NULL);
+        AsignHookMethod(record, NSSelectorFromString(@"groupContainerURLs"),
+                        (IMP)RecordGroupURLs, (IMP *)&OriginalRecordGroupURLs, "@", NULL, NULL);
+    });
 }
 
 static NSURL *GroupContainerForCaller(id self, SEL selector, NSString *identifier, const void *caller) {

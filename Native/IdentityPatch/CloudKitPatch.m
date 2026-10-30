@@ -33,8 +33,8 @@ static ObjectArgument OriginalContainer, OriginalEntitlement, OriginalContainerE
 static ObjectGetter OriginalDefault, OriginalDefaultIdentifier;
 static Initializer OriginalInit, OriginalPublicInit, OriginalEntitlementsInit;
 static CurrentProcessInitializer OriginalCurrentProcessEntitlementsInit;
-static ObjectGetter OriginalProcessEntitlements, OriginalCoreDataDefaultIdentifier;
-static ObjectArgument OriginalEntitlementsOverlay;
+static ObjectGetter OriginalCoreDataDefaultIdentifier;
+static ObjectArgument OriginalProcessEntitlement, OriginalEntitlementsOverlay;
 static EnvironmentInitializer OriginalEnvironmentInit;
 static OptionsInitializer OriginalOptionsInit;
 static void (*OriginalCheckServices)(id, SEL);
@@ -210,7 +210,15 @@ static id CurrentProcessEntitlementsInit(id self __attribute__((ns_consumed)), S
     @try {
         id entitlements = OriginalCurrentProcessEntitlementsInit(self, selector);
         if (!entitlements) return nil;
-        NSDictionary *values = OriginalProcessEntitlements(entitlements, NSSelectorFromString(@"entitlementsDict"));
+        // CKEntitlements exposes a raw per-key reader, not an entitlementsDict
+        // getter. Read only the fields we can normalize, without invoking the
+        // typed getters that are subject to the malformed-value validation.
+        NSMutableDictionary *values = [NSMutableDictionary dictionary];
+        SEL valueSelector = NSSelectorFromString(@"valueForEntitlement:");
+        for (NSString *key in @[ServicesKey, ContainersKey, EnvironmentKey]) {
+            id value = OriginalProcessEntitlement(entitlements, valueSelector, key);
+            if (value) values[key] = value;
+        }
         NSDictionary *overlay = ProcessEntitlementsOverlay(values);
         if (!overlay) return entitlements;
         id normalized = OriginalEntitlementsOverlay(entitlements,
@@ -224,11 +232,11 @@ static id CurrentProcessEntitlementsInit(id self __attribute__((ns_consumed)), S
 
 static void InstallCurrentProcessEntitlementsHook(Class cls) {
     if (!cls || !ProcessEntitlementsOverlay(SignedEntitlements()).count) return;
-    Method values = class_getInstanceMethod(cls, NSSelectorFromString(@"entitlementsDict"));
+    Method value = class_getInstanceMethod(cls, NSSelectorFromString(@"valueForEntitlement:"));
     Method overlay = class_getInstanceMethod(cls, NSSelectorFromString(@"entitlementsByAddingOverlay:"));
-    if (!AsignMethodMatches(values, "@", NULL, NULL) ||
+    if (!AsignMethodMatches(value, "@", "@", NULL) ||
         !AsignMethodMatches(overlay, "@", "@", NULL)) return;
-    OriginalProcessEntitlements = (void *)method_getImplementation(values);
+    OriginalProcessEntitlement = (void *)method_getImplementation(value);
     OriginalEntitlementsOverlay = (void *)method_getImplementation(overlay);
     AsignHookMethod(cls, NSSelectorFromString(@"initWithCurrentProcess"),
                     (IMP)CurrentProcessEntitlementsInit, (IMP *)&OriginalCurrentProcessEntitlementsInit,
