@@ -139,6 +139,18 @@ Every hooked method's result and argument types are checked, distinguishing
 objects, blocks and integer widths. Object class annotations and type qualifiers
 are accepted when the ABI matches.
 
+After clearing cloud options, some SDKs still initialize mirroring inside the
+cloud subclass. For a batch with at least one store repaired by the patch and
+no remaining cloud requests, the internal loading hook calls the ABI-checked
+`NSPersistentContainer` base implementation. The public hook's repair evidence
+is retained on each description and revalidated at the internal hook. A new
+cloud request replaces that evidence. Already-local batches, authorized or
+unknown requests, and mixed batches with remaining cloud options retain the
+cloud subclass loader. Missing or incompatible base methods retain option
+clearing alone. The receiver, descriptions and completion block are preserved.
+The Five Cents iOS 27 report exercises both loading hooks before mirroring
+throws; launch and persistence still require device validation.
+
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
 Concrete IDs are preserved exactly, including older team-prefixed IDs such as
@@ -150,7 +162,7 @@ whose container snapshot was omitted need to be imported from the original IPA;
 the replacement signing profile cannot recover their original container IDs.
 `python3 .github/scripts/check_cloudkit_containers.py` checks capture,
 metadata publication, re-signing and runtime eligibility on macOS; `--ipa`
-additionally checks the original Sygic IPA. The manual build runs this regression.
+additionally checks the original Sygic IPA.
 Default-container requests can use that identity in local mode. On iOS 17+,
 the app's imported SwiftData `CloudKitDatabase.automatic` getter uses an explicit
 original container only when the installed signature has no usable container.
@@ -235,6 +247,19 @@ The patch installs from Objective-C `+load`, before app initializers:
   concurrent app lookups retain their original identity. The getter forwards the
   Swift metatype and the real SDK object unchanged. No asset manager is fabricated,
   no Swift trap is suppressed, and signed capabilities remain authoritative.
+- Background Assets group-container and group-defaults requests can use the
+  existing compatibility directory only for the main bundle's `BAAppGroupID`,
+  when it exactly matches a captured original group proven unavailable in the
+  running signature. Working native containers, explicit defaults containers,
+  unrelated groups and unknown signatures retain native behavior. Callers are
+  identified by the loaded image exporting `AssetPackManager`'s metadata
+  accessor; the synchronous shared-manager scope also covers Foundation helpers.
+  Defaults initialization carries only the matching suite's scope and restores
+  it for nested calls and Objective-C exceptions. This group repair also applies
+  when the bundle identifier was preserved, independently of identity repair.
+  The Placify original IPA establishes its group declaration and extension;
+  its report omits the assertion message, so this closes a coverage gap without
+  proving that every Background Assets validation failure is repaired.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and

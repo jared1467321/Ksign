@@ -22,6 +22,7 @@ static InitSuite OriginalDefaults;
 static InitPublicSuite OriginalPublicDefaults;
 static NSURL *(*OriginalGroupContainer)(id, SEL, NSString *);
 static _Thread_local __unsafe_unretained NSString *AppDefaultsSuite;
+static _Thread_local __unsafe_unretained NSString *BackgroundAssetsGroup;
 
 static BOOL CompatibleMethod(Method method, unsigned arguments) {
     return (arguments == 3 || arguments == 4) &&
@@ -109,6 +110,36 @@ static BOOL GroupIdentifier(NSString *identifier) {
         [identifier rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/\\*"]].location == NSNotFound;
 }
 
+static NSString *BackgroundAssetsFallbackGroup(void) {
+    if (!AsignPatchEnabled(AsignPatchBackgroundAssets) || !AsignPatchEnabled(AsignPatchAppGroups)) return nil;
+    id group = NSBundle.mainBundle.infoDictionary[@"BAAppGroupID"];
+    return GroupIdentifier(group) && AsignAppGroupNeedsFallback(group) ? group : nil;
+}
+
+BOOL AsignNeedsBackgroundAssetsCompatibility(void) {
+    return BackgroundAssetsFallbackGroup() != nil;
+}
+
+void *AsignWithBackgroundAssetsCompatibility(void *(^operation)(void)) {
+    NSString *previous = BackgroundAssetsGroup;
+    BackgroundAssetsGroup = BackgroundAssetsFallbackGroup();
+    @try { return operation(); }
+    @finally { BackgroundAssetsGroup = previous; }
+}
+
+static BOOL BackgroundAssetsGroupForCaller(NSString *group, const void *caller) {
+    // Only the declared, captured original group can receive SDK repair. A
+    // synchronous scope also covers calls made through Foundation helpers.
+    if (!GroupIdentifier(group) || ![group isEqualToString:BackgroundAssetsFallbackGroup()]) return NO;
+    if ([group isEqualToString:BackgroundAssetsGroup]) return YES;
+    Dl_info source, sdk;
+    if (!caller || !dladdr(caller, &source) || !source.dli_fbase) return NO;
+    // Resolve on demand, without loading the optional framework or invoking
+    // Swift. Later SDK calls need the same repair after shared initialization.
+    void *manager = dlsym(RTLD_DEFAULT, "$s16BackgroundAssets16AssetPackManagerCMa");
+    return manager && dladdr(manager, &sdk) && sdk.dli_fbase && source.dli_fbase == sdk.dli_fbase;
+}
+
 static NSURL *CompatibilityGroupURL(NSString *identifier, NSURL *native) {
     if (!GroupIdentifier(identifier)) return nil;
     BOOL legacy = AsignPreservesLegacyGroupDirectories();
@@ -153,11 +184,10 @@ static BOOL SwiftDataCaller(const void *caller) {
 static NSURL *GroupContainerForCaller(id self, SEL selector, NSString *identifier, const void *caller) {
     NSURL *native = OriginalGroupContainer(self, selector, identifier);
     if (!AsignPatchCallerIsApp(caller)) {
-        // SwiftData resolves explicit group-backed store URLs inside the SDK,
-        // before Core Data store loading. Only extend repair to that framework
-        // for a known lost group and a failed native lookup. In particular,
-        // legacy-directory discovery must never override its working container.
-        if (native || !AsignAppGroupNeedsFallback(identifier) || !SwiftDataCaller(caller)) return native;
+        // Preserve working native containers, including legacy upgrades. SDK
+        // repair requires a known lost group and an identified caller/scope.
+        if (native || !AsignAppGroupNeedsFallback(identifier) ||
+            (!SwiftDataCaller(caller) && !BackgroundAssetsGroupForCaller(identifier, caller))) return native;
     }
     return CompatibilityGroupURL(identifier, native) ?: native;
 }
@@ -169,18 +199,26 @@ static NSURL *GroupContainer(id self, SEL selector, NSString *identifier) {
 static id PublicDefaults(id self __attribute__((ns_consumed)), SEL selector, NSString *suite) __attribute__((ns_returns_retained));
 static id PublicDefaults(id self __attribute__((ns_consumed)), SEL selector, NSString *suite) {
     NSString *previous = AppDefaultsSuite;
-    AppDefaultsSuite = AsignPatchCallerIsApp(__builtin_return_address(0)) && GroupIdentifier(suite) ? suite : nil;
+    NSString *previousGroup = BackgroundAssetsGroup;
+    const void *caller = __builtin_return_address(0);
+    BOOL background = BackgroundAssetsGroupForCaller(suite, caller);
+    AppDefaultsSuite = (AsignPatchCallerIsApp(caller) || background) && GroupIdentifier(suite) ? suite : nil;
+    // Carry only this suite through Foundation's initializer. Unrelated nested
+    // suites must not inherit a Background Assets request's provenance.
+    BackgroundAssetsGroup = background ? suite : nil;
     @try { return OriginalPublicDefaults(self, selector, suite); }
-    @finally { AppDefaultsSuite = previous; }
+    @finally { AppDefaultsSuite = previous; BackgroundAssetsGroup = previousGroup; }
 }
 
 static id Defaults(id self __attribute__((ns_consumed)), SEL selector, NSString *suite, NSURL *container) __attribute__((ns_returns_retained));
 static id Defaults(id self __attribute__((ns_consumed)), SEL selector, NSString *suite, NSURL *container) {
+    const void *caller = __builtin_return_address(0);
+    BOOL background = BackgroundAssetsGroupForCaller(suite, caller);
     if (!container && GroupIdentifier(suite) &&
-        ([suite isEqual:AppDefaultsSuite] || AsignPatchCallerIsApp(__builtin_return_address(0)))) {
+        ([suite isEqual:AppDefaultsSuite] || AsignPatchCallerIsApp(caller) || background)) {
         NSURL *native = OriginalGroupContainer(NSFileManager.defaultManager,
             @selector(containerURLForSecurityApplicationGroupIdentifier:), suite);
-        container = CompatibilityGroupURL(suite, native);
+        if (!background || !native) container = CompatibilityGroupURL(suite, native);
     }
     return OriginalDefaults(self, selector, suite, container);
 }

@@ -15,6 +15,7 @@ static NSString *const ServicesKey = @"com.apple.developer.icloud-services";
 static NSString *const ContainersKey = @"com.apple.developer.icloud-container-identifiers";
 static NSString *const EnvironmentKey = @"com.apple.developer.icloud-container-environment";
 static char LocalIdentifierKey;
+static char LocalStoreIdentifierKey;
 // Only synchronous SDK construction sees this view. Other threads and the
 // Security entitlement APIs continue to see the real signed capabilities.
 static _Thread_local __unsafe_unretained NSString *ConstructingLocalIdentifier;
@@ -41,6 +42,7 @@ static OperationMethod OriginalContainerOperation, OriginalContainerConvenience;
 static OperationMethod OriginalDatabaseOperation, OriginalDatabaseConvenience;
 static void (*OriginalLoadPersistentStores)(NSPersistentCloudKitContainer *, SEL, StoreCompletion);
 static void (*OriginalLoadStoreDescriptions)(NSPersistentCloudKitContainer *, SEL, NSArray *, StoreCompletion);
+static void (*LocalLoadStoreDescriptions)(NSPersistentContainer *, SEL, NSArray *, StoreCompletion);
 static struct {
     const char *name;
     NSString *key;
@@ -346,16 +348,37 @@ static void ContainerConvenience(id self, SEL selector, NSOperation *operation) 
 static void DatabaseOperation(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseOperation); }
 static void DatabaseConvenience(id self, SEL selector, NSOperation *operation) { Operation(self, selector, operation, OriginalDatabaseConvenience); }
 
-static void PrepareLocalStores(NSArray<NSPersistentStoreDescription *> *descriptions) {
+static BOOL PrepareLocalStores(NSArray<NSPersistentStoreDescription *> *descriptions) {
     // Core Data can initialize CloudKit (including its logging/entitlement
     // checks) before it constructs a CKContainer. Handle unavailable stores
     // before that path starts, instead of catching an exception and retrying a
     // partially loaded container. Keep each store and its local options intact.
+    BOOL repaired = NO;
     for (NSPersistentStoreDescription *description in descriptions) {
-        if (NeedsLocal(description.cloudKitContainerOptions.containerIdentifier)) {
+        NSPersistentCloudKitContainerOptions *options = description.cloudKitContainerOptions;
+        if (options) {
+            // A replacement request must qualify independently, even if this
+            // description previously used local compatibility storage.
+            objc_setAssociatedObject(description, &LocalStoreIdentifierKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            NSString *identifier = options.containerIdentifier;
+            if (!NeedsLocal(identifier)) continue;
             description.cloudKitContainerOptions = nil;
+            objc_setAssociatedObject(description, &LocalStoreIdentifierKey, identifier, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            repaired = YES;
+        } else if (NeedsLocal(objc_getAssociatedObject(description, &LocalStoreIdentifierKey))) {
+            // The public hook can prepare these same descriptions before the
+            // internal loader is reached. Retain the exact repair evidence.
+            repaired = YES;
         }
     }
+    return repaired;
+}
+
+static BOOL OnlyLocalStores(NSArray<NSPersistentStoreDescription *> *descriptions) {
+    for (NSPersistentStoreDescription *description in descriptions) {
+        if (description.cloudKitContainerOptions) return NO;
+    }
+    return YES;
 }
 
 static void LoadPersistentStores(NSPersistentCloudKitContainer *self, SEL selector, StoreCompletion completion) {
@@ -370,14 +393,30 @@ static void LoadStoreDescriptions(NSPersistentCloudKitContainer *self, SEL selec
     // implementation directly, bypassing our subclass override. Intercept the
     // cloud subclass's internal entry before it constructs a mirroring delegate.
     // Use the actual argument: it need not be self.persistentStoreDescriptions.
-    PrepareLocalStores(descriptions);
+    BOOL repaired = PrepareLocalStores(descriptions);
+    // Some SDKs initialize mirroring inside the cloud subclass even after
+    // options were cleared. Enter the real base loader only for a batch with
+    // a proven repair and no remaining cloud requests. Mixed/unknown batches
+    // still use the original subclass implementation.
+    if (repaired && LocalLoadStoreDescriptions && OnlyLocalStores(descriptions)) {
+        LocalLoadStoreDescriptions(self, selector, descriptions, completion);
+        return;
+    }
     OriginalLoadStoreDescriptions(self, selector, descriptions, completion);
 }
 
 static void InstallStoreDescriptionsHook(void) {
     Class cls = NSPersistentCloudKitContainer.class;
-    AsignHookMethod(cls, NSSelectorFromString(@"_loadStoreDescriptions:withCompletionHandler:"),
-                    (IMP)LoadStoreDescriptions, (IMP *)&OriginalLoadStoreDescriptions, "v", "@", "@?");
+    SEL selector = NSSelectorFromString(@"_loadStoreDescriptions:withCompletionHandler:");
+    Method base = class_getInstanceMethod(NSPersistentContainer.class, selector);
+    Method cloud = class_getInstanceMethod(cls, selector);
+    if (AsignMethodMatches(base, "v", "@", "@?") &&
+        AsignMethodMatches(cloud, "v", "@", "@?") &&
+        method_getImplementation(base) != method_getImplementation(cloud)) {
+        LocalLoadStoreDescriptions = (void *)method_getImplementation(base);
+    }
+    AsignHookMethod(cls, selector, (IMP)LoadStoreDescriptions,
+                    (IMP *)&OriginalLoadStoreDescriptions, "v", "@", "@?");
 }
 
 void AsignInstallCloudKitPatch(void) {
