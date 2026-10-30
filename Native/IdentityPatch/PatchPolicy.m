@@ -89,6 +89,16 @@ NSArray *AsignInstalledAppGroups(void) {
     return groups;
 }
 
+static BOOL UsableKeychainDefaultGroup(id value) {
+    // Security uses the first signed keychain group literally, including a
+    // profile-style suffix such as TEAM.*. Keep that exact native destination;
+    // this is not wildcard authorization for any requested original group.
+    // com.apple.token is read-only and cannot receive fallback writes.
+    if (ConcreteIdentifier(value)) return ![value isEqualToString:@"com.apple.token"];
+    if (![value isKindOfClass:NSString.class] || ![value hasSuffix:@".*"]) return NO;
+    return ConcreteIdentifier([value substringToIndex:[value length] - 2]);
+}
+
 NSString *AsignKeychainReplacementGroup(id identifier) {
     if (!ConcreteIdentifier(identifier) || !SignedCapabilities ||
         ![Identifiers(OriginalInfo[@"AsignOriginalKeychainAccessGroups"]) containsObject:identifier]) return nil;
@@ -104,8 +114,11 @@ NSString *AsignKeychainReplacementGroup(id identifier) {
     // An unrelated malformed app-group entry must not disable this repair.
     // Do not guess a default when the first keychain entry itself is unusable.
     if (keychainValue && !keychain) return nil;
-    id fallback = keychain.count ? keychain.firstObject : appID;
-    return ConcreteIdentifier(fallback) ? fallback : nil;
+    if (keychain.count) {
+        id fallback = keychain.firstObject;
+        return UsableKeychainDefaultGroup(fallback) ? fallback : nil;
+    }
+    return ConcreteIdentifier(appID) && ![appID isEqualToString:@"com.apple.token"] ? appID : nil;
 }
 
 BOOL AsignNeedsKeychainPatch(void) {

@@ -25,7 +25,14 @@ and unknown groups. Only a known original group that is now unavailable is
 remapped to the installed default keychain group. Both `SecItemUpdate` dictionaries
 use this rule on retry. An unusable app-group entry or unrelated signing value
 does not disable a known keychain mapping; the default destination itself must
-still be concrete. No probe item is created, no item is moved or deleted by setup,
+be usable. A first signed keychain group ending in `.*` is retained literally
+as Security's native default destination, without expanding it or treating it
+as permission for the original developer's groups. The prefix must be concrete;
+other malformed defaults remain ineligible, and the read-only `com.apple.token`
+group is never selected as a destination. The patch does not skip an unusable
+first group to choose a later group or substitute the application identifier.
+Default queries, authorized groups and retry conditions retain their behavior.
+No probe item is created, no item is moved or deleted by setup,
 and Security imports are rebound only in app-owned code. Apple frameworks keep
 their native imports.
 
