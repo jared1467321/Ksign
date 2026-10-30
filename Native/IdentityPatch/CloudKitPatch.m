@@ -23,6 +23,7 @@ static _Thread_local __unsafe_unretained id ConstructingLocalReceiver;
 
 typedef id (*ObjectGetter)(id, SEL);
 typedef id (*ObjectArgument)(id, SEL, id);
+typedef id (*CurrentProcessInitializer)(id __attribute__((ns_consumed)), SEL) __attribute__((ns_returns_retained));
 typedef id (*Initializer)(id __attribute__((ns_consumed)), SEL, id) __attribute__((ns_returns_retained));
 typedef id (*EnvironmentInitializer)(id __attribute__((ns_consumed)), SEL, id, NSInteger) __attribute__((ns_returns_retained));
 typedef id (*OptionsInitializer)(id __attribute__((ns_consumed)), SEL, id, id) __attribute__((ns_returns_retained));
@@ -31,6 +32,9 @@ typedef void (^StoreCompletion)(NSPersistentStoreDescription *, NSError *);
 static ObjectArgument OriginalContainer, OriginalEntitlement, OriginalContainerEntitlement;
 static ObjectGetter OriginalDefault, OriginalDefaultIdentifier;
 static Initializer OriginalInit, OriginalPublicInit, OriginalEntitlementsInit;
+static CurrentProcessInitializer OriginalCurrentProcessEntitlementsInit;
+static ObjectGetter OriginalProcessEntitlements, OriginalCoreDataDefaultIdentifier;
+static ObjectArgument OriginalEntitlementsOverlay;
 static EnvironmentInitializer OriginalEnvironmentInit;
 static OptionsInitializer OriginalOptionsInit;
 static void (*OriginalCheckServices)(id, SEL);
@@ -153,29 +157,112 @@ static NSString *DefaultIdentifier(void) {
     return [OriginalContainers() firstObject];
 }
 
+static NSArray *SDKStringArray(id value) {
+    if (![value isKindOfClass:NSArray.class]) return @[];
+    NSMutableArray *strings = nil;
+    for (id entry in value) {
+        if (![entry isKindOfClass:NSString.class]) {
+            strings = [NSMutableArray array];
+            break;
+        }
+    }
+    if (!strings) return value;
+    for (id entry in value) if ([entry isKindOfClass:NSString.class]) [strings addObject:entry];
+    return [strings copy];
+}
+
+static BOOL SDKEnvironment(id value) {
+    return [value isKindOfClass:NSString.class] &&
+        ([value caseInsensitiveCompare:@"Development"] == NSOrderedSame ||
+         [value caseInsensitiveCompare:@"Production"] == NSOrderedSame);
+}
+
+static NSDictionary *ProcessEntitlementsOverlay(NSDictionary *values) {
+    if (![values isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *signedValues = SignedEntitlements();
+    if (!signedValues) return nil;
+    NSMutableDictionary *overlay = [NSMutableDictionary dictionary];
+    for (NSString *key in @[ServicesKey, ContainersKey]) {
+        id value = values[key];
+        // Normalize only malformed values actually supplied by the running
+        // signature. Preserve valid SDK overlays and every valid string entry.
+        if (!value || ![value isEqual:signedValues[key]]) continue;
+        NSArray *strings = SDKStringArray(value);
+        if (![value isEqual:strings]) overlay[key] = strings;
+    }
+    id environment = values[EnvironmentKey];
+    if (environment && [environment isEqual:signedValues[EnvironmentKey]] && !SDKEnvironment(environment)) {
+        // CKEntitlements' native overlay API treats NSNull as removal. Its own
+        // missing-environment behavior remains authoritative; no grant is added.
+        overlay[EnvironmentKey] = NSNull.null;
+    }
+    return overlay.count ? [overlay copy] : nil;
+}
+
+static id CurrentProcessEntitlementsInit(id self __attribute__((ns_consumed)), SEL selector) __attribute__((ns_returns_retained));
+static id CurrentProcessEntitlementsInit(id self __attribute__((ns_consumed)), SEL selector) {
+    NSString *previous = ConstructingLocalIdentifier;
+    id previousReceiver = ConstructingLocalReceiver;
+    // CloudKit caches this object in process-wide state before constructing a
+    // CKContainer. Never cache a container's temporary entitlement view in it.
+    ConstructingLocalIdentifier = nil;
+    ConstructingLocalReceiver = nil;
+    @try {
+        id entitlements = OriginalCurrentProcessEntitlementsInit(self, selector);
+        if (!entitlements) return nil;
+        NSDictionary *values = OriginalProcessEntitlements(entitlements, NSSelectorFromString(@"entitlementsDict"));
+        NSDictionary *overlay = ProcessEntitlementsOverlay(values);
+        if (!overlay) return entitlements;
+        id normalized = OriginalEntitlementsOverlay(entitlements,
+            NSSelectorFromString(@"entitlementsByAddingOverlay:"), overlay);
+        return normalized ?: entitlements;
+    } @finally {
+        ConstructingLocalIdentifier = previous;
+        ConstructingLocalReceiver = previousReceiver;
+    }
+}
+
+static void InstallCurrentProcessEntitlementsHook(Class cls) {
+    if (!cls || !ProcessEntitlementsOverlay(SignedEntitlements()).count) return;
+    Method values = class_getInstanceMethod(cls, NSSelectorFromString(@"entitlementsDict"));
+    Method overlay = class_getInstanceMethod(cls, NSSelectorFromString(@"entitlementsByAddingOverlay:"));
+    if (!AsignMethodMatches(values, "@", NULL, NULL) ||
+        !AsignMethodMatches(overlay, "@", "@", NULL)) return;
+    OriginalProcessEntitlements = (void *)method_getImplementation(values);
+    OriginalEntitlementsOverlay = (void *)method_getImplementation(overlay);
+    AsignHookMethod(cls, NSSelectorFromString(@"initWithCurrentProcess"),
+                    (IMP)CurrentProcessEntitlementsInit, (IMP *)&OriginalCurrentProcessEntitlementsInit,
+                    "@", NULL, NULL);
+}
+
+static id CoreDataDefaultIdentifier(id cls, SEL selector) {
+    NSString *identifier = DefaultIdentifier();
+    // Core Data discovers its default through signed entitlements directly,
+    // independently of SwiftData's imported .automatic getter. Choose a captured
+    // original only when no usable signed CloudKit container can be selected.
+    if (NeedsLocal(identifier)) return identifier;
+    return OriginalCoreDataDefaultIdentifier(cls, selector);
+}
+
 static NSDictionary *ConstructionEntitlements(NSDictionary *original) {
     NSString *identifier = ConstructingLocalIdentifier;
     if (!identifier || (original && ![original isKindOfClass:NSDictionary.class])) return original;
     NSMutableDictionary *view = original ? [original mutableCopy] : [NSMutableDictionary dictionary];
     NSDictionary *signedValues = SignedEntitlements();
-    id containers = view[ContainersKey];
-    NSMutableArray *identifiers = [containers isKindOfClass:NSArray.class] ? [containers mutableCopy] : [NSMutableArray array];
-    id permittedContainers = signedValues[ContainersKey];
-    if ([permittedContainers isKindOfClass:NSArray.class]) {
-        for (id permitted in permittedContainers) if (![identifiers containsObject:permitted]) [identifiers addObject:permitted];
+    NSMutableArray *identifiers = [SDKStringArray(view[ContainersKey]) mutableCopy];
+    for (id permitted in SDKStringArray(signedValues[ContainersKey])) {
+        if (![identifiers containsObject:permitted]) [identifiers addObject:permitted];
     }
     if (![identifiers containsObject:identifier]) [identifiers addObject:identifier];
     view[ContainersKey] = identifiers;
-    id services = view[ServicesKey];
-    NSMutableArray *enabled = [services isKindOfClass:NSArray.class] ? [services mutableCopy] : [NSMutableArray array];
-    id permittedServices = signedValues[ServicesKey];
-    if ([permittedServices isKindOfClass:NSArray.class]) {
-        for (id permitted in permittedServices) if (![enabled containsObject:permitted]) [enabled addObject:permitted];
+    NSMutableArray *enabled = [SDKStringArray(view[ServicesKey]) mutableCopy];
+    for (id permitted in SDKStringArray(signedValues[ServicesKey])) {
+        if (![enabled containsObject:permitted]) [enabled addObject:permitted];
     }
     if (![enabled containsObject:@"CloudKit"]) [enabled addObject:@"CloudKit"];
     view[ServicesKey] = enabled;
-    if ([signedValues[EnvironmentKey] isKindOfClass:NSString.class]) view[EnvironmentKey] = signedValues[EnvironmentKey];
-    else if (![view[EnvironmentKey] isKindOfClass:NSString.class]) view[EnvironmentKey] = @"Production";
+    if (SDKEnvironment(signedValues[EnvironmentKey])) view[EnvironmentKey] = signedValues[EnvironmentKey];
+    else if (!SDKEnvironment(view[EnvironmentKey])) view[EnvironmentKey] = @"Production";
     return [view copy];
 }
 
@@ -436,6 +523,7 @@ void AsignInstallCloudKitPatch(void) {
         INSTALL(container, "_initWithContainerIdentifier:environment:", EnvironmentInit, OriginalEnvironmentInit, "@", "@", @encode(NSInteger));
         INSTALL(container, "initWithContainerID:options:", OptionsInit, OriginalOptionsInit, "@", "@", "@");
         INSTALL(entitlements, "initWithEntitlementsDict:", EntitlementsInit, OriginalEntitlementsInit, "@", "@", NULL);
+        InstallCurrentProcessEntitlementsHook(entitlements);
         INSTALL(meta, "_checkSelfCloudServicesEntitlement", CheckServices, OriginalCheckServices, "v", NULL, NULL);
         INSTALL(meta, "_checkSelfContainerIdentifier", CheckDefaultIdentifier, OriginalDefaultIdentifier, "@", NULL, NULL);
         INSTALL(meta, "_untrustedEntitlementForKey:", Entitlement, OriginalEntitlement, "@", "@", NULL);
@@ -452,6 +540,10 @@ void AsignInstallCloudKitPatch(void) {
         INSTALL(database, "_scheduleConvenienceOperation:", DatabaseConvenience, OriginalDatabaseConvenience, "v", "@", NULL);
         INSTALL(NSPersistentCloudKitContainer.class, "loadPersistentStoresWithCompletionHandler:",
                 LoadPersistentStores, OriginalLoadPersistentStores, "v", "@?", NULL);
+        if (NeedsLocal(DefaultIdentifier())) {
+            INSTALL(object_getClass(NSPersistentCloudKitContainer.class), "discoverDefaultContainerIdentifier",
+                    CoreDataDefaultIdentifier, OriginalCoreDataDefaultIdentifier, "@", NULL, NULL);
+        }
         InstallStoreDescriptionsHook();
 #undef INSTALL
         for (size_t i = 0; i < sizeof(EntitlementGetters) / sizeof(EntitlementGetters[0]); ++i) {

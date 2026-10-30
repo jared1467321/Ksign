@@ -172,6 +172,28 @@ This lets SQLiteData discover a container during database startup. Explicit
 A small Swift helper constructs the configuration using the public API, with
 SwiftData weakly linked for older systems. All code remains in `asignpatch.dylib`.
 
+Core Data's separate `discoverDefaultContainerIdentifier` class method uses the
+same fallback selection when its ABI is supported. It reads signed entitlements
+directly and can bypass the app's SwiftData import. With no usable signed cloud
+container, returning a captured original lets store loading recognize that
+automatic request as eligible for local mode. A usable signed container keeps
+Core Data's native discovery, and explicit store requests retain their per-ID
+eligibility checks.
+
+CloudKit's shared process-state initialization validates `CKEntitlements` before
+a `CKContainer` construction scope exists. For a process already eligible for
+CloudKit compatibility, a supported `initWithCurrentProcess` hook uses the SDK's
+real `entitlementsByAddingOverlay:` method to normalize malformed cloud values
+that exactly match the running signature. Scalar values in array fields become
+empty arrays, non-string array elements are removed, and invalid environment
+values are removed using the SDK's native overlay semantics. Valid entries and
+unrelated keys are retained. This prevents profile placeholders such as the
+string `icloud-services = "*"` from failing SDK type validation; it adds no cloud
+permission. The raw getter, overlay method and initializer ABIs must all match.
+The process-wide object is built outside temporary container scopes, so a
+container's compatibility capabilities cannot leak into the cached object.
+Signature reads and fallback eligibility continue to use the real signed values.
+
 This is a local compatibility path, not a cloud storage implementation. It
 does not recover existing remote-only data, enable sharing, grant access to the
 original developer's containers, or promise that an app requiring successful
@@ -252,14 +274,27 @@ The patch installs from Objective-C `+load`, before app initializers:
   when it exactly matches a captured original group proven unavailable in the
   running signature. Working native containers, explicit defaults containers,
   unrelated groups and unknown signatures retain native behavior. Callers are
-  identified by the loaded image exporting `AssetPackManager`'s metadata
-  accessor; the synchronous shared-manager scope also covers Foundation helpers.
+  identified by the loaded images exporting `AssetPackManager` or the private
+  helper's `AppInfo` metadata accessors; the synchronous shared-manager scope
+  also covers Foundation helpers. No optional framework is loaded by discovery.
   Defaults initialization carries only the matching suite's scope and restores
   it for nested calls and Objective-C exceptions. This group repair also applies
   when the bundle identifier was preserved, independently of identity repair.
   The Placify original IPA establishes its group declaration and extension;
   its report omits the assertion message, so this closes a coverage gap without
   proving that every Background Assets validation failure is repaired.
+- SDK group validation can also query LaunchServices directly. When available,
+  the ABI-checked `LSBundleRecord` getters for `groupContainerIdentifiers` and
+  `groupContainerURLs` supply immutable local views to the same scoped callers,
+  for the exact installed bundle identifier of the current process. Only the
+  eligible original `BAAppGroupID` is added, and only if its real native or
+  compatibility directory is available. Existing entries and unrelated records
+  are preserved; unrecognized result types pass through. Native file-container
+  lookups and nested record reads suppress these views so native authorization
+  checks, directory-root selection and preferences fallback remain independent.
+  The registered record and signed permissions are never changed. Absent or
+  incompatible getters are skipped. This repairs local SDK setup without
+  implementing Apple's hosted-asset service or bypassing distribution checks.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and

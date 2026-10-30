@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <TargetConditionals.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
@@ -23,6 +24,17 @@ static InitPublicSuite OriginalPublicDefaults;
 static NSURL *(*OriginalGroupContainer)(id, SEL, NSString *);
 static _Thread_local __unsafe_unretained NSString *AppDefaultsSuite;
 static _Thread_local __unsafe_unretained NSString *BackgroundAssetsGroup;
+static _Thread_local BOOL ReadingNativeGroupRecord;
+typedef id (*RecordGetter)(id, SEL);
+static RecordGetter OriginalRecordGroupIdentifiers, OriginalRecordGroupURLs;
+
+static NSURL *NativeGroupContainer(id manager, SEL selector, NSString *identifier) {
+    if (!OriginalGroupContainer) return nil;
+    BOOL previous = ReadingNativeGroupRecord;
+    ReadingNativeGroupRecord = YES;
+    @try { return OriginalGroupContainer(manager, selector, identifier); }
+    @finally { ReadingNativeGroupRecord = previous; }
+}
 
 static BOOL CompatibleMethod(Method method, unsigned arguments) {
     return (arguments == 3 || arguments == 4) &&
@@ -96,7 +108,7 @@ static NSURL *SharedRoot(void) {
     dispatch_once(&once, ^{
         if (!OriginalGroupContainer) return;
         for (NSString *group in AsignInstalledAppGroups()) {
-            GroupRoot = OriginalGroupContainer(NSFileManager.defaultManager,
+            GroupRoot = NativeGroupContainer(NSFileManager.defaultManager,
                 @selector(containerURLForSecurityApplicationGroupIdentifier:), group);
             if (GroupRoot) break;
         }
@@ -136,8 +148,13 @@ static BOOL BackgroundAssetsGroupForCaller(NSString *group, const void *caller) 
     if (!caller || !dladdr(caller, &source) || !source.dli_fbase) return NO;
     // Resolve on demand, without loading the optional framework or invoking
     // Swift. Later SDK calls need the same repair after shared initialization.
-    void *manager = dlsym(RTLD_DEFAULT, "$s16BackgroundAssets16AssetPackManagerCMa");
-    return manager && dladdr(manager, &sdk) && sdk.dli_fbase && source.dli_fbase == sdk.dli_fbase;
+    const char *metadata[] = {"$s16BackgroundAssets16AssetPackManagerCMa",
+                              "$s29ManagedBackgroundAssetsHelper7AppInfoVMa"};
+    for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); ++i) {
+        void *type = dlsym(RTLD_DEFAULT, metadata[i]);
+        if (type && dladdr(type, &sdk) && sdk.dli_fbase && source.dli_fbase == sdk.dli_fbase) return YES;
+    }
+    return NO;
 }
 
 static NSURL *CompatibilityGroupURL(NSString *identifier, NSURL *native) {
@@ -181,8 +198,70 @@ static BOOL SwiftDataCaller(const void *caller) {
         source.dli_fbase == sdk.dli_fbase;
 }
 
+static BOOL CurrentBundleRecord(id record) {
+    SEL selector = NSSelectorFromString(@"bundleIdentifier");
+    Method method = class_getInstanceMethod(object_getClass(record), selector);
+    if (!AsignMethodMatches(method, "@", NULL, NULL)) return NO;
+    id identifier = ((RecordGetter)method_getImplementation(method))(record, selector);
+    // This library's CF imports retain the installed identity. A record for
+    // another app/extension must never receive this process's local group view.
+    NSString *installed = (__bridge NSString *)CFBundleGetIdentifier(CFBundleGetMainBundle());
+    return [identifier isKindOfClass:NSString.class] && installed && [identifier isEqualToString:installed];
+}
+
+static id BackgroundAssetsRecordGroups(id record, SEL selector, const void *caller, BOOL identifiers) {
+    RecordGetter original = identifiers ? OriginalRecordGroupIdentifiers : OriginalRecordGroupURLs;
+    BOOL previous = ReadingNativeGroupRecord;
+    ReadingNativeGroupRecord = YES;
+    @try {
+        id native = original(record, selector);
+        if (previous) return native;
+        NSString *group = BackgroundAssetsFallbackGroup();
+        if (!BackgroundAssetsGroupForCaller(group, caller) || !CurrentBundleRecord(record)) return native;
+        if (identifiers) {
+            if (native && ![native isKindOfClass:NSSet.class] && ![native isKindOfClass:NSArray.class]) return native;
+            if ([native containsObject:group]) return native;
+        } else {
+            if (native && ![native isKindOfClass:NSDictionary.class]) return native;
+            if (native[group]) return native;
+        }
+        NSURL *url = NativeGroupContainer(NSFileManager.defaultManager,
+            @selector(containerURLForSecurityApplicationGroupIdentifier:), group);
+        url = url ?: CompatibilityGroupURL(group, nil);
+        if (!url) return native;
+        // Expose one real local directory to SDK validation. Neither the native
+        // LaunchServices record nor any signed entitlement is modified.
+        if (identifiers) {
+            if (!native) return [NSSet setWithObject:group];
+            id view = [native mutableCopy];
+            [view addObject:group];
+            return [view copy];
+        }
+        NSMutableDictionary *view = native ? [native mutableCopy] : [NSMutableDictionary dictionary];
+        view[group] = url;
+        return [view copy];
+    } @finally { ReadingNativeGroupRecord = previous; }
+}
+
+static id RecordGroupIdentifiers(id self, SEL selector) {
+    return BackgroundAssetsRecordGroups(self, selector, __builtin_return_address(0), YES);
+}
+
+static id RecordGroupURLs(id self, SEL selector) {
+    return BackgroundAssetsRecordGroups(self, selector, __builtin_return_address(0), NO);
+}
+
+static void InstallBackgroundAssetsRecordPatch(void) {
+    if (!AsignNeedsBackgroundAssetsCompatibility()) return;
+    Class record = NSClassFromString(@"LSBundleRecord");
+    AsignHookMethod(record, NSSelectorFromString(@"groupContainerIdentifiers"),
+                    (IMP)RecordGroupIdentifiers, (IMP *)&OriginalRecordGroupIdentifiers, "@", NULL, NULL);
+    AsignHookMethod(record, NSSelectorFromString(@"groupContainerURLs"),
+                    (IMP)RecordGroupURLs, (IMP *)&OriginalRecordGroupURLs, "@", NULL, NULL);
+}
+
 static NSURL *GroupContainerForCaller(id self, SEL selector, NSString *identifier, const void *caller) {
-    NSURL *native = OriginalGroupContainer(self, selector, identifier);
+    NSURL *native = NativeGroupContainer(self, selector, identifier);
     if (!AsignPatchCallerIsApp(caller)) {
         // Preserve working native containers, including legacy upgrades. SDK
         // repair requires a known lost group and an identified caller/scope.
@@ -216,7 +295,7 @@ static id Defaults(id self __attribute__((ns_consumed)), SEL selector, NSString 
     BOOL background = BackgroundAssetsGroupForCaller(suite, caller);
     if (!container && GroupIdentifier(suite) &&
         ([suite isEqual:AppDefaultsSuite] || AsignPatchCallerIsApp(caller) || background)) {
-        NSURL *native = OriginalGroupContainer(NSFileManager.defaultManager,
+        NSURL *native = NativeGroupContainer(NSFileManager.defaultManager,
             @selector(containerURLForSecurityApplicationGroupIdentifier:), suite);
         if (!background || !native) container = CompatibilityGroupURL(suite, native);
     }
@@ -232,6 +311,7 @@ static void InstallAppGroupPatch(Class manager, Class defaults) {
     // apps can require that container while initializing their startup logs.
     Hook(manager, @"containerURLForSecurityApplicationGroupIdentifier:",
          (IMP)GroupContainer, (IMP *)&OriginalGroupContainer, 3);
+    InstallBackgroundAssetsRecordPatch();
     // The public initializer carries app provenance through Foundation's
     // internal call. Install these together only when both ABIs are supported.
     Method internal = defaults ? class_getInstanceMethod(defaults, NSSelectorFromString(@"_initWithSuiteName:container:")) : NULL;
