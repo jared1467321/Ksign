@@ -1,4 +1,5 @@
 import UIKit
+import UniformTypeIdentifiers
 import NimbleExtensions
 
 @MainActor
@@ -17,12 +18,15 @@ enum VPNReconnectShareSheet {
             return false
         }
 
-        VPNReconnectDiagnostics.record("sheet[\(diagnosticID)] presenter=\(describe(presenter)); payload=String; excluded activities=copy,print,contact,cameraRoll,readingList")
-
-        // Text lets a shortcut accepting Text/Anything appear in the system
-        // share sheet.
-        let sheet = UIActivityViewController(
-            activityItems: ["Reconnect VPN using \(shortcutName)"], applicationActivities: nil)
+        // Explicitly package UTF-8 text using UIKit's item-provider sharing
+        // path. Retain diagnostics to check whether this avoids the Shortcuts
+        // extension's input-processing crash on iOS 27.
+        let text = "Reconnect VPN using \(shortcutName)"
+        let itemProvider = NSItemProvider(item: text as NSString,
+                                          typeIdentifier: UTType.utf8PlainText.identifier)
+        let configuration = UIActivityItemsConfiguration(itemProviders: [itemProvider])
+        let sheet = UIActivityViewController(activityItemsConfiguration: configuration)
+        VPNReconnectDiagnostics.record("sheet[\(diagnosticID)] presenter=\(describe(presenter)); payload=UIActivityItemsConfiguration; registeredTypes=\(itemProvider.registeredTypeIdentifiers); excluded activities=copy,print,contact,cameraRoll,readingList")
         sheet.excludedActivityTypes = [.copyToPasteboard, .print, .assignToContact,
                                       .saveToCameraRoll, .addToReadingList]
         sheet.completionWithItemsHandler = { [weak sheet] activity, completed, returnedItems, error in
