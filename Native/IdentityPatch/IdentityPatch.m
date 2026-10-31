@@ -49,9 +49,7 @@ static BOOL NeedsInstalledIdentity(void *caller) {
 static void *__attribute__((swiftcall)) AssetManager(void *metadata __attribute__((swift_context))) {
     // Forward the Swift metatype/self register and the SDK's retained result
     // unchanged. Never return nil or a substitute for a Swift actor instance.
-    return AsignWithBackgroundAssetsCompatibility(^void *{
-        RETURN_INSTALLED_IDENTITY(GetAssetManager(metadata));
-    });
+    RETURN_INSTALLED_IDENTITY(GetAssetManager(metadata));
 }
 
 static NSString *OriginalIdentifier(NSDictionary *info) {
@@ -288,8 +286,7 @@ static void InstallIdentityPatch(void) {
         AsignIdentityBinding automatic = AsignCloudKitAutomaticBinding();
         if (automatic.original) bindings[count++] = automatic;
     }
-    if (AsignPatchEnabled(AsignPatchBackgroundAssets) &&
-        (identityNeeded || AsignNeedsBackgroundAssetsCompatibility())) {
+    if (identityNeeded && AsignPatchEnabled(AsignPatchBackgroundAssets)) {
         const char *assetManager = "$s16BackgroundAssets16AssetPackManagerC6sharedACvgZ";
         GetAssetManager = dlsym(RTLD_DEFAULT, assetManager);
         if (GetAssetManager) {

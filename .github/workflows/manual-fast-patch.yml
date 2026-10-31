@@ -77,6 +77,9 @@ jobs:
           NATIVE_RUST_TOOLCHAIN="$(python3 -c 'import json; print(json.load(open("Native/Device/source.json"))["rust_toolchain"])')"
           rustup toolchain install "$NATIVE_RUST_TOOLCHAIN" --profile minimal
 
+      - name: Check CloudKit container capture and fallback eligibility
+        run: python3 .github/scripts/check_cloudkit_containers.py
+
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays and documentation
       # must not force both native targets to rebuild.

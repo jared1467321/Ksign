@@ -139,18 +139,6 @@ Every hooked method's result and argument types are checked, distinguishing
 objects, blocks and integer widths. Object class annotations and type qualifiers
 are accepted when the ABI matches.
 
-After clearing cloud options, some SDKs still initialize mirroring inside the
-cloud subclass. For a batch with at least one store repaired by the patch and
-no remaining cloud requests, the internal loading hook calls the ABI-checked
-`NSPersistentContainer` base implementation. The public hook's repair evidence
-is retained on each description and revalidated at the internal hook. A new
-cloud request replaces that evidence. Already-local batches, authorized or
-unknown requests, and mixed batches with remaining cloud options retain the
-cloud subclass loader. Missing or incompatible base methods retain option
-clearing alone. The receiver, descriptions and completion block are preserved.
-The Five Cents iOS 27 report exercises both loading hooks before mirroring
-throws; launch and persistence still require device validation.
-
 The original CloudKit container IDs are captured per app/extension in
 `AsignOriginalCloudContainerIdentifiers` with the first capability snapshot.
 Concrete IDs are preserved exactly, including older team-prefixed IDs such as
@@ -162,7 +150,7 @@ whose container snapshot was omitted need to be imported from the original IPA;
 the replacement signing profile cannot recover their original container IDs.
 `python3 .github/scripts/check_cloudkit_containers.py` checks capture,
 metadata publication, re-signing and runtime eligibility on macOS; `--ipa`
-additionally checks the original Sygic IPA.
+additionally checks the original Sygic IPA. The manual build runs this regression.
 Default-container requests can use that identity in local mode. On iOS 17+,
 the app's imported SwiftData `CloudKitDatabase.automatic` getter uses an explicit
 original container only when the installed signature has no usable container.
@@ -171,30 +159,6 @@ This lets SQLiteData discover a container during database startup. Explicit
 `.none` configurations and usable signed CloudKit configurations are preserved.
 A small Swift helper constructs the configuration using the public API, with
 SwiftData weakly linked for older systems. All code remains in `asignpatch.dylib`.
-
-Core Data's separate `discoverDefaultContainerIdentifier` class method uses the
-same fallback selection when its ABI is supported. It reads signed entitlements
-directly and can bypass the app's SwiftData import. With no usable signed cloud
-container, returning a captured original lets store loading recognize that
-automatic request as eligible for local mode. A usable signed container keeps
-Core Data's native discovery, and explicit store requests retain their per-ID
-eligibility checks.
-
-CloudKit's shared process-state initialization validates `CKEntitlements` before
-a `CKContainer` construction scope exists. For a process already eligible for
-CloudKit compatibility, a supported `initWithCurrentProcess` hook uses the SDK's
-real `entitlementsByAddingOverlay:` method to normalize malformed cloud values
-that exactly match the running signature. Scalar values in array fields become
-empty arrays, non-string array elements are removed, and invalid environment
-values are removed using the SDK's native overlay semantics. Valid entries and
-unrelated keys are retained. This prevents profile placeholders such as the
-string `icloud-services = "*"` from failing SDK type validation; it adds no cloud
-permission. The native `valueForEntitlement:` reader supplies the three raw
-fields; no `entitlementsDict` getter or private ivar layout is assumed. The
-per-key reader, overlay method and initializer ABIs must all match.
-The process-wide object is built outside temporary container scopes, so a
-container's compatibility capabilities cannot leak into the cached object.
-Signature reads and fallback eligibility continue to use the real signed values.
 
 This is a local compatibility path, not a cloud storage implementation. It
 does not recover existing remote-only data, enable sharing, grant access to the
@@ -271,37 +235,6 @@ The patch installs from Objective-C `+load`, before app initializers:
   concurrent app lookups retain their original identity. The getter forwards the
   Swift metatype and the real SDK object unchanged. No asset manager is fabricated,
   no Swift trap is suppressed, and signed capabilities remain authoritative.
-- Background Assets group-container and group-defaults requests can use the
-  existing compatibility directory only for the main bundle's `BAAppGroupID`,
-  when it exactly matches a captured original group proven unavailable in the
-  running signature. Working native containers, explicit defaults containers,
-  unrelated groups and unknown signatures retain native behavior. Callers are
-  identified by the loaded images exporting `AssetPackManager` or the private
-  helper's `AppInfo` metadata accessors; the synchronous shared-manager scope
-  also covers Foundation helpers. No optional framework is loaded by discovery.
-  Defaults initialization carries only the matching suite's scope and restores
-  it for nested calls and Objective-C exceptions. This group repair also applies
-  when the bundle identifier was preserved, independently of identity repair.
-  The Placify original IPA establishes its group declaration and extension;
-  its report omits the assertion message, so this closes a coverage gap without
-  proving that every Background Assets validation failure is repaired.
-- SDK group validation can also query LaunchServices directly. When available,
-  the ABI-checked `LSApplicationRecord` getters for `groupContainerIdentifiers` and
-  `groupContainerURLs` supply immutable local views to the same scoped callers,
-  for the exact installed bundle identifier of the current process. Only the
-  eligible original `BAAppGroupID` is added, and only if its real native or
-  compatibility directory is available. Existing entries and unrelated records
-  are preserved; unrecognized result types pass through. Native file-container
-  lookups and nested record reads suppress these views so native authorization
-  checks, directory-root selection and preferences fallback remain independent.
-  Hook installation is attempted at startup and retried before shared-manager
-  initialization, after its native or compatibility directory is prepared.
-  A missing application-record class leaves installation retryable; once the
-  class is available, installation is serialized and targets its concrete
-  implementations or adds overrides for inherited getters.
-  The registered record and signed permissions are never changed. Absent or
-  incompatible getters are skipped. This repairs local SDK setup without
-  implementing Apple's hosted-asset service or bypassing distribution checks.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and
