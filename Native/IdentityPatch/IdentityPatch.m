@@ -32,9 +32,13 @@ static AssetManagerGetter GetAssetManager;
 
 static BOOL NeedsInstalledIdentity(void *caller) {
     if (InstalledIdentityRequested) return YES;
-    // A process-wide NSBundle swizzle must still preserve the native identity
-    // for system callers, including calls made through Foundation helpers.
-    return !AsignPatchCallerIsApp(caller);
+    Dl_info image;
+    if (!dladdr(caller, &image) || !image.dli_fname) return NO;
+    // Keep this exception specific to Background Assets host validation.
+    // Other framework callers retain the original identity view, including
+    // StoreKit. Require system paths so embedded frameworks cannot opt in.
+    return strstr(image.dli_fname, "/System/Library/Frameworks/BackgroundAssets.framework/") ||
+        strstr(image.dli_fname, "/System/Library/PrivateFrameworks/ManagedBackgroundAssetsHelper.framework/");
 }
 
 // Restore the prior view for nested calls and Objective-C exceptions. Keep

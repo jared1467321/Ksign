@@ -224,10 +224,11 @@ The patch installs from Objective-C `+load`, before app initializers:
 
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,
   `objectForInfoDictionaryKey:` and `bundleWithIdentifier:` expose the original
-  identity for renamed annotated bundles when called from app-owned code. If
+  identity for renamed annotated bundles, including framework callers outside
+  the Background Assets installed-identity scope described below. If
   the process's original and installed IDs match, identity hooks are not installed.
-  System callers and other bundles retain their native identities.
-- Background Assets and other system frameworks see the installed identity for
+  Bundles without original-identity metadata retain their native identities.
+- Background Assets and ManagedBackgroundAssetsHelper see the installed identity for
   bundle lookups so SDK validation can find the registered app. The app's
   imported Swift `AssetPackManager.shared` getter also uses this view for its
   synchronous initialization, including nested Foundation/LaunchServices calls.
@@ -235,6 +236,10 @@ The patch installs from Objective-C `+load`, before app initializers:
   concurrent app lookups retain their original identity. The getter forwards the
   Swift metatype and the real SDK object unchanged. No asset manager is fabricated,
   no Swift trap is suppressed, and signed capabilities remain authoritative.
+  Other system frameworks, including StoreKit's hooked `NSBundle` lookups,
+  receive the original identity outside that scope so purchase metadata lookups
+  are not given the replacement bundle ID by this exception. The view does not
+  change service authorization.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and
