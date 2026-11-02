@@ -33,7 +33,20 @@ final class NBAuroraChromeSource {
     private var placeholderString: String?
     private var hidden = false
     private var active = true
-    private var fingerprint = ""
+    private struct Fingerprint: Equatable {
+        enum Content: Equatable {
+            case search(text: String?, placeholder: String?, font: UIFont?, editing: Bool,
+                        alignment: NSTextAlignment, selection: NSRange?, textHash: Int,
+                        placeholderHash: Int, color: UIColor?)
+            case label(text: String?, attributedHash: Int, font: UIFont?, color: UIColor?,
+                       alignment: NSTextAlignment, lines: Int)
+            case icon(imageHash: Int, highlightedImageHash: Int, highlighted: Bool, tint: UIColor?)
+        }
+        let content: Content
+        let bounds: CGRect
+        let scale: CGFloat
+    }
+    private var fingerprint: Fingerprint?
     private var image: UIImage?
     private var lastCapture: CFTimeInterval = -.infinity
     private static let placeholderMarker = NSAttributedString.Key("NimbleKit.auroraHiddenPlaceholder")
@@ -100,29 +113,35 @@ final class NBAuroraChromeSource {
 
     func glyphImage() -> UIImage? {
         guard let view, view.bounds.width > 0, view.bounds.height > 0 else { return nil }
-        let signature: String
+        // This runs for every known glyph at the geometry cadence. Compare
+        // native values directly instead of allocating font/color descriptions
+        // and a joined string on every tick, even when nothing has changed.
+        let signature: Fingerprint.Content
         if let field = view as? UISearchTextField {
             let selection = field.selectedTextRange.map {
-                "\(field.offset(from: field.beginningOfDocument, to: $0.start)):\(field.offset(from: field.beginningOfDocument, to: $0.end))"
-            } ?? ""
+                let start = field.offset(from: field.beginningOfDocument, to: $0.start)
+                let end = field.offset(from: field.beginningOfDocument, to: $0.end)
+                return NSRange(location: start, length: end - start)
+            }
             let placeholder = Self.isHiddenPlaceholder(field.attributedPlaceholder)
                 ? originalPlaceholder : field.attributedPlaceholder
             let color = field.textColor == .clear ? originalTextColor : field.textColor
-            signature = [field.text ?? "", field.placeholder ?? "", field.font?.description ?? "",
-                         String(field.isEditing), String(field.textAlignment.rawValue), selection,
-                         String(field.attributedText?.hash ?? 0), String(placeholder?.hash ?? 0),
-                         color?.description ?? ""].joined(separator: "|")
+            signature = .search(text: field.text, placeholder: field.placeholder, font: field.font,
+                                editing: field.isEditing, alignment: field.textAlignment,
+                                selection: selection, textHash: field.attributedText?.hash ?? 0,
+                                placeholderHash: placeholder?.hash ?? 0, color: color)
         } else if let label = view as? UILabel {
-            signature = [label.text ?? "", String(label.attributedText?.hash ?? 0), label.font.description,
-                         label.textColor.description, String(label.textAlignment.rawValue),
-                         String(label.numberOfLines)].joined(separator: "|")
+            signature = .label(text: label.text, attributedHash: label.attributedText?.hash ?? 0,
+                               font: label.font, color: label.textColor,
+                               alignment: label.textAlignment, lines: label.numberOfLines)
         } else if let icon = view as? UIImageView {
-            signature = [String(icon.image?.hash ?? 0), String(icon.highlightedImage?.hash ?? 0),
-                         String(icon.isHighlighted), icon.tintColor.description].joined(separator: "|")
+            signature = .icon(imageHash: icon.image?.hash ?? 0,
+                              highlightedImageHash: icon.highlightedImage?.hash ?? 0,
+                              highlighted: icon.isHighlighted, tint: icon.tintColor)
         } else {
             return nil
         }
-        let key = "\(signature)|\(view.bounds)|\(view.window?.screen.scale ?? 1)"
+        let key = Fingerprint(content: signature, bounds: view.bounds, scale: view.window?.screen.scale ?? 1)
         let now = CACurrentMediaTime()
         guard key != fingerprint || (image == nil && now - lastCapture >= 0.25) else { return image }
 

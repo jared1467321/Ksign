@@ -73,7 +73,7 @@ The map samples the procedural sky before pane refraction, glass highlights
 and stars. It does not capture the composited screen. One shared 15 Hz clock
 serves every visible text scope. The serial worker allows only one GPU request
 in flight, copies the small generated map into immutable RGBA data off the main
-thread, and caches a single shared shader argument. Raw bytes avoid image
+thread, and caches shared shader arguments for its strips. Raw bytes avoid image
 color-space conversions. The glyph shader interpolates these bytes without
 running the sky or reading the procedural noise texture. Render work is bounded
 at 73,728 sky evaluations per map, independent of glyph count or display scale.
@@ -83,13 +83,25 @@ math and glyph sharpness are unchanged. This halves scheduled map renders and
 paint deliveries, not necessarily total UI cost. Device measurements are still
 needed to assess responsiveness and whether color transitions look smooth.
 
+Foregrounds now bind full-width strips of the original map rather than the
+whole map for each label. The anchor selects rows using the label's complete
+window frame, rounded outward to 16-row bands with spare rows for overhang and
+bilinear sampling. Horizontal coordinates, interpolation fractions, color math,
+alpha, the 192 × 384 source resolution and 15 Hz cadence are unchanged. Tall
+containers can still use the full map. Each frame shares shader arguments for
+matching strips; its strip cache is capped at twice the full map's byte count,
+so scrolling through a frozen Reduce Motion map cannot grow it indefinitely.
+Paint compares strip identity, row range and bytes before publishing. Changes
+elsewhere in the sky no longer redraw a label whose strip remains identical.
+
 The map cache is not an ObservableObject and does not broadcast frames to
 retained views. Each scope owns a lease and a separate observable paint object;
-only active leases receive frames. The scope observes its lease, while its
+only active leases receive frames. The scope owns its lease, while its
 small foreground view observes paint, so color delivery does not trigger scope
-geometry work. A frame ID suppresses duplicate delivery when a scope registers
-again. Offscreen scopes clear their paint once, releasing the shader buffer,
-and receive no further frame notifications. On reentry they immediately receive
+geometry work. Shared sample identity and byte equality suppress duplicate
+delivery when a scope registers again. Offscreen scopes clear their paint once,
+releasing the shader buffer, and receive no further frame notifications.
+On reentry they immediately receive
 the latest matching cached frame. Reduce Motion clients receive only the frozen
 cache, including when animated clients are also active.
 
@@ -107,7 +119,7 @@ without another SwiftUI appearance/geometry callback or user interaction. The
 same path covers retained cells, tab entry, sheets and drawer detent changes.
 Window/local sizes preserve alignment when selection scales a row.
 
-Layout ticks publish only changed visible placements and lease transitions.
+Layout ticks publish only changed visible placements, strips and lease transitions.
 Offscreen anchors release paint and do not publish placement or receive animated
 frames. Disappeared SwiftUI scopes also unregister their anchors immediately,
 even if their native views remain attached to a window. They receive no geometry
@@ -117,6 +129,25 @@ becomes inactive. The map
 still uses its separate shared 15 Hz clock, serial GPU worker, cached frames and
 weak leases. This adds one shared native geometry scan, not one timer or render
 per label; device performance still needs measurement with long lists.
+
+Lease changes in a layout batch schedule one deferred client scan instead of
+rescanning all leases for each label. Cached paint still reaches returning
+labels immediately. The serial map worker uses utility QoS so decorative work
+does not request the same CPU priority as downloading, signing or installing.
+The single-flight limit and bounded failure retries are unchanged.
+
+A standalone CPU differential check executed the previous and updated glyph
+shader arithmetic on arbitrary RGBA maps: 6,201,000 samples matched exactly
+across 14,625 layouts, including fractional origins, scaled rows, partial rows,
+horizontal overflow, full-screen containers and map edges. Malformed-strip
+fallback also passed; AddressSanitizer and UndefinedBehaviorSanitizer reported
+no addressing errors. A fixture with eight visible rows and three labels per row
+used 1,032,192 bytes of strip arguments versus 7,077,888 bytes of full-map
+arguments, about 6.9 times less data before any compositor sharing. These are
+argument-size and CPU arithmetic checks, not measurements of SwiftUI uploads,
+device frame time or processing throughput. The Linux environment has no Swift
+compiler or Apple SDK; an Xcode build and on-device checks during downloading,
+signing and installation are still required.
 
 Text activation requires both SwiftUI presentation ownership and usable native
 layout. `onAppear` grants ownership and `onDisappear` clears paint and withdraws
@@ -189,7 +220,10 @@ overlay above the native compositing containers. Small alpha bitmaps are cached
 until text, selection, font, image, bounds or appearance changes; they never
 capture the aurora or read back the whole screen. A weak display-link target
 tracks known glyph geometry at up to 30 Hz and discovers/recycles native views
-at 4 Hz. It stops while inactive, disabled, or disappeared, restores original masks
+at 4 Hz. Glyph cache keys compare typed text, fonts, colors, selection, image
+hashes and geometry directly; stationary glyph checks no longer build joined
+strings or request font/color descriptions on every tick. It stops while inactive,
+disabled, or disappeared, restores original masks
 and search attributes, and cleans up orphaned owners on its next callback. Empty glyph
 captures leave native paint visible and retry at most four times per second. Unknown tab
 layouts keep their native paint. Each overlay scans only its own presentation's

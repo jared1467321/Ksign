@@ -874,18 +874,25 @@ kernel void auroraBuildInkMap(
     float2 position,
     float4 bounds,
     float2 mapSize,
+    float2 mapRows,
     device const void *mapBytes,
     int byteCount,
     float opacity
 ) {
     int width = max(int(mapSize.x), 1), height = max(int(mapSize.y), 1);
-    if (byteCount != width * height * 4) { return half4(half3(opacity), half(opacity)); }
+    int firstRow = int(mapRows.x), rowCount = int(mapRows.y);
+    if (firstRow < 0 || rowCount < 1 || firstRow + rowCount > height ||
+        byteCount != width * rowCount * 4) { return half4(half3(opacity), half(opacity)); }
     device const uchar4 *pixels = reinterpret_cast<device const uchar4 *>(mapBytes);
     float2 uv = (position - bounds.xy) / max(bounds.zw, float2(1.0));
     float2 point = uv * mapSize - 0.5;
     int x = int(floor(point.x)), y = int(floor(point.y));
     int x0 = clamp(x, 0, width - 1), x1 = clamp(x + 1, 0, width - 1);
     int y0 = clamp(y, 0, height - 1), y1 = clamp(y + 1, 0, height - 1);
+    // Keep the full map's coordinate/fraction math, then address the original
+    // rows in this strip. In-range interpolation is identical to the full map.
+    y0 = clamp(y0 - firstRow, 0, rowCount - 1);
+    y1 = clamp(y1 - firstRow, 0, rowCount - 1);
     float2 fraction = fract(point);
     float3 top = mix(float4(pixels[y0 * width + x0]).rgb,
                      float4(pixels[y0 * width + x1]).rgb, fraction.x);

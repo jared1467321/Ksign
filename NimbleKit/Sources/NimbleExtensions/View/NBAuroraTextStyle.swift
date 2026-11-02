@@ -107,7 +107,7 @@ struct NBAuroraMappedForeground<Content: View>: View {
     @ObservedObject var paint: NBAuroraInkPaint
 
     var body: some View {
-        let field = paint.frame.flatMap { $0.identity == identity ? $0 : nil }
+        let field = paint.sample.flatMap { $0.identity == identity ? $0 : nil }
         if let secondary {
             content.foregroundStyle(ink(primary, adapts: adaptsPrimary, field: field),
                                     ink(secondary, adapts: adaptsSecondary, field: field))
@@ -117,7 +117,7 @@ struct NBAuroraMappedForeground<Content: View>: View {
     }
 
     private func ink(_ fallback: NBThemeColor, adapts: Bool,
-                     field: NBAuroraInkMap.Frame?) -> AnyShapeStyle {
+                     field: NBAuroraInkMap.Sample?) -> AnyShapeStyle {
         guard adapts && fallback.alpha > 0 else { return AnyShapeStyle(fallback.color) }
         let fill: AnyShapeStyle
         if let field {
@@ -126,6 +126,7 @@ struct NBAuroraMappedForeground<Content: View>: View {
                     .float4(Float(bounds.minX), Float(bounds.minY),
                             Float(bounds.width), Float(bounds.height)),
                     .float2(Float(NBAuroraInkMapFormat.width), Float(NBAuroraInkMapFormat.height)),
+                    .float2(Float(field.rows.first), Float(field.rows.count)),
                     field.argument, .float(Float(fallback.alpha)))
                     .in(bounds)
             )

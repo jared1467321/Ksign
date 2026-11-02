@@ -10,6 +10,35 @@ enum NBAuroraInkMapFormat {
     static let framesPerSecond = 15
 }
 
+/// Full-width strips preserve horizontal overflow and inherited row ink. Round
+/// outward to shared bands, with a band of spare rows on each side for glyph
+/// overhang and both bilinear taps. These are original texels, never resampled.
+struct NBAuroraInkRows: Hashable, Sendable {
+    let first: Int
+    let count: Int
+
+    static let full = Self(first: 0, count: NBAuroraInkMapFormat.height)
+
+    private init(first: Int, count: Int) {
+        self.first = first
+        self.count = count
+    }
+
+    init(frame: CGRect, window: CGRect) {
+        guard NBAuroraTextVisibility.usable(frame), NBAuroraTextVisibility.usable(window) else {
+            self = .full
+            return
+        }
+        let height = NBAuroraInkMapFormat.height
+        let band = 16
+        let low = min(1, max(0, (frame.minY - window.minY) / window.height))
+        let high = min(1, max(0, (frame.maxY - window.minY) / window.height))
+        let first = max(0, (Int(floor(low * CGFloat(height) - 0.5)) / band - 1) * band)
+        let end = min(height, (Int(floor(high * CGFloat(height) - 0.5)) / band + 2) * band)
+        self.init(first: first, count: end - first)
+    }
+}
+
 /// A scope owns its lease; the map keeps only a weak reference to it. Dropped
 /// scopes cannot leave a display link running if onDisappear is missed.
 @available(iOS 17.0, tvOS 17.0, *)
@@ -20,16 +49,23 @@ final class NBAuroraInkLease: ObservableObject {
     let paint = NBAuroraInkPaint()
     var active = false
     var reduceMotion = false
+    var rows = NBAuroraInkRows.full
 }
 
 @available(iOS 17.0, tvOS 17.0, *)
 @MainActor
 final class NBAuroraInkPaint: ObservableObject {
-    @Published private(set) var frame: NBAuroraInkMap.Frame?
+    @Published private(set) var sample: NBAuroraInkMap.Sample?
 
-    fileprivate func receive(_ frame: NBAuroraInkMap.Frame?) {
-        guard self.frame?.id != frame?.id else { return }
-        self.frame = frame
+    fileprivate func receive(_ frame: NBAuroraInkMap.Frame?, rows: NBAuroraInkRows = .full) {
+        let next = frame?.sample(for: rows)
+        guard sample !== next else { return }
+        if let sample, let next, sample.identity == next.identity,
+           sample.rows == next.rows, sample.bytes == next.bytes {
+            // A changing sky elsewhere must not redraw an unchanged label.
+            return
+        }
+        sample = next
     }
 }
 
@@ -38,10 +74,45 @@ final class NBAuroraInkPaint: ObservableObject {
 final class NBAuroraInkMap {
     static let shared = NBAuroraInkMap()
 
-    struct Frame {
-        let id = UUID()
+    final class Sample {
         let identity: NBAuroraShaderIdentity
+        let rows: NBAuroraInkRows
+        let bytes: Data
         let argument: Shader.Argument
+
+        init(identity: NBAuroraShaderIdentity, rows: NBAuroraInkRows, bytes: Data) {
+            self.identity = identity
+            self.rows = rows
+            self.bytes = bytes
+            argument = .data(bytes)
+        }
+    }
+
+    final class Frame {
+        let identity: NBAuroraShaderIdentity
+        private let bytes: Data
+        private var samples: [NBAuroraInkRows: Sample] = [:]
+        private var cachedByteCount = 0
+
+        init(identity: NBAuroraShaderIdentity, bytes: Data) {
+            self.identity = identity
+            self.bytes = bytes
+        }
+
+        func sample(for rows: NBAuroraInkRows) -> Sample {
+            if let sample = samples[rows] { return sample }
+            let stride = NBAuroraInkMapFormat.width * 4
+            let cropped = rows == .full ? bytes
+                : bytes.subdata(in: (rows.first * stride)..<((rows.first + rows.count) * stride))
+            let sample = Sample(identity: identity, rows: rows, bytes: cropped)
+            // Frozen maps survive scrolling. Bound their cache rather than
+            // retaining every strip ever visited with Reduce Motion enabled.
+            if cachedByteCount + cropped.count <= bytes.count * 2 {
+                samples[rows] = sample
+                cachedByteCount += cropped.count
+            }
+            return sample
+        }
     }
 
     private(set) var animated: Frame?
@@ -55,6 +126,7 @@ final class NBAuroraInkMap {
     private var displayLink: CADisplayLink?
     private var inFlight = false
     private var refreshPending = false
+    private var refreshScheduled = false
     private var unavailable = false
     private var consecutiveFailures = 0
     private var isActive = true
@@ -85,14 +157,25 @@ final class NBAuroraInkMap {
         if active {
             leases[ObjectIdentifier(lease)] = WeakLease(value: lease)
             lease.paint.receive(frame(for: AuroraSession.shared.identity.shaderIdentity,
-                                      reduceMotion: reduceMotion))
+                                      reduceMotion: reduceMotion), rows: lease.rows)
         } else {
             leases.removeValue(forKey: ObjectIdentifier(lease))
             // Retained offscreen views release the live map and stop receiving
             // frames. Returning views get the current cached frame above.
             lease.paint.receive(nil)
         }
-        refresh(advancing: false)
+        scheduleRefresh()
+    }
+
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            // A batch of arriving/departing labels needs one client scan.
+            self.refresh(advancing: false)
+        }
     }
 
     func frame(for identity: NBAuroraShaderIdentity, reduceMotion: Bool) -> Frame? {
@@ -147,13 +230,13 @@ final class NBAuroraInkMap {
                 // A shuffle during GPU work must not publish the previous sky.
                 if let bytes, identity == AuroraSession.shared.identity.shaderIdentity,
                    self.leases.values.contains(where: { $0.value?.active == true }) {
-                    let frame = Frame(identity: identity, argument: .data(bytes))
+                    let frame = Frame(identity: identity, bytes: bytes)
                     self.consecutiveFailures = 0
                     if frozen { self.still = frame } else { self.animated = frame }
                     for lease in self.leases.values {
                         guard let client = lease.value, client.active,
                               client.reduceMotion == frozen else { continue }
-                        client.paint.receive(frame)
+                        client.paint.receive(frame, rows: client.rows)
                     }
                 } else if bytes == nil, identity == AuroraSession.shared.identity.shaderIdentity,
                           self.leases.values.contains(where: { $0.value?.active == true }) {
@@ -198,7 +281,7 @@ private final class NBAuroraInkClock: NSObject {
 /// and independently owned color bytes cross the queue boundary.
 @available(iOS 17.0, tvOS 17.0, *)
 private final class NBAuroraInkWorker: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "NimbleKit.auroraInkMap", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "NimbleKit.auroraInkMap", qos: .utility)
     private var backend: Backend?
     private var attemptedSetup = false
 

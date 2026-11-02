@@ -33,14 +33,16 @@ final class NBAuroraTextAttachment: ObservableObject {
         anchor?.updateRegistration()
     }
 
-    func receive(bounds: CGRect?, reduceMotion: Bool) {
+    func receive(bounds: CGRect?, rows: NBAuroraInkRows = .full, reduceMotion: Bool) {
         let bounds = isPresented ? bounds : nil
         if let bounds { placement.receive(bounds) }
         let visible = bounds != nil
+        let rows = visible ? rows : .full
         let identity = visible ? AuroraSession.shared.identity.shaderIdentity : nil
         guard lease.active != visible || lease.reduceMotion != reduceMotion
-                || self.identity != identity else { return }
+                || lease.rows != rows || self.identity != identity else { return }
         self.identity = identity
+        lease.rows = rows
         NBAuroraInkMap.shared.update(lease, active: visible, reduceMotion: reduceMotion)
     }
 }
@@ -69,6 +71,7 @@ final class NBAuroraTextAnchorView: UIView {
     private var lastGeometry: Geometry?
     private var lastVisibilityCheck: CFTimeInterval = -.infinity
     private var cachedInkBounds: CGRect?
+    private var cachedInkRows = NBAuroraInkRows.full
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -142,7 +145,8 @@ final class NBAuroraTextAnchorView: UIView {
 
     func sample(at time: CFTimeInterval) {
         guard canTrack else { suspend(); return }
-        attachment?.receive(bounds: inkBounds(at: time), reduceMotion: reduceMotion)
+        let bounds = inkBounds(at: time)
+        attachment?.receive(bounds: bounds, rows: cachedInkRows, reduceMotion: reduceMotion)
     }
 
     func suspend() {
@@ -153,6 +157,7 @@ final class NBAuroraTextAnchorView: UIView {
     func invalidateGeometry() {
         lastGeometry = nil
         cachedInkBounds = nil
+        cachedInkRows = .full
         lastVisibilityCheck = -.infinity
     }
 
@@ -177,6 +182,7 @@ final class NBAuroraTextAnchorView: UIView {
         lastGeometry = geometry
         lastVisibilityCheck = time
         cachedInkBounds = visibleInkBounds(frame: frame, window: window)
+        cachedInkRows = NBAuroraInkRows(frame: frame, window: window.bounds)
         return cachedInkBounds
     }
 
