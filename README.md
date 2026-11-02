@@ -56,6 +56,23 @@ Enable **IPA Patching** in an app's signing **Properties**, or in
 CloudKit compatibility code into the main app and its extensions before signing. All architecture slices are retained. No separate
 patching pass or intermediate IPA export is needed.
 
+IPA Patching also enables local purchases automatically, without an overlay,
+gestures or additional setup. Supported StoreKit 1 product requests get local
+placeholder products. Adding a payment delivers a local purchased transaction
+without submitting a real payment; ownership and unfinished transactions are
+saved in the app's container and can be restored. Existing native transactions
+keep their normal finish behavior. Apps that never use these purchase APIs or
+RevenueCat do not activate the local ownership or response logic.
+
+RevenueCat client entitlement responses can use exact product-to-entitlement
+mappings observed from the SDK or fetched once on demand when the app requests
+customer information. Cached mappings are reused across launches. This enables
+the mapped local entitlements automatically; server-hosted content and remote
+account permissions are unaffected. Missing mappings are not guessed. Local
+receipt verification responses are compatibility JSON, not Apple-signed receipts.
+StoreKit 2 signed transactions, custom purchase checks and enforced RevenueCat
+response signatures are not covered by this implementation.
+
 When signing changes an identifier, normal in-process `Bundle`/`NSBundle`
 identity and information-dictionary lookups see the original identifier. The
 patch also handles the corresponding Core Foundation lookups imported by

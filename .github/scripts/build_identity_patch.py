@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "Native/IdentityPatch"
 VERSION = b"AsignPatch/v1\0"
 HOOKS = ("identity", "keychain", "app-groups", "cloudkit", "background-assets", "module-trace", "image-callbacks",
-         "subscription-registration")
+         "subscription-registration", "local-purchases")
 
 
 def diagnostic_flags(disabled_hooks=(), defer_image_callbacks=False):
@@ -53,7 +53,9 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
             objects = []
             for source in (SOURCE / "Rebind.c", SOURCE / "IdentityPatch.m", SOURCE / "CompatibilityPatch.m",
                            SOURCE / "CloudKitPatch.m", SOURCE / "SubscriptionPatch.m", SOURCE / "PatchPolicy.m",
-                           SOURCE / "DyldPatch.c", SOURCE / "DyldPatchMatch.c"):
+                           SOURCE / "DyldPatch.c", SOURCE / "DyldPatchMatch.c",
+                           SOURCE / "PurchasePatch.m", SOURCE / "LocalPurchases.m",
+                           SOURCE / "StoreKitPurchasePatch.m", SOURCE / "RevenueCatPurchasePatch.m"):
                 obj = scratch / f"{arch}-{source.stem}.o"
                 arc = ["-fobjc-arc", "-fblocks"] if source.suffix == ".m" else []
                 subprocess.run([clang, *flags, *arc, "-c", str(source), "-o", str(obj)], check=True)
@@ -79,7 +81,8 @@ def build(output, sdk="iphoneos", target_platform="iphoneos", architectures=None
             subprocess.run(["xcrun", "lipo", "-create", *map(str, slices), "-output", str(library)], check=True)
         data = library.read_bytes()
         if not all(marker in data for marker in (VERSION, b"AsignCompatibilityPatch/v1\0", b"AsignCloudKitPatch/v1\0",
-                                                b"AsignDyldPatch/v1\0", b"AsignSubscriptionPatch/v1\0")):
+                                                b"AsignDyldPatch/v1\0", b"AsignSubscriptionPatch/v1\0",
+                                                b"AsignPurchasePatch/v1\0")):
             raise RuntimeError("Asign patch version marker was stripped")
         if not output.exists() or output.read_bytes() != data:
             # Publish beside the destination so rename remains atomic even if

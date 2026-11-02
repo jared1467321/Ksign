@@ -1,7 +1,7 @@
 # Unified Asign compatibility patch
 
 `asignpatch.dylib` contains the bundle identity, keychain, app-group,
-NSUserDefaults, CloudKit and subscription-registration compatibility code in one source-built library.
+NSUserDefaults, CloudKit, subscription-registration and local purchase code in one source-built library.
 The main Xcode target's **Build Asign patch** phase bundles it as
 `asignpatch.dylib.bin`; the packaging script requires all implementation
 version markers and removes stale two-library resources from cached products.
@@ -224,11 +224,10 @@ The patch installs from Objective-C `+load`, before app initializers:
 
 - `NSBundle.bundleIdentifier`, `infoDictionary`, `localizedInfoDictionary`,
   `objectForInfoDictionaryKey:` and `bundleWithIdentifier:` expose the original
-  identity for renamed annotated bundles, including framework callers outside
-  the Background Assets installed-identity scope described below. If
+  identity for renamed annotated bundles when called from app-owned code. If
   the process's original and installed IDs match, identity hooks are not installed.
-  Bundles without original-identity metadata retain their native identities.
-- Background Assets and ManagedBackgroundAssetsHelper see the installed identity for
+  System callers and other bundles retain their native identities.
+- Background Assets and other system frameworks see the installed identity for
   bundle lookups so SDK validation can find the registered app. The app's
   imported Swift `AssetPackManager.shared` getter also uses this view for its
   synchronous initialization, including nested Foundation/LaunchServices calls.
@@ -236,10 +235,6 @@ The patch installs from Objective-C `+load`, before app initializers:
   concurrent app lookups retain their original identity. The getter forwards the
   Swift metatype and the real SDK object unchanged. No asset manager is fabricated,
   no Swift trap is suppressed, and signed capabilities remain authoritative.
-  Other system frameworks, including StoreKit's hooked `NSBundle` lookups,
-  receive the original identity outside that scope so purchase metadata lookups
-  are not given the replacement bundle ID by this exception. The view does not
-  change service authorization.
 - Imported `CFBundleGetIdentifier`, `CFBundleGetInfoDictionary`,
   `CFBundleGetLocalInfoDictionary`, `CFBundleGetValueForInfoDictionaryKey`,
   `CFBundleGetBundleWithIdentifier`, `CFBundleCopyInfoDictionaryForURL` and
@@ -285,7 +280,7 @@ classification cache survives an unload. The existing rebinder also covers
 later-loaded embedded code, with the same import-path limitations below.
 
 For diagnosis, the manual workflow accepts `patch_disabled_hooks`, a comma-separated
-list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks,subscription-registration`,
+list of `identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks,subscription-registration,local-purchases`,
 and `patch_defer_image_callbacks`. Leave both at their defaults for a normal build.
 Equivalent standalone options are repeatable `--disable-hook NAME` and
 `--defer-image-callbacks` on `.github/scripts/build_identity_patch.py`.
@@ -319,6 +314,74 @@ or authenticated arm64e import paths are not rewritten. The rebinder explicitly
 skips authenticated pointer sections rather than writing unsigned pointers into
 them. It does not claim to conceal an installed identifier from every possible
 inspection mechanism or grant capabilities associated with an original ID.
+
+## Automatic local purchases
+
+`PurchasePatch.m`, `StoreKitPurchasePatch.m`, `RevenueCatPurchasePatch.m` and
+`LocalPurchases.m` add local purchase handling to the source-built library.
+There is no dependency on either uploaded reference dylib. The build and package
+checks require an `AsignPurchasePatch/v1` marker so cached products cannot omit
+this implementation. The prior StoreKit identity experiment is reverted;
+system frameworks again retain the installed bundle identity.
+
+Setup installs API hooks but creates no ownership ledger, UI, background polling
+or network request. It does not link/load StoreKit into apps that did not load it.
+An image callback retries method installation on the main queue if StoreKit is
+loaded later; calls made before that retry are outside the supported path.
+Methods with an incompatible ABI are not replaced.
+
+StoreKit 1 requests initialized by app code keep their own identifier sets and
+receive asynchronous local product and completion callbacks. There is no shared
+request delegate or product cache. Cancellation suppresses pending callbacks.
+Products and transactions use actual SDK subclasses so Swift class checks work;
+their public getters supply local values rather than writing private SDK ivars.
+Product text uses the identifier and the placeholder price is zero. Subscription
+periods and other unavailable catalogue metadata are not guessed.
+
+`addPayment:` records a new local transaction and delivers it to registered
+observers without calling the original payment method. Each observer receives
+an event once even when registration and purchase race. Removing an observer
+stops local delivery. Finishing a local transaction removes it from the queue and
+unfinished journal while retaining ownership; native transactions still forward
+to the original finish implementation. Restores report local history through
+restored transactions and the usual completion callback. Because placeholder
+metadata does not establish whether a product is consumable, local history treats
+recorded products as restorable; repeated purchase attempts still generate new
+transactions. Records are scoped to the installed app's standard defaults.
+Receipt-refresh requests from app code complete using compatibility JSON in
+Application Support, without invoking Apple's refresh/sign-in flow. Once local
+purchase APIs are active, app-owned main-bundle receipt-URL reads use that file;
+other bundles and system callers retain their native receipt URL. This does not
+make the local JSON pass cryptographic receipt validation.
+
+RevenueCat traffic is recognized only for the HTTPS hosts `api.revenuecat.com`,
+`api.rc-backup.com` and `api-production.8-lives-cat.io` and the exact supported v1
+paths. Ordinary networking, offerings, login and arbitrary proxy URLs pass through.
+Mappings are isolated by the application's Authorization/API key. Exact mappings
+can come from the product-entitlement endpoint or existing entitlement records;
+unknown names are never replaced with a generic `premium` guess. A customer-info
+request can trigger one deduplicated mapping fetch per key/process, using the same
+host and headers. It is not triggered by library loading or ordinary traffic.
+
+Known mappings produce local customer-info responses with the mapped entitlements
+active, without needing a purchase prompt. Payloads use a private `NSURLProtocol`
+session with native data tasks, retaining resume/cancel/completion semantics and
+the caller's delegate queue. Local receipt posts are not submitted to RevenueCat;
+without a mapping they return a local error. Apple `/verifyReceipt` requests are
+answered locally only after local purchase APIs are active. These bodies are compatibility
+JSON and do not fabricate a valid Apple receipt/JWS or RevenueCat signature.
+Remote account permissions and server-hosted features are not changed.
+
+StoreKit 2 purchases and custom entitlement checks are outside these hooks.
+Enforced response-signature verification can reject local RevenueCat JSON.
+No claim of universal app support is made. Device validation is still required.
+
+`python3 .github/scripts/check_local_purchases.py` runs on macOS Foundation with
+StoreKit-shaped test objects and no account/device/network dependency. It covers
+per-request products, cancellation, purchased/finished/restored events, observer
+races, native transaction forwarding, persisted ownership across processes,
+RevenueCat key isolation, local task delivery/cancellation and unrelated URLs.
+The manual cached build runs this check before building the IPA.
 
 iOS launch/relaunch, device-specific private SDK behavior, keychain,
 shared-group, extension and Background Assets behavior require device validation.

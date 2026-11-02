@@ -18,7 +18,8 @@ enum {
     AsignPatchBackgroundAssets = 1 << 4,
     AsignPatchModuleTrace = 1 << 5,
     AsignPatchImageCallbacks = 1 << 6,
-    AsignPatchSubscriptionRegistration = 1 << 7
+    AsignPatchSubscriptionRegistration = 1 << 7,
+    AsignPatchLocalPurchases = 1 << 8
 };
 
 #if ASIGN_PATCH_DISABLED_HOOKS || ASIGN_PATCH_DEFER_IMAGE_CALLBACKS

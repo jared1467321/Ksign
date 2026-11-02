@@ -17,7 +17,7 @@ on:
         required: false
         default: false
       patch_disabled_hooks:
-        description: "Diagnostic only: comma-separated identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks,subscription-registration"
+        description: "Diagnostic only: comma-separated identity,keychain,app-groups,cloudkit,background-assets,module-trace,image-callbacks,subscription-registration,local-purchases"
         type: string
         required: false
         default: ""
@@ -79,6 +79,9 @@ jobs:
 
       - name: Check CloudKit container capture and fallback eligibility
         run: python3 .github/scripts/check_cloudkit_containers.py
+
+      - name: Check local purchase callbacks and ownership
+        run: python3 .github/scripts/check_local_purchases.py
 
       # Match the builder's own stamp: pinned source, Rust bridge, build script,
       # and actual Xcode/Rust versions. Swift overlays and documentation
