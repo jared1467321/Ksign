@@ -375,6 +375,7 @@
 				"$(SRCROOT)/Native/IdentityPatch/LocalPurchases.m",
 				"$(SRCROOT)/Native/IdentityPatch/StoreKitPurchasePatch.m",
 				"$(SRCROOT)/Native/IdentityPatch/RevenueCatPurchasePatch.m",
+				"$(SRCROOT)/Native/IdentityPatch/PurchaseSDKPatch.m",
 				"$(SRCROOT)/Native/IdentityPatch/CloudKitPatch.m",
 				"$(SRCROOT)/Native/IdentityPatch/CloudKitPatch.h",
 				"$(SRCROOT)/Native/IdentityPatch/CloudKitABI.h",

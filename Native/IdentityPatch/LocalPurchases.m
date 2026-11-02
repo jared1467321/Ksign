@@ -7,11 +7,12 @@
 #import <math.h>
 
 __attribute__((used, visibility("default")))
-const char AsignPurchasePatchVersion[] = "AsignPurchasePatch/v1";
+const char AsignPurchasePatchVersion[] = "AsignPurchasePatch/v2";
 
 static NSString *const LedgerKey = @"AsignLocalPurchases.v1";
 static NSString *const PendingKey = @"AsignLocalPurchasePending.v1";
 static NSString *const MappingKey = @"AsignLocalPurchaseMappings.v1";
+static NSString *const KindsKey = @"AsignLocalPurchaseKinds.v1";
 static char StoreValuesKey;
 static atomic_bool PurchaseContextActive;
 
@@ -40,7 +41,15 @@ static NSDictionary *Records(NSString *key) {
             ![record[@"date"] isKindOfClass:NSNumber.class] ||
             ![record[@"quantity"] isKindOfClass:NSNumber.class] ||
             !isfinite([record[@"date"] doubleValue]) || [record[@"date"] doubleValue] < 0 ||
-            [record[@"quantity"] integerValue] < 1) continue;
+            [record[@"date"] doubleValue] > 253402300799.0 ||
+            [record[@"quantity"] integerValue] < 1 ||
+            ![identifier isEqual:[key isEqual:LedgerKey] ? record[@"product"] : record[@"identifier"]] ||
+            (record[@"restored"] && (![record[@"restored"] isKindOfClass:NSNumber.class] ||
+                                     !Identifier(record[@"originalIdentifier"]) ||
+                                     ![record[@"originalDate"] isKindOfClass:NSNumber.class] ||
+                                     !isfinite([record[@"originalDate"] doubleValue]) ||
+                                     [record[@"originalDate"] doubleValue] < 0 ||
+                                     [record[@"originalDate"] doubleValue] > 253402300799.0))) continue;
         valid[identifier] = record;
     }
     return [valid copy];
@@ -52,6 +61,46 @@ NSDictionary *AsignLocalPurchases(void) {
 
 NSDictionary *AsignLocalPendingPurchases(void) {
     @synchronized (PurchaseLock()) { return Records(PendingKey); }
+}
+
+static NSDictionary *ProductKinds(void) {
+    id stored = [NSUserDefaults.standardUserDefaults objectForKey:KindsKey];
+    return [stored isKindOfClass:NSDictionary.class] ? stored : @{};
+}
+
+AsignProductKind AsignLocalProductKind(NSString *product) {
+    if (!Identifier(product)) return AsignProductUnknown;
+    @synchronized (PurchaseLock()) {
+        id number = ProductKinds()[product];
+        NSInteger kind = [number isKindOfClass:NSNumber.class] ? [number integerValue] : 0;
+        return kind >= AsignProductConsumable && kind <= AsignProductSubscription ? (AsignProductKind)kind : AsignProductUnknown;
+    }
+}
+
+void AsignRememberProductKind(NSString *product, AsignProductKind kind) {
+    if (!Identifier(product) || kind < AsignProductConsumable || kind > AsignProductSubscription) return;
+    @synchronized (PurchaseLock()) {
+        NSMutableDictionary *kinds = [ProductKinds() mutableCopy];
+        id old = kinds[product];
+        // Conflicting metadata is permanently unknown, rather than making a
+        // previously observed consumable restorable. Old ledgers need no rewrite.
+        if ([old isKindOfClass:NSNumber.class] && ([old integerValue] == -1 || [old integerValue] == kind)) return;
+        kinds[product] = old ? @(-1) : @(kind);
+        [NSUserDefaults.standardUserDefaults setObject:kinds forKey:KindsKey];
+    }
+    AsignStoreKitProductTypesChanged();
+}
+
+NSDictionary *AsignRestorableLocalPurchases(void) {
+    @synchronized (PurchaseLock()) {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        NSDictionary *owned = Records(LedgerKey);
+        for (NSString *product in owned) {
+            AsignProductKind kind = AsignLocalProductKind(product);
+            if (kind == AsignProductNonConsumable || kind == AsignProductSubscription) result[product] = owned[product];
+        }
+        return [result copy];
+    }
 }
 
 NSString *AsignLocalTransactionIdentifier(void) {
@@ -79,6 +128,25 @@ NSDictionary *AsignRecordLocalPurchase(NSString *product, NSInteger quantity) {
     }
 }
 
+NSDictionary *AsignRecordLocalRestore(NSDictionary *purchase) {
+    @synchronized (PurchaseLock()) {
+        NSString *product = [purchase isKindOfClass:NSDictionary.class] ? purchase[@"product"] : nil;
+        if (!Identifier(product)) return nil;
+        NSDictionary *owned = AsignRestorableLocalPurchases()[product];
+        if (!owned || ![owned isEqual:purchase]) return nil;
+        NSMutableDictionary *record = [owned mutableCopy];
+        record[@"originalIdentifier"] = owned[@"identifier"];
+        record[@"originalDate"] = owned[@"date"];
+        record[@"date"] = @(NSDate.date.timeIntervalSince1970);
+        record[@"identifier"] = AsignLocalTransactionIdentifier();
+        record[@"restored"] = @YES;
+        NSMutableDictionary *pending = [Records(PendingKey) mutableCopy];
+        pending[record[@"identifier"]] = record;
+        [NSUserDefaults.standardUserDefaults setObject:pending forKey:PendingKey];
+        return [record copy];
+    }
+}
+
 void AsignFinishLocalPurchase(NSString *transaction) {
     if (!Identifier(transaction)) return;
     @synchronized (PurchaseLock()) {
@@ -92,12 +160,21 @@ static NSString *DateString(NSTimeInterval time) {
     static NSISO8601DateFormatter *formatter;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ formatter = [NSISO8601DateFormatter new]; });
-    return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:time]];
+    @synchronized (formatter) { return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:time]]; }
 }
 
 NSDictionary *AsignLocalReceiptResponse(void) {
     NSMutableArray *items = [NSMutableArray array];
+    NSDictionary *pending = AsignLocalPendingPurchases();
+    NSMutableDictionary *records = [NSMutableDictionary dictionary];
     for (NSDictionary *record in AsignLocalPurchases().allValues) {
+        // Finished consumables must not reappear as durable receipt ownership.
+        if (AsignLocalProductKind(record[@"product"]) != AsignProductConsumable) records[record[@"identifier"]] = record;
+    }
+    for (NSDictionary *record in pending.allValues) {
+        if (![record[@"restored"] boolValue]) records[record[@"identifier"]] = record;
+    }
+    for (NSDictionary *record in records.allValues) {
         NSTimeInterval time = [record[@"date"] doubleValue];
         [items addObject:@{@"product_id":record[@"product"], @"quantity":[record[@"quantity"] stringValue],
             @"transaction_id":record[@"identifier"], @"original_transaction_id":record[@"identifier"],
@@ -168,6 +245,14 @@ void AsignRememberPurchaseMapping(NSString *scope, NSDictionary *response) {
         }
         // Existing (including expired) entitlement records establish exact names.
         id subscriber = response[@"subscriber"];
+        id subscriptions = [subscriber isKindOfClass:NSDictionary.class] ? subscriber[@"subscriptions"] : nil;
+        if ([subscriptions isKindOfClass:NSDictionary.class]) {
+            for (id product in subscriptions) {
+                id entry = subscriptions[product];
+                if (Identifier(product) && [entry isKindOfClass:NSDictionary.class] && Identifier(entry[@"purchase_date"]))
+                    AsignRememberProductKind(product, AsignProductSubscription);
+            }
+        }
         id entitlements = [subscriber isKindOfClass:NSDictionary.class] ? subscriber[@"entitlements"] : nil;
         if ([entitlements isKindOfClass:NSDictionary.class]) {
             for (id name in entitlements) {
@@ -199,21 +284,41 @@ NSDictionary *AsignLocalSubscriberResponse(NSString *scope, NSString *user, NSDi
     NSMutableDictionary *subscriptions = [raw isKindOfClass:NSDictionary.class] ? [raw mutableCopy] : [NSMutableDictionary dictionary];
     raw = subscriber[@"entitlements"];
     NSMutableDictionary *entitlements = [raw isKindOfClass:NSDictionary.class] ? [raw mutableCopy] : [NSMutableDictionary dictionary];
+    raw = subscriber[@"non_subscriptions"];
+    NSMutableDictionary *nonSubscriptions = [raw isKindOfClass:NSDictionary.class] ? [raw mutableCopy] : [NSMutableDictionary dictionary];
     NSString *now = DateString(NSDate.date.timeIntervalSince1970);
     NSDictionary *owned = AsignLocalPurchases();
     for (NSString *product in mapping) {
         id names = mapping[product];
         if (![names isKindOfClass:NSArray.class] || ![names count]) continue;
+        AsignProductKind kind = AsignLocalProductKind(product);
+        // A consumable is granted by its purchase event, never automatically
+        // turned into permanent ownership by a catalog/entitlement mapping.
+        if (kind == AsignProductConsumable) continue;
         id record = owned[product];
         NSString *date = [record isKindOfClass:NSDictionary.class] ? DateString([record[@"date"] doubleValue]) : now;
-        raw = subscriptions[product];
-        NSMutableDictionary *subscription = [raw isKindOfClass:NSDictionary.class] ? [raw mutableCopy] : [NSMutableDictionary dictionary];
-        [subscription addEntriesFromDictionary:@{@"purchase_date":date, @"original_purchase_date":date,
-            @"expires_date":NSNull.null, @"store":@"app_store", @"is_sandbox":@YES,
-            @"period_type":@"normal", @"ownership_type":@"PURCHASED",
-            @"billing_issues_detected_at":NSNull.null, @"unsubscribe_detected_at":NSNull.null,
-            @"refunded_at":NSNull.null}];
-        subscriptions[product] = subscription;
+        if (kind == AsignProductNonConsumable) {
+            raw = nonSubscriptions[product];
+            NSMutableArray *purchases = [raw isKindOfClass:NSArray.class] ? [raw mutableCopy] : [NSMutableArray array];
+            NSString *identifier = [record isKindOfClass:NSDictionary.class] ? record[@"identifier"] : [@"asign-local:" stringByAppendingString:product];
+            BOOL exists = NO;
+            for (id entry in purchases) {
+                if ([entry isKindOfClass:NSDictionary.class] && [entry[@"id"] isEqual:identifier]) { exists = YES; break; }
+            }
+            if (!exists) [purchases addObject:@{@"id":identifier, @"purchase_date":date,
+                @"original_purchase_date":date, @"store":@"app_store", @"is_sandbox":@YES}];
+            nonSubscriptions[product] = purchases;
+            [subscriptions removeObjectForKey:product];
+        } else {
+            raw = subscriptions[product];
+            NSMutableDictionary *subscription = [raw isKindOfClass:NSDictionary.class] ? [raw mutableCopy] : [NSMutableDictionary dictionary];
+            [subscription addEntriesFromDictionary:@{@"purchase_date":date, @"original_purchase_date":date,
+                @"expires_date":NSNull.null, @"store":@"app_store", @"is_sandbox":@YES,
+                @"period_type":@"normal", @"ownership_type":@"PURCHASED",
+                @"billing_issues_detected_at":NSNull.null, @"unsubscribe_detected_at":NSNull.null,
+                @"refunded_at":NSNull.null}];
+            subscriptions[product] = subscription;
+        }
         for (id name in names) {
             if (!Identifier(name)) continue;
             entitlements[name] = @{@"product_identifier":product, @"purchase_date":date, @"expires_date":NSNull.null};
@@ -221,7 +326,7 @@ NSDictionary *AsignLocalSubscriberResponse(NSString *scope, NSString *user, NSDi
     }
     subscriber[@"subscriptions"] = subscriptions;
     subscriber[@"entitlements"] = entitlements;
-    if (!subscriber[@"non_subscriptions"]) subscriber[@"non_subscriptions"] = @{};
+    subscriber[@"non_subscriptions"] = nonSubscriptions;
     if (!subscriber[@"original_app_user_id"]) subscriber[@"original_app_user_id"] = user ?: @"asign-local";
     if (!subscriber[@"first_seen"]) subscriber[@"first_seen"] = now;
     result[@"subscriber"] = subscriber;

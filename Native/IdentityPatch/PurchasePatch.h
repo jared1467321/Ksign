@@ -4,6 +4,20 @@
 void AsignInstallPurchasePatch(void);
 void AsignInstallStoreKitPurchasePatch(void);
 void AsignInstallRevenueCatPurchasePatch(void);
+void AsignInstallPurchaseSDKPatch(void);
+
+typedef enum {
+    AsignProductUnknown = 0,
+    AsignProductConsumable = 1,
+    AsignProductNonConsumable = 2,
+    AsignProductSubscription = 3
+} AsignProductKind;
+void AsignRememberProductKind(NSString *product, AsignProductKind kind);
+AsignProductKind AsignLocalProductKind(NSString *product);
+NSDictionary *AsignRestorableLocalPurchases(void);
+NSDictionary *AsignRecordLocalRestore(NSDictionary *purchase);
+// Schedules a retry for observers registered before product metadata arrived.
+void AsignStoreKitProductTypesChanged(void);
 
 // Created lazily on the first purchase call, in this application's container.
 NSDictionary *AsignLocalPurchases(void);

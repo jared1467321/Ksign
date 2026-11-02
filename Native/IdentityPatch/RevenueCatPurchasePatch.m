@@ -10,6 +10,8 @@ static RequestTask NativeRequestTask;
 static NSString *const BodyKey = @"AsignLocalPurchaseBody.v1";
 static NSString *const ErrorKey = @"AsignLocalPurchaseError.v1";
 static char LocalSessionKey;
+typedef void (^ConnectionCompletion)(NSURLResponse *, NSData *, NSError *);
+static void (*OriginalConnection)(id, SEL, NSURLRequest *, NSOperationQueue *, ConnectionCompletion);
 
 // Use Foundation's native task/cancellation machinery with a private URL
 // protocol. Prepared responses never open a connection or submit a receipt.
@@ -87,6 +89,39 @@ static BOOL ReceiptVerification(NSURLRequest *request) {
     NSURL *url = request.URL;
     return [url.scheme.lowercaseString isEqual:@"https"] && [url.path isEqual:@"/verifyReceipt"] &&
         [@[@"buy.itunes.apple.com", @"sandbox.itunes.apple.com"] containsObject:url.host.lowercaseString];
+}
+
+static void ConnectionRequest(id self, SEL selector, NSURLRequest *request,
+                              NSOperationQueue *queue, ConnectionCompletion completion) {
+    if (!completion || ![queue isKindOfClass:NSOperationQueue.class] ||
+        !ReceiptVerification(request) || !AsignLocalPurchasesActive()) {
+        OriginalConnection(self, selector, request, queue, completion);
+        return;
+    }
+    NSData *data = AsignLocalReceipt();
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:200
+        HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type":@"application/json"}];
+    [queue addOperationWithBlock:^{ completion(response, data, nil); }];
+}
+
+static void InstallLegacyConnection(void) {
+    Class cls = object_getClass(NSClassFromString(@"NSURLConnection"));
+    SEL selector = NSSelectorFromString(@"sendAsynchronousRequest:queue:completionHandler:");
+    Method method = cls ? class_getInstanceMethod(cls, selector) : NULL;
+    if (!method || method_getNumberOfArguments(method) != 5) return;
+    char *type = method_copyReturnType(method);
+    BOOL valid = AsignTypeMatches(type, "v");
+    free(type);
+    const char *arguments[] = {"@", ":", "@", "@", "@?"};
+    for (unsigned i = 0; valid && i < 5; ++i) {
+        type = method_copyArgumentType(method, i);
+        valid = AsignTypeMatches(type, arguments[i]);
+        free(type);
+    }
+    if (!valid) return;
+    OriginalConnection = (void *)method_getImplementation(method);
+    if (!class_addMethod(cls, selector, (IMP)ConnectionRequest, method_getTypeEncoding(method)))
+        OriginalConnection = (void *)method_setImplementation(method, (IMP)ConnectionRequest);
 }
 
 static NSDictionary *JSON(NSData *data) {
@@ -201,6 +236,7 @@ static NSURLSessionDataTask *PurchaseURLTask(NSURLSession *self, SEL selector, N
 void AsignInstallRevenueCatPurchasePatch(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        InstallLegacyConnection();
         Method method = class_getInstanceMethod(NSURLSession.class, @selector(dataTaskWithRequest:completionHandler:));
         if (!AsignMethodMatches(method, "@", "@", "@?")) return;
         NativeRequestTask = (RequestTask)method_getImplementation(method);
@@ -215,5 +251,8 @@ void AsignInstallRevenueCatPurchasePatch(void) {
 void AsignTestPurchaseTransport(RequestTask request, URLTask url) {
     OriginalRequestTask = request;
     OriginalURLTask = url;
+}
+void AsignTestPurchaseConnection(void (*connection)(id, SEL, NSURLRequest *, NSOperationQueue *, ConnectionCompletion)) {
+    OriginalConnection = connection;
 }
 #endif

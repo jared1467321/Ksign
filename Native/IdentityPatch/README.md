@@ -317,17 +317,17 @@ inspection mechanism or grant capabilities associated with an original ID.
 
 ## Automatic local purchases
 
-`PurchasePatch.m`, `StoreKitPurchasePatch.m`, `RevenueCatPurchasePatch.m` and
-`LocalPurchases.m` add local purchase handling to the source-built library.
+`PurchasePatch.m`, `StoreKitPurchasePatch.m`, `RevenueCatPurchasePatch.m`,
+`PurchaseSDKPatch.m` and `LocalPurchases.m` add local purchase handling to the source-built library.
 There is no dependency on either uploaded reference dylib. The build and package
-checks require an `AsignPurchasePatch/v1` marker so cached products cannot omit
+checks require an `AsignPurchasePatch/v2` marker so cached products cannot omit
 this implementation. The prior StoreKit identity experiment is reverted;
 system frameworks again retain the installed bundle identity.
 
 Setup installs API hooks but creates no ownership ledger, UI, background polling
 or network request. It does not link/load StoreKit into apps that did not load it.
-An image callback retries method installation on the main queue if StoreKit is
-loaded later; calls made before that retry are outside the supported path.
+An image callback retries method installation on the main queue if StoreKit or
+embedded app/SDK code is loaded later; calls before that retry are outside the supported path.
 Methods with an incompatible ABI are not replaced.
 
 StoreKit 1 requests initialized by app code keep their own identifier sets and
@@ -343,11 +343,33 @@ observers without calling the original payment method. Each observer receives
 an event once even when registration and purchase race. Removing an observer
 stops local delivery. Finishing a local transaction removes it from the queue and
 unfinished journal while retaining ownership; native transactions still forward
-to the original finish implementation. Restores report local history through
-restored transactions and the usual completion callback. Because placeholder
-metadata does not establish whether a product is consumable, local history treats
-recorded products as restorable; repeated purchase attempts still generate new
-transactions. Records are scoped to the installed app's standard defaults.
+to the original finish implementation. Once an observer registers, finished
+non-consumables and subscriptions are automatically restored once per product/queue
+per process. This waits for a registered observer and retries when product metadata
+arrives later. An unfinished purchase already in the queue takes precedence.
+Restores have new transaction IDs/dates and retain the original purchase ID/date.
+They are journaled before delivery, so an interrupted restore resumes after launch;
+finishing a restored transaction clears its journal entry. Explicit restore requests
+use the same eligibility/pending checks and retain the usual completion callback.
+
+Consumables and products with unknown/conflicting types are excluded from both
+automatic and explicit restoration. Repeated purchases still generate distinct
+transactions. An unfinished consumable retains its ordinary purchased callback;
+it is not converted to a restored transaction. Finished consumables are excluded
+from compatibility receipts, while all unfinished purchases are included.
+Existing v1 ownership and unfinished-purchase records remain readable. Unknown
+legacy product types are not guessed or discarded. Records remain scoped to the
+installed app's standard defaults; no app preference domain is cleared.
+
+Product kinds come from an actual SK1 subscription period, native RevenueCat
+subscriber subscription records, or RevenueCat's explicit product type when it is
+not backed by an SK1 product. SK1 has no general consumable/non-consumable flag.
+RevenueCat's SK1 `productType` is a placeholder non-consumable value and is not
+accepted as durability evidence. A product identifier, price, missing subscription
+period, or entitlement name alone never establishes a restorable type. Conflicting
+evidence remains unknown. Apps whose only metadata consists of placeholder SK1
+products can purchase locally but will not gain automatic restoration until the
+product type is established.
 Receipt-refresh requests from app code complete using compatibility JSON in
 Application Support, without invoking Apple's refresh/sign-in flow. Once local
 purchase APIs are active, app-owned main-bundle receipt-URL reads use that file;
@@ -367,21 +389,44 @@ Known mappings produce local customer-info responses with the mapped entitlement
 active, without needing a purchase prompt. Payloads use a private `NSURLProtocol`
 session with native data tasks, retaining resume/cancel/completion semantics and
 the caller's delegate queue. Local receipt posts are not submitted to RevenueCat;
-without a mapping they return a local error. Apple `/verifyReceipt` requests are
-answered locally only after local purchase APIs are active. These bodies are compatibility
+without a mapping they return a local error. Known non-consumables use the
+`non_subscriptions` response collection and retain existing purchase history;
+known consumables are not automatically granted by an entitlement mapping.
+Apple `/verifyReceipt` requests are answered locally only after local purchase
+APIs are active. This includes the legacy `NSURLConnection` asynchronous API,
+which delivers its result on the requested operation queue. HTTPS host/path
+checks remain exact and other connection requests retain their native behavior.
+These bodies are compatibility
 JSON and do not fabricate a valid Apple receipt/JWS or RevenueCat signature.
 Remote account permissions and server-hosted features are not changed.
 
-StoreKit 2 purchases and custom entitlement checks are outside these hooks.
+The SDK adapter checks only named RevenueCat classes and method ABIs in app-owned
+code. For an SDK entitlement with an existing identifier/product relationship,
+a locally purchased, known durable product can activate cached Objective-C
+entitlement checks. Active entitlement collections, active/purchased product sets,
+and product/entitlement date queries get corresponding local views. Existing
+native active entitlement data is retained. This needs an actual SDK entitlement
+object; it does not invent an absent entitlement or guess its name. The adapter
+does not mark anything as cryptographically verified.
+
+This is Objective-C dispatch support. Direct/devirtualized Swift getter calls,
+unrelated app premium getters, and native StoreKit 2 purchases are outside these
+hooks. There is no all-class scanner or substring-based URL interception.
 Enforced response-signature verification can reject local RevenueCat JSON.
 No claim of universal app support is made. Device validation is still required.
 
 `python3 .github/scripts/check_local_purchases.py` runs on macOS Foundation with
 StoreKit-shaped test objects and no account/device/network dependency. It covers
 per-request products, cancellation, purchased/finished/restored events, observer
-races, native transaction forwarding, persisted ownership across processes,
-RevenueCat key isolation, local task delivery/cancellation and unrelated URLs.
+races, native transaction forwarding, ownership across processes, interrupted
+automatic restore/retry, late/conflicting product metadata, consumable exclusion,
+cached SDK entitlement consistency, RevenueCat key isolation, local task
+delivery/cancellation, legacy callbacks and unrelated classes/URLs.
 The manual cached build runs this check before building the IPA.
+
+SDK API references: [entitlements](https://github.com/RevenueCat/purchases-ios/blob/main/Sources/Purchasing/EntitlementInfo.swift),
+[customer info](https://github.com/RevenueCat/purchases-ios/blob/main/Sources/Identity/CustomerInfo.swift),
+and [product types, including the SK1 placeholder](https://github.com/RevenueCat/purchases-ios/blob/main/Sources/Purchasing/StoreKitAbstractions/ProductType.swift).
 
 iOS launch/relaunch, device-specific private SDK behavior, keychain,
 shared-group, extension and Background Assets behavior require device validation.

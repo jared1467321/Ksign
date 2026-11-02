@@ -6,6 +6,7 @@
 static BOOL AppCaller = YES;
 BOOL AsignPatchCallerIsApp(const void *caller) { (void)caller; return AppCaller; }
 static NSUserDefaults *Defaults;
+static NSString *Suite;
 static id TestDefaults(id self, SEL selector) { (void)self; (void)selector; return Defaults; }
 static NSURL *TestSupport;
 static NSArray *(*OriginalDirectories)(id, SEL, NSSearchPathDirectory, NSSearchPathDomainMask);
@@ -135,6 +136,55 @@ static NSUInteger NativeStarts, NativePayments, NativeFinishes, NativeRestores;
 - (void)paymentQueueRestoreCompletedTransactionsFinished:(id)queue { (void)queue; ++self.restored; }
 @end
 
+// Named SDK objects let the production adapter be tested without linking an
+// SDK into the patch. Native getters deliberately do not dispatch to each
+// other, matching Swift's ability to bypass Objective-C message dispatch.
+@interface RCStoreProduct : NSObject
+@property(nonatomic, copy) NSString *productIdentifier;
+@property(nonatomic) NSInteger productType;
+@property(nonatomic, strong) id sk1Product, subscriptionPeriod;
+@end
+@implementation RCStoreProduct
+@end
+@interface RCEntitlementInfo : NSObject
+@property(nonatomic, copy) NSString *identifier, *productIdentifier;
+@property(nonatomic) BOOL isActive, isActiveInAnyEnvironment, isActiveInCurrentEnvironment, willRenew;
+@property(nonatomic, strong) NSDate *expirationDate;
+@end
+@implementation RCEntitlementInfo
+@end
+@interface RCEntitlementInfos : NSObject
+@property(nonatomic, copy) NSDictionary *all, *nativeActive;
+@property(nonatomic, readonly) NSDictionary *active, *activeInAnyEnvironment, *activeInCurrentEnvironment;
+@end
+@implementation RCEntitlementInfos
+- (NSDictionary *)active { return self.nativeActive; }
+- (NSDictionary *)activeInAnyEnvironment { return self.nativeActive; }
+- (NSDictionary *)activeInCurrentEnvironment { return self.nativeActive; }
+@end
+@interface RCCustomerInfo : NSObject
+@property(nonatomic, strong) RCEntitlementInfos *entitlements;
+@property(nonatomic, readonly) NSSet *activeSubscriptions, *allPurchasedProductIdentifiers;
+- (NSDate *)expirationDateForProductIdentifier:(NSString *)product;
+- (NSDate *)expirationDateForEntitlement:(NSString *)name;
+- (NSDate *)purchaseDateForProductIdentifier:(NSString *)product;
+- (NSDate *)purchaseDateForEntitlement:(NSString *)name;
+@end
+@implementation RCCustomerInfo
+- (NSSet *)activeSubscriptions { return [NSSet setWithObject:@"native"] ; }
+- (NSSet *)allPurchasedProductIdentifiers { return [NSSet setWithObject:@"native"] ; }
+- (NSDate *)expirationDateForProductIdentifier:(NSString *)product { (void)product; return [NSDate dateWithTimeIntervalSince1970:1]; }
+- (NSDate *)expirationDateForEntitlement:(NSString *)name { (void)name; return [NSDate dateWithTimeIntervalSince1970:1]; }
+- (NSDate *)purchaseDateForProductIdentifier:(NSString *)product { (void)product; return nil; }
+- (NSDate *)purchaseDateForEntitlement:(NSString *)name { (void)name; return nil; }
+@end
+@interface UnrelatedPremiumChecker : NSObject
+- (BOOL)isActive;
+@end
+@implementation UnrelatedPremiumChecker
+- (BOOL)isActive { return NO; }
+@end
+
 static void Drain(void) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.08];
     while ([deadline timeIntervalSinceNow] > 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
@@ -188,11 +238,15 @@ static void StoreKitChecks(void) {
     [queue finishTransaction:[SKPaymentTransaction new]]; assert(NativeFinishes == 1);
     [queue addPayment:Pay(@"a")]; Drain();
     assert(first.events.count == 2 && ![transaction.transactionIdentifier isEqual:((SKPaymentTransaction *)first.events.lastObject).transactionIdentifier]);
+    AsignRememberProductKind(@"a", AsignProductNonConsumable);
     [queue restoreCompletedTransactions]; Drain();
     assert(!NativeRestores && first.restored == 1 && second.restored == 1);
     transaction = first.events.lastObject;
     assert(transaction.transactionState == 3 && [(SKPaymentTransaction *)transaction.originalTransaction transactionState] == 1);
     assert(first.events.count == 3 && second.events.count == 3);
+
+    [queue removeTransactionObserver:first]; [queue removeTransactionObserver:second];
+    [Defaults removePersistentDomainForName:Suite];
 
     // An observer added after purchase but before delivery gets one callback.
     SKPaymentQueue *lateQueue = [SKPaymentQueue new]; TestObserver *late = [TestObserver new];
@@ -200,6 +254,154 @@ static void StoreKitChecks(void) {
     assert(late.events.count == 1);
     [lateQueue removeTransactionObserver:late]; [lateQueue addPayment:Pay(@"other")]; Drain();
     assert(late.events.count == 1 && !NativePayments);
+}
+
+static void FinishedPurchase(NSString *product, AsignProductKind kind, NSInteger quantity) {
+    AsignRememberProductKind(product, kind);
+    NSDictionary *record = AsignRecordLocalPurchase(product, quantity);
+    assert(record);
+    AsignFinishLocalPurchase(record[@"identifier"]);
+}
+
+static void RestoreWrite(void) {
+    [Defaults removePersistentDomainForName:Suite];
+    [Defaults setObject:@"preserve" forKey:@"app.preference"];
+    FinishedPurchase(@"lifetime", AsignProductNonConsumable, 1);
+    FinishedPurchase(@"subscription", AsignProductSubscription, 1);
+    FinishedPurchase(@"coins", AsignProductConsumable, 5);
+    FinishedPurchase(@"unknown", AsignProductUnknown, 1);
+    FinishedPurchase(@"conflict", AsignProductConsumable, 1);
+    AsignRememberProductKind(@"conflict", AsignProductNonConsumable);
+    AsignRememberProductKind(@"conflict", AsignProductSubscription);
+    assert(AsignLocalProductKind(@"conflict") == AsignProductUnknown);
+    AsignRememberProductKind(@"pending-coins", AsignProductConsumable);
+    AsignRecordLocalPurchase(@"pending-coins", 3);
+    assert(AsignRestorableLocalPurchases().count == 2 && AsignLocalPendingPurchases().count == 1);
+    assert(!AsignRecordLocalRestore(@{}) && !AsignRecordLocalRestore(AsignLocalPurchases()[@"coins"]));
+    NSArray *items = AsignLocalReceiptResponse()[@"receipt"][@"in_app"];
+    for (NSDictionary *item in items) assert(![item[@"product_id"] isEqual:@"coins"]);
+}
+
+static void RestoreRead(BOOL retry) {
+    assert(!AsignLocalPurchasesActive());
+    AsignInstallStoreKitPurchasePatch();
+    assert(!AsignLocalPurchasesActive());
+    SKPaymentQueue *queue = [SKPaymentQueue new];
+    TestObserver *observer = [TestObserver new]; observer.autoFinish = retry;
+    NSDictionary *before = AsignLocalPendingPurchases();
+    [queue addTransactionObserver:observer]; Drain();
+    assert(observer.events.count == 3 && !observer.restored);
+    NSUInteger restored = 0;
+    for (SKPaymentTransaction *transaction in observer.events) {
+        NSString *product = transaction.payment.productIdentifier;
+        if (transaction.transactionState == 3) {
+            ++restored;
+            assert(([@[@"lifetime", @"subscription"] containsObject:product]));
+            assert(transaction.payment.quantity == 1);
+            SKPaymentTransaction *original = transaction.originalTransaction;
+            assert(original.transactionState == 1);
+            assert([original.transactionIdentifier isEqual:AsignLocalPurchases()[product][@"identifier"]]);
+            if (retry) assert(before[transaction.transactionIdentifier][@"restored"]);
+        } else {
+            assert(transaction.transactionState == 1 && [product isEqual:@"pending-coins"] && transaction.payment.quantity == 3);
+        }
+    }
+    assert(restored == 2 && !NativeRestores && !NativePayments && !NativeFinishes);
+    AsignStoreKitProductTypesChanged(); [queue addTransactionObserver:observer]; Drain();
+    assert(observer.events.count == 3);
+    if (!retry) {
+        assert(queue.transactions.count == 3 && AsignLocalPendingPurchases().count == 3);
+        TestObserver *other = [TestObserver new];
+        [queue addTransactionObserver:other]; Drain();
+        assert(other.events.count == 3);
+        [queue removeTransactionObserver:other];
+    } else {
+        assert(!queue.transactions.count && !AsignLocalPendingPurchases().count);
+        [queue removeTransactionObserver:observer]; [queue addTransactionObserver:observer]; Drain();
+        assert(observer.events.count == 3);
+        [queue restoreCompletedTransactions]; Drain();
+        assert(observer.events.count == 5 && observer.restored == 1 && !AsignLocalPendingPurchases().count);
+    }
+    assert([[Defaults objectForKey:@"app.preference"] isEqual:@"preserve"]);
+}
+
+static void LateMetadataChecks(void) {
+    [Defaults removePersistentDomainForName:Suite];
+    FinishedPurchase(@"late-type", AsignProductUnknown, 1);
+    AsignInstallStoreKitPurchasePatch();
+    SKPaymentQueue *queue = [SKPaymentQueue new];
+    TestObserver *observer = [TestObserver new]; observer.autoFinish = YES;
+    [queue addTransactionObserver:observer]; Drain(); assert(!observer.events.count);
+    AsignRememberProductKind(@"late-type", AsignProductNonConsumable); Drain();
+    assert(observer.events.count == 1 && [(SKPaymentTransaction *)observer.events[0] transactionState] == 3);
+    AsignRememberProductKind(@"late-type", AsignProductNonConsumable);
+    AsignStoreKitProductTypesChanged(); Drain(); assert(observer.events.count == 1);
+    FinishedPurchase(@"late-coins", AsignProductUnknown, 10);
+    AsignRememberProductKind(@"late-coins", AsignProductConsumable); Drain();
+    assert(observer.events.count == 1);
+    observer.autoFinish = NO;
+    FinishedPurchase(@"conflicting-restore", AsignProductNonConsumable, 1); Drain();
+    assert(observer.events.count == 2 && queue.transactions.count == 1);
+    AsignRememberProductKind(@"conflicting-restore", AsignProductConsumable); Drain();
+    assert(AsignLocalProductKind(@"conflicting-restore") == AsignProductUnknown);
+    assert(!queue.transactions.count && !AsignLocalPendingPurchases().count);
+}
+
+static RCEntitlementInfo *Entitlement(NSString *name, NSString *product) {
+    RCEntitlementInfo *info = [RCEntitlementInfo new]; info.identifier = name; info.productIdentifier = product;
+    info.expirationDate = [NSDate dateWithTimeIntervalSince1970:1]; info.willRenew = YES;
+    return info;
+}
+
+static void SDKChecks(void) {
+    [Defaults removePersistentDomainForName:Suite];
+    RCEntitlementInfo *lifetime = Entitlement(@"reader", @"lifetime");
+    AppCaller = NO; AsignInstallPurchaseSDKPatch(); AppCaller = YES;
+    AsignInstallPurchaseSDKPatch(); AsignInstallPurchaseSDKPatch();
+    assert(!AsignLocalPurchasesActive() && !AsignLocalPurchases().count && !lifetime.isActive);
+    FinishedPurchase(@"lifetime", AsignProductUnknown, 1);
+    RCStoreProduct *product = [RCStoreProduct new]; product.productIdentifier = @"lifetime"; product.productType = 1;
+    product.sk1Product = [NSObject new];
+    assert([product.productIdentifier isEqual:@"lifetime"]);
+    assert(AsignLocalProductKind(@"lifetime") == AsignProductUnknown && !lifetime.isActive);
+    product.sk1Product = nil;
+    assert([product.productIdentifier isEqual:@"lifetime"]);
+    assert(AsignLocalProductKind(@"lifetime") == AsignProductNonConsumable && lifetime.isActive);
+    RCStoreProduct *unknown = [RCStoreProduct new]; unknown.productIdentifier = @"future-type"; unknown.productType = 99;
+    assert([unknown.productIdentifier isEqual:@"future-type"] && AsignLocalProductKind(@"future-type") == AsignProductUnknown);
+    unknown.productIdentifier = @"sk1-subscription"; unknown.productType = 1;
+    unknown.sk1Product = [NSObject new]; unknown.subscriptionPeriod = [NSObject new];
+    assert([unknown.productIdentifier isEqual:@"sk1-subscription"] && AsignLocalProductKind(@"sk1-subscription") == AsignProductSubscription);
+    assert(lifetime.isActiveInAnyEnvironment && lifetime.isActiveInCurrentEnvironment && !lifetime.expirationDate && !lifetime.willRenew);
+    RCEntitlementInfo *coins = Entitlement(@"coins", @"coins");
+    FinishedPurchase(@"coins", AsignProductUnknown, 10);
+    product.productIdentifier = @"coins"; product.productType = 0;
+    assert([product.productIdentifier isEqual:@"coins"] && AsignLocalProductKind(@"coins") == AsignProductConsumable);
+    assert(!coins.isActive && coins.expirationDate);
+    RCEntitlementInfo *subscription = Entitlement(@"subscription", @"subscription");
+    FinishedPurchase(@"subscription", AsignProductUnknown, 1);
+    product.productIdentifier = @"subscription"; product.productType = 3;
+    assert([product.productIdentifier isEqual:@"subscription"] && AsignLocalProductKind(@"subscription") == AsignProductSubscription);
+    RCEntitlementInfo *remote = Entitlement(@"remote", @"remote");
+    assert(subscription.isActive && !remote.isActive && ![[UnrelatedPremiumChecker new] isActive]);
+    RCEntitlementInfos *infos = [RCEntitlementInfos new];
+    infos.all = @{@"reader":lifetime, @"subscription":subscription, @"coins":coins, @"remote":remote};
+    infos.nativeActive = @{@"untouched":remote};
+    assert(infos.active.count == 3 && infos.active[@"reader"] == lifetime && !infos.active[@"coins"]);
+    assert(infos.activeInAnyEnvironment.count == 3 && infos.activeInCurrentEnvironment.count == 3);
+    RCCustomerInfo *customer = [RCCustomerInfo new]; customer.entitlements = infos;
+    assert(customer.activeSubscriptions.count == 2 && [customer.activeSubscriptions containsObject:@"subscription"]);
+    assert(customer.allPurchasedProductIdentifiers.count == 3 && ![customer.allPurchasedProductIdentifiers containsObject:@"coins"]);
+    assert(![customer expirationDateForProductIdentifier:@"subscription"] && ![customer expirationDateForEntitlement:@"reader"]);
+    assert([customer purchaseDateForProductIdentifier:@"lifetime"] && [customer purchaseDateForEntitlement:@"reader"]);
+    assert([customer expirationDateForProductIdentifier:@"remote"] && ![customer purchaseDateForEntitlement:@"remote"]);
+    // Native active data wins over a local fallback, including expiry/renewal.
+    lifetime.isActive = YES;
+    assert(lifetime.expirationDate && lifetime.willRenew);
+    // Malformed/mismatched data cannot activate an unnamed entitlement.
+    lifetime.identifier = @""; lifetime.isActive = NO;
+    assert(!lifetime.isActive);
+    infos.all = @{@"wrong-name":subscription}; assert(infos.active.count == 1);
 }
 
 typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
@@ -256,6 +458,15 @@ static void RevenueCatChecks(void) {
     assert(body[@"subscriber"][@"entitlements"][@"reader"][@"expires_date"] == NSNull.null);
     assert([body[@"subscriber"][@"entitlements"][@"editor"][@"product_identifier"] isEqual:@"a"]);
     assert(!AsignLocalSubscriberResponse(@"unknown", @"user", nil));
+    AsignRememberProductKind(@"a", AsignProductNonConsumable);
+    body = AsignLocalSubscriberResponse(key, @"user", nil);
+    assert(!body[@"subscriber"][@"subscriptions"][@"a"] && [body[@"subscriber"][@"non_subscriptions"][@"a"] count] == 1);
+    NSString *coinsKey = @"Bearer consumables";
+    AsignRememberPurchaseMapping(coinsKey, @{@"product_entitlement_mapping":@{
+        @"coins":@{@"product_identifier":@"coins", @"entitlements":@[@"coin_access"]}}});
+    AsignRememberProductKind(@"coins", AsignProductConsumable);
+    body = AsignLocalSubscriberResponse(coinsKey, @"user", nil);
+    assert(![body[@"subscriber"][@"entitlements"] count] && ![body[@"subscriber"][@"subscriptions"] count]);
 
     AsignInstallRevenueCatPurchasePatch();
     AsignTestPurchaseTransport(Transport, URLTransportFunction);
@@ -319,10 +530,45 @@ static void RevenueCatChecks(void) {
     [session invalidateAndCancel];
 }
 
+typedef void (^LegacyCompletion)(NSURLResponse *, NSData *, NSError *);
+typedef void (*LegacyTransport)(id, SEL, NSURLRequest *, NSOperationQueue *, LegacyCompletion);
+void AsignTestPurchaseConnection(LegacyTransport);
+static NSUInteger NativeConnections;
+static void ConnectionTransport(id self, SEL selector, NSURLRequest *request, NSOperationQueue *queue, LegacyCompletion completion) {
+    (void)self; (void)selector; (void)request; (void)queue; (void)completion; ++NativeConnections;
+}
+static void LegacyChecks(void) {
+    [Defaults removePersistentDomainForName:Suite];
+    AsignInstallRevenueCatPurchasePatch(); AsignTestPurchaseConnection(ConnectionTransport);
+    Class cls = NSClassFromString(@"NSURLConnection");
+    SEL selector = NSSelectorFromString(@"sendAsynchronousRequest:queue:completionHandler:");
+    LegacyTransport send = (void *)method_getImplementation(class_getClassMethod(cls, selector));
+    assert(send);
+    __block NSUInteger callbacks = 0;
+    LegacyCompletion finished = ^(NSURLResponse *response, NSData *data, NSError *error) {
+        assert(NSThread.isMainThread && !error && [(NSHTTPURLResponse *)response statusCode] == 200);
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        assert([json[@"status"] integerValue] == 0); ++callbacks;
+    };
+    NSURLRequest *receipt = Request(@"https://buy.itunes.apple.com/verifyReceipt", nil);
+    send(cls, selector, receipt, NSOperationQueue.mainQueue, finished);
+    assert(NativeConnections == 1 && !callbacks && !AsignLocalPurchasesActive());
+    AsignRecordLocalPurchase(@"local", 1);
+    send(cls, selector, receipt, NSOperationQueue.mainQueue, finished);
+    assert(NativeConnections == 1 && !callbacks);
+    WaitFor(^BOOL { return callbacks == 1; });
+    for (NSString *url in @[@"https://example.com/verifyReceipt", @"https://buy.itunes.apple.com.evil.test/verifyReceipt",
+                            @"https://buy.itunes.apple.com/login", @"http://buy.itunes.apple.com/verifyReceipt"]) {
+        send(cls, selector, Request(url, nil), NSOperationQueue.mainQueue, finished);
+    }
+    assert(NativeConnections == 5 && callbacks == 1);
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         assert(argc == 3);
         NSString *suite = [NSString stringWithUTF8String:argv[1]];
+        Suite = suite;
         NSString *mode = [NSString stringWithUTF8String:argv[2]];
         Defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
         TestSupport = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES] URLByAppendingPathComponent:suite isDirectory:YES];
@@ -338,6 +584,16 @@ int main(int argc, const char **argv) {
             assert(AsignLocalPendingPurchases().count == 1);
             AsignFinishLocalPurchase(AsignLocalPurchases()[@"persisted"][@"identifier"]);
             assert(!AsignLocalPendingPurchases().count && AsignLocalPurchases().count == 1);
+        } else if ([mode isEqual:@"restore-write"]) {
+            RestoreWrite();
+        } else if ([mode isEqual:@"restore-read"] || [mode isEqual:@"restore-retry"]) {
+            RestoreRead([mode isEqual:@"restore-retry"]);
+        } else if ([mode isEqual:@"late-metadata"]) {
+            LateMetadataChecks();
+        } else if ([mode isEqual:@"sdk"]) {
+            SDKChecks();
+        } else if ([mode isEqual:@"legacy"]) {
+            LegacyChecks();
         } else if ([mode isEqual:@"runtime"]) {
             [Defaults removePersistentDomainForName:suite];
             StoreKitChecks(); RevenueCatChecks();

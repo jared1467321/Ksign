@@ -22,12 +22,13 @@ def main():
             "xcrun", "clang", "-fobjc-arc", "-fblocks", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
             "-DASIGN_PURCHASE_TESTING=1", "-I", str(SOURCE),
             str(SOURCE / "LocalPurchases.m"), str(SOURCE / "StoreKitPurchasePatch.m"),
-            str(SOURCE / "RevenueCatPurchasePatch.m"), str(SOURCE / "Tests/LocalPurchasesTests.m"),
+            str(SOURCE / "RevenueCatPurchasePatch.m"), str(SOURCE / "PurchaseSDKPatch.m"),
+            str(SOURCE / "Tests/LocalPurchasesTests.m"),
             "-framework", "Foundation", "-o", str(output),
         ], check=True)
         suite = "asign.purchase.checks." + uuid.uuid4().hex
         try:
-            for mode in ("write", "read", "runtime"):
+            for mode in ("write", "read", "restore-write", "restore-read", "restore-retry", "late-metadata", "sdk", "legacy", "runtime"):
                 subprocess.run([str(output), suite, mode], check=True, timeout=30)
         finally:
             subprocess.run([str(output), suite, "cleanup"], check=True, timeout=30)

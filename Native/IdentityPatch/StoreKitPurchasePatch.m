@@ -16,6 +16,9 @@ static NSURL *(*OriginalReceiptURL)(id, SEL);
 static void (*OriginalRefreshStart)(id, SEL);
 static void (*OriginalRefreshCancel)(id, SEL);
 static id (*OriginalPaymentForProduct)(id, SEL, id);
+static NSHashTable *ObservedQueues; // Main queue only, weak; no queue lifetime extension.
+static void AutoRestore(id queue);
+static void Notify(id queue, NSArray *transactions, NSString *name);
 
 @interface AsignLocalProductRequest : NSObject
 @property(nonatomic, copy) NSArray *identifiers;
@@ -29,6 +32,7 @@ static id (*OriginalPaymentForProduct)(id, SEL, id);
 @property(nonatomic, strong) NSHashTable *observers;
 @property(nonatomic, strong) NSMutableArray *pending;
 @property(nonatomic, strong) NSMapTable *delivered;
+@property(nonatomic, strong) NSMutableSet *autoRestoredProducts;
 @end
 @implementation AsignLocalPurchaseQueue
 @end
@@ -59,21 +63,38 @@ static id Payment(NSDictionary *record) {
     return payment;
 }
 
-static id Transaction(NSDictionary *record, id payment, NSInteger state, id original, NSError *error) {
+static id Transaction(NSDictionary *record, id payment, NSInteger state, id original, NSError *error, NSData *receipt) {
     if (!payment) return nil;
     NSString *identifier = record[@"identifier"] ?: AsignLocalTransactionIdentifier();
     return AsignLocalStoreObject(@"SKPaymentTransaction", @"AsignLocalTransactionV1", @{
         @"payment":payment, @"transactionState":@(state),
         @"transactionIdentifier":identifier, @"matchingIdentifier":identifier,
         @"transactionDate":[NSDate dateWithTimeIntervalSince1970:[record[@"date"] doubleValue]],
-        @"transactionReceipt":AsignLocalReceipt() ?: NSData.data,
+        @"transactionReceipt":receipt ?: AsignLocalReceipt() ?: NSData.data,
         @"originalTransaction":original ?: NSNull.null, @"error":error ?: NSNull.null, @"downloads":@[]});
 }
 
 static id PaymentForProduct(id self, SEL selector, id product) {
-    if (!AsignIsLocalStoreObject(product)) return OriginalPaymentForProduct(self, selector, product);
     NSString *identifier = AsignPurchaseObjectValue(product, @"productIdentifier");
+    if (!AsignIsLocalStoreObject(product)) {
+        // A real SK1 subscription period establishes a subscription. Its
+        // absence cannot distinguish a consumable from a permanent purchase.
+        if (AsignPurchaseObjectValue(product, @"subscriptionPeriod"))
+            AsignRememberProductKind(identifier, AsignProductSubscription);
+        return OriginalPaymentForProduct(self, selector, product);
+    }
     return identifier ? Payment(@{@"product":identifier, @"quantity":@1}) : nil;
+}
+
+static id JournalTransaction(NSDictionary *record, NSData *receipt) {
+    id payment = Payment(record);
+    if (![record[@"restored"] boolValue]) return Transaction(record, payment, 1, nil, nil, receipt);
+    AsignProductKind kind = AsignLocalProductKind(record[@"product"]);
+    if (kind != AsignProductNonConsumable && kind != AsignProductSubscription) return nil;
+    NSMutableDictionary *original = [record mutableCopy];
+    original[@"identifier"] = record[@"originalIdentifier"];
+    original[@"date"] = record[@"originalDate"];
+    return Transaction(record, payment, 3, Transaction(original, payment, 1, nil, nil, receipt), nil, receipt);
 }
 
 static AsignLocalPurchaseQueue *QueueState(id queue) {
@@ -84,9 +105,15 @@ static AsignLocalPurchaseQueue *QueueState(id queue) {
             state.observers = NSHashTable.weakObjectsHashTable;
             state.pending = [NSMutableArray array];
             state.delivered = [NSMapTable weakToStrongObjectsMapTable];
+            state.autoRestoredProducts = [NSMutableSet set];
+            NSData *receipt;
             for (NSDictionary *record in AsignLocalPendingPurchases().allValues) {
-                id transaction = Transaction(record, Payment(record), 1, nil, nil);
-                if (transaction) [state.pending addObject:transaction];
+                if (!receipt) receipt = AsignLocalReceipt();
+                id transaction = JournalTransaction(record, receipt);
+                if (transaction) {
+                    [state.pending addObject:transaction];
+                    [state.autoRestoredProducts addObject:record[@"product"]];
+                } else if ([record[@"restored"] boolValue]) AsignFinishLocalPurchase(record[@"identifier"]);
             }
             objc_setAssociatedObject(queue, &QueueKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
@@ -100,12 +127,34 @@ static void NotifyObserver(id observer, NSString *name, id queue, id payload) {
         ((void (*)(id, SEL, id, id))objc_msgSend)(observer, selector, queue, payload);
 }
 
+static void PruneIneligibleRestores(id queue, AsignLocalPurchaseQueue *state) {
+    NSMutableArray *removed = [NSMutableArray array];
+    @synchronized (state) {
+        for (id transaction in [state.pending copy]) {
+            if (!AsignPurchaseObjectValue(transaction, @"originalTransaction")) continue;
+            id payment = AsignPurchaseObjectValue(transaction, @"payment");
+            AsignProductKind kind = AsignLocalProductKind(AsignPurchaseObjectValue(payment, @"productIdentifier"));
+            if (kind == AsignProductNonConsumable || kind == AsignProductSubscription) continue;
+            [state.pending removeObjectIdenticalTo:transaction];
+            AsignFinishLocalPurchase(AsignPurchaseObjectValue(transaction, @"transactionIdentifier"));
+            [removed addObject:transaction];
+        }
+    }
+    if (removed.count) Notify(queue, removed, @"paymentQueue:removedTransactions:");
+}
+
 static void DeliverTransactions(id queue, AsignLocalPurchaseQueue *state, id observer, NSArray *transactions) {
+    PruneIneligibleRestores(queue, state);
     NSMutableArray *fresh = [NSMutableArray array];
     @synchronized (state) {
         NSMutableSet *seen = [state.delivered objectForKey:observer];
         if (!seen) { seen = [NSMutableSet set]; [state.delivered setObject:seen forKey:observer]; }
         for (id transaction in transactions) {
+            if (AsignPurchaseObjectValue(transaction, @"originalTransaction")) {
+                id payment = AsignPurchaseObjectValue(transaction, @"payment");
+                AsignProductKind kind = AsignLocalProductKind(AsignPurchaseObjectValue(payment, @"productIdentifier"));
+                if (kind != AsignProductNonConsumable && kind != AsignProductSubscription) continue;
+            }
             NSString *identifier = AsignPurchaseObjectValue(transaction, @"transactionIdentifier");
             if (identifier && ![seen containsObject:identifier]) {
                 [seen addObject:identifier];
@@ -197,13 +246,14 @@ static void AddObserver(id self, SEL selector, id observer) {
     if (!observer) return;
     OnMain(^{
         AsignLocalPurchaseQueue *state = QueueState(self);
+        if (!ObservedQueues) ObservedQueues = NSHashTable.weakObjectsHashTable;
+        [ObservedQueues addObject:self];
         NSArray *pending;
         @synchronized (state) {
             if ([state.observers containsObject:observer]) return;
             [state.observers addObject:observer];
             pending = [state.pending copy];
         }
-        if (!pending.count) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             @synchronized (state) { if (![state.observers containsObject:observer]) return; }
             // Finished events may have been removed since registration.
@@ -212,6 +262,7 @@ static void AddObserver(id self, SEL selector, id observer) {
                 for (id transaction in pending) if ([state.pending containsObject:transaction]) [current addObject:transaction];
             }
             if (current.count) DeliverTransactions(self, state, observer, current);
+            AutoRestore(self);
         });
     });
 }
@@ -274,9 +325,12 @@ static void AddPayment(id self, SEL selector, id payment) {
         NSDictionary *record = AsignRecordLocalPurchase(product, quantity);
         NSError *error = record ? nil : [NSError errorWithDomain:@"SKErrorDomain" code:3
             userInfo:@{NSLocalizedDescriptionKey:@"Invalid local purchase."}];
-        id transaction = Transaction(record ?: @{}, snapshot, record ? 1 : 2, nil, error);
+        id transaction = Transaction(record ?: @{}, snapshot, record ? 1 : 2, nil, error, nil);
         if (!transaction) return;
-        @synchronized (state) { [state.pending addObject:transaction]; }
+        @synchronized (state) {
+            [state.pending addObject:transaction];
+            if (record) [state.autoRestoredProducts addObject:product];
+        }
         Notify(self, @[transaction], @"paymentQueue:updatedTransactions:");
     });
 }
@@ -301,22 +355,52 @@ static NSArray *Transactions(id self, SEL selector) {
     @synchronized (state) { return [native arrayByAddingObjectsFromArray:state.pending]; }
 }
 
+static void RestoreLocal(id queue, BOOL automatic) {
+    AsignLocalPurchaseQueue *state = QueueState(queue);
+    PruneIneligibleRestores(queue, state);
+    NSMutableArray *restored = [NSMutableArray array];
+    NSDictionary *owned = AsignRestorableLocalPurchases();
+    NSData *receipt;
+    @synchronized (state) {
+        if (automatic && !state.observers.allObjects.count) return;
+        for (NSString *product in owned) {
+            if (automatic && [state.autoRestoredProducts containsObject:product]) continue;
+            BOOL pending = NO;
+            for (id transaction in state.pending) {
+                id payment = AsignPurchaseObjectValue(transaction, @"payment");
+                if ([AsignPurchaseObjectValue(payment, @"productIdentifier") isEqual:product]) { pending = YES; break; }
+            }
+            if (pending) { [state.autoRestoredProducts addObject:product]; continue; }
+            NSDictionary *record = AsignRecordLocalRestore(owned[product]);
+            // Every restore in this batch has the same ownership receipt.
+            // Serialize it once, rather than once per restored/original object.
+            if (record && !receipt) receipt = AsignLocalReceipt();
+            id transaction = record ? JournalTransaction(record, receipt) : nil;
+            if (transaction) {
+                [restored addObject:transaction];
+                [state.autoRestoredProducts addObject:product];
+            }
+        }
+        [state.pending addObjectsFromArray:restored];
+    }
+    if (restored.count) Notify(queue, [restored copy], @"paymentQueue:updatedTransactions:");
+}
+
+static void AutoRestore(id queue) { RestoreLocal(queue, YES); }
+
+void AsignStoreKitProductTypesChanged(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (id queue in ObservedQueues.allObjects) AutoRestore(queue);
+    });
+}
+
 static void Restore(id self, SEL selector) {
     (void)selector;
+    AsignActivateLocalPurchases();
     OnMain(^{
-        AsignLocalPurchaseQueue *state = QueueState(self);
-        NSMutableArray *restored = [NSMutableArray array];
-        for (NSDictionary *record in AsignLocalPurchases().allValues) {
-            id payment = Payment(record);
-            id original = Transaction(record, payment, 1, nil, nil);
-            NSMutableDictionary *restoreRecord = [record mutableCopy];
-            restoreRecord[@"identifier"] = AsignLocalTransactionIdentifier();
-            id transaction = Transaction(restoreRecord, payment, 3, original, nil);
-            if (transaction) [restored addObject:transaction];
-        }
-        @synchronized (state) { [state.pending addObjectsFromArray:restored]; }
-        if (restored.count) Notify(self, [restored copy], @"paymentQueue:updatedTransactions:");
+        RestoreLocal(self, NO);
         dispatch_async(dispatch_get_main_queue(), ^{
+            AsignLocalPurchaseQueue *state = QueueState(self);
             NSArray *observers;
             @synchronized (state) { observers = state.observers.allObjects; }
             SEL finished = NSSelectorFromString(@"paymentQueueRestoreCompletedTransactionsFinished:");
