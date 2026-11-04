@@ -504,13 +504,14 @@ final class ArchiveBackedApp {
 	}
 
 	private static func isSafeArchivePath(_ path: String) -> Bool {
-		guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("\\"), !path.contains("\\") else { return false }
+		// ZIP paths use '/'; embedded backslashes are literal iOS filename characters.
+		guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("\\") else { return false }
 		let components = path.split(separator: "/", omittingEmptySubsequences: false)
 		return !components.contains(where: { $0 == ".." })
 	}
 
 	private static func isSafeRelativePath(_ path: String) -> Bool {
-		guard !path.hasPrefix("/"), !path.hasPrefix("\\"), !path.contains("\\") else { return false }
+		guard !path.hasPrefix("/"), !path.hasPrefix("\\") else { return false }
 		return !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." })
 	}
 }

@@ -72,7 +72,9 @@ static string FoldASCIIPath(string path)
 
 static string NormalizeArchiveLogicalPath(string path)
 {
+#ifdef _WIN32
     replace(path.begin(), path.end(), '\\', '/');
+#endif
     while (!path.empty() && '/' == path.front()) {
         path.erase(path.begin());
     }
@@ -84,9 +86,12 @@ static string NormalizeArchiveLogicalPath(string path)
 
 static bool IsSafeArchiveRelativePath(const string& path)
 {
-    if (path.empty() || '/' == path.front() || '\\' == path.front() || string::npos != path.find('\\')) {
+    if (path.empty() || '/' == path.front() || '\\' == path.front()) {
         return false;
     }
+#ifdef _WIN32
+    if (string::npos != path.find('\\')) return false;
+#endif
     size_t start = 0;
     while (start <= path.size()) {
         size_t end = path.find('/', start);
@@ -378,10 +383,9 @@ bool ZBundle::AddArchiveFileIndex()
         }
 
         string archiveName = info->filename;
-        // IPA member names are required to use forward slashes. Do not quietly
-        // normalize backslashes here: treating them as separators could turn a
-        // malformed member into a different logical path than the archive stores.
-        if (string::npos != archiveName.find('\\')) {
+        // Preserve literal POSIX filename characters, including backslashes.
+        // Validate without converting them into different archive paths.
+        if (!IsSafeArchiveRelativePath(archiveName)) {
             err = MZ_FORMAT_ERROR;
             break;
         }
@@ -834,7 +838,9 @@ bool ZBundle::GenerateCodeResources(const string& strFolder, const string& strBu
 		}
 
 		string strNode = strPath.substr(strPrefix.size());
+#ifdef _WIN32
 		ZUtil::StringReplace(strNode, "\\", "/");
+#endif
 		files.push_back(std::move(strNode));
 	}
 

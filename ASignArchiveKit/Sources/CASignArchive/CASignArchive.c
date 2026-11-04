@@ -521,8 +521,10 @@ static int asign_path_component_is_parent(const char *start, size_t length) {
 static int asign_relative_path_is_safe(const char *path) {
     if (path == NULL || path[0] == '\0' || path[0] == '/' || path[0] == '\\')
         return 0;
-    if (strchr(path, '\\') != NULL)
-        return 0;
+
+    // On iOS/POSIX a backslash inside a member name is a literal character,
+    // not a separator (for example FILCA's MagazineNumber_01_\!.png).
+    // Check traversal using '/' without renaming the resource.
 
     const char *component = path;
     const char *cursor = path;
@@ -544,7 +546,7 @@ static char *asign_trimmed_root_copy(const char *root) {
     if (root == NULL)
         return NULL;
     size_t length = strlen(root);
-    while (length > 0 && (root[length - 1] == '/' || root[length - 1] == '\\'))
+    while (length > 0 && root[length - 1] == '/')
         length--;
     if (length == 0)
         return NULL;
