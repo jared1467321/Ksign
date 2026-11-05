@@ -15,6 +15,13 @@ typedef void (*asign_archive_progress_cb)(double progress, void *userdata);
 #define ASIGN_ARCHIVE_NOT_FOUND 1
 // The indexed source was replaced or modified; stale offsets must not be reused.
 #define ASIGN_ARCHIVE_SOURCE_CHANGED (-1000)
+// A completed output has inconsistent or overlapping ZIP entry boundaries.
+#define ASIGN_ARCHIVE_INVALID_LAYOUT (-1001)
+
+/// Checks completed, single-file ZIP entry headers and ranges without reading
+/// or inflating payloads. On failure, invalid_entry receives the affected name
+/// when available; callers may pass NULL/0 if no name is needed.
+int32_t asign_archive_validate_layout(const char *path, char *invalid_entry, size_t capacity);
 
 typedef int32_t (*asign_archive_entry_cb)(
     const char *path,
@@ -133,7 +140,8 @@ int32_t asign_archive_materialize_signing_inputs(
 /// omit_existing_code_signatures is non-zero, existing _CodeSignature entries
 /// are omitted so regenerated sparse signatures replace them.
 /// Replacement/new files use compression_level; untouched members keep their
-/// original compressed bytes and ZIP metadata.
+/// original compressed bytes and ZIP metadata. Directories are recreated as
+/// empty stored entries, preserving names, permissions and timestamps.
 int32_t asign_archive_rebuild_with_overlay(
     const char *source_archive_path,
     const char *destination_archive_path,

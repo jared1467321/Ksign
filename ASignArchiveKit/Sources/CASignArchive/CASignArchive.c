@@ -424,6 +424,138 @@ int32_t asign_archive_create(
     return err;
 }
 
+typedef struct asign_zip_range_s {
+    uint64_t start, end;
+    int64_t position;
+} asign_zip_range;
+
+static uint64_t asign_layout_le(const uint8_t *bytes, size_t count) {
+    uint64_t value = 0;
+    for (size_t i = 0; i < count; i++) value |= (uint64_t)bytes[i] << (8 * i);
+    return value;
+}
+
+static int asign_layout_read(int fd, uint64_t offset, uint8_t *bytes, size_t count, uint64_t limit) {
+    if (offset > limit || count > limit - offset) return 0;
+    size_t done = 0;
+    while (done < count) {
+        ssize_t size = pread(fd, bytes + done, count - done, (off_t)(offset + done));
+        if (size < 0 && errno == EINTR) continue;
+        if (size <= 0) return 0;
+        done += (size_t)size;
+    }
+    return 1;
+}
+
+static int asign_zip_range_compare(const void *lhs, const void *rhs) {
+    const asign_zip_range *a = lhs, *b = rhs;
+    return (a->start > b->start) - (a->start < b->start);
+}
+
+int32_t asign_archive_validate_layout(const char *path, char *invalid_entry, size_t capacity) {
+    if (invalid_entry != NULL && capacity > 0) invalid_entry[0] = '\0';
+    if (path == NULL) return MZ_PARAM_ERROR;
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return MZ_OPEN_ERROR;
+    void *reader = mz_zip_reader_create(), *zip = NULL;
+    asign_zip_range *ranges = NULL;
+    size_t count = 0, allocated = 0;
+    int32_t err = reader == NULL ? MZ_MEM_ERROR : mz_zip_reader_open_file(reader, path);
+    if (err == MZ_OK) err = mz_zip_reader_get_zip_handle(reader, &zip);
+    if (err == MZ_OK) err = mz_zip_reader_goto_first_entry(reader);
+    struct stat st;
+    uint64_t limit = 0;
+    if (err == MZ_OK) {
+        int64_t central = mz_zip_get_entry(zip);
+        if (fstat(fileno(file), &st) != 0) err = MZ_READ_ERROR;
+        else if (central < 0 || central > st.st_size) err = ASIGN_ARCHIVE_INVALID_LAYOUT;
+        else limit = (uint64_t)central;
+    }
+    while (err == MZ_OK) {
+        mz_zip_file *info = NULL;
+        err = mz_zip_reader_entry_get_info(reader, &info);
+        if (err != MZ_OK) break;
+        uint8_t header[30];
+        uint64_t start = info->disk_offset, end = 0;
+        if (info->disk_number != 0 || info->disk_offset < 0 ||
+            info->compressed_size < 0 || info->uncompressed_size < 0 ||
+            !asign_layout_read(fileno(file), start, header, sizeof(header), limit) ||
+            asign_layout_le(header, 4) != 0x04034b50 ||
+            asign_layout_le(header + 6, 2) != info->flag ||
+            asign_layout_le(header + 8, 2) != info->compression_method ||
+            asign_layout_le(header + 26, 2) != info->filename_size) {
+            err = ASIGN_ARCHIVE_INVALID_LAYOUT;
+        } else {
+            uint64_t data = start + sizeof(header) + asign_layout_le(header + 26, 2)
+                + asign_layout_le(header + 28, 2);
+            if (data > limit || (uint64_t)info->compressed_size > limit - data ||
+                (info->compression_method == MZ_COMPRESS_METHOD_STORE &&
+                 info->compressed_size != info->uncompressed_size)) {
+                err = ASIGN_ARCHIVE_INVALID_LAYOUT;
+            } else {
+                end = data + info->compressed_size;
+                if (info->flag & MZ_ZIP_FLAG_DATA_DESCRIPTOR) {
+                    // Descriptors may have an optional signature and 32- or
+                    // 64-bit sizes. Include them in the range, without opening
+                    // an entry reader or decompressing its payload.
+                    uint8_t descriptor[24];
+                    int wide = asign_layout_le(header + 18, 4) == UINT32_MAX ||
+                        asign_layout_le(header + 22, 4) == UINT32_MAX ||
+                        info->compressed_size >= UINT32_MAX || info->uncompressed_size >= UINT32_MAX;
+                    size_t width = wide ? 8 : 4, length = 4 + width * 2;
+                    int matched = 0;
+                    for (size_t prefix = 0; prefix <= 4 && !matched; prefix += 4) {
+                        if (!asign_layout_read(fileno(file), end, descriptor, length + prefix, limit)) continue;
+                        if (prefix && asign_layout_le(descriptor, 4) != 0x08074b50) continue;
+                        if (asign_layout_le(descriptor + prefix, 4) != info->crc ||
+                            asign_layout_le(descriptor + prefix + 4, width) != (uint64_t)info->compressed_size ||
+                            asign_layout_le(descriptor + prefix + 4 + width, width) != (uint64_t)info->uncompressed_size)
+                            continue;
+                        end += length + prefix;
+                        matched = 1;
+                    }
+                    if (!matched) err = ASIGN_ARCHIVE_INVALID_LAYOUT;
+                }
+            }
+        }
+        if (err != MZ_OK) {
+            if (invalid_entry != NULL && capacity > 0)
+                snprintf(invalid_entry, capacity, "%s", info->filename);
+            break;
+        }
+        if (count == allocated) {
+            size_t next = allocated ? allocated * 2 : 64;
+            if (next < allocated || next > SIZE_MAX / sizeof(*ranges)) { err = MZ_MEM_ERROR; break; }
+            asign_zip_range *grown = realloc(ranges, next * sizeof(*ranges));
+            if (grown == NULL) { err = MZ_MEM_ERROR; break; }
+            ranges = grown;
+            allocated = next;
+        }
+        ranges[count++] = (asign_zip_range){start, end, mz_zip_get_entry(zip)};
+        err = mz_zip_reader_goto_next_entry(reader);
+    }
+    if (err == MZ_END_OF_LIST) {
+        err = MZ_OK;
+        if (count > 1) qsort(ranges, count, sizeof(*ranges), asign_zip_range_compare);
+        for (size_t i = 1; i < count; i++) {
+            if (ranges[i - 1].end <= ranges[i].start) continue;
+            err = ASIGN_ARCHIVE_INVALID_LAYOUT;
+            if (invalid_entry != NULL && capacity > 0 &&
+                mz_zip_goto_entry(zip, ranges[i - 1].position) == MZ_OK) {
+                mz_zip_file *info = NULL;
+                if (mz_zip_entry_get_info(zip, &info) == MZ_OK)
+                    snprintf(invalid_entry, capacity, "%s", info->filename);
+            }
+            break;
+        }
+    }
+    free(ranges);
+    if (reader != NULL) mz_zip_reader_close(reader);
+    mz_zip_reader_delete(&reader);
+    fclose(file);
+    return err;
+}
+
 // MARK: - Archive-backed sparse signing helpers
 
 typedef struct asign_string_set_s {
@@ -2184,13 +2316,29 @@ int32_t asign_archive_index_rebuild(
         }
 
         if (!skip && !replaced) {
-            // minizip's write-open changes the method to STORE at level zero,
-            // even in raw mode. Raw payloads must retain their source method:
-            // a DEFLATE stream labeled STORE is not a valid resource. The level
-            // is unused for raw compression; restore it for overlay additions.
-            mz_zip_writer_set_compress_level(writer, MZ_COMPRESS_LEVEL_DEFAULT);
-            err = mz_zip_writer_copy_from_reader(writer, reader);
-            mz_zip_writer_set_compress_level(writer, compression_level);
+            if (mz_zip_reader_entry_is_dir(reader) == MZ_OK &&
+                !(index->ordered[entry_index]->flags & 2)) {
+                // Raw-copy skips directory payloads, but closes with their old
+                // compressed size. A deflated empty folder then overlaps the
+                // next header. Recreate it with no payload or compression.
+                mz_zip_file directory = *file_info;
+                directory.compression_method = MZ_COMPRESS_METHOD_STORE;
+                directory.compressed_size = directory.uncompressed_size = 0;
+                directory.crc = 0;
+                directory.flag = MZ_ZIP_FLAG_UTF8 & directory.flag;
+                directory.linkname = NULL;
+                directory.aes_version = directory.aes_strength = 0;
+                // Regenerate layout-dependent extra fields (notably ZIP64).
+                directory.extrafield = NULL;
+                directory.extrafield_size = 0;
+                err = mz_zip_writer_add_buffer(writer, "", 0, &directory);
+            } else {
+                // Level zero would relabel raw DEFLATE bytes as STORE. The
+                // level is unused during raw copying; restore it afterward.
+                mz_zip_writer_set_compress_level(writer, MZ_COMPRESS_LEVEL_DEFAULT);
+                err = mz_zip_writer_copy_from_reader(writer, reader);
+                mz_zip_writer_set_compress_level(writer, compression_level);
+            }
             if (err != MZ_OK)
                 break;
             err = asign_string_set_add(&written, entry_name);

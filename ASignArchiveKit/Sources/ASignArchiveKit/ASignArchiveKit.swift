@@ -25,13 +25,14 @@ public enum ASignArchiveError: LocalizedError, Sendable {
     case materializationFailed(code: Int32)
     case entryAccessFailed(code: Int32)
     case overlayRebuildFailed(code: Int32)
+    case layoutValidationFailed(code: Int32, entry: String)
 
     public var errorDescription: String? {
         let code: Int32
         switch self {
         case .extractionFailed(let status), .creationFailed(let status),
              .materializationFailed(let status), .entryAccessFailed(let status),
-             .overlayRebuildFailed(let status): code = status
+             .overlayRebuildFailed(let status), .layoutValidationFailed(let status, _): code = status
         }
         if code == ASIGN_ARCHIVE_SOURCE_CHANGED {
             return "The source IPA changed while it was being read. Please try again once the file has finished downloading or copying."
@@ -47,6 +48,12 @@ public enum ASignArchiveError: LocalizedError, Sendable {
             return "minizip-ng failed to access an archive entry (error \(code))."
         case .overlayRebuildFailed(let code):
             return "minizip-ng failed to build the archive-backed signed IPA (error \(code))."
+        case .layoutValidationFailed(let code, let entry):
+            if code == ASIGN_ARCHIVE_INVALID_LAYOUT {
+                let location = entry.isEmpty ? "" : " at \(entry)"
+                return "The IPA could not be packaged correctly\(location): archive entries are invalid or overlap. Please sign it again."
+            }
+            return "Failed to validate the exported IPA (error \(code))."
         }
     }
 }
@@ -401,6 +408,7 @@ public enum ASignArchive {
             try? fileManager.removeItem(at: destinationArchiveURL)
             throw ASignArchiveError.overlayRebuildFailed(code: status)
         }
+        try validateOutput(at: destinationArchiveURL)
     }
 
     public static func create(
@@ -448,6 +456,27 @@ public enum ASignArchive {
         guard status == 0 else {
             try? fileManager.removeItem(at: archiveURL)
             throw ASignArchiveError.creationFailed(code: status)
+        }
+        try validateOutput(at: archiveURL)
+    }
+
+    /// Checks headers and entry ranges without decompressing file contents.
+    public static func validateLayout(of archiveURL: URL) throws {
+        var entry = [CChar](repeating: 0, count: 4096)
+        let capacity = entry.count
+        let status = archiveURL.path.withCString {
+            asign_archive_validate_layout($0, &entry, capacity)
+        }
+        guard status == 0 else {
+            throw ASignArchiveError.layoutValidationFailed(code: status, entry: String(cString: entry))
+        }
+    }
+
+    private static func validateOutput(at archiveURL: URL) throws {
+        do { try validateLayout(of: archiveURL) }
+        catch {
+            try? FileManager.default.removeItem(at: archiveURL)
+            throw error
         }
     }
 
