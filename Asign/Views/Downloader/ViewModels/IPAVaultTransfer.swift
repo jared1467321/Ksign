@@ -5,9 +5,18 @@ import Darwin
 /// presentation snapshots cross to the main thread. URLSession delivers data
 /// directly on the serial delegate queue, so we never enqueue a closure per chunk.
 final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    struct Controls: Equatable, Sendable {
+        var hasDownloads = false
+        var canPauseAll = false
+        var canResumeAll = false
+        var canPauseQueued = false
+        var canCancelQueued = false
+    }
+
     struct Presentation {
         let items: [DownloadItem]
         let adaptive: AdaptivePresentation
+        let controls: Controls
     }
     private let queue = DispatchQueue(label: "Asign.IPAVault.transport", qos: .utility)
     private lazy var delegateQueue: OperationQueue = {
@@ -20,6 +29,8 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         didSet { publishPresentation() }
     }
     private let receive: (Presentation) -> Void
+    private var presentationBatchDepth = 0
+    private var presentationPending = false
 
     init(receive: @escaping (Presentation) -> Void) {
         self.receive = receive
@@ -36,7 +47,43 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     private func publishPresentation() {
         dispatchPrecondition(condition: .onQueue(queue))
-        receive(Presentation(items: downloadItems, adaptive: ipavaultLatestAdaptivePresentation))
+        guard presentationBatchDepth == 0 else {
+            presentationPending = true
+            return
+        }
+        // Derive menu availability on the transport worker, never in a SwiftUI
+        // body. The menu observes only changes to these small boolean values.
+        let queuedIDs = queuedIPAVaultDownloadIDs
+        var controls = Controls()
+        for item in downloadItems where !item.isFinished {
+            let id = item.id.uuidString
+            controls.hasDownloads = true
+            if pausedIPAVaultDownloadIDs.contains(id) {
+                controls.canResumeAll = true
+            } else if ipavaultJobs[id]?.assembling != true {
+                controls.canPauseAll = true
+            }
+            if queuedIDs.contains(id) {
+                controls.canCancelQueued = true
+                if !pausedIPAVaultDownloadIDs.contains(id) || resumeRequestedIPAVaultDownloadIDs.contains(id) {
+                    controls.canPauseQueued = true
+                }
+            }
+        }
+        receive(Presentation(items: downloadItems, adaptive: ipavaultLatestAdaptivePresentation, controls: controls))
+    }
+
+    private func withPresentationBatch(_ work: () -> Void) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        presentationBatchDepth += 1
+        defer {
+            presentationBatchDepth -= 1
+            if presentationBatchDepth == 0, presentationPending {
+                presentationPending = false
+                publishPresentation()
+            }
+        }
+        work()
     }
 
     // Shared with the IPA Vault picker. Logging is opt-in and persists across launches.
@@ -662,7 +709,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
             self.startIPAVaultAdaptiveControllerIfNeeded()
         }
 
-        queue.async(execute: work)
+        queue.async { [self] in withPresentationBatch(work) }
     }
 
     // IPA Vault uses foreground ranged requests, so claim one continued-processing
@@ -808,23 +855,27 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     func pauseAllIPAVaultDownloads() {
         queue.async { [self] in
-            // Mark the whole queue before pumping so pausing one file cannot
-            // start another queued file in the middle of the batch operation.
-            for item in downloadItems {
-                pauseIPAVaultDownloadIfPresent(item)
+            withPresentationBatch {
+                // Mark the whole queue before pumping so pausing one file cannot
+                // start another queued file in the middle of the batch operation.
+                for item in downloadItems {
+                    pauseIPAVaultDownloadIfPresent(item)
+                }
+                pumpIPAVaultDownloadQueue()
+                updateIPAVaultBackgroundTaskState()
             }
-            pumpIPAVaultDownloadQueue()
-            updateIPAVaultBackgroundTaskState()
         }
     }
 
     func resumeAllIPAVaultDownloads() {
         queue.async { [self] in
-            for item in downloadItems {
-                requestIPAVaultDownloadResume(item)
+            withPresentationBatch {
+                for item in downloadItems {
+                    requestIPAVaultDownloadResume(item)
+                }
+                pumpIPAVaultDownloadQueue()
+                updateIPAVaultBackgroundTaskState()
             }
-            pumpIPAVaultDownloadQueue()
-            updateIPAVaultBackgroundTaskState()
         }
     }
 
@@ -842,25 +893,29 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     func pauseAllQueuedIPAVaultDownloads() {
         queue.async { [self] in
-            let ids = queuedIPAVaultDownloadIDs
-            for item in downloadItems where ids.contains(item.id.uuidString) {
-                pauseIPAVaultDownloadIfPresent(item)
+            withPresentationBatch {
+                let ids = queuedIPAVaultDownloadIDs
+                for item in downloadItems where ids.contains(item.id.uuidString) {
+                    pauseIPAVaultDownloadIfPresent(item)
+                }
+                pumpIPAVaultDownloadQueue()
+                updateIPAVaultBackgroundTaskState()
             }
-            pumpIPAVaultDownloadQueue()
-            updateIPAVaultBackgroundTaskState()
         }
     }
 
     func cancelAllQueuedIPAVaultDownloads() {
         queue.async { [self] in
-            // Remove the entire waiting set before allowing the scheduler to
-            // fill a slot, so a file being cancelled cannot start mid-operation.
-            let ids = queuedIPAVaultDownloadIDs
-            for itemID in ids {
-                _ = cancelIPAVaultDownloadIfPresent(itemID: itemID, updateQueue: false)
+            withPresentationBatch {
+                // Remove the entire waiting set before allowing the scheduler to
+                // fill a slot, so a file being cancelled cannot start mid-operation.
+                let ids = queuedIPAVaultDownloadIDs
+                for itemID in ids {
+                    _ = cancelIPAVaultDownloadIfPresent(itemID: itemID, updateQueue: false)
+                }
+                pumpIPAVaultDownloadQueue()
+                updateIPAVaultBackgroundTaskState()
             }
-            pumpIPAVaultDownloadQueue()
-            updateIPAVaultBackgroundTaskState()
         }
     }
 

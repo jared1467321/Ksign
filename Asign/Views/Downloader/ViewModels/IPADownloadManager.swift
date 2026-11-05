@@ -3,11 +3,21 @@ import SwiftUI
 import WebKit
 import UIKit
 
+// Menu availability changes independently of progress and tuning statistics.
+final class IPAVaultDownloadControls: ObservableObject {
+    @Published private(set) var state = IPAVaultTransfer.Controls()
+
+    fileprivate func apply(_ next: IPAVaultTransfer.Controls) {
+        if state != next { state = next }
+    }
+}
+
 // UI rows are main-queue owned; URLSession bookkeeping is protected by taskLock.
 final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     @Published var downloadItems: [DownloadItem] = []
     var activeItems: [DownloadItem] { downloadItems.filter { !$0.isFinished } }
     var finishedItems: [DownloadItem] { downloadItems.filter { $0.isFinished } }
+    let vaultControls = IPAVaultDownloadControls()
     @Published private(set) var ipavaultAdaptiveConcurrentCount = 0
     @Published private(set) var ipavaultAdaptiveStreamsPerFile = 2
     @Published private(set) var ipavaultAdaptiveStatus = "Idle"
@@ -45,6 +55,7 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
     deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 
     private func applyVault(_ snapshot: IPAVaultTransfer.Presentation) {
+        vaultControls.apply(snapshot.controls)
         let next = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.id, $0) })
         let removed = Set(lastVaultItems.keys).subtracting(next.keys)
         var items = downloadItems.filter { !removed.contains($0.id) }

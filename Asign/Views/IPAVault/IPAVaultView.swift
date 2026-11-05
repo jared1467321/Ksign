@@ -328,7 +328,8 @@ struct IPAVaultView: View {
     @State private var pendingDelete: IPAVaultRemoteFile?
     @State private var pendingBatchDelete: [IPAVaultRemoteFile] = []
     @State private var deletingIDs: Set<String> = []
-    @State private var selectingDownloaded = false
+    @State private var selectingRemoteFiles = false
+    @State private var remoteSelectionGeneration = UUID()
 
     private var mode: IPAVaultMode {
         IPAVaultMode(rawValue: modeRaw) ?? .download
@@ -402,7 +403,11 @@ struct IPAVaultView: View {
                 await refreshCurrentMode()
             }
             .onChange(of: modeRaw) { _ in
+                remoteSelectionGeneration = UUID()
                 Task { await refreshCurrentMode() }
+            }
+            .onDisappear {
+                remoteSelectionGeneration = UUID()
             }
             .alert("IPA Vault", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -487,17 +492,6 @@ struct IPAVaultView: View {
                 }
 
                 Section {
-                    Button {
-                        Task { await selectDownloaded() }
-                    } label: {
-                        Label("Select Downloaded", systemImage: "checkmark.circle")
-                    }
-                    .buttonStyle(.borderless)
-                    .nbThemeForeground(.accent)
-                    .nbThemeTextRow()
-                    .disabled(selectingDownloaded)
-                    .accessibilityHint("Selects server IPAs with complete local copies for removal")
-
                     ForEach(remoteFiles) { file in
                         Button {
                             toggleRemote(file)
@@ -526,13 +520,21 @@ struct IPAVaultView: View {
                     HStack {
                         Text("Server").nbThemeChromeForeground(.textSecondary)
                         Spacer()
-                        Button(presentationSession.selectedRemoteIDs.count == remoteFiles.count ? "Clear" : "Select All") {
-                            if presentationSession.selectedRemoteIDs.count == remoteFiles.count {
-                                presentationSession.selectedRemoteIDs.removeAll()
-                            } else {
-                                presentationSession.selectedRemoteIDs = Set(remoteFiles.map(\.id))
+                        Menu {
+                            Button("Select All") {
+                                Task { await selectRemoteFiles(downloadedOnly: false) }
                             }
+                            Button("Select Downloaded") {
+                                Task { await selectRemoteFiles(downloadedOnly: true) }
+                            }
+                            Button("Clear Selection") {
+                                remoteSelectionGeneration = UUID()
+                                presentationSession.selectedRemoteIDs.removeAll()
+                            }
+                        } label: {
+                            Label("Select", systemImage: "checkmark.circle")
                         }
+                        .disabled(selectingRemoteFiles || loading || !deletingIDs.isEmpty)
                         .nbThemeForeground(.accent)
                     }
                 }
@@ -662,6 +664,7 @@ struct IPAVaultView: View {
     }
 
     private func toggleRemote(_ file: IPAVaultRemoteFile) {
+        remoteSelectionGeneration = UUID()
         if presentationSession.selectedRemoteIDs.contains(file.id) {
             presentationSession.selectedRemoteIDs.remove(file.id)
         } else {
@@ -670,14 +673,24 @@ struct IPAVaultView: View {
     }
 
     @MainActor
-    private func selectDownloaded() async {
-        guard !selectingDownloaded else { return }
-        selectingDownloaded = true
-        defer { selectingDownloaded = false }
+    private func selectRemoteFiles(downloadedOnly: Bool) async {
+        guard !selectingRemoteFiles, !loading, deletingIDs.isEmpty else { return }
+        selectingRemoteFiles = true
+        defer { selectingRemoteFiles = false }
+
+        // Capture immutable inputs on main; directory work, indexing and every
+        // per-file match run on the existing utility worker.
+        let files = remoteFiles
+        let downloads = downloadManager.downloadItems
+        let excludedIDs = deletingIDs
+        let server = serverURL
+        let generation = remoteSelectionGeneration
 
         do {
-            let directory = URL.documentsDirectory.appendingPathComponent("Downloads", isDirectory: true)
-            let localSizes = try await Task.detached(priority: .userInitiated) {
+            let selectedIDs = try await BackgroundFileWork.perform {
+                guard downloadedOnly else { return Set(files.map(\.id)) }
+
+                let directory = URL.documentsDirectory.appendingPathComponent("Downloads", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let urls = try FileManager.default.contentsOfDirectory(
                     at: directory,
@@ -691,22 +704,34 @@ struct IPAVaultView: View {
                         sizes[url.lastPathComponent] = Int64(size)
                     }
                 }
-                return sizes
-            }.value
-
-            let unfinishedNames = Set(downloadManager.activeItems.map { $0.localPath.lastPathComponent })
-            let downloaded = remoteFiles.filter { file in
-                file.url.pathExtension.lowercased() == "ipa" &&
-                    localSizes[file.name] == file.size &&
-                    !unfinishedNames.contains(file.name) &&
-                    !hasActiveDownload(for: file) &&
-                    !deletingIDs.contains(file.id)
+                var unfinishedNames: Set<String> = []
+                var unfinishedURLs: Set<URL> = []
+                for item in downloads where !item.isFinished {
+                    unfinishedNames.insert(item.localPath.lastPathComponent)
+                    unfinishedURLs.insert(item.url)
+                }
+                var selected: Set<String> = []
+                for file in files where file.url.pathExtension.lowercased() == "ipa" {
+                    if sizes[file.name] == file.size,
+                       !unfinishedNames.contains(file.name),
+                       !unfinishedURLs.contains(file.url),
+                       !excludedIDs.contains(file.id) {
+                        selected.insert(file.id)
+                    }
+                }
+                return selected
             }
-            presentationSession.selectedRemoteIDs = Set(downloaded.map(\.id))
-            statusMessage = downloaded.isEmpty
-                ? "No downloaded IPAs match the server files."
-                : "Selected \(downloaded.count) downloaded IPA\(downloaded.count == 1 ? "" : "s")."
+
+            // A newer tap, refresh, mode change or delete wins over stale work.
+            guard remoteSelectionGeneration == generation, serverURL == server, mode == .download else { return }
+            presentationSession.selectedRemoteIDs = selectedIDs
+            if downloadedOnly {
+                statusMessage = selectedIDs.isEmpty
+                    ? "No downloaded IPAs match the server files."
+                    : "Selected \(selectedIDs.count) downloaded IPA\(selectedIDs.count == 1 ? "" : "s")."
+            }
         } catch {
+            guard remoteSelectionGeneration == generation, serverURL == server, mode == .download else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -720,6 +745,7 @@ struct IPAVaultView: View {
     }
 
     private func downloadSelected() {
+        remoteSelectionGeneration = UUID()
         let selected = remoteFiles.filter { presentationSession.selectedRemoteIDs.contains($0.id) }
         let downloads = selected.map { (url: $0.url, filename: $0.name, size: $0.size) }
         downloadManager.enqueueIPAVaultDownloads(downloads)
@@ -746,6 +772,7 @@ struct IPAVaultView: View {
     }
 
     private func prepareBatchDelete() {
+        remoteSelectionGeneration = UUID()
         let selected = remoteFiles.filter { presentationSession.selectedRemoteIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
 
@@ -762,6 +789,7 @@ struct IPAVaultView: View {
 
     @MainActor
     private func deleteFromServer(_ file: IPAVaultRemoteFile) async {
+        remoteSelectionGeneration = UUID()
         guard !deletingIDs.contains(file.id) else { return }
         guard !hasActiveDownload(for: file) else {
             errorMessage = "Cancel or finish this file’s active download before deleting it from the server."
@@ -783,6 +811,7 @@ struct IPAVaultView: View {
 
     @MainActor
     private func deleteSelectedFromServer(_ files: [IPAVaultRemoteFile]) async {
+        remoteSelectionGeneration = UUID()
         guard !files.isEmpty else { return }
 
         let active = files.filter { hasActiveDownload(for: $0) }
@@ -849,6 +878,7 @@ struct IPAVaultView: View {
 
     @MainActor
     private func refreshRemoteFiles() async {
+        remoteSelectionGeneration = UUID()
         guard let baseURL = normalizedServerURL else {
             errorMessage = "Enter a valid IPA Vault server address."
             remoteFiles = []

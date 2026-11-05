@@ -234,62 +234,12 @@ private struct DownloadTransferSection: View {
     let deleteItem: (DownloadItem) -> Void
 
     private var hasActiveIPAVaultDownloads: Bool {
-        downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
+        downloadManager.vaultControls.state.hasDownloads
     }
 
-    private var allIPAVaultDownloadsPaused: Bool {
-        downloadManager.downloadItems
-            .filter { $0.isIPAVaultDownload && !$0.isFinished }
-            .allSatisfy(\.isPaused)
-    }
-
-    @ViewBuilder
     private var ipaVaultBatchControl: some View {
-        Button {
-            if allIPAVaultDownloadsPaused {
-                downloadManager.resumeAllIPAVaultDownloads()
-            } else {
-                downloadManager.pauseAllIPAVaultDownloads()
-            }
-        } label: {
-            Label(allIPAVaultDownloadsPaused ? "Resume All" : "Pause All",
-                  systemImage: allIPAVaultDownloadsPaused ? "play.fill" : "pause.fill")
-        }
-        .buttonStyle(.borderless)
-        .nbThemeForeground(.accent)
-        .nbThemeTextRow()
-        .accessibilityHint("Applies to all unfinished IPA Vault downloads, including queued files")
-
-        if !allIPAVaultDownloadsPaused && downloadManager.activeItems.contains(where: { $0.isIPAVaultDownload && $0.isPaused }) {
-            Button {
-                downloadManager.resumeAllIPAVaultDownloads()
-            } label: {
-                Label("Resume All", systemImage: "play.fill")
-            }
-            .buttonStyle(.borderless)
-            .nbThemeForeground(.accent)
-            .nbThemeTextRow()
-        }
-
-        Button {
-            downloadManager.pauseAllQueuedIPAVaultDownloads()
-        } label: {
-            Label("Pause All Queued", systemImage: "pause.circle")
-        }
-        .buttonStyle(.borderless)
-        .nbThemeForeground(.accent)
-        .nbThemeTextRow()
-        .accessibilityHint("Pauses waiting downloads while current downloads continue")
-
-        Button(role: .destructive) {
-            downloadManager.cancelAllQueuedIPAVaultDownloads()
-        } label: {
-            Label("Cancel All Queued", systemImage: "xmark.circle")
-        }
-        .buttonStyle(.borderless)
-        .nbThemeForeground(.danger)
-        .nbThemeTextRow()
-        .accessibilityHint("Cancels waiting and paused downloads while current downloads continue")
+        IPAVaultDownloadMenu(downloadManager: downloadManager, controls: downloadManager.vaultControls)
+            .equatable()
     }
 
     private var ipavaultLiveThroughputText: String {
@@ -416,6 +366,57 @@ private struct DownloadTransferSection: View {
             guard !inspectorSampleDownloadStatus, !libraryManager.isImporting else { return }
             downloadManager.loadDownloadedIPAs()
         }
+    }
+}
+
+// This stable row observes availability only. Progress and speed updates do not
+// invalidate its labels, menu layout or adaptive-text geometry.
+private struct IPAVaultDownloadMenu: View, Equatable {
+    let downloadManager: IPADownloadManager
+    @ObservedObject var controls: IPAVaultDownloadControls
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.downloadManager === rhs.downloadManager && lhs.controls === rhs.controls
+    }
+
+    var body: some View {
+        Menu {
+            Section("All Downloads") {
+                Button {
+                    downloadManager.pauseAllIPAVaultDownloads()
+                } label: {
+                    Label("Pause All", systemImage: "pause.fill")
+                }
+                .disabled(!controls.state.canPauseAll)
+
+                Button {
+                    downloadManager.resumeAllIPAVaultDownloads()
+                } label: {
+                    Label("Resume All", systemImage: "play.fill")
+                }
+                .disabled(!controls.state.canResumeAll)
+            }
+            Section("Queued Downloads") {
+                Button {
+                    downloadManager.pauseAllQueuedIPAVaultDownloads()
+                } label: {
+                    Label("Pause Queued", systemImage: "pause.circle")
+                }
+                .disabled(!controls.state.canPauseQueued)
+
+                Button(role: .destructive) {
+                    downloadManager.cancelAllQueuedIPAVaultDownloads()
+                } label: {
+                    Label("Cancel Queued", systemImage: "xmark.circle")
+                }
+                .disabled(!controls.state.canCancelQueued)
+            }
+        } label: {
+            Label("Manage Downloads", systemImage: "slider.horizontal.3")
+        }
+        .nbThemeForeground(.accent)
+        .nbThemeTextRow()
+        .accessibilityHint("Manage all downloads or only waiting downloads")
     }
 }
 
