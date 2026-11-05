@@ -828,6 +828,42 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         }
     }
 
+    private var queuedIPAVaultDownloadIDs: Set<String> {
+        var ids = Set(pendingIPAVaultDownloads.map(\.itemID))
+        // Paused and tuner-suspended jobs can already have partial files.
+        // A suspended job whose streams are still draining is still downloading.
+        for itemID in pausedIPAVaultDownloadIDs.union(tunerSuspendedIPAVaultDownloadIDs) {
+            if let job = ipavaultJobs[itemID], !job.assembling, job.tasks.isEmpty {
+                ids.insert(itemID)
+            }
+        }
+        return ids
+    }
+
+    func pauseAllQueuedIPAVaultDownloads() {
+        queue.async { [self] in
+            let ids = queuedIPAVaultDownloadIDs
+            for item in downloadItems where ids.contains(item.id.uuidString) {
+                pauseIPAVaultDownloadIfPresent(item)
+            }
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
+        }
+    }
+
+    func cancelAllQueuedIPAVaultDownloads() {
+        queue.async { [self] in
+            // Remove the entire waiting set before allowing the scheduler to
+            // fill a slot, so a file being cancelled cannot start mid-operation.
+            let ids = queuedIPAVaultDownloadIDs
+            for itemID in ids {
+                _ = cancelIPAVaultDownloadIfPresent(itemID: itemID, updateQueue: false)
+            }
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
+        }
+    }
+
     private func pauseIPAVaultDownloadIfPresent(_ item: DownloadItem) {
         let itemID = item.id.uuidString
         guard item.isIPAVaultDownload, !item.isFinished else { return }
@@ -891,7 +927,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         queue.async { [self] in _ = cancelIPAVaultDownloadIfPresent(itemID: item.id.uuidString) }
     }
 
-    private func cancelIPAVaultDownloadIfPresent(itemID: String) -> Bool {
+    private func cancelIPAVaultDownloadIfPresent(itemID: String, updateQueue: Bool = true) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
 
         if pendingIPAVaultDownloads.contains(where: { $0.itemID == itemID }) || ipavaultJobs[itemID] != nil {
@@ -905,9 +941,11 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
             pausedIPAVaultDownloadIDs.remove(itemID)
             resumeRequestedIPAVaultDownloadIDs.remove(itemID)
             clearIPAVaultPresentationProgress(for: itemID)
-            pumpIPAVaultDownloadQueue()
-            rebalanceIPAVaultStreams()
-            updateIPAVaultBackgroundTaskState()
+            if updateQueue {
+                pumpIPAVaultDownloadQueue()
+                rebalanceIPAVaultStreams()
+                updateIPAVaultBackgroundTaskState()
+            }
             return true
         }
 
@@ -927,9 +965,11 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
         clearIPAVaultPresentationProgress(for: itemID)
         try? FileManager.default.removeItem(at: job.directory)
-        pumpIPAVaultDownloadQueue()
-        rebalanceIPAVaultStreams()
-        updateIPAVaultBackgroundTaskState()
+        if updateQueue {
+            pumpIPAVaultDownloadQueue()
+            rebalanceIPAVaultStreams()
+            updateIPAVaultBackgroundTaskState()
+        }
         return true
     }
 

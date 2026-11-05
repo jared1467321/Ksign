@@ -72,6 +72,8 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
     func resumeIPAVaultDownload(_ item: DownloadItem) { vault.resumeIPAVaultDownload(item) }
     func pauseAllIPAVaultDownloads() { vault.pauseAllIPAVaultDownloads() }
     func resumeAllIPAVaultDownloads() { vault.resumeAllIPAVaultDownloads() }
+    func pauseAllQueuedIPAVaultDownloads() { vault.pauseAllQueuedIPAVaultDownloads() }
+    func cancelAllQueuedIPAVaultDownloads() { vault.cancelAllQueuedIPAVaultDownloads() }
 
     private func setupURLSession() {
         let config = URLSessionConfiguration.default

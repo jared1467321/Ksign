@@ -328,6 +328,7 @@ struct IPAVaultView: View {
     @State private var pendingDelete: IPAVaultRemoteFile?
     @State private var pendingBatchDelete: [IPAVaultRemoteFile] = []
     @State private var deletingIDs: Set<String> = []
+    @State private var selectingDownloaded = false
 
     private var mode: IPAVaultMode {
         IPAVaultMode(rawValue: modeRaw) ?? .download
@@ -486,6 +487,17 @@ struct IPAVaultView: View {
                 }
 
                 Section {
+                    Button {
+                        Task { await selectDownloaded() }
+                    } label: {
+                        Label("Select Downloaded", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .nbThemeForeground(.accent)
+                    .nbThemeTextRow()
+                    .disabled(selectingDownloaded)
+                    .accessibilityHint("Selects server IPAs with complete local copies for removal")
+
                     ForEach(remoteFiles) { file in
                         Button {
                             toggleRemote(file)
@@ -654,6 +666,48 @@ struct IPAVaultView: View {
             presentationSession.selectedRemoteIDs.remove(file.id)
         } else {
             presentationSession.selectedRemoteIDs.insert(file.id)
+        }
+    }
+
+    @MainActor
+    private func selectDownloaded() async {
+        guard !selectingDownloaded else { return }
+        selectingDownloaded = true
+        defer { selectingDownloaded = false }
+
+        do {
+            let directory = URL.documentsDirectory.appendingPathComponent("Downloads", isDirectory: true)
+            let localSizes = try await Task.detached(priority: .userInitiated) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let urls = try FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                    options: [.skipsHiddenFiles]
+                )
+                var sizes: [String: Int64] = [:]
+                for url in urls where url.pathExtension.lowercased() == "ipa" {
+                    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    if values.isRegularFile == true, let size = values.fileSize, size > 0 {
+                        sizes[url.lastPathComponent] = Int64(size)
+                    }
+                }
+                return sizes
+            }.value
+
+            let unfinishedNames = Set(downloadManager.activeItems.map { $0.localPath.lastPathComponent })
+            let downloaded = remoteFiles.filter { file in
+                file.url.pathExtension.lowercased() == "ipa" &&
+                    localSizes[file.name] == file.size &&
+                    !unfinishedNames.contains(file.name) &&
+                    !hasActiveDownload(for: file) &&
+                    !deletingIDs.contains(file.id)
+            }
+            presentationSession.selectedRemoteIDs = Set(downloaded.map(\.id))
+            statusMessage = downloaded.isEmpty
+                ? "No downloaded IPAs match the server files."
+                : "Selected \(downloaded.count) downloaded IPA\(downloaded.count == 1 ? "" : "s")."
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 

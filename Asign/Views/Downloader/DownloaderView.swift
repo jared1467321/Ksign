@@ -243,6 +243,7 @@ private struct DownloadTransferSection: View {
             .allSatisfy(\.isPaused)
     }
 
+    @ViewBuilder
     private var ipaVaultBatchControl: some View {
         Button {
             if allIPAVaultDownloadsPaused {
@@ -258,6 +259,37 @@ private struct DownloadTransferSection: View {
         .nbThemeForeground(.accent)
         .nbThemeTextRow()
         .accessibilityHint("Applies to all unfinished IPA Vault downloads, including queued files")
+
+        if !allIPAVaultDownloadsPaused && downloadManager.activeItems.contains(where: { $0.isIPAVaultDownload && $0.isPaused }) {
+            Button {
+                downloadManager.resumeAllIPAVaultDownloads()
+            } label: {
+                Label("Resume All", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderless)
+            .nbThemeForeground(.accent)
+            .nbThemeTextRow()
+        }
+
+        Button {
+            downloadManager.pauseAllQueuedIPAVaultDownloads()
+        } label: {
+            Label("Pause All Queued", systemImage: "pause.circle")
+        }
+        .buttonStyle(.borderless)
+        .nbThemeForeground(.accent)
+        .nbThemeTextRow()
+        .accessibilityHint("Pauses waiting downloads while current downloads continue")
+
+        Button(role: .destructive) {
+            downloadManager.cancelAllQueuedIPAVaultDownloads()
+        } label: {
+            Label("Cancel All Queued", systemImage: "xmark.circle")
+        }
+        .buttonStyle(.borderless)
+        .nbThemeForeground(.danger)
+        .nbThemeTextRow()
+        .accessibilityHint("Cancels waiting and paused downloads while current downloads continue")
     }
 
     private var ipavaultLiveThroughputText: String {
