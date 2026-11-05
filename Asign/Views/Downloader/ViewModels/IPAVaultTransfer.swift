@@ -791,50 +791,72 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
     }
 
     func pauseIPAVaultDownload(_ item: DownloadItem) {
-        let work: @Sendable () -> Void = {
-            let itemID = item.id.uuidString
-            guard item.isIPAVaultDownload, !item.isFinished else { return }
-            guard !self.pausedIPAVaultDownloadIDs.contains(itemID) else { return }
-            guard self.ipavaultJobs[itemID] != nil || self.pendingIPAVaultDownloads.contains(where: { $0.itemID == itemID }) else { return }
-
-            if let job = self.ipavaultJobs[itemID], job.assembling {
-                return
-            }
-
-            self.resumeRequestedIPAVaultDownloadIDs.remove(itemID)
-            self.pausedIPAVaultDownloadIDs.insert(itemID)
-
-            if let job = self.ipavaultJobs[itemID] {
-                self.cancelIPAVaultStreams(job, requeueUnfinished: true)
-                self.tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
-                job.desiredStreams = self.ipavaultBatchTargetStreams
-            }
-            self.setIPAVaultPausedState(itemID: itemID, isPaused: true)
-            self.pumpIPAVaultDownloadQueue()
-            self.rebalanceIPAVaultStreams()
-            self.updateIPAVaultBackgroundTaskState()
+        queue.async { [self] in
+            pauseIPAVaultDownloadIfPresent(item)
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
         }
-
-        queue.async(execute: work)
     }
 
     func resumeIPAVaultDownload(_ item: DownloadItem) {
-        let work: @Sendable () -> Void = {
-            let itemID = item.id.uuidString
-            guard item.isIPAVaultDownload, !item.isFinished, self.pausedIPAVaultDownloadIDs.contains(itemID) else { return }
-
-            if self.ipavaultJobs[itemID] != nil {
-                self.resumeRequestedIPAVaultDownloadIDs.insert(itemID)
-            } else {
-                self.pausedIPAVaultDownloadIDs.remove(itemID)
-                self.setIPAVaultPausedState(itemID: itemID, isPaused: false)
-            }
-
-            self.pumpIPAVaultDownloadQueue()
-            self.updateIPAVaultBackgroundTaskState()
+        queue.async { [self] in
+            requestIPAVaultDownloadResume(item)
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
         }
+    }
 
-        queue.async(execute: work)
+    func pauseAllIPAVaultDownloads() {
+        queue.async { [self] in
+            // Mark the whole queue before pumping so pausing one file cannot
+            // start another queued file in the middle of the batch operation.
+            for item in downloadItems {
+                pauseIPAVaultDownloadIfPresent(item)
+            }
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
+        }
+    }
+
+    func resumeAllIPAVaultDownloads() {
+        queue.async { [self] in
+            for item in downloadItems {
+                requestIPAVaultDownloadResume(item)
+            }
+            pumpIPAVaultDownloadQueue()
+            updateIPAVaultBackgroundTaskState()
+        }
+    }
+
+    private func pauseIPAVaultDownloadIfPresent(_ item: DownloadItem) {
+        let itemID = item.id.uuidString
+        guard item.isIPAVaultDownload, !item.isFinished else { return }
+        guard ipavaultJobs[itemID] != nil || pendingIPAVaultDownloads.contains(where: { $0.itemID == itemID }) else { return }
+        guard ipavaultJobs[itemID]?.assembling != true else { return }
+
+        // A paused job may be waiting for a resume slot. Pause All must also
+        // withdraw that request so it cannot restart after another file finishes.
+        resumeRequestedIPAVaultDownloadIDs.remove(itemID)
+        guard pausedIPAVaultDownloadIDs.insert(itemID).inserted else { return }
+
+        if let job = ipavaultJobs[itemID] {
+            cancelIPAVaultStreams(job, requeueUnfinished: true)
+            tunerSuspendedIPAVaultDownloadIDs.remove(itemID)
+            job.desiredStreams = ipavaultBatchTargetStreams
+        }
+        setIPAVaultPausedState(itemID: itemID, isPaused: true)
+    }
+
+    private func requestIPAVaultDownloadResume(_ item: DownloadItem) {
+        let itemID = item.id.uuidString
+        guard item.isIPAVaultDownload, !item.isFinished, pausedIPAVaultDownloadIDs.contains(itemID) else { return }
+
+        if ipavaultJobs[itemID] != nil {
+            resumeRequestedIPAVaultDownloadIDs.insert(itemID)
+        } else {
+            pausedIPAVaultDownloadIDs.remove(itemID)
+            setIPAVaultPausedState(itemID: itemID, isPaused: false)
+        }
     }
 
     private func setIPAVaultPausedState(itemID: String, isPaused: Bool) {

@@ -237,6 +237,29 @@ private struct DownloadTransferSection: View {
         downloadManager.downloadItems.contains { $0.isIPAVaultDownload && !$0.isFinished }
     }
 
+    private var allIPAVaultDownloadsPaused: Bool {
+        downloadManager.downloadItems
+            .filter { $0.isIPAVaultDownload && !$0.isFinished }
+            .allSatisfy(\.isPaused)
+    }
+
+    private var ipaVaultBatchControl: some View {
+        Button {
+            if allIPAVaultDownloadsPaused {
+                downloadManager.resumeAllIPAVaultDownloads()
+            } else {
+                downloadManager.pauseAllIPAVaultDownloads()
+            }
+        } label: {
+            Label(allIPAVaultDownloadsPaused ? "Resume All" : "Pause All",
+                  systemImage: allIPAVaultDownloadsPaused ? "play.fill" : "pause.fill")
+        }
+        .buttonStyle(.borderless)
+        .nbThemeForeground(.accent)
+        .nbThemeTextRow()
+        .accessibilityHint("Applies to all unfinished IPA Vault downloads, including queued files")
+    }
+
     private var ipavaultLiveThroughputText: String {
         guard downloadManager.ipavaultAdaptiveSpeedBPS > 0 else {
             return "Measuring…"
@@ -315,6 +338,7 @@ private struct DownloadTransferSection: View {
                     if hasActiveIPAVaultDownloads {
                         ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
                                           streams: ipavaultActiveStreamsText)
+                        ipaVaultBatchControl
                     }
                     HStack(spacing: 12) {
                         ProgressView()
@@ -330,6 +354,7 @@ private struct DownloadTransferSection: View {
                     if hasActiveIPAVaultDownloads {
                         ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
                                           streams: ipavaultActiveStreamsText)
+                        ipaVaultBatchControl
                     }
 
                     ForEach(libraryManager.downloads) { download in
