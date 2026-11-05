@@ -7,7 +7,7 @@ struct DeviceSetupError: LocalizedError {
     init(_ message: String) { self.message = message }
 }
 
-struct DevicePairingRecord: Codable {
+struct DevicePairingRecord: Codable, Sendable {
     let pairing_plist: String
     let host_alt_irk: [UInt8]
     let device_udid: String
@@ -27,13 +27,30 @@ struct DevicePairingRecord: Codable {
 }
 
 enum DevicePairingStore {
+    private static let queue = DispatchQueue(label: "Asign.device-pairing-store", qos: .utility)
+
+    private static func perform<T>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { continuation.resume(with: Result(catching: body)) }
+        }
+    }
+
+    static func load() async throws -> DevicePairingRecord? { try await perform { try loadStored() } }
+    static func save(_ record: DevicePairingRecord) async throws { try await perform { try saveStored(record) } }
+    static func materialize(_ record: DevicePairingRecord) async throws -> URL {
+        try await perform { try materializeStored(record) }
+    }
+    static func reset() async throws { try await perform { try resetStored() } }
+    static func removeWorkingCopy() async { _ = try? await perform { removeWorkingCopyStored() } }
+    static func scheduleWorkingCopyRemoval() { queue.async { removeWorkingCopyStored() } }
+
     private static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: (Bundle.main.bundleIdentifier ?? "Ksign") + ".device-pairing",
          kSecAttrAccount as String: "local-device-v1"]
     }
 
-    static func load() throws -> DevicePairingRecord? {
+    private static func loadStored() throws -> DevicePairingRecord? {
         var query = Self.query
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -47,7 +64,7 @@ enum DevicePairingStore {
         return record
     }
 
-    static func save(_ record: DevicePairingRecord) throws {
+    private static func saveStored(_ record: DevicePairingRecord) throws {
         try record.validate()
         let values: [String: Any] = [
             kSecValueData as String: try JSONEncoder().encode(record),
@@ -61,7 +78,7 @@ enum DevicePairingStore {
 
     // The native reader currently takes a path. Keep its working copy outside
     // Documents, exclude it from backups, and remove it when the connection ends.
-    static func materialize(_ record: DevicePairingRecord) throws -> URL {
+    private static func materializeStored(_ record: DevicePairingRecord) throws -> URL {
         try record.validate()
         var directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DeviceConnection", isDirectory: true)
@@ -75,16 +92,16 @@ enum DevicePairingStore {
         return url
     }
 
-    static func removeWorkingCopy() {
+    private static func removeWorkingCopyStored() {
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DeviceConnection/pairing.plist")
         try? FileManager.default.removeItem(at: url)
     }
 
-    static func reset() throws {
+    private static func resetStored() throws {
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecItemNotFound { try check(status) }
-        removeWorkingCopy()
+        removeWorkingCopyStored()
     }
 
     private static func check(_ status: OSStatus) throws {

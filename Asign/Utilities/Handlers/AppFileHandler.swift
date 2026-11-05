@@ -173,10 +173,7 @@ final class AppFileHandler: NSObject, @unchecked Sendable {
 
 	private func _reportProgress(_ progress: Double) {
 		guard let download = _download else { return }
-		DispatchQueue.main.async {
-			download.unpackageProgress = progress
-			BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-		}
+        download.reportImport(progress)
 	}
 }
 

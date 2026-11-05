@@ -22,26 +22,24 @@ extension Storage {
 		
 		completion: @escaping (Error?) -> Void
 	) {
-		// Same fix as `addImported` — see the note there. `FR.signPackageFile`
-		// runs `SigningHandler` in a detached task, so this had the identical
-		// off-queue insert into the main-queue `viewContext`.
-		context.perform {
-			let new = Signed(context: self.context)
-			
-			new.uuid = uuid
-			new.source = source
-			new.date = Date()
-			// if nil, we assume adhoc or certificate was deleted afterwards
-			new.certificate = certificate
-			// could possibly be nil, but thats fine.
-			new.identifier = appIdentifier
-			new.name = appName
-			new.icon = appIcon
-			new.version = appVersion
-			
-			self.saveContext()
-			UIImpactFeedbackGenerator(style: .light).impactOccurred()
-			completion(nil)
-		}
+		// Read the relationship on its owning queue; only its permanent ID is
+        // passed to the writer, never the UI's managed object.
+        context.perform {
+            let certificateID = certificate?.objectID
+            self.insertLibraryRecord({ worker in
+                let new = Signed(context: worker)
+                new.uuid = uuid
+                new.source = source
+                new.date = Date()
+                if let certificateID {
+                    new.certificate = try worker.existingObject(with: certificateID) as? CertificatePair
+                }
+                new.identifier = appIdentifier
+                new.name = appName
+                new.icon = appIcon
+                new.version = appVersion
+                return new
+            }, completion: completion)
+        }
 	}
 }

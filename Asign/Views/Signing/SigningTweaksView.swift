@@ -146,72 +146,36 @@ struct SigningTweaksView: View {
 	}
 	
 	private func _loadTweaks() {
-		let tweaksDir = FileManager.default.tweaks
-		guard let files = try? FileManager.default.contentsOfDirectory(
-			at: tweaksDir,
-			includingPropertiesForKeys: nil
-		) else {
-			_tweaksInDirectory = []
-			return
-		}
-		
-		_tweaksInDirectory = files.filter { url in
-			let ext = url.pathExtension.lowercased()
-			return ext == "dylib" || ext == "deb" || ext == "framework" || ext == "bundle"
-		}
-		
-		// Heal stale paths: an enabled tweak whose saved URL no longer exists,
-		// but whose filename is sitting in the Tweaks folder, gets repointed at
-		// the current container instead of silently failing to inject.
-		_rehydrateInjectionPaths()
-	}
-	
-	private func _rehydrateInjectionPaths() {
-		let tweaksDir = FileManager.default.tweaks
-		
-		let healed = options.injectionFiles.map { url -> URL in
-			guard !FileManager.default.fileExists(atPath: url.path) else { return url }
-			let candidate = tweaksDir.appendingPathComponent(url.lastPathComponent)
-			return FileManager.default.fileExists(atPath: candidate.path) ? candidate : url
-		}
-		
-		guard healed != options.injectionFiles else { return }
-		options.injectionFiles = healed
-	}
-	
-	private func _importTweaks(urls: [URL]) {
-		guard !urls.isEmpty else { return }
-		let tweaksDir = FileManager.default.tweaks
-		
-		do {
-			try FileManager.default.createDirectoryIfNeeded(at: tweaksDir)
-		} catch {
-			print("Error creating tweaks directory: \(error)")
-			return
-		}
-		
-		let allowedExtensions = Set(["dylib", "deb", "framework", "bundle"])
-		
-		for url in urls {
-			let ext = url.pathExtension.lowercased()
-			guard allowedExtensions.contains(ext) else { continue }
-			
-			let destinationURL = tweaksDir.appendingPathComponent(url.lastPathComponent)
-			do {
-				if FileManager.default.fileExists(atPath: destinationURL.path) {
-					try FileManager.default.removeItem(at: destinationURL)
-				}
-				try FileManager.default.copyItem(at: url, to: destinationURL)
-				// Imported from this screen, so enable it for this session.
-				_setEnabled(true, for: destinationURL)
-			} catch {
-				print("Error copying tweak file: \(error)")
-			}
-		}
-		
-		_loadTweaks()
-	}
-	
+        let directory = FileManager.default.tweaks
+        let enabled = options.injectionFiles
+        Task { @MainActor in
+            let result = try? await BackgroundFileWork.perform {
+                let files = TweakFileStore.list(in: directory)
+                let healed = enabled.map { url -> URL in
+                    guard !FileManager.default.fileExists(atPath: url.path) else { return url }
+                    let candidate = directory.appendingPathComponent(url.lastPathComponent)
+                    return FileManager.default.fileExists(atPath: candidate.path) ? candidate : url
+                }
+                return (files, healed)
+            }
+            guard let result else { return }
+            _tweaksInDirectory = result.0
+            // Preserve toggles made while the directory was being read.
+            if options.injectionFiles == enabled, result.1 != enabled { options.injectionFiles = result.1 }
+        }
+    }
+
+    private func _importTweaks(urls: [URL]) {
+        let directory = FileManager.default.tweaks
+        Task { @MainActor in
+            let imported = (try? await BackgroundFileWork.perform {
+                TweakFileStore.importFiles(urls, to: directory)
+            }) ?? []
+            for url in imported { _setEnabled(true, for: url) }
+            _loadTweaks()
+        }
+    }
+
 	/// Enables/disables a tweak for this signing session only.
 	private func _setEnabled(_ isOn: Bool, for tweak: URL) {
 		let name = tweak.lastPathComponent

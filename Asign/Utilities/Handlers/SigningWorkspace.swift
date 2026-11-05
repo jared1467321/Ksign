@@ -192,7 +192,7 @@ final class SigningWorkspace {
 }
 
 /// Core Data records remain on their context's queue; workers use a value copy.
-struct SigningAppSnapshot: AppInfoPresentable {
+struct SigningAppSnapshot: AppInfoPresentable, Sendable {
     let name: String?
     let version: String?
     let identifier: String?

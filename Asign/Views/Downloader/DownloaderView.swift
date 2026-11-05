@@ -543,18 +543,7 @@ Enter the URL of the website containing the IPA file (Direct install/ITMS Servic
             return
         }
         
-        do {
-            try FileManager.default.removeItem(at: item.localPath)
-            
-            // Not animated. A spring around a List row removal is the
-            // animated performBatchUpdates path that has been tripping the
-            // watchdog; during a bulk delete it ran once per item.
-            if let index = downloadManager.downloadItems.firstIndex(where: { $0.id == item.id }) {
-                downloadManager.downloadItems.remove(at: index)
-            }
-        } catch {
-            UIAlertController.showAlertWithOk(title: .localized("Error"), message: error.localizedDescription)
-        }
+        downloadManager.deleteFinishedDownload(item)
     }
 }
 

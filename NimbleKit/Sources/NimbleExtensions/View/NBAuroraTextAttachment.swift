@@ -101,6 +101,7 @@ final class NBAuroraTextAnchorView: UIView {
     }
 
     func configure(attachment: NBAuroraTextAttachment, reduceMotion: Bool) {
+        let changed = self.attachment !== attachment || self.reduceMotion != reduceMotion
         if self.attachment !== attachment {
             let previous = self.attachment
             if previous?.anchor === self { previous?.anchor = nil }
@@ -120,7 +121,9 @@ final class NBAuroraTextAnchorView: UIView {
         }
         attachment.anchor = self
         self.reduceMotion = reduceMotion
-        invalidateGeometry()
+        // Progress/paint updates can reconfigure an unmoved label. Preserve its
+        // clipping cache; sampling still detects actual bounds/window movement.
+        if changed { invalidateGeometry() }
         // Registration never samples/publishes inside a SwiftUI update.
         if canTrack {
             NBAuroraTextLayoutClock.shared.register(self)

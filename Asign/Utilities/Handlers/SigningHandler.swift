@@ -373,7 +373,7 @@ final class SigningHandler: NSObject {
             guard let metadata = _signedArchiveMetadata else { throw SigningFileHandlerError.infoPlistNotFound }
             let cachedIcon = _signedArchiveIcon
 
-			await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+			try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
 				Storage.shared.addSigned(
 					uuid: _uuid,
 					certificate: _options.doAdhocSigning ? nil : appCertificate,
@@ -381,7 +381,8 @@ final class SigningHandler: NSObject {
 					appIdentifier: metadata.identifier,
 					appVersion: metadata.version,
 					appIcon: cachedIcon
-				) { _ in
+				) { error in
+                    if let error { continuation.resume(throwing: error); return }
 					Logger.signing.info("[\(self._uuid)] Added archive-backed signed app to database")
 					continuation.resume()
 				}
@@ -395,7 +396,7 @@ final class SigningHandler: NSObject {
 			throw SigningFileHandlerError.appNotFound
 		}
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let bundle = Bundle(url: appUrl)
 
             Storage.shared.addSigned(
@@ -405,7 +406,8 @@ final class SigningHandler: NSObject {
                 appIdentifier: bundle?.bundleIdentifier,
                 appVersion: bundle?.version,
                 appIcon: bundle?.iconFileName
-            ) { _ in
+            ) { error in
+                if let error { continuation.resume(throwing: error); return }
                 Logger.signing.info("[\(self._uuid)] Added to database")
                 continuation.resume()
             }

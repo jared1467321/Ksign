@@ -6,6 +6,7 @@
 //
 
 import CoreData
+import UIKit.UIImpactFeedbackGenerator
 
 // MARK: - Class
 final class Storage: ObservableObject {
@@ -33,6 +34,28 @@ final class Storage: ObservableObject {
 	var context: NSManagedObjectContext {
 		container.viewContext
 	}
+
+    /// Workers save library records on a private context. Merge only permanent
+    /// IDs into the view context before delivering completion to the UI.
+    func insertLibraryRecord(_ create: @escaping (NSManagedObjectContext) throws -> NSManagedObject,
+                             completion: @escaping (Error?) -> Void) {
+        container.performBackgroundTask { worker in
+            do {
+                let record = try create(worker)
+                try worker.save()
+                let id = record.objectID
+                self.context.perform {
+                    NSManagedObjectContext.mergeChanges(fromRemoteContextSave:
+                        [NSInsertedObjectsKey: [id]], into: [self.context])
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    completion(nil)
+                }
+            } catch {
+                worker.rollback()
+                self.context.perform { completion(error) }
+            }
+        }
+    }
 	
 	func saveContext() {
         DispatchQueue.main.async {

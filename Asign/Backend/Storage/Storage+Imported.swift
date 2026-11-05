@@ -21,46 +21,16 @@ extension Storage {
 		
 		completion: @escaping (Error?) -> Void
 	) {
-		// `context` is the container's `viewContext`, which is bound to the
-		// main queue. This body used to run wherever it was called from —
-		// and the import path calls it from `AppFileHandler.addToDatabase()`,
-		// which lives inside `FR.handlePackageFile`'s detached task. So a
-		// background thread was inserting into a main-queue context while
-		// `LibraryView`'s @FetchRequests were reading from that same context
-		// on the main thread.
-		//
-		// Core Data doesn't fail loudly on that. It takes its internal locks
-		// out of order, and when the timing lines up the app simply stops —
-		// no crash, no log, nothing written badly, which is why a relaunch
-		// and a retry of the exact same files works fine. Bulk import runs
-		// concurrent workers, which is where the race actually showed up.
-		//
-		// `perform` hops onto the context's own queue before touching
-		// anything. It also puts the haptic — a UIKit object that was being
-		// constructed and fired off the main thread — back where it belongs.
-		context.perform {
-			let new = Imported(context: self.context)
-			
-			new.uuid = uuid
-			new.source = source
-			new.date = Date()
-			// could possibly be nil, but thats fine.
-			// ?
-			new.identifier = appIdentifier
-			new.name = appName
-			new.icon = appIcon
-			new.version = appVersion
-			
-			// Complete only after the record is persisted, so the importer can
-			// restore its source IPA if the save fails (for example, disk full).
-			do {
-				try self.context.save()
-				UIImpactFeedbackGenerator(style: .light).impactOccurred()
-				completion(nil)
-			} catch {
-				self.context.delete(new)
-				completion(error)
-			}
-		}
+		insertLibraryRecord({ worker in
+            let new = Imported(context: worker)
+            new.uuid = uuid
+            new.source = source
+            new.date = Date()
+            new.identifier = appIdentifier
+            new.name = appName
+            new.icon = appIcon
+            new.version = appVersion
+            return new
+        }, completion: completion)
 	}
 }

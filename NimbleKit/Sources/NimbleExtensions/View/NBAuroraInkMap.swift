@@ -39,6 +39,56 @@ struct NBAuroraInkRows: Hashable, Sendable {
     }
 }
 
+/// Immutable color strips are cropped and compared on the Metal worker. Main
+/// only looks up a prepared sample and publishes changed sample identities.
+@available(iOS 17.0, tvOS 17.0, *)
+final class NBAuroraInkSample: @unchecked Sendable {
+    let identity: NBAuroraShaderIdentity
+    let rows: NBAuroraInkRows
+    let bytes: Data
+    let argument: Shader.Argument
+
+    init(identity: NBAuroraShaderIdentity, rows: NBAuroraInkRows, bytes: Data) {
+        self.identity = identity
+        self.rows = rows
+        self.bytes = bytes
+        argument = .data(bytes)
+    }
+}
+
+@available(iOS 17.0, tvOS 17.0, *)
+final class NBAuroraInkFrame: @unchecked Sendable {
+    let identity: NBAuroraShaderIdentity
+    private let full: NBAuroraInkSample
+    private let samples: [NBAuroraInkRows: NBAuroraInkSample]
+
+    init(identity: NBAuroraShaderIdentity, bytes: Data, rows: Set<NBAuroraInkRows>,
+         previous: NBAuroraInkFrame?) {
+        self.identity = identity
+        func sample(_ rows: NBAuroraInkRows, _ data: Data) -> NBAuroraInkSample {
+            if let old = previous?.sample(for: rows), old.rows == rows,
+               old.identity == identity, old.bytes == data { return old }
+            return NBAuroraInkSample(identity: identity, rows: rows, bytes: data)
+        }
+        full = sample(.full, bytes)
+        var strips: [NBAuroraInkRows: NBAuroraInkSample] = [:]
+        let stride = NBAuroraInkMapFormat.width * 4
+        // Only currently visible, unique strips are prepared. The immutable
+        // frame never accumulates strips from previous scrolling positions.
+        for rows in rows where rows != .full {
+            let data = bytes.subdata(in: (rows.first * stride)..<((rows.first + rows.count) * stride))
+            strips[rows] = sample(rows, data)
+        }
+        samples = strips
+    }
+
+    func sample(for rows: NBAuroraInkRows) -> NBAuroraInkSample {
+        // A newly visible label (or scrolling over a frozen sky) can use the
+        // exact full map until a matching strip is prepared. No resampling.
+        samples[rows] ?? full
+    }
+}
+
 /// A scope owns its lease; the map keeps only a weak reference to it. Dropped
 /// scopes cannot leave a display link running if onDisappear is missed.
 @available(iOS 17.0, tvOS 17.0, *)
@@ -60,11 +110,6 @@ final class NBAuroraInkPaint: ObservableObject {
     fileprivate func receive(_ frame: NBAuroraInkMap.Frame?, rows: NBAuroraInkRows = .full) {
         let next = frame?.sample(for: rows)
         guard sample !== next else { return }
-        if let sample, let next, sample.identity == next.identity,
-           sample.rows == next.rows, sample.bytes == next.bytes {
-            // A changing sky elsewhere must not redraw an unchanged label.
-            return
-        }
         sample = next
     }
 }
@@ -74,46 +119,8 @@ final class NBAuroraInkPaint: ObservableObject {
 final class NBAuroraInkMap {
     static let shared = NBAuroraInkMap()
 
-    final class Sample {
-        let identity: NBAuroraShaderIdentity
-        let rows: NBAuroraInkRows
-        let bytes: Data
-        let argument: Shader.Argument
-
-        init(identity: NBAuroraShaderIdentity, rows: NBAuroraInkRows, bytes: Data) {
-            self.identity = identity
-            self.rows = rows
-            self.bytes = bytes
-            argument = .data(bytes)
-        }
-    }
-
-    final class Frame {
-        let identity: NBAuroraShaderIdentity
-        private let bytes: Data
-        private var samples: [NBAuroraInkRows: Sample] = [:]
-        private var cachedByteCount = 0
-
-        init(identity: NBAuroraShaderIdentity, bytes: Data) {
-            self.identity = identity
-            self.bytes = bytes
-        }
-
-        func sample(for rows: NBAuroraInkRows) -> Sample {
-            if let sample = samples[rows] { return sample }
-            let stride = NBAuroraInkMapFormat.width * 4
-            let cropped = rows == .full ? bytes
-                : bytes.subdata(in: (rows.first * stride)..<((rows.first + rows.count) * stride))
-            let sample = Sample(identity: identity, rows: rows, bytes: cropped)
-            // Frozen maps survive scrolling. Bound their cache rather than
-            // retaining every strip ever visited with Reduce Motion enabled.
-            if cachedByteCount + cropped.count <= bytes.count * 2 {
-                samples[rows] = sample
-                cachedByteCount += cropped.count
-            }
-            return sample
-        }
-    }
+    typealias Sample = NBAuroraInkSample
+    typealias Frame = NBAuroraInkFrame
 
     private(set) var animated: Frame?
     private(set) var still: Frame?
@@ -217,7 +224,12 @@ final class NBAuroraInkMap {
         inFlight = true
         refreshPending = false
         let generation = generation
-        worker.render(identity: identity.values, time: time) { [weak self] bytes in
+        let rows = Set(leases.values.compactMap { entry -> NBAuroraInkRows? in
+            guard let lease = entry.value, lease.active, lease.reduceMotion == frozen else { return nil }
+            return lease.rows
+        })
+        worker.render(identity: identity, time: time, rows: rows,
+                      previous: frozen ? still : animated) { [weak self] frame in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.inFlight = false
@@ -228,9 +240,8 @@ final class NBAuroraInkMap {
                     return
                 }
                 // A shuffle during GPU work must not publish the previous sky.
-                if let bytes, identity == AuroraSession.shared.identity.shaderIdentity,
+                if let frame, identity == AuroraSession.shared.identity.shaderIdentity,
                    self.leases.values.contains(where: { $0.value?.active == true }) {
-                    let frame = Frame(identity: identity, bytes: bytes)
                     self.consecutiveFailures = 0
                     if frozen { self.still = frame } else { self.animated = frame }
                     for lease in self.leases.values {
@@ -238,7 +249,7 @@ final class NBAuroraInkMap {
                               client.reduceMotion == frozen else { continue }
                         client.paint.receive(frame, rows: client.rows)
                     }
-                } else if bytes == nil, identity == AuroraSession.shared.identity.shaderIdentity,
+                } else if frame == nil, identity == AuroraSession.shared.identity.shaderIdentity,
                           self.leases.values.contains(where: { $0.value?.active == true }) {
                     self.consecutiveFailures += 1
                     if self.consecutiveFailures < 2 {
@@ -292,15 +303,20 @@ private final class NBAuroraInkWorker: @unchecked Sendable {
         let output: any MTLTexture
     }
 
-    func render(identity: [Float], time: Float, completion: @escaping @Sendable (Data?) -> Void) {
+    func render(identity: NBAuroraShaderIdentity, time: Float, rows: Set<NBAuroraInkRows>,
+                previous: NBAuroraInkFrame?,
+                completion: @escaping @Sendable (NBAuroraInkFrame?) -> Void) {
         queue.async {
-            let image = autoreleasepool { self.render(identity: identity, time: time) }
-            if image == nil {
+            let frame = autoreleasepool { () -> NBAuroraInkFrame? in
+                guard let bytes = self.render(identity: identity.values, time: time) else { return nil }
+                return NBAuroraInkFrame(identity: identity, bytes: bytes, rows: rows, previous: previous)
+            }
+            if frame == nil {
                 // Recreate failed Metal resources on the next bounded attempt.
                 self.backend = nil
                 self.attemptedSetup = false
             }
-            completion(image)
+            completion(frame)
         }
     }
 

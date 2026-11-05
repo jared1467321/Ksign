@@ -295,7 +295,9 @@ final class ArchiveHandler: NSObject, FileManagerDelegate {
 	// the payload from this directory, so it has to survive until the install
 	// reaches a terminal state.
 	static func cleanup(workDir: URL) {
-		autoreleasepool { try? FileManager.default.removeItem(at: workDir) }
+        let remove: @Sendable () -> Void = { autoreleasepool { try? FileManager.default.removeItem(at: workDir) } }
+        if Thread.isMainThread { DispatchQueue.global(qos: .utility).async(execute: remove) }
+        else { remove() }
 	}
 	
 	func cleanup() {

@@ -55,10 +55,12 @@ extension Storage {
 		return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
 	}
 	
-	func deleteApp(for app: AppInfoPresentable) {
+	func deleteApp(for app: AppInfoPresentable, removingFiles: Bool = true) {
 		do {
-			if let url = getUuidDirectory(for: app) {
-				try? FileManager.default.removeItem(at: url)
+			if removingFiles, let url = getUuidDirectory(for: app) {
+                DispatchQueue.global(qos: .utility).async {
+                    try? FileManager.default.removeItem(at: url)
+                }
 			}
 			if let object = app as? NSManagedObject {
 				context.delete(object)

@@ -112,64 +112,33 @@ struct DefaultTweaksView: View {
 	}
 
 	private func _delete(_ tweak: URL) {
-		do {
-			try FileManager.default.removeItem(at: tweak)
-			_setEnabled(false, for: tweak.lastPathComponent)
-			_loadTweaks()
-		} catch {
-			print("Error deleting tweak: \(error)")
-		}
-		_pendingDeletion = nil
-	}
+        _pendingDeletion = nil
+        Task { @MainActor in
+            do {
+                try await BackgroundFileWork.perform { try FileManager.default.removeItem(at: tweak) }
+                _setEnabled(false, for: tweak.lastPathComponent)
+                _loadTweaks()
+            } catch { print("Error deleting tweak: \(error)") }
+        }
+    }
 
-	private func _loadTweaks() {
-		let tweaksDir = FileManager.default.tweaks
-		guard let files = try? FileManager.default.contentsOfDirectory(
-			at: tweaksDir,
-			includingPropertiesForKeys: nil
-		) else {
-			_tweaksInDirectory = []
-			return
-		}
+    private func _loadTweaks() {
+        let directory = FileManager.default.tweaks
+        Task { @MainActor in
+            _tweaksInDirectory = (try? await BackgroundFileWork.perform { TweakFileStore.list(in: directory) }) ?? []
+        }
+    }
 
-		_tweaksInDirectory = files.filter { url in
-			let ext = url.pathExtension.lowercased()
-			return ext == "dylib" || ext == "deb" || ext == "framework" || ext == "bundle"
-		}
-	}
-
-	private func _importTweaks(urls: [URL]) {
-		guard !urls.isEmpty else { return }
-		let tweaksDir = FileManager.default.tweaks
-
-		do {
-			try FileManager.default.createDirectoryIfNeeded(at: tweaksDir)
-		} catch {
-			print("Error creating tweaks directory: \(error)")
-			return
-		}
-
-		let allowedExtensions = Set(["dylib", "deb", "framework", "bundle"])
-
-		for url in urls {
-			let ext = url.pathExtension.lowercased()
-			guard allowedExtensions.contains(ext) else { continue }
-
-			let destinationURL = tweaksDir.appendingPathComponent(url.lastPathComponent)
-			do {
-				if FileManager.default.fileExists(atPath: destinationURL.path) {
-					try FileManager.default.removeItem(at: destinationURL)
-				}
-				try FileManager.default.copyItem(at: url, to: destinationURL)
-				// Imported here on purpose, so enable it by default.
-				_setEnabled(true, for: destinationURL.lastPathComponent)
-			} catch {
-				print("Error copying tweak file: \(error)")
-			}
-		}
-
-		_loadTweaks()
-	}
+    private func _importTweaks(urls: [URL]) {
+        let directory = FileManager.default.tweaks
+        Task { @MainActor in
+            let imported = (try? await BackgroundFileWork.perform {
+                TweakFileStore.importFiles(urls, to: directory)
+            }) ?? []
+            for url in imported { _setEnabled(true, for: url.lastPathComponent) }
+            _loadTweaks()
+        }
+    }
 
 	private func _setEnabled(_ isOn: Bool, for name: String) {
 		var list = options.defaultInjectionDylibs ?? []

@@ -66,7 +66,7 @@ final class DeviceInstallationManager: ObservableObject {
         else if canCreatePairing(), LocalDeviceVPN.extensionBundleIdentifier != nil,
                 !legacyPairingExists() { mode = .builtIn }
         else { mode = .manual }
-        DevicePairingStore.removeWorkingCopy()
+        DevicePairingStore.scheduleWorkingCopyRemoval()
     }
 
     static var legacyPairingPath: String {
@@ -207,7 +207,7 @@ final class DeviceInstallationManager: ObservableObject {
         vpn.disconnectIfOwned()
         configuredMode = nil
         do {
-            try DevicePairingStore.reset()
+            try await DevicePairingStore.reset()
             // Do not silently reuse an imported pairing after the user asks to
             // pair again. Keep that file intact for Manual Setup.
             defaults.set(canCreatePairing(), forKey: Self.freshPairingKey)
@@ -345,11 +345,11 @@ final class DeviceInstallationManager: ObservableObject {
         // Validate VPN provisioning before asking for pairing consent.
         try await vpn.connect(restarting: needsFreshPairing)
         try Task.checkCancellation()
-        var record = try DevicePairingStore.load()
+        var record = try await DevicePairingStore.load()
         let usesLegacyPairing = record == nil && legacyPairingExists() && !needsFreshPairing
         let reusedPairing = record != nil || usesLegacyPairing
         if record == nil && !usesLegacyPairing { record = try await createPairing() }
-        try configurePairing(record)
+        try await configurePairing(record)
         phase = .connecting
         do {
             try await HeartbeatManager.shared.prepareInstallationConnection()
@@ -376,7 +376,7 @@ final class DeviceInstallationManager: ObservableObject {
                 try Task.checkCancellation()
                 // Keep the previous credentials until replacement pairing succeeds.
                 record = try await createPairing()
-                try configurePairing(record)
+                try await configurePairing(record)
                 phase = .connecting
                 try await HeartbeatManager.shared.prepareInstallationConnection()
             }
@@ -388,14 +388,14 @@ final class DeviceInstallationManager: ObservableObject {
         phase = .pairing
         let record = try await DevicePairingService.shared.pair()
         try Task.checkCancellation()
-        try DevicePairingStore.save(record)
+        try await DevicePairingStore.save(record)
         defaults.set(false, forKey: Self.freshPairingKey)
         return record
     }
 
-    private func configurePairing(_ record: DevicePairingRecord?) throws {
+    private func configurePairing(_ record: DevicePairingRecord?) async throws {
         if let record {
-            HeartbeatManager.configurePairingPath(try DevicePairingStore.materialize(record).path)
+            HeartbeatManager.configurePairingPath(try await DevicePairingStore.materialize(record).path)
         } else {
             HeartbeatManager.configurePairingPath(nil)
         }
@@ -408,7 +408,7 @@ final class DeviceInstallationManager: ObservableObject {
             self.configuredMode = nil
             self.needsConnectionRecovery = false
             HeartbeatManager.configurePairingPath(nil)
-            DevicePairingStore.removeWorkingCopy()
+            await DevicePairingStore.removeWorkingCopy()
             let restoreVPN = await self.vpn.finishSession()
             if case .ready = self.phase { self.phase = .configured }
             // New work waits for cleanup but can arrive while the tunnel is

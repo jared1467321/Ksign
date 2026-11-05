@@ -8,7 +8,7 @@
 import Foundation
 import UIKit
 
-struct FileItem: Identifiable, Hashable {
+struct FileItem: Identifiable, Hashable, Sendable {
     var id: String { url.path }
     let name: String
     let url: URL

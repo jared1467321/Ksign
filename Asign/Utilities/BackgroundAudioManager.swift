@@ -90,6 +90,9 @@ final class BackgroundAudioManager {
 	// Reached from the main actor (installs) and from URLSession delegate
 	// queues (downloads), so state is lock-guarded rather than isolated.
 	private let _lock = NSLock()
+    private let controlQueue = DispatchQueue(label: "Asign.background-audio", qos: .utility)
+    private let runningLock = NSLock()
+    private var cachedRunning = false
 
 	private let _engine = AVAudioEngine()
 	private var _silence: AVAudioSourceNode?
@@ -169,16 +172,21 @@ final class BackgroundAudioManager {
 	}
 
 	var isRunning: Bool {
-		_lock.lock()
-		defer { _lock.unlock() }
-		return _engine.isRunning
-	}
+        runningLock.lock()
+        defer { runningLock.unlock() }
+        return cachedRunning
+    }
+
 
 	// MARK: - Claims
 
 	// Idempotent. Call it as often as you like; the matching `release` is what
 	// gives it up.
-	func claim(_ owner: Owner) {
+    func claim(_ owner: Owner) {
+        controlQueue.async { self._claim(owner) }
+    }
+
+    private func _claim(_ owner: Owner) {
 		_lock.lock()
 		let inserted = _owners.insert(owner).inserted
 		_lock.unlock()
@@ -196,7 +204,11 @@ final class BackgroundAudioManager {
 
 	// Idempotent, so a caller that releases twice — or on a path it isn't sure
 	// ran — can't pull the keep-alive out from under anyone else.
-	func release(_ owner: Owner) {
+    func release(_ owner: Owner) {
+        controlQueue.async { self._release(owner) }
+    }
+
+    private func _release(_ owner: Owner) {
 		_lock.lock()
 		let removed = _owners.remove(owner) != nil
 		_lock.unlock()
@@ -219,7 +231,11 @@ final class BackgroundAudioManager {
 	// an unbalanced pair here leaks the engine the same way the old integer
 	// count did. An owner used with `begin`/`end` must never also be used with
 	// `claim`/`release`.
-	func begin(_ owner: Owner) {
+    func begin(_ owner: Owner) {
+        controlQueue.async { self._begin(owner) }
+    }
+
+    private func _begin(_ owner: Owner) {
 		_lock.lock()
 		let count = (_counts[owner] ?? 0) + 1
 		_counts[owner] = count
@@ -234,7 +250,11 @@ final class BackgroundAudioManager {
 		_evaluate(force: count == 1)
 	}
 
-	func end(_ owner: Owner) {
+    func end(_ owner: Owner) {
+        controlQueue.async { self._end(owner) }
+    }
+
+    private func _end(_ owner: Owner) {
 		_lock.lock()
 		let previous = _counts[owner] ?? 0
 		let count = max(0, previous - 1)
@@ -261,16 +281,20 @@ final class BackgroundAudioManager {
 	// 0.4s for aggregate progress and calls this from there, which is the
 	// tightest check during the case that matters most; the watchdog below
 	// covers everything else.
-	func ensureRunning() {
-		_evaluate(force: false)
-	}
+    func ensureRunning() {
+        controlQueue.async { self._evaluate(force: false) }
+    }
 
 	// MARK: - Invisible BG task claims
 
 	// These are intentionally string-keyed so BackgroundTaskManager can mirror its
 	// own workflow/download identities without exposing them through this manager's
 	// public Owner enum or status UI. Calls are idempotent.
-	func claimSystemTask(_ key: String) {
+    func claimSystemTask(_ key: String) {
+        controlQueue.async { self._claimSystemTask(key) }
+    }
+
+    private func _claimSystemTask(_ key: String) {
 		_lock.lock()
 		let inserted = _systemTaskClaims.insert(key).inserted
 		_lock.unlock()
@@ -278,7 +302,11 @@ final class BackgroundAudioManager {
 		_evaluate(force: inserted)
 	}
 
-	func releaseSystemTask(_ key: String) {
+    func releaseSystemTask(_ key: String) {
+        controlQueue.async { self._releaseSystemTask(key) }
+    }
+
+    private func _releaseSystemTask(_ key: String) {
 		_lock.lock()
 		let removed = _systemTaskClaims.remove(key) != nil
 		_lock.unlock()
@@ -461,7 +489,7 @@ final class BackgroundAudioManager {
 			while !Task.isCancelled {
 				try? await Task.sleep(nanoseconds: 2_000_000_000)
 				guard let self, !Task.isCancelled else { break }
-				self._evaluate(force: false)
+                self.controlQueue.async { self._evaluate(force: false) }
 			}
 		}
 	}
@@ -473,7 +501,11 @@ final class BackgroundAudioManager {
 
 	// MARK: - System events
 
-	private func _handleInterruption(_ notification: Notification) {
+    private func _handleInterruption(_ notification: Notification) {
+        controlQueue.async { self._handleInterruptionOnQueue(notification) }
+    }
+
+    private func _handleInterruptionOnQueue(_ notification: Notification) {
 		guard
 			let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
 			let type = AVAudioSession.InterruptionType(rawValue: raw)
@@ -518,7 +550,11 @@ final class BackgroundAudioManager {
 
 	// Route changes and hardware reconfiguration stop the engine without
 	// telling anyone. `isRunning` catches most of it; this catches it sooner.
-	private func _handleConfigurationChange() {
+    private func _handleConfigurationChange() {
+        controlQueue.async { self._handleConfigurationChangeOnQueue() }
+    }
+
+    private func _handleConfigurationChangeOnQueue() {
 		_lock.lock()
 		_needsRestart = true
 		// Same reasoning as the interruption handler above.
@@ -539,6 +575,9 @@ final class BackgroundAudioManager {
 	private var _status: BackgroundAudioStatus { .shared }
 
 	private func _publishLocked() {
+        runningLock.lock()
+        cachedRunning = _engine.isRunning
+        runningLock.unlock()
 		let visibleEnabled = OptionsManager.shared.options.backgroundAudio && _hasVisibleClaimsLocked
 
 		if visibleEnabled {

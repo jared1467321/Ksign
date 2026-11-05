@@ -12,10 +12,27 @@ final class ExtractItem: ObservableObject, Identifiable {
 	@Published var progress: Double = 0.0
 	let id: String
 	let fileName: String
+    private var presentation: ForegroundValueDelivery<Double>!
+    private let presentationLock = NSLock()
+    private var acceptsProgress = true
+    func report(_ progress: Double) {
+        presentationLock.lock()
+        if acceptsProgress { presentation.submit(progress) }
+        presentationLock.unlock()
+    }
+    func stopPresentation() {
+        presentationLock.lock()
+        acceptsProgress = false
+        presentation.cancel()
+        presentationLock.unlock()
+    }
 
 	init(id: String = UUID().uuidString, fileName: String) {
 		self.id = id
 		self.fileName = fileName
+        presentation = ForegroundValueDelivery { [weak self] value in
+            if self?.progress != value { self?.progress = value }
+        }
 	}
 }
 
@@ -40,19 +57,35 @@ final class ExtractManager: ObservableObject {
 	private var _activityLastTouched: [String: Int] = [:]
 	private var _activitySequence = 0
 
-	private init() { }
+    private let progressLock = NSLock()
+    private var pendingProgress: [String: Double] = [:]
+    private var progressDelivery: LatestValueDelivery<[String: Double]>!
+
+    private init() {
+        progressDelivery = LatestValueDelivery(queue: _activityQueue) { [weak self] updates in
+            guard let self else { return }
+            var changed = false
+            for (id, value) in updates where self._activeActivityItemIDs.contains(id) {
+                guard self._activityProgress[id] != value else { continue }
+                self._activityProgress[id] = value
+                self._activitySequence += 1
+                self._activityLastTouched[id] = self._activitySequence
+                changed = true
+            }
+            if changed { self._publishActivity() }
+        }
+    }
 
 	@discardableResult
 	func start(fileName: String) -> ExtractItem {
 		let item = ExtractItem(fileName: fileName)
-		_startActivity(id: item.id, fileName: fileName)
 		// Submit while this foreground/user-initiated start call is still active;
 		// the main-queue list mutation below remains the UI source of truth.
 		BackgroundTaskManager.shared.claim(.extracting)
+        _startActivity(id: item.id, fileName: fileName)
 
 		DispatchQueue.main.async {
 			self.extractItems.append(item)
-			self._updateBackgroundTaskState()
 		}
 		return item
 	}
@@ -60,35 +93,31 @@ final class ExtractManager: ObservableObject {
 	func updateProgress(for item: ExtractItem, progress: Double) {
 		let clamped = max(0.0, min(1.0, progress))
 
-		let liveFraction = clamped
+        progressLock.lock()
+        pendingProgress[item.id] = clamped
+        let snapshot = pendingProgress
+        progressDelivery.submit(snapshot)
+        progressLock.unlock()
 
-		_activityQueue.async {
-			guard self._activityItemIDs.contains(item.id) else { return }
-			guard self._activityProgress[item.id] != liveFraction else { return }
-			self._activityProgress[item.id] = liveFraction
-			self._activitySequence += 1
-			self._activityLastTouched[item.id] = self._activitySequence
-			self._publishActivity()
-		}
-
-		DispatchQueue.main.async {
-			item.progress = clamped
-		}
+        item.report(clamped)
 	}
 
 	func finish(item: ExtractItem, succeeded: Bool = true) {
+        item.stopPresentation()
+        progressLock.lock()
+        pendingProgress.removeValue(forKey: item.id)
+        progressLock.unlock()
 		_finishActivity(id: item.id, succeeded: succeeded)
 
 		DispatchQueue.main.async {
 			if let idx = self.extractItems.firstIndex(where: { $0.id == item.id }) {
 				self.extractItems.remove(at: idx)
 			}
-			self._updateBackgroundTaskState()
 		}
 	}
 
 	private func _startActivity(id: String, fileName: String) {
-		_activityQueue.sync {
+		_activityQueue.async { [self] in
 			if _activeActivityItemIDs.isEmpty {
 				_activityItemIDs.removeAll()
 				_completedActivityItemIDs.removeAll()
@@ -106,12 +135,13 @@ final class ExtractManager: ObservableObject {
 			_activityNames[id] = fileName
 			_activitySequence += 1
 			_activityLastTouched[id] = _activitySequence
+            BackgroundTaskManager.shared.claim(.extracting)
 			_publishActivity()
 		}
 	}
 
 	private func _finishActivity(id: String, succeeded: Bool) {
-		_activityQueue.sync {
+		_activityQueue.async { [self] in
 			guard _activityItemIDs.contains(id) else { return }
 			_activeActivityItemIDs.remove(id)
 			if succeeded {
@@ -127,6 +157,9 @@ final class ExtractManager: ObservableObject {
 			_activitySequence += 1
 			_activityLastTouched[id] = _activitySequence
 			_publishActivity()
+            if _activeActivityItemIDs.isEmpty {
+                BackgroundTaskManager.shared.release(.extracting, success: _failedActivityItemIDs.isEmpty)
+            }
 		}
 	}
 
@@ -162,15 +195,4 @@ final class ExtractManager: ObservableObject {
 		)
 	}
 
-	// Identity-claimed off the live list, the same way `DownloadManager` does
-	// it: the list is already the source of truth for whether anything is
-	// extracting, so deriving the claim from it can't drift out of sync.
-	private func _updateBackgroundTaskState() {
-		if !extractItems.isEmpty {
-			BackgroundTaskManager.shared.claim(.extracting)
-		} else {
-			let failed = !_failedActivityItemIDs.isEmpty
-			BackgroundTaskManager.shared.release(.extracting, success: !failed)
-		}
-	}
 }

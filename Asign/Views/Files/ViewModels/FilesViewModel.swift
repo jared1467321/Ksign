@@ -11,6 +11,8 @@ import SwiftUI
 
 
 class FilesViewModel: ObservableObject {
+    private var listingGeneration = UUID()
+
     @Published var files: [FileItem] = []
     @Published var currentDirectory: URL
     @Published var selectedItems: Set<FileItem> = []
@@ -19,7 +21,7 @@ class FilesViewModel: ObservableObject {
     @Published var selectedItem: FileItem?
     @Published var showDirectoryPicker = false
     
-    enum SortOption: String, CaseIterable {
+    enum SortOption: String, CaseIterable, Sendable {
         case name
         case date
         case type
@@ -48,40 +50,47 @@ class FilesViewModel: ObservableObject {
     }
     
     func loadFiles() {
-        let fileManager = FileManager.default
-        
-        do {
-            let contents = try fileManager.contentsOfDirectory(at: currentDirectory, includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey, .fileSizeKey])
-            
-            let mapped = contents.compactMap { url in
-                do {
-                    let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .creationDateKey, .fileSizeKey])
-                    let isDirectory = resourceValues.isDirectory ?? false
-                    let creationDate = resourceValues.creationDate
-                    let size = resourceValues.fileSize ?? 0
-                    
-                    return FileItem(
-                        name: url.lastPathComponent,
-                        url: url,
-                        size: Int64(size),
-                        creationDate: creationDate,
-                        isDirectory: isDirectory
-                    )
-                } catch {
-                    print("Error getting file attributes: \(error)")
-                    return nil
+        let directory = currentDirectory
+        let generation = UUID()
+        listingGeneration = generation
+        let sort = sortOption
+        let ascending = sortAscending
+        Task { @MainActor [weak self] in
+            do {
+                let mapped = try await BackgroundFileWork.perform {
+                    let contents = try FileManager.default.contentsOfDirectory(at: directory,
+                        includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey, .fileSizeKey])
+                    let items = contents.compactMap { url -> FileItem? in
+                        guard let values = try? url.resourceValues(forKeys:
+                            [.isDirectoryKey, .creationDateKey, .fileSizeKey]) else { return nil }
+                        return FileItem(name: url.lastPathComponent, url: url,
+                            size: Int64(values.fileSize ?? 0), creationDate: values.creationDate,
+                            isDirectory: values.isDirectory ?? false)
+                    }
+                    return Self.sorted(items, by: sort, ascending: ascending)
                 }
-            }
-            files = _applySort(to: mapped)
-        } catch {
-            DispatchQueue.main.async {
-                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Error loading files: \(error.localizedDescription)"))
+                guard let self, self.currentDirectory == directory,
+                      self.listingGeneration == generation else { return }
+                self.files = mapped
+            } catch {
+                guard let self, self.listingGeneration == generation else { return }
+                UIAlertController.showAlertWithOk(title: .localized("Error"),
+                    message: .localized("Error loading files: \(error.localizedDescription)"))
             }
         }
     }
-    
 
-    
+    private func changeFiles(_ body: @escaping @Sendable () throws -> Void) {
+        Task { @MainActor [weak self] in
+            do {
+                try await BackgroundFileWork.perform(body)
+                self?.loadFiles()
+            } catch {
+                UIAlertController.showAlertWithOk(title: .localized("Error"), message: error.localizedDescription)
+            }
+        }
+    }
+
     func deleteFile(_ fileItem: FileItem) {
         delete(items: [fileItem])
     }
@@ -101,53 +110,31 @@ class FilesViewModel: ObservableObject {
 
     private func delete(items: [FileItem]) {
         guard !items.isEmpty else { return }
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            let fileManager = FileManager.default
-            var errorMessages: [String] = []
-            
-            for item in items {
-                do {
-                    try fileManager.removeItem(at: item.url)
-                    
-                    DispatchQueue.main.async {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            if let index = self.files.firstIndex(where: { $0.url == item.url }) {
-                                self.files.remove(at: index)
-                                self.files = self._applySort(to: self.files)
-                            }
-                        }
-                    }
-                } catch {
-                    errorMessages.append(item.name)
+        Task { @MainActor [weak self] in
+            let errors = (try? await BackgroundFileWork.perform { () -> [String] in
+                var errors: [String] = []
+                for item in items {
+                    do { try FileManager.default.removeItem(at: item.url) }
+                    catch { errors.append(item.name) }
                 }
-            }
-            
-            DispatchQueue.main.async {
-                if !errorMessages.isEmpty {
-                    let count = errorMessages.count
-                    UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Failed to delete \(count) item\(count == 1 ? "" : "s")"))
-                }
+                return errors
+            }) ?? items.map(\.name)
+            self?.loadFiles()
+            if !errors.isEmpty {
+                let count = errors.count
+                UIAlertController.showAlertWithOk(title: .localized("Error"),
+                    message: .localized("Failed to delete \(count) item\(count == 1 ? "" : "s")"))
             }
         }
     }
-    
+
     func createNewFolder(name: String) {
         guard !name.isEmpty else { return }
         
         let sanitizedName = sanitizeFileName(name)
         let newFolderURL = currentDirectory.appendingPathComponent(sanitizedName)
         
-        do {
-            try FileManager.default.createDirectory(at: newFolderURL, withIntermediateDirectories: true, attributes: nil)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                loadFiles()
-            }
-        } catch {
-            DispatchQueue.main.async {
-                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Error creating folder: \(error.localizedDescription)"))
-            }
-        }
+        changeFiles { try FileManager.default.createDirectory(at: newFolderURL, withIntermediateDirectories: true) }
     }
     
     func createNewTextFile(name: String) {
@@ -156,17 +143,9 @@ class FilesViewModel: ObservableObject {
         
         let sanitizedName = sanitizeFileName(trimmed)
         let newURL = currentDirectory.appendingPathComponent(sanitizedName)
-        let finalURL = generateUniqueFileName(for: newURL)
-        
-        do {
+        changeFiles {
+            let finalURL = Self.generateUniqueFileName(for: newURL)
             try Data().write(to: finalURL)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                loadFiles()
-            }       
-        } catch {
-            DispatchQueue.main.async {
-                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Error creating text file: \(error.localizedDescription)"))
-            }
         }
     }
     
@@ -176,16 +155,7 @@ class FilesViewModel: ObservableObject {
         let sanitizedName = sanitizeFileName(newName)
         let newURL = currentDirectory.appendingPathComponent(sanitizedName)
         
-        do {
-            try FileManager.default.moveItem(at: item.url, to: newURL)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                loadFiles()
-            }
-        } catch {
-            DispatchQueue.main.async {
-                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized("Error renaming file: \(error.localizedDescription)"))
-            }
-        }
+        changeFiles { try FileManager.default.moveItem(at: item.url, to: newURL) }
     }
     
 
@@ -242,7 +212,8 @@ class FilesViewModel: ObservableObject {
     func importFiles(urls: [URL]) {
         guard !urls.isEmpty else { return }
         
-        DispatchQueue.global(qos: .userInitiated).async {
+        let directory = currentDirectory
+        DispatchQueue.global(qos: .utility).async {
             let fileManager = FileManager.default
             var failureCount = 0
             
@@ -252,8 +223,8 @@ class FilesViewModel: ObservableObject {
                         throw NSError(domain: "FileImportError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Source file not accessible: \(url.lastPathComponent)"])
                     }
                     
-                    let destinationURL = self.currentDirectory.appendingPathComponent(url.lastPathComponent)
-                    let finalDestinationURL = self.generateUniqueFileName(for: destinationURL)
+                    let destinationURL = directory.appendingPathComponent(url.lastPathComponent)
+                    let finalDestinationURL = Self.generateUniqueFileName(for: destinationURL)
                     
                     try self.importSingleItem(from: url, to: finalDestinationURL)
                 } catch {
@@ -296,7 +267,7 @@ class FilesViewModel: ObservableObject {
     
 
     
-    private func generateUniqueFileName(for url: URL) -> URL {
+    private static func generateUniqueFileName(for url: URL) -> URL {
         let fileManager = FileManager.default
         
         if !fileManager.fileExists(atPath: url.path) {
@@ -370,10 +341,10 @@ class FilesViewModel: ObservableObject {
     func updateSort(option: SortOption, ascending: Bool) {
         sortOption = option
         sortAscending = ascending
-        files = _applySort(to: files)
+        loadFiles()
     }
     
-    private func _applySort(to files: [FileItem]) -> [FileItem] {
+    private static func sorted(_ files: [FileItem], by sortOption: SortOption, ascending sortAscending: Bool) -> [FileItem] {
         return files.sorted { a, b in
             switch sortOption {
             case .name:
@@ -400,7 +371,7 @@ class FilesViewModel: ObservableObject {
         }
     }
     
-    private func _fileType(for file: FileItem) -> String {
+    private static func _fileType(for file: FileItem) -> String {
         if file.isDirectory { return .localized("Folder") }
         let ext = file.url.pathExtension
         return ext.isEmpty ? .localized("Unknown") : ext.lowercased()

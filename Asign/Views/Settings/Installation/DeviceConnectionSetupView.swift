@@ -273,7 +273,7 @@ struct DeviceConnectionSettingsView: View {
     }
 
     private func refreshPairingStatus() {
-        hasSavedPairing = (try? DevicePairingStore.load()) != nil
+        Task { @MainActor in hasSavedPairing = (try? await DevicePairingStore.load()) != nil }
     }
 }
 

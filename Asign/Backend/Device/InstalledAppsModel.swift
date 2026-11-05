@@ -39,8 +39,10 @@ final class InstalledAppsModel: ObservableObject {
                 loadTask = nil
             }
             do {
+                let observed = try await Task.detached(priority: .utility) {
+                    try IDeviceManagedInstallRegistry.shared.snapshot()
+                }.value
                 let registry = IDeviceManagedInstallRegistry.shared
-                let observed = try registry.snapshot()
                 let installed = try await manager.installedApps()
                 try Task.checkCancellation()
                 let dated = try await Task.detached(priority: .userInitiated) {
@@ -121,7 +123,9 @@ final class InstalledAppsModel: ObservableObject {
                 background.report(.uninstalling, completed: uninstallCompleted, total: eligible.count,
                                   fraction: nil, detail: "Checking installed app", currentItem: app.name)
                 do {
-                    let request = try IDeviceUninstallRequest(installedApp: app)
+                    let request = try await Task.detached(priority: .utility) {
+                        try IDeviceUninstallRequest(installedApp: app)
+                    }.value
                     uninstallStatuses[app.id] = "Uninstalling…"
                     background.report(.uninstalling, detail: "Uninstalling \(app.name)")
                     let removed = try await manager.uninstall(request)

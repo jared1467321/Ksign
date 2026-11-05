@@ -176,10 +176,12 @@ enum FR {
                 // Source cleanup is part of the operation, before either
                 // completion callback. UI delivery can be delayed in background.
                 if options.removeApp {
+                    let directory = await MainActor.run {
+                        app.isSigned ? nil : Storage.shared.getUuidDirectory(for: app)
+                    }
+                    if let directory { try? FileManager.default.removeItem(at: directory) }
                     await MainActor.run {
-                        if !app.isSigned {
-                            Storage.shared.deleteApp(for: app)
-                        }
+                        if !app.isSigned { Storage.shared.deleteApp(for: app, removingFiles: false) }
                     }
                 }
 

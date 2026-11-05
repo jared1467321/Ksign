@@ -20,6 +20,53 @@ class Download: Identifiable, @unchecked Sendable, ObservableObject {
 	@Published var totalBytes: Int64 = 0
 	@Published var unpackageProgress: Double = 0.0
 	
+    private struct ProgressSnapshot {
+        var progress: Double = 0
+        var bytesDownloaded: Int64 = 0
+        var totalBytes: Int64 = 0
+        var unpackageProgress: Double = 0
+    }
+    private let progressLock = NSLock()
+    private var latestProgress = ProgressSnapshot()
+    private var acceptsProgress = true
+    private var presentation: ForegroundValueDelivery<ProgressSnapshot>!
+    private var systemProgress: LatestValueDelivery<Double>!
+
+    func reportNetwork(bytes: Int64, total: Int64) {
+        report { snapshot in
+            snapshot.progress = total > 0 ? Double(bytes) / Double(total) : 0
+            snapshot.bytesDownloaded = bytes
+            snapshot.totalBytes = total
+        }
+    }
+
+    func reportImport(_ fraction: Double) { report { $0.unpackageProgress = fraction } }
+
+    private func report(_ update: (inout ProgressSnapshot) -> Void) {
+        progressLock.lock()
+        guard acceptsProgress else { progressLock.unlock(); return }
+        update(&latestProgress)
+        let snapshot = latestProgress
+        presentation.submit(snapshot)
+        systemProgress.submit(onlyArchiving ? snapshot.unpackageProgress
+            : 0.3 * snapshot.unpackageProgress + 0.7 * snapshot.progress)
+        progressLock.unlock()
+    }
+
+    func stopPresentation() {
+        progressLock.lock()
+        acceptsProgress = false
+        presentation.cancel()
+        systemProgress.cancel()
+        progressLock.unlock()
+    }
+
+    func resumePresentation() {
+        progressLock.lock()
+        acceptsProgress = true
+        progressLock.unlock()
+    }
+
 	var overallProgress: Double {
 		onlyArchiving
 		? unpackageProgress
@@ -55,6 +102,16 @@ class Download: Identifiable, @unchecked Sendable, ObservableObject {
         self.url = url
 		self.onlyArchiving = onlyArchiving
         self.fileName = url.lastPathComponent
+        presentation = ForegroundValueDelivery { [weak self] snapshot in
+            guard let self else { return }
+            if self.progress != snapshot.progress { self.progress = snapshot.progress }
+            if self.bytesDownloaded != snapshot.bytesDownloaded { self.bytesDownloaded = snapshot.bytesDownloaded }
+            if self.totalBytes != snapshot.totalBytes { self.totalBytes = snapshot.totalBytes }
+            if self.unpackageProgress != snapshot.unpackageProgress { self.unpackageProgress = snapshot.unpackageProgress }
+        }
+        systemProgress = LatestValueDelivery(queue: DispatchQueue(label: "Asign.download-system-progress", qos: .utility)) { fraction in
+            BackgroundTaskManager.shared.updateProgress(for: id, progress: fraction)
+        }
     }
 }
 
@@ -153,6 +210,8 @@ class DownloadManager: NSObject, ObservableObject {
 		_importDepth = max(0, _importDepth - 1)
 	}
 	
+    private let transportLock = NSLock()
+    private var transportDownloads: [Int: Download] = [:]
     private var _session: URLSession!
     
     override init() {
@@ -174,9 +233,11 @@ class DownloadManager: NSObject, ObservableObject {
         
         let task = _session.downloadTask(with: url)
         download.task = task
-        task.resume()
-        
+        transportLock.lock()
+        transportDownloads[task.taskIdentifier] = download
+        transportLock.unlock()
         downloads.append(download)
+        task.resume()
 		BackgroundTaskManager.shared.startTask(for: id, filename: url.lastPathComponent)
         return download
     }
@@ -191,13 +252,22 @@ class DownloadManager: NSObject, ObservableObject {
 	}
     
     func resumeDownload(_ download: Download) {
+        download.resumePresentation()
         if let resumeData = download.resumeData {
             let task = _session.downloadTask(withResumeData: resumeData)
+            transportLock.lock()
+            if let old = download.task { transportDownloads.removeValue(forKey: old.taskIdentifier) }
+            transportDownloads[task.taskIdentifier] = download
+            transportLock.unlock()
             download.task = task
             task.resume()
             BackgroundTaskManager.shared.startTask(for: download.id, filename: download.fileName)
         } else if let url = download.task?.originalRequest?.url {
             let task = _session.downloadTask(with: url)
+            transportLock.lock()
+            if let old = download.task { transportDownloads.removeValue(forKey: old.taskIdentifier) }
+            transportDownloads[task.taskIdentifier] = download
+            transportLock.unlock()
             download.task = task
             task.resume()
             BackgroundTaskManager.shared.startTask(for: download.id, filename: download.fileName)
@@ -205,6 +275,7 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     func cancelDownload(_ download: Download) {
+        download.stopPresentation()
         download.task?.cancel()
         BackgroundTaskManager.shared.stopTask(for: download.id, success: false)
 
@@ -226,7 +297,9 @@ class DownloadManager: NSObject, ObservableObject {
 	}
 	
 	func getDownloadTask(by task: URLSessionDownloadTask) -> Download? {
-		return downloads.first(where: { $0.task == task })
+        transportLock.lock()
+        defer { transportLock.unlock() }
+        return transportDownloads[task.taskIdentifier]
 	}
 }
 
@@ -321,6 +394,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 				dl: dl,
 				liveActivityBatchToken: liveActivityBatchToken,
 				backgroundCompletion: { err in
+                    dl?.stopPresentation()
 					if let error = err {
 						continuation.resume(throwing: error)
 					} else {
@@ -368,17 +442,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let download = getDownloadTask(by: downloadTask) else { return }
         
-        DispatchQueue.main.async {
-            download.progress = totalBytesExpectedToWrite > 0
-			? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-			: 0
-            download.bytesDownloaded = totalBytesWritten
-            download.totalBytes = totalBytesExpectedToWrite
-            BackgroundTaskManager.shared.updateProgress(for: download.id, progress: download.overallProgress)
-        }
+        download.reportNetwork(bytes: totalBytesWritten, total: totalBytesExpectedToWrite)
     }
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer {
+            transportLock.lock()
+            transportDownloads.removeValue(forKey: task.taskIdentifier)
+            transportLock.unlock()
+        }
         guard
 			let _ = error,
 			let downloadTask = task as? URLSessionDownloadTask,
@@ -412,7 +484,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
         guard url.path.hasPrefix(staging.path) else { return }
 
-        try? FileManager.default.removeItem(at: url)
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
     }
 
     private func _notifyDownloadCompleted(fileName: String) {

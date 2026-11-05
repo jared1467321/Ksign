@@ -64,49 +64,38 @@ extension SigningAlternativeIconView {
 	}
 	
 	
-	private func _iconUrl(_ path: String) -> UIImage? {
-		if Storage.shared.isArchiveBacked(app) {
-			return _archiveIconImages[path]
-		}
-		guard let appDirectory = Storage.shared.getAppDirectory(for: app) else { return nil }
-		return UIImage(contentsOfFile: appDirectory.appendingPathComponent(path).relativePath)?.resizeToSquare()
-	}
-	
-	private func _loadAlternateIcons() {
-		if let archiveURL = Storage.shared.getArchiveURL(for: app) {
-			do {
-				let archivedApp = try ArchiveBackedApp(archiveURL: archiveURL)
-				guard let plistData = try archivedApp.data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024),
-					let infoPlist = try PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any]
-				else { return }
-				_loadAlternateIcons(from: infoPlist, archivedApp: archivedApp)
-			} catch {
-				print("[ArchiveBacked] Failed to load alternate icons: \(error)")
-			}
-			return
-		}
+	private func _iconUrl(_ path: String) -> UIImage? { _archiveIconImages[path] }
 
-		guard let appDirectory = Storage.shared.getAppDirectory(for: app) else { return }
-		let infoPlistPath = appDirectory.appendingPathComponent("Info.plist")
-		guard let infoPlist = NSDictionary(contentsOf: infoPlistPath) as? [String: Any] else { return }
-		_loadAlternateIcons(from: infoPlist, archivedApp: nil)
-	}
-
-	private func _loadAlternateIcons(from infoPlist: [String: Any], archivedApp: ArchiveBackedApp?) {
-		guard
-			let iconDict = infoPlist["CFBundleIcons"] as? [String: Any],
-			let alternateIconsDict = iconDict["CFBundleAlternateIcons"] as? [String: [String: Any]]
-		else { return }
-
-		_archiveIconImages.removeAll()
-		_alternateIcons = alternateIconsDict.compactMap { name, details in
-			guard let files = details["CFBundleIconFiles"] as? [String], let path = files.first else { return nil }
-			if let archivedApp,
-				let data = try? archivedApp.resourceData(named: path, maximumBytes: 32 * 1024 * 1024),
-				let image = UIImage(data: data)?.resizeToSquare() {
-				_archiveIconImages[path] = image
-			}
-			return (name, path)
-		}
-	}
+    private func _loadAlternateIcons() {
+        let snapshot = SigningAppSnapshot(app)
+        Task { @MainActor in
+            let result = try? await BackgroundFileWork.perform { () -> ([(name: String, path: String)], [String: UIImage]) in
+                let archive = try Storage.shared.getArchiveURL(for: snapshot).map { try ArchiveBackedApp(archiveURL: $0) }
+                let directory = archive == nil ? Storage.shared.getAppDirectory(for: snapshot) : nil
+                let info: [String: Any]?
+                if let archive, let data = try archive.data(relativePath: "Info.plist", maximumBytes: 16 * 1024 * 1024) {
+                    info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+                } else if let directory {
+                    info = NSDictionary(contentsOf: directory.appendingPathComponent("Info.plist")) as? [String: Any]
+                } else { info = nil }
+                guard let icons = info?["CFBundleIcons"] as? [String: Any],
+                      let alternates = icons["CFBundleAlternateIcons"] as? [String: [String: Any]] else { return ([], [:]) }
+                var rows: [(name: String, path: String)] = []
+                var images: [String: UIImage] = [:]
+                for (name, details) in alternates {
+                    guard let files = details["CFBundleIconFiles"] as? [String], let path = files.first else { continue }
+                    rows.append((name, path))
+                    if let archive, let data = try? archive.resourceData(named: path, maximumBytes: 32 * 1024 * 1024) {
+                        images[path] = UIImage(data: data)?.resizeToSquare()
+                    } else if let directory {
+                        images[path] = UIImage(contentsOfFile: directory.appendingPathComponent(path).path)?.resizeToSquare()
+                    }
+                }
+                return (rows, images)
+            }
+            guard !Task.isCancelled, let result else { return }
+            _alternateIcons = result.0
+            _archiveIconImages = result.1
+        }
+    }
 }

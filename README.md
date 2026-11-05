@@ -43,6 +43,22 @@ cached across frames and screens. Pane refraction runs only when panes exist;
 off-screen backdrops pause their animation. These optimizations retain the same
 Aurora animation and glass finishes.
 
+IPA Vault transfer callbacks, file writes, range scheduling and tuning run on a
+dedicated serial worker. Download and extraction progress reaches the UI through
+bounded latest-value mailboxes; system progress continues while the UI is busy
+or backgrounded. Pairing-store access, library-record saves, directory scans,
+signing artwork inspection and file cleanup also use background workers.
+Adaptive text keeps its existing map resolution, colors and animation cadence;
+the ink worker prepares and compares visible color strips, and stationary labels
+retain their geometry cache across unrelated progress updates.
+
+Run `python3 .github/scripts/check_ui_workers.py --swiftc /path/to/swiftc` on
+Linux with Swift 6 to check real local HTTP range transfers, pause/resume,
+cancellation, interrupted-transfer retries, background progress and UI snapshot
+merging. It also checks unchanged ink-sample reuse and exact color-strip bytes.
+An iOS build and on-device Instruments measurements are still needed to validate
+UIKit/Core Data integration and actual frame timing.
+
 Duplicate Aurora Glass to edit its Light and Dark palettes independently.
 Existing custom profiles retain their saved colors, and Halloween remains
 available. The old built-in default switches to Aurora Glass once on upgrade;

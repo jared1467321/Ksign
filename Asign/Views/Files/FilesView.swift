@@ -379,9 +379,7 @@ struct FilesView: View {
             file,
             to: viewModel.currentDirectory,
             progressCallback: { progress in
-                DispatchQueue.main.async {
-                    ExtractManager.shared.updateProgress(for: extractItem, progress: progress)
-                }
+                ExtractManager.shared.updateProgress(for: extractItem, progress: progress)
             }
         ) { result in
             let succeeded: Bool
@@ -413,9 +411,7 @@ struct FilesView: View {
             file,
             to: viewModel.currentDirectory,
             progressCallback: { progress in
-                DispatchQueue.main.async {
-                    ExtractManager.shared.updateProgress(for: extractItem, progress: progress)
-                }
+                ExtractManager.shared.updateProgress(for: extractItem, progress: progress)
             }
         ) { result in
             let succeeded: Bool
