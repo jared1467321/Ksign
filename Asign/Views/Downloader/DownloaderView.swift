@@ -239,7 +239,6 @@ private struct DownloadTransferSection: View {
 
     private var ipaVaultBatchControl: some View {
         IPAVaultDownloadMenu(downloadManager: downloadManager, controls: downloadManager.vaultControls)
-            .equatable()
     }
 
     private var ipavaultLiveThroughputText: String {
@@ -369,14 +368,26 @@ private struct DownloadTransferSection: View {
     }
 }
 
-// This stable row observes availability only. Progress and speed updates do not
-// invalidate its labels, menu layout or adaptive-text geometry.
-private struct IPAVaultDownloadMenu: View, Equatable {
+// Observe availability outside the equality boundary. Reading the flags here
+// gives the menu a new value when an action changes availability.
+private struct IPAVaultDownloadMenu: View {
     let downloadManager: IPADownloadManager
     @ObservedObject var controls: IPAVaultDownloadControls
 
+    var body: some View {
+        IPAVaultDownloadMenuContent(downloadManager: downloadManager, state: controls.state)
+            .equatable()
+    }
+}
+
+// Equality compares immutable flags, not the shared model's identity. Progress
+// updates with unchanged flags still leave this menu and its label alone.
+private struct IPAVaultDownloadMenuContent: View, Equatable {
+    let downloadManager: IPADownloadManager
+    let state: IPAVaultTransfer.Controls
+
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.downloadManager === rhs.downloadManager && lhs.controls === rhs.controls
+        lhs.downloadManager === rhs.downloadManager && lhs.state == rhs.state
     }
 
     var body: some View {
@@ -387,14 +398,14 @@ private struct IPAVaultDownloadMenu: View, Equatable {
                 } label: {
                     Label("Pause All", systemImage: "pause.fill")
                 }
-                .disabled(!controls.state.canPauseAll)
+                .disabled(!state.canPauseAll)
 
                 Button {
                     downloadManager.resumeAllIPAVaultDownloads()
                 } label: {
                     Label("Resume All", systemImage: "play.fill")
                 }
-                .disabled(!controls.state.canResumeAll)
+                .disabled(!state.canResumeAll)
             }
             Section("Queued Downloads") {
                 Button {
@@ -402,14 +413,14 @@ private struct IPAVaultDownloadMenu: View, Equatable {
                 } label: {
                     Label("Pause Queued", systemImage: "pause.circle")
                 }
-                .disabled(!controls.state.canPauseQueued)
+                .disabled(!state.canPauseQueued)
 
                 Button(role: .destructive) {
                     downloadManager.cancelAllQueuedIPAVaultDownloads()
                 } label: {
                     Label("Cancel Queued", systemImage: "xmark.circle")
                 }
-                .disabled(!controls.state.canCancelQueued)
+                .disabled(!state.canCancelQueued)
             }
         } label: {
             Label("Manage Downloads", systemImage: "slider.horizontal.3")
