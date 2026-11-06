@@ -7,10 +7,6 @@ import Darwin
 final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     struct Controls: Equatable, Sendable {
         var hasDownloads = false
-        var canPauseAll = false
-        var canResumeAll = false
-        var canPauseQueued = false
-        var canCancelQueued = false
     }
 
     struct Presentation {
@@ -51,25 +47,9 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
             presentationPending = true
             return
         }
-        // Derive menu availability on the transport worker, never in a SwiftUI
-        // body. The menu observes only changes to these small boolean values.
-        let queuedIDs = queuedIPAVaultDownloadIDs
-        var controls = Controls()
-        for item in downloadItems where !item.isFinished {
-            let id = item.id.uuidString
-            controls.hasDownloads = true
-            if pausedIPAVaultDownloadIDs.contains(id) {
-                controls.canResumeAll = true
-            } else if ipavaultJobs[id]?.assembling != true {
-                controls.canPauseAll = true
-            }
-            if queuedIDs.contains(id) {
-                controls.canCancelQueued = true
-                if !pausedIPAVaultDownloadIDs.contains(id) || resumeRequestedIPAVaultDownloadIDs.contains(id) {
-                    controls.canPauseQueued = true
-                }
-            }
-        }
+        // Only section visibility needs presentation state. Menu commands use
+        // authoritative transport state when invoked, never UI enablement flags.
+        let controls = Controls(hasDownloads: downloadItems.contains { !$0.isFinished })
         receive(Presentation(items: downloadItems, adaptive: ipavaultLatestAdaptivePresentation, controls: controls))
     }
 

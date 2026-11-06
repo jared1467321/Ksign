@@ -3,7 +3,7 @@ import SwiftUI
 import WebKit
 import UIKit
 
-// Menu availability changes independently of progress and tuning statistics.
+// Section visibility changes independently of progress and tuning statistics.
 final class IPAVaultDownloadControls: ObservableObject {
     @Published private(set) var state = IPAVaultTransfer.Controls()
 

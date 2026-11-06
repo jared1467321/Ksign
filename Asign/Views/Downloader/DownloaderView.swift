@@ -238,7 +238,7 @@ private struct DownloadTransferSection: View {
     }
 
     private var ipaVaultBatchControl: some View {
-        IPAVaultDownloadMenu(downloadManager: downloadManager, controls: downloadManager.vaultControls)
+        IPAVaultDownloadMenu(downloadManager: downloadManager)
     }
 
     private var ipavaultLiveThroughputText: String {
@@ -368,66 +368,58 @@ private struct DownloadTransferSection: View {
     }
 }
 
-// Observe availability outside the equality boundary. Reading the flags here
-// gives the menu a new value when an action changes availability.
+// Paint the label independently of the native menu. Adaptive-text frames and
+// transfer snapshots must never replace a presented menu's action handlers.
 private struct IPAVaultDownloadMenu: View {
     let downloadManager: IPADownloadManager
-    @ObservedObject var controls: IPAVaultDownloadControls
 
     var body: some View {
-        IPAVaultDownloadMenuContent(downloadManager: downloadManager, state: controls.state)
-            .equatable()
+        ZStack(alignment: .leading) {
+            Label("Manage Downloads", systemImage: "slider.horizontal.3")
+                .nbThemeForeground(.accent)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
+            IPAVaultNativeDownloadMenu(downloadManager: downloadManager)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minHeight: 44)
+        .nbThemeTextRow()
     }
 }
 
-// Equality compares immutable flags, not the shared model's identity. Progress
-// updates with unchanged flags still leave this menu and its label alone.
-private struct IPAVaultDownloadMenuContent: View, Equatable {
+private struct IPAVaultNativeDownloadMenu: UIViewRepresentable {
     let downloadManager: IPADownloadManager
-    let state: IPAVaultTransfer.Controls
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.downloadManager === rhs.downloadManager && lhs.state == rhs.state
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.accessibilityLabel = .localized("Manage Downloads")
+        button.accessibilityHint = .localized("Manage all downloads or only waiting downloads")
+        button.showsMenuAsPrimaryAction = true
+        let manager = downloadManager
+        let pauseAll = UIAction(title: .localized("Pause All"), image: UIImage(systemName: "pause.fill")) { _ in
+            manager.pauseAllIPAVaultDownloads()
+        }
+        let resumeAll = UIAction(title: .localized("Resume All"), image: UIImage(systemName: "play.fill")) { _ in
+            manager.resumeAllIPAVaultDownloads()
+        }
+        let pauseQueued = UIAction(title: .localized("Pause Queued"), image: UIImage(systemName: "pause.circle")) { _ in
+            manager.pauseAllQueuedIPAVaultDownloads()
+        }
+        let cancelQueued = UIAction(title: .localized("Cancel Queued"), image: UIImage(systemName: "xmark.circle"),
+                                    attributes: .destructive) { _ in
+            manager.cancelAllQueuedIPAVaultDownloads()
+        }
+        button.menu = UIMenu(children: [
+            UIMenu(title: .localized("All Downloads"), options: .displayInline, children: [pauseAll, resumeAll]),
+            UIMenu(title: .localized("Queued Downloads"), options: .displayInline, children: [pauseQueued, cancelQueued])
+        ])
+        return button
     }
 
-    var body: some View {
-        Menu {
-            Section("All Downloads") {
-                Button {
-                    downloadManager.pauseAllIPAVaultDownloads()
-                } label: {
-                    Label("Pause All", systemImage: "pause.fill")
-                }
-                .disabled(!state.canPauseAll)
-
-                Button {
-                    downloadManager.resumeAllIPAVaultDownloads()
-                } label: {
-                    Label("Resume All", systemImage: "play.fill")
-                }
-                .disabled(!state.canResumeAll)
-            }
-            Section("Queued Downloads") {
-                Button {
-                    downloadManager.pauseAllQueuedIPAVaultDownloads()
-                } label: {
-                    Label("Pause Queued", systemImage: "pause.circle")
-                }
-                .disabled(!state.canPauseQueued)
-
-                Button(role: .destructive) {
-                    downloadManager.cancelAllQueuedIPAVaultDownloads()
-                } label: {
-                    Label("Cancel Queued", systemImage: "xmark.circle")
-                }
-                .disabled(!state.canCancelQueued)
-            }
-        } label: {
-            Label("Manage Downloads", systemImage: "slider.horizontal.3")
-        }
-        .nbThemeForeground(.accent)
-        .nbThemeTextRow()
-        .accessibilityHint("Manage all downloads or only waiting downloads")
+    func updateUIView(_ uiView: UIButton, context: Context) {
+        // The manager is shared for the screen's lifetime. Keep the same native
+        // menu and enabled actions during progress, pause/resume and paint updates.
     }
 }
 
