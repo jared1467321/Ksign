@@ -25,6 +25,8 @@ extension ServerInstaller {
 	
 	static func setupApp(port: Int) throws -> Application {
 		let app = Application(env)
+		var configured = false
+		defer { if !configured { app.shutdown() } }
 		app.threadPool = .init(numberOfThreads: 1)
 		
 		if ServerInstaller.getServerMethod() != 1 {
@@ -40,6 +42,7 @@ extension ServerInstaller {
 		app.routes.defaultMaxBodySize = "128mb"
 		app.routes.caseInsensitive = false
 		
+		configured = true
 		return app
 	}
 	

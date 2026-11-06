@@ -80,7 +80,7 @@ extension UIApplication {
     /// and fall is stranded the moment it misses the rise.
     /// - Parameter identifier: Bundle identifier
     /// - Returns: True when the app is installed
-    static public func isAppInstalled(_ identifier: String) -> Bool {
+    nonisolated static public func isAppInstalled(_ identifier: String) -> Bool {
         let classNameBase64 = "TFNBcHBsaWNhdGlvbldvcmtzcGFjZQ==" // LSApplicationWorkspace
         let defaultSelectorBase64 = "ZGVmYXVsdFdvcmtzcGFjZQ=="   // defaultWorkspace
         let installedSelectorBase64 = "YXBwbGljYXRpb25Jc0luc3RhbGxlZDo=" // applicationIsInstalled:

@@ -162,48 +162,49 @@ class FilesViewModel: ObservableObject {
     func importCertificate(_ file: FileItem) {
         guard file.isP12Certificate else { return }
         
-        let provisionFile = CertificateService.shared.findProvisionFile(near: file)
-        switch provisionFile {
-        case .failure(let err):
-            DispatchQueue.main.async { UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(err.errorDescription ?? "Unknown error")) }
-        case .success(let provisionFile):
-            CertificateService.shared.importP12Certificate(p12File: file, provisionFile: provisionFile, password: "") { [weak self] result in
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success(let message):
-                        UIAlertController.showAlertWithOk(title: .localized("Success"), message: .localized(message))
-                    case .failure(let importError):
-                        if case .invalidPassword = importError {
-                            UIAlertController.showAlertWithTextBox(
-                                title: .localized("Enter Certificate Password"),
-                                message: .localized("Enter the password for the certificate. Leave it blank if no password is required."),
-                                textFieldPlaceholder: .localized("Password"),
-                                textFieldText: "",
-                                submit: .localized("Import"),
-                                cancel: .localized("Cancel"),
-                                onSubmit: { password in
-                                    CertificateService.shared.importP12Certificate(p12File: file, provisionFile: provisionFile, password: password) { result in
-                                        DispatchQueue.main.async {
-                                            switch result {
-                                            case .success(let message):
-                                                UIAlertController.showAlertWithOk(title: .localized("Success"), message: .localized(message))
-                                            case .failure(let finalError):
-                                                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(finalError.localizedDescription))
+        Task { @MainActor in
+            let provisionFile = await CertificateService.shared.findProvisionFileInBackground(near: file)
+            switch provisionFile {
+            case .failure(let err):
+                DispatchQueue.main.async { UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(err.errorDescription ?? "Unknown error")) }
+            case .success(let provisionFile):
+                CertificateService.shared.importP12Certificate(p12File: file, provisionFile: provisionFile, password: "") { [weak self] result in
+                    DispatchQueue.main.async {
+                        switch result {
+                        case .success(let message):
+                            UIAlertController.showAlertWithOk(title: .localized("Success"), message: .localized(message))
+                        case .failure(let importError):
+                            if case .invalidPassword = importError {
+                                UIAlertController.showAlertWithTextBox(
+                                    title: .localized("Enter Certificate Password"),
+                                    message: .localized("Enter the password for the certificate. Leave it blank if no password is required."),
+                                    textFieldPlaceholder: .localized("Password"),
+                                    textFieldText: "",
+                                    submit: .localized("Import"),
+                                    cancel: .localized("Cancel"),
+                                    onSubmit: { password in
+                                        CertificateService.shared.importP12Certificate(p12File: file, provisionFile: provisionFile, password: password) { result in
+                                            DispatchQueue.main.async {
+                                                switch result {
+                                                case .success(let message):
+                                                    UIAlertController.showAlertWithOk(title: .localized("Success"), message: .localized(message))
+                                                case .failure(let finalError):
+                                                    UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(finalError.localizedDescription))
+                                                }
                                             }
                                         }
                                     }
-                                }
-                            )
-                        } else {
-                            UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(importError.localizedDescription))
+                                )
+                            } else {
+                                UIAlertController.showAlertWithOk(title: .localized("Error"), message: .localized(importError.localizedDescription))
+                            }
                         }
                     }
                 }
             }
         }
     }
-    
-    
+
     private func sanitizeFileName(_ name: String) -> String {
         let invalidCharacters = CharacterSet(charactersIn: "/:?*<>|\"\\")
         return name.components(separatedBy: invalidCharacters).joined()

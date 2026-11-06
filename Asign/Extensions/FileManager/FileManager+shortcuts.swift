@@ -84,46 +84,50 @@ extension FileManager {
 	
 	// FeatherTweak
 	func moveAndStore(_ url: URL, with prepend: String, completion: @escaping (URL) -> Void) {
-		let destination = _getDestination(url, with: prepend)
-		
-		try? createDirectoryIfNeeded(at: destination.temp)
-		
-		var didStartAccessing = false
-		if isFileFromFileProvider(at: url) {
-			didStartAccessing = url.startAccessingSecurityScopedResource()
-		}
-		
-		defer {
-			if didStartAccessing {
-				url.stopAccessingSecurityScopedResource()
+		DispatchQueue.global(qos: .userInitiated).async {
+			let destination = self._getDestination(url, with: prepend)
+
+			try? self.createDirectoryIfNeeded(at: destination.temp)
+
+			var didStartAccessing = false
+			if self.isFileFromFileProvider(at: url) {
+				didStartAccessing = url.startAccessingSecurityScopedResource()
 			}
-		}
-		
-		do {
-			var isDirectory: ObjCBool = false
-			if self.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue {
-				try self.copyItem(at: url, to: destination.dest)
-				completion(destination.dest)
-			} else {
-				let fileData = try Data(contentsOf: url)
-				try fileData.write(to: destination.dest)
-				completion(destination.dest)
+
+			defer {
+				if didStartAccessing {
+					url.stopAccessingSecurityScopedResource()
+				}
 			}
-		} catch {
+
 			do {
-				try self.copyItem(at: url, to: destination.dest)
-				completion(destination.dest)
+				var isDirectory: ObjCBool = false
+				if self.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue {
+					try self.copyItem(at: url, to: destination.dest)
+					DispatchQueue.main.async { completion(destination.dest) }
+				} else {
+					let fileData = try Data(contentsOf: url)
+					try fileData.write(to: destination.dest)
+					DispatchQueue.main.async { completion(destination.dest) }
+				}
 			} catch {
-				print("Error in moveAndStore: \(error.localizedDescription)")
+				do {
+					try self.copyItem(at: url, to: destination.dest)
+					DispatchQueue.main.async { completion(destination.dest) }
+				} catch {
+					print("Error in moveAndStore: \(error.localizedDescription)")
+				}
 			}
 		}
 	}
-	
+
 	func deleteStored(_ url: URL, completion: @escaping (URL) -> Void) {
-		try? FileManager.default.removeItem(at: url)
-		completion(url)
+		DispatchQueue.global(qos: .utility).async {
+			try? FileManager.default.removeItem(at: url)
+			DispatchQueue.main.async { completion(url) }
+		}
 	}
-	
+
 	// FeatherTweak
 	private func _getDestination(_ url: URL, with prepend: String) -> (temp: URL, dest: URL) {
 		let tempDir = self.temporaryDirectory.appendingPathComponent("\(prepend)_\(UUID().uuidString)", isDirectory: true)

@@ -16,87 +16,78 @@ extension Storage {
 		return (try? context.fetch(request)) ?? []
 	}
 	
-	func addSource(
-		_ url: URL,
-		name: String? = "Unknown",
-		identifier: String,
-		iconURL: URL? = nil,
-		deferSave: Bool = false,
-		isBuiltIn: Bool = false,
-		completion: @escaping (Error?) -> Void
-	) {
-		if sourceExists(identifier) {
-			completion(nil)
-			print("ignoring \(identifier)")
-			return
-		}
-		
-		let new = AltSource(context: context)
-		new.name = name
-		new.date = Date()
-		new.identifier = identifier
-		new.sourceURL = url
-		new.iconURL = iconURL
-		new.setValue(isBuiltIn, forKey: "isBuiltIn")
-		
-		do {
-			if !deferSave {
-				try context.save()
-			}
-			completion(nil)
-		} catch {
-			completion(error)
-		}
-	}
-	
-	func addSource(
-		_ url: URL,
-		repository: ASRepository,
-		id: String = "",
-		deferSave: Bool = false,
-		isBuiltIn: Bool = false,
-		completion: @escaping (Error?) -> Void
-	) {
-		addSource(
-			url,
-			name: repository.name,
-			identifier: !id.isEmpty
-						? id
-						: (repository.id ?? url.absoluteString),
-			iconURL: repository.currentIconURL,
-			deferSave: deferSave,
-			isBuiltIn: isBuiltIn,
-			completion: completion
-		)
+	private struct SourceRecord {
+		let url: URL
+		let name: String?
+		let identifier: String
+		let iconURL: URL?
+		let isBuiltIn: Bool
 	}
 
-	func addSources(
-		repos: [URL: ASRepository],
-		completion: @escaping (Error?) -> Void
-	) {
-		for (url, repo) in repos {
-			addSource(
-				url,
-				repository: repo,
-				deferSave: true,
-				completion: { error in
-					if let error {
-						completion(error)
-					}
-				}
-			)
+	func addSource(_ url: URL, name: String? = "Unknown", identifier: String,
+				   iconURL: URL? = nil, isBuiltIn: Bool = false,
+				   completion: @escaping (Error?) -> Void) {
+		writeSources([SourceRecord(url: url, name: name, identifier: identifier,
+								   iconURL: iconURL, isBuiltIn: isBuiltIn)], completion: completion)
+	}
+
+	func addSource(_ url: URL, repository: ASRepository, id: String = "", isBuiltIn: Bool = false,
+				   completion: @escaping (Error?) -> Void) {
+		addSource(url, name: repository.name,
+				  identifier: id.isEmpty ? (repository.id ?? url.absoluteString) : id,
+				  iconURL: repository.currentIconURL, isBuiltIn: isBuiltIn, completion: completion)
+	}
+
+	func addSources(repos: [URL: ASRepository], completion: @escaping (Error?) -> Void) {
+		let records = repos.map { url, repository in
+			SourceRecord(url: url, name: repository.name, identifier: repository.id ?? url.absoluteString,
+						 iconURL: repository.currentIconURL, isBuiltIn: false)
 		}
-		
-        saveContext()
-        completion(nil)
+		writeSources(records, completion: completion)
+	}
+
+	private func writeSources(_ records: [SourceRecord], completion: @escaping (Error?) -> Void) {
+		// One private context serializes duplicate checks with insertion, even
+		// when several source downloads finish at once. Publish only saved IDs.
+		let worker = sourceWriteContext
+		worker.perform {
+			do {
+				var inserted: [NSManagedObject] = []
+				for record in records {
+					let request: NSFetchRequest<AltSource> = AltSource.fetchRequest()
+					request.predicate = NSPredicate(format: "identifier == %@", record.identifier)
+					guard try worker.count(for: request) == 0 else { continue }
+					let source = AltSource(context: worker)
+					source.name = record.name
+					source.date = Date()
+					source.identifier = record.identifier
+					source.sourceURL = record.url
+					source.iconURL = record.iconURL
+					source.isBuiltIn = record.isBuiltIn
+					inserted.append(source)
+				}
+				try worker.save()
+				let ids = inserted.map(\.objectID)
+				worker.reset()
+				self.context.perform {
+					NSManagedObjectContext.mergeChanges(fromRemoteContextSave:
+						[NSInsertedObjectsKey: ids], into: [self.context])
+					completion(nil)
+				}
+			} catch {
+				worker.rollback()
+				worker.reset()
+				self.context.perform { completion(error) }
+			}
+		}
 	}
 
 
 	func addBuiltInSources() {
 		let builtInSourceURLs = [
-            "https://community-apps.sidestore.io/sidecommunity.json",
-            "https://github.com/LiveContainer/LiveContainer/releases/download/1.0/apps.json",
-            "https://alt.crystall1ne.dev"
+			"https://community-apps.sidestore.io/sidecommunity.json",
+			"https://github.com/LiveContainer/LiveContainer/releases/download/1.0/apps.json",
+			"https://alt.crystall1ne.dev"
 		]
 		
 		for urlString in builtInSourceURLs {
@@ -109,16 +100,11 @@ extension Storage {
 		saveContext()
 	}
 
-	func sourceExists(_ identifier: String) -> Bool {
-		let fetchRequest: NSFetchRequest<AltSource> = AltSource.fetchRequest()
-		fetchRequest.predicate = NSPredicate(format: "identifier == %@", identifier)
-
-		do {
-			let count = try context.count(for: fetchRequest)
-			return count > 0
-		} catch {
-			print("Error checking if repository exists: \(error)")
-			return false
+	func sourceExists(_ identifier: String) async -> Bool {
+		await sourceWriteContext.perform {
+			let request: NSFetchRequest<AltSource> = AltSource.fetchRequest()
+			request.predicate = NSPredicate(format: "identifier == %@", identifier)
+			return ((try? self.sourceWriteContext.count(for: request)) ?? 0) > 0
 		}
 	}
 }

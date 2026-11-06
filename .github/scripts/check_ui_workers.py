@@ -64,6 +64,54 @@ import FoundationNetworking
     init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
 }
 protocol ObservableObject: AnyObject {}
+public struct Color: Decodable, Hashable, Sendable {}
+enum SourceAppsView { enum SortOption: Sendable { case `default`, name, date } }
+protocol AppInfoPresentable {}
+struct ServerTestApp: AppInfoPresentable {}
+final class ServerInstallTracking {}
+final class InstallerStatusViewModel {
+    enum InstallerStatus { case ready }
+    var status = InstallerStatus.ready
+}
+// Platform substitutes: lifecycle methods below are the production implementation.
+final class Application {
+    final class HTTPServer {
+        func start() throws {
+            require(!Thread.isMainThread, "server startup ran on main")
+            Application.lock.lock()
+            Application.starts += 1
+            let fail = Application.failStarts
+            let gate = Application.startGate
+            Application.lock.unlock()
+            if let gate { Application.startEntered.signal(); gate.wait() }
+            if fail { throw ServerInstallerError.couldNotStart }
+        }
+        func shutdown() { require(!Thread.isMainThread, "listener shutdown ran on main") }
+    }
+    static let lock = NSLock()
+    static var starts = 0
+    static var closes = 0
+    static var failStarts = false
+    static var startGate: DispatchSemaphore?
+    static let startEntered = DispatchSemaphore(value: 0)
+    static let closed = DispatchSemaphore(value: 0)
+    let server = HTTPServer()
+    func shutdown() {
+        require(!Thread.isMainThread, "Vapor shutdown ran on main")
+        Self.lock.lock(); Self.closes += 1; Self.lock.unlock()
+        Self.closed.signal()
+    }
+}
+extension ServerInstaller {
+    static var sni: String {
+        require(!Thread.isMainThread, "host/TLS lookup ran on main")
+        return "localhost"
+    }
+    static func setupApp(port: Int) throws -> Application {
+        require(!Thread.isMainThread, "Vapor/TLS setup ran on main")
+        return Application()
+    }
+}
 final class UIApplication {
     static let shared = UIApplication()
     enum State { case active, background }
@@ -231,6 +279,76 @@ func diskChecks() {
     print("PASS: file work called from MainActor stays off-main; tweak copy/list/reimport integrity")
 }
 
+func catalogChecks() throws {
+    let json = #"{"name":"Catalog","apps":[{"name":"beta","bundleIdentifier":"b","description":"Needle","versionDate":"2026-11-04"},{"name":"Alpha","bundleIdentifier":"a","versionDate":"2026-11-05"},{"name":"alpha","bundleIdentifier":"a2","versionDate":"2026-11-05"},{"name":"123","bundleIdentifier":"n"}]}"#
+    let repository = try JSONDecoder().decode(ASRepository.self, from: Data(json.utf8))
+    let done = DispatchSemaphore(value: 0)
+    let worker = LatestValueDelivery<SourceAppsProjection.Request>(queue: DispatchQueue(label: "test.catalog")) { request in
+        require(!Thread.isMainThread, "catalog filtering ran on main")
+        let snapshot = SourceAppsProjection.build(request)
+        require(snapshot.apps.count == 10000, "large catalog dropped rows")
+        require(snapshot.groups["A"]?.count == 5000 && snapshot.titles == ["A", "B", "#"], "catalog name groups changed")
+        done.signal()
+    }
+    var large = repository
+    large.apps = Array(repeating: repository.apps, count: 2500).flatMap { $0 }
+    worker.submit(.init(sources: [large], searchText: "", sortOption: .name, ascending: true, generation: UUID()))
+    require(done.wait(timeout: .now() + 10) == .success, "catalog depended on UI scheduling")
+    func build(_ query: String = "", _ sort: SourceAppsView.SortOption = .default, _ ascending: Bool = true) -> SourceAppsProjection.Snapshot {
+        SourceAppsProjection.build(.init(sources: [repository], searchText: query, sortOption: sort, ascending: ascending, generation: UUID()))
+    }
+    require(build("nEeDlE").apps.map { $0.app.id } == ["b"], "description search changed")
+    require(build("absent").apps.isEmpty, "empty search result rebuilt the catalog")
+    require(build("", .default, false).apps.map { $0.app.id } == ["n", "a2", "a", "b"], "default reversal changed")
+    require(build("", .name, false).titles == ["B", "A", "#"], "descending name sections changed")
+    let dated = build("", .date)
+    require(dated.titles.count == 3 && dated.groups[dated.titles[0]]?.count == 2, "date sections changed")
+    require(dated.apps.last?.app.id == "a2", "date sort changed")
+    print("PASS: real repository decoding, catalog search/sort/grouping and 10,000 rows with blocked main")
+}
+
+func serverLifecycleChecks() {
+    let server = ServerInstaller(app: ServerTestApp(), viewModel: InstallerStatusViewModel())
+    require(Application.starts == 0, "server constructor performed startup")
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        try await server.startServing()
+        try await server.startServing()
+        server.shutDown()
+        try await server.startServing()
+        server.shutDown()
+        done.signal()
+    }
+    require(done.wait(timeout: .now() + 5) == .success, "server lifecycle depended on main")
+    for _ in 0..<2 { require(Application.closed.wait(timeout: .now() + 5) == .success, "server shutdown missing") }
+    require(Application.starts == 2 && Application.closes == 2, "start/stop ordering or idempotence changed")
+    Application.failStarts = true
+    let failed = ServerInstaller(app: ServerTestApp(), viewModel: InstallerStatusViewModel())
+    Task.detached {
+        do { try await failed.startServing(); fatalError("server startup error was lost") }
+        catch { done.signal() }
+    }
+    require(done.wait(timeout: .now() + 5) == .success, "startup failure hung")
+    for _ in 0..<6 { require(Application.closed.wait(timeout: .now() + 5) == .success, "failed startup leaked a server") }
+    require(Application.starts == 8 && Application.closes == 8, "port retry cleanup changed")
+    Application.failStarts = false
+    let gate = DispatchSemaphore(value: 0)
+    Application.startGate = gate
+    let cancelled = ServerInstaller(app: ServerTestApp(), viewModel: InstallerStatusViewModel())
+    let task = Task.detached {
+        do { try await cancelled.startServing(); fatalError("cancelled startup returned success") }
+        catch is CancellationError { cancelled.shutDown(); done.signal() }
+        catch { fatalError("unexpected cancellation result") }
+    }
+    require(Application.startEntered.wait(timeout: .now() + 5) == .success, "startup never entered worker")
+    task.cancel()
+    gate.signal()
+    require(done.wait(timeout: .now() + 5) == .success, "startup cancellation hung")
+    require(Application.closed.wait(timeout: .now() + 5) == .success, "cancelled server was not shut down")
+    Application.startGate = nil
+    print("PASS: production server lifecycle off-main, idempotence, ordered restart, failed port cleanup and cancellation")
+}
+
 func facadeChecks(_ base: String, payload: Data) throws {
     let manager = IPADownloadManager()
     manager.enqueueIPAVaultDownloads([(URL(string: base + "/facade")!, "facade.ipa", Int64(payload.count))])
@@ -302,6 +420,8 @@ final class TransferCheck: @unchecked Sendable {
         mailboxChecks()
         workflowChecks()
         diskChecks()
+        try catalogChecks()
+        serverLifecycleChecks()
         let base = CommandLine.arguments[1]
         let root = URL.documentsDirectory
         let payload = try Data(contentsOf: root.appendingPathComponent("expected"))
@@ -349,6 +469,17 @@ def main():
             (work / 'Model.swift').write_text(model)
             (work / 'Stubs.swift').write_text(STUBS)
             (work / 'Checks.swift').write_text(MAIN)
+            repository = (ROOT / 'AltSourceKit/Sources/AltSourceKit/Models/ASRepository.swift').read_text().replace('import SwiftUI', '')
+            (work / 'Repository.swift').write_text(repository)
+            projection = (ROOT / 'Asign/Views/Sources/Apps/SourceAppsProjection.swift').read_text().replace('import AltSourceKit', '')
+            (work / 'Projection.swift').write_text(projection)
+            lifecycle = (ROOT / 'Asign/Backend/Server/ServerInstaller.swift').read_text()
+            for module in ['Vapor', 'NIOSSL', 'NIOTLS', 'SwiftUI', 'IDeviceSwift']:
+                lifecycle = lifecycle.replace('import ' + module, '')
+            start = lifecycle.index('\tprivate func _configureRoutes() throws {')
+            end = lifecycle.index('\n\tprivate func _shutdownServer()', start)
+            lifecycle = lifecycle[:start] + '\tprivate func _configureRoutes() throws {}\n' + lifecycle[end:]
+            (work / 'ServerLifecycle.swift').write_text(lifecycle)
             facade = (ROOT / 'Asign/Views/Downloader/ViewModels/IPADownloadManager.swift').read_text()
             for module in ['SwiftUI', 'UIKit', 'WebKit']:
                 facade = facade.replace('import ' + module, '')
@@ -369,8 +500,9 @@ def main():
             subprocess.run([args.swiftc, '-swift-version', '5', '-o', str(work / 'checks'),
                 str(ROOT / 'Asign/Utilities/LatestValueDelivery.swift'),
                 str(ROOT / 'Asign/Utilities/BackgroundFileWork.swift'),
+                str(ROOT / 'AltSourceKit/Sources/AltSourceKit/Extensions/Array/Array+safe.swift'),
                 str(ROOT / 'NimbleKit/Sources/NimbleExtensions/View/NBAuroraShaderIdentity.swift'),
-                *[str(work / name) for name in ['Transfer.swift', 'Model.swift', 'Stubs.swift', 'Checks.swift', 'Facade.swift', 'Foreground.swift', 'Ink.swift', 'Extract.swift', 'Download.swift']]], check=True)
+                *[str(work / name) for name in ['Transfer.swift', 'Model.swift', 'Stubs.swift', 'Checks.swift', 'Facade.swift', 'Foreground.swift', 'Ink.swift', 'Extract.swift', 'Download.swift', 'Repository.swift', 'Projection.swift', 'ServerLifecycle.swift']]], check=True)
             subprocess.run([str(work / 'checks'), f'http://127.0.0.1:{server.server_port}', str(work)], check=True, timeout=180)
     finally:
         server.shutdown()

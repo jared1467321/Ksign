@@ -126,7 +126,7 @@ struct BackupSettingsView: View {
         Task { @MainActor in
             defer { busy = false }
             do {
-                let backup = try SettingsBackupService.snapshot()
+                let backup = try await SettingsBackupService.snapshot()
                 let url = try await Task.detached(priority: .userInitiated) {
                     let data = try SettingsBackupCrypto.encrypt(backup, password: secret)
                     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Asign-Backup-\(UUID().uuidString)")
@@ -145,7 +145,7 @@ struct BackupSettingsView: View {
     }
 
     private func clearExport() {
-        if let exportURL { try? FileManager.default.removeItem(at: exportURL.deletingLastPathComponent()) }
+        if let exportURL { ArchiveHandler.cleanup(workDir: exportURL.deletingLastPathComponent()) }
         exportURL = nil
     }
 
@@ -190,11 +190,13 @@ struct BackupSettingsView: View {
     private func restoreBackup() {
         guard canRestore, let backup = reviewedBackup else { return }
         busy = true
-        defer { busy = false }
-        do {
-            try SettingsBackupService.restore(backup)
-            reviewedBackup = nil
-            message = "Restored certificates, sources, themes, and settings. Your theme is active now."
-        } catch { failure = error.localizedDescription }
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                try await SettingsBackupService.restore(backup)
+                reviewedBackup = nil
+                message = "Restored certificates, sources, themes, and settings. Your theme is active now."
+            } catch { failure = error.localizedDescription }
+        }
     }
 }

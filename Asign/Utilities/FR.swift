@@ -1086,14 +1086,15 @@ enum FR {
 			switch result {
 			case .success(let data):
 				let id = data.id ?? url.absoluteString
-				
-				if !Storage.shared.sourceExists(id) {
-					Storage.shared.addSource(url, repository: data, id: id) { _ in
-						competion()
-					}
-				} else {
-					DispatchQueue.main.async {
-						UIAlertController.showAlertWithOk(title: "Error", message: "Repository already added.")
+				Task { @MainActor in
+					if await !Storage.shared.sourceExists(id) {
+						Storage.shared.addSource(url, repository: data, id: id) { _ in
+							competion()
+						}
+					} else {
+						DispatchQueue.main.async {
+							UIAlertController.showAlertWithOk(title: "Error", message: "Repository already added.")
+						}
 					}
 				}
 			case .failure(let error):

@@ -222,35 +222,38 @@ final class ThemeReportBridge {
     /// Generated reports are standalone HTML files. Keep their persisted CSS
     /// defaults synchronized before export so a report saved after theme edits
     /// opens with the same colors the user was looking at in-app.
-    func persistCurrentTheme(to urls: [URL]) throws {
+    @MainActor func persistCurrentTheme(to urls: [URL]) async throws {
         let theme = NBThemeManager.shared.activeTheme
-        for url in urls {
-            var html = try String(contentsOf: url, encoding: .utf8)
-            var changed = false
+        let scheme = NBThemeManager.shared.isDark ? "dark" : "light"
+        let colors = Self.variables.map { (cssName: $0.cssName, color: theme.color(for: $0.role).cssRGBA) }
+        try await BackgroundFileWork.perform {
+            for url in urls {
+                var html = try String(contentsOf: url, encoding: .utf8)
+                var changed = false
 
-            let scheme = NBThemeManager.shared.isDark ? "dark" : "light"
-            let updatedScheme = html.replacingOccurrences(of: "color-scheme: dark;", with: "color-scheme: \(scheme);")
-                .replacingOccurrences(of: "color-scheme: light;", with: "color-scheme: \(scheme);")
-            if updatedScheme != html {
-                html = updatedScheme
-                changed = true
-            }
-
-            for variable in Self.variables {
-                let escapedName = NSRegularExpression.escapedPattern(for: variable.cssName)
-                let pattern = "(\(escapedName)\\s*:)\\s*[^;]+;"
-                let regex = try NSRegularExpression(pattern: pattern)
-                let range = NSRange(html.startIndex..<html.endIndex, in: html)
-                let replacement = "$1\(theme.color(for: variable.role).cssRGBA);"
-                let updated = regex.stringByReplacingMatches(in: html, range: range, withTemplate: replacement)
-                if updated != html {
-                    html = updated
+                let updatedScheme = html.replacingOccurrences(of: "color-scheme: dark;", with: "color-scheme: \(scheme);")
+                    .replacingOccurrences(of: "color-scheme: light;", with: "color-scheme: \(scheme);")
+                if updatedScheme != html {
+                    html = updatedScheme
                     changed = true
                 }
-            }
 
-            if changed {
-                try html.write(to: url, atomically: true, encoding: .utf8)
+                for variable in colors {
+                    let escapedName = NSRegularExpression.escapedPattern(for: variable.cssName)
+                    let pattern = "(\(escapedName)\\s*:)\\s*[^;]+;"
+                    let regex = try NSRegularExpression(pattern: pattern)
+                    let range = NSRange(html.startIndex..<html.endIndex, in: html)
+                    let replacement = "$1\(variable.color);"
+                    let updated = regex.stringByReplacingMatches(in: html, range: range, withTemplate: replacement)
+                    if updated != html {
+                        html = updated
+                        changed = true
+                    }
+                }
+
+                if changed {
+                    try html.write(to: url, atomically: true, encoding: .utf8)
+                }
             }
         }
     }

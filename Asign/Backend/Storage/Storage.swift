@@ -12,11 +12,13 @@ import UIKit.UIImpactFeedbackGenerator
 final class Storage: ObservableObject {
 	static let shared = Storage()
 	let container: NSPersistentContainer
+	let sourceWriteContext: NSManagedObjectContext
 	
 	private let _name: String = "Feather"
 	
 	init(inMemory: Bool = false) {
 		container = NSPersistentContainer(name: _name)
+		sourceWriteContext = container.newBackgroundContext()
 		
 		if inMemory {
 			container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
@@ -65,17 +67,23 @@ final class Storage: ObservableObject {
         }
 	}
 	
-	func clearContext<T: NSManagedObject>(request: NSFetchRequest<T>) {
+	func clearContext<T: NSManagedObject>(request: NSFetchRequest<T>) async {
 		let deleteRequest = NSBatchDeleteRequest(fetchRequest: (request as? NSFetchRequest<NSFetchRequestResult>)!)
+		deleteRequest.resultType = .resultTypeObjectIDs
+		let worker = container.newBackgroundContext()
 		do {
-			_ = try context.execute(deleteRequest)
-		} catch {
-			print("clear: \(error.localizedDescription)")
-		}
+			let ids = try await worker.perform {
+				(try worker.execute(deleteRequest) as? NSBatchDeleteResult)?.result as? [NSManagedObjectID] ?? []
+			}
+			await context.perform {
+				NSManagedObjectContext.mergeChanges(fromRemoteContextSave: [NSDeletedObjectsKey: ids], into: [self.context])
+			}
+		} catch { print("clear: \(error.localizedDescription)") }
 	}
     
-    func countContent<T: NSManagedObject>(for type: T.Type) -> String {
+    func countContent<T: NSManagedObject>(for type: T.Type) async -> String {
         let request = T.fetchRequest()
-        return "\((try? context.count(for: request)) ?? 0)"
+        let worker = container.newBackgroundContext()
+        return await worker.perform { "\((try? worker.count(for: request)) ?? 0)" }
     }
 }

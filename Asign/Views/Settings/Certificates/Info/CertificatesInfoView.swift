@@ -42,8 +42,10 @@ struct CertificatesInfoView: View {
 				NBToolbarButton(role: .close)
 			}
 		}
-		.onAppear {
-			data = Storage.shared.getProvisionFileDecoded(for: cert)
+		.task(id: cert.uuid) {
+			let decoded = await Storage.shared.getProvisionFileDecoded(for: cert)
+			guard !Task.isCancelled else { return }
+			data = decoded
 		}
     }
 }

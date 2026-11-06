@@ -11,6 +11,7 @@ import SwiftUI
 import NimbleJSON
 
 // MARK: - Class
+@MainActor
 final class SourcesViewModel: ObservableObject {
 	static let shared = SourcesViewModel()
 	
@@ -32,49 +33,49 @@ final class SourcesViewModel: ObservableObject {
 		isFinished = false
 		defer { isFinished = true }
 		
-		await MainActor.run {
-			self.sources = [:]
-		}
+		self.sources = [:]
 		
 		let sourcesArray = Array(sources)
+		// Managed objects stay on MainActor. Child tasks receive URLs and indices.
+		let urls = sourcesArray.map(\.sourceURL)
+		let dataService = _dataService
+		let batchSize = max(1, batchSize)
 		
 		for startIndex in stride(from: 0, to: sourcesArray.count, by: batchSize) {
 			let endIndex = min(startIndex + batchSize, sourcesArray.count)
-			let batch = sourcesArray[startIndex..<endIndex]
-			
-			let batchResults = await withTaskGroup(of: (AltSource, ASRepository?).self, returning: [AltSource: ASRepository].self) { group in
-				for source in batch {
+			let batchResults = await withTaskGroup(of: (Int, ASRepository?).self, returning: [Int: ASRepository].self) { group in
+				for index in startIndex..<endIndex {
+					let url = urls[index]
 					group.addTask {
-						guard let url = source.sourceURL else {
-							return (source, nil)
+						guard let url else {
+							return (index, nil)
 						}
 						
 						return await withCheckedContinuation { continuation in
-							self._dataService.fetch(from: url) { (result: RepositoryDataHandler) in
+							dataService.fetch(from: url) { (result: RepositoryDataHandler) in
 								switch result {
 								case .success(let repo):
-									continuation.resume(returning: (source, repo))
+									continuation.resume(returning: (index, repo))
 								case .failure(_):
-									continuation.resume(returning: (source, nil))
+									continuation.resume(returning: (index, nil))
 								}
 							}
 						}
 					}
 				}
 				
-				var results = [AltSource: ASRepository]()
-				for await (source, repo) in group {
+				var results = [Int: ASRepository]()
+				for await (index, repo) in group {
 					if let repo {
-						results[source] = repo
+						results[index] = repo
 					}
 				}
 				return results
 			}
 			
-			await MainActor.run {
-				for (source, repo) in batchResults {
-					self.sources[source] = repo
-				}
+			for (index, repo) in batchResults {
+				let source = sourcesArray[index]
+				if !source.isDeleted { self.sources[source] = repo }
 			}
 		}
 	}

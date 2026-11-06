@@ -29,9 +29,11 @@ struct CertificatesCellView: View {
 		.frame(height: 80)
 		.contentTransition(.opacity)
 		.frame(maxWidth: .infinity, alignment: .leading)
-		.onAppear {
+		.task(id: cert.uuid) {
+			let decoded = await Storage.shared.getProvisionFileDecoded(for: cert)
+			guard !Task.isCancelled else { return }
 			withAnimation {
-				data = Storage.shared.getProvisionFileDecoded(for: cert)
+				data = decoded
 //                Storage.shared.revokagedCertificate(for: cert)
 			}
 		}

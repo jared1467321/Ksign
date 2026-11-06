@@ -171,7 +171,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _clean()
         
         _copyServerCertificates()
-        _addDefaultCertificates()
+        Task.detached(priority: .utility) { Self._addDefaultCertificates() }
 
 #if SERVER
         // fallback just in case xd
@@ -284,7 +284,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
     
-    private func _addDefaultCertificates() {
+    nonisolated private static func _addDefaultCertificates() {
             guard
                 UserDefaults.standard.bool(forKey: "feather.didImportDefaultCertificates") == false,
                 let signingAssetsURL = Bundle.main.url(forResource: "signing-assets", withExtension: nil)
@@ -323,7 +323,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                         p12URL: p12Url,
                         provisionURL: provisionUrl,
                         p12Password: password,
-                        certificateName: certName,
+                        certificateName: certName
                     ) { _ in
                         
                     }

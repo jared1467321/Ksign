@@ -126,19 +126,25 @@ struct BulkSigningView: View {
 					allowedContentTypes:  [.image],
 					onDocumentsPicked: { urls in
 						guard let selectedFileURL = urls.first else { return }
-						guard let id = _editingConfigId, let index = _configs.firstIndex(where: { $0.id == id }) else { return }
-						_configs[index].icon = UIImage.fromFile(selectedFileURL)?.resizeToSquare()
+						guard let id = _editingConfigId else { return }
+						Task { @MainActor in
+							let image = try? await BackgroundFileWork.perform { UIImage.fromFile(selectedFileURL)?.resizeToSquare() }
+							guard let index = _configs.firstIndex(where: { $0.id == id }) else { return }
+							_configs[index].icon = image
+						}
 					}
 				)
 			}
 			.photosPicker(isPresented: $_isImagePickerPresenting, selection: $_selectedPhoto)
 			.onChange(of: _selectedPhoto) { newValue in
 				guard let newValue else { return }
+				let id = _editingConfigId
 				
 				Task { @MainActor in
-					if let data = try? await newValue.loadTransferable(type: Data.self),
-					   let image = UIImage(data: data)?.resizeToSquare() {
-						if let id = _editingConfigId, let index = _configs.firstIndex(where: { $0.id == id }) {
+					if let data = try? await newValue.loadTransferable(type: Data.self) {
+						let image = try? await BackgroundFileWork.perform { UIImage(data: data)?.resizeToSquare() }
+						guard _selectedPhoto == newValue else { return }
+						if let id, let index = _configs.firstIndex(where: { $0.id == id }) {
 							_configs[index].icon = image
 						}
 					}

@@ -16,49 +16,96 @@ import IDeviceSwift
 
 // MARK: - Class
 class ServerInstaller: Identifiable, ObservableObject {
+	private static let lifecycleQueue = DispatchQueue(label: "Asign.install-server", qos: .userInitiated)
 	let id = UUID()
-	private(set) var port = 0
+	private let stateLock = NSLock()
+	private var _port = 0
+	private var _host = "127.0.0.1"
+	private var _packageUrl: URL?
+	private var _hostedInstallers: [ServerInstaller] = []
+	private(set) var port: Int {
+		get { withState { _port } }
+		set { withState { _port = newValue } }
+	}
+	private(set) var host: String {
+		get { withState { _host } }
+		set { withState { _host = newValue } }
+	}
 	private var _needsShutdown = false
 
-	var packageUrl: URL?
+	var packageUrl: URL? {
+		get { withState { _packageUrl } }
+		set { withState { _packageUrl = newValue } }
+	}
 	let installTracking: ServerInstallTracking
 
 	// Other apps this server also serves. A batched group is served from a
 	// single server: the host serves its own payload plus every member's, each
 	// keyed by app id, so only one server (and one port) is stood up for the
 	// whole manifest instead of one per app. Members never serve.
-	private(set) var hostedInstallers: [ServerInstaller] = []
+	var hostedInstallers: [ServerInstaller] { withState { _hostedInstallers } }
 
-	var app: AppInfoPresentable
-	@ObservedObject var viewModel: InstallerStatusViewModel
+	let app: AppInfoPresentable
+	let viewModel: InstallerStatusViewModel
 	private var _server: Application?
 	private let _statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)?
+
+	private func withState<T>(_ body: () -> T) -> T {
+		stateLock.lock()
+		defer { stateLock.unlock() }
+		return body()
+	}
 
 	init(
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
-		startsServer: Bool = true,
 		installTracking: ServerInstallTracking = ServerInstallTracking(),
 		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil
-	) throws {
+	) {
 		self.app = app
 		self.viewModel = viewModel
 		self.installTracking = installTracking
 		self._statusReporter = statusReporter
-		if startsServer {
-			try startServing()
-		}
 	}
 
 	deinit {
-		_shutdownServer()
+		if _needsShutdown, let server = _server {
+			Self.lifecycleQueue.async {
+				server.server.shutdown()
+				server.shutdown()
+			}
+		}
 	}
 
-	// Binds a port and starts the TLS server. Deferred out of `init` so a
+	// Binds a port and starts the TLS server on a serial worker. Deferred out of `init` so a
 	// batched app can archive its package without ever standing up a server —
 	// only the group's host serves, for itself and all its members. Idempotent.
-	func startServing() throws {
+	func startServing() async throws {
+		try Task.checkCancellation()
+		do {
+			try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+				Self.lifecycleQueue.async {
+					continuation.resume(with: Result { try self._startServing() })
+				}
+			}
+		} catch {
+			try Task.checkCancellation()
+			throw error
+		}
+		try Task.checkCancellation()
+	}
+
+	private func _startServing() throws {
 		guard _server == nil else { return }
+		var started = false
+		defer {
+			if !started {
+				_server?.server.shutdown()
+				_server?.shutdown()
+				_server = nil
+			}
+		}
+		host = Self.sni
 
 		// The port is picked at random; a collision throws, so retry a few
 		// times with fresh ports before giving up on this app.
@@ -69,6 +116,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 		for attempt in 0..<6 {
 			if attempt > 0 {
 				_server?.shutdown()
+				_server = nil
 				self.port = Int.random(in: 4000...8000)
 				self._server = try Self.setupApp(port: port)
 			}
@@ -77,24 +125,24 @@ class ServerInstaller: Identifiable, ObservableObject {
 				try _configureRoutes()
 				try _server?.server.start()
 				_needsShutdown = true
+				started = true
 				return
 			} catch {
 				lastError = error
 			}
 		}
 
-		_server = nil
 		throw lastError ?? ServerInstallerError.couldNotStart
 	}
 
 	// Registers the members this host also serves. Set just before the host
 	// starts serving and fires the shared prompt.
 	func setHosted(_ installers: [ServerInstaller]) {
-		hostedInstallers = installers
+		withState { _hostedInstallers = installers }
 	}
 
 	func shutDown() {
-		_shutdownServer()
+		Self.lifecycleQueue.async { self._shutdownServer() }
 	}
 
 	// One "*" handler serves the host and every hosted member. Payloads and

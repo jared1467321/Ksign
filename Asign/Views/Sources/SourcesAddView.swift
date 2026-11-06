@@ -88,61 +88,40 @@ struct SourcesAddView: View {
 		_ code: String?,
 		competion: @escaping () -> Void
 	) {
-		guard let code else { return }
-		
-		let handler = ASDeobfuscator(with: code)
-		let repoUrls = handler.decode().compactMap { URL(string: $0) }
-
-		guard !repoUrls.isEmpty else { return }
-		
-		actor RepositoryCollector {
-			private var repositories: [URL: ASRepository] = [:]
-			
-			func add(url: URL, repository: ASRepository) {
-				repositories[url] = repository
-			}
-			
-			func getAllRepositories() -> [URL: ASRepository] {
-				return repositories
-			}
-		}
-		
+		guard let code else { _isImporting = false; return }
 		let dataService = _dataService
-		let collector = RepositoryCollector()
-		
-		Task {
-			await withTaskGroup(of: Void.self) { group in
-				for url in repoUrls {
-					group.addTask {
-						await withCheckedContinuation { continuation in
-							Task { @MainActor in
-								dataService.fetch<ASRepository>(from: url) { (result: RepositoryDataHandler) in
-									switch result {
-									case .success(let data):
-										Task {
-											await collector.add(url: url, repository: data)
-										}
-									case .failure(let error):
-										print("Failed to fetch \(url): \(error)")
-									}
-									continuation.resume()
+		Task { @MainActor in
+			let urls = (try? await BackgroundFileWork.perform {
+				ASDeobfuscator.decode(with: code).compactMap { URL(string: $0) }
+			}) ?? []
+			guard !urls.isEmpty else { _isImporting = false; return }
+			var repositories: [URL: ASRepository] = [:]
+			for start in stride(from: 0, to: urls.count, by: 4) {
+				let batch = urls[start..<min(start + 4, urls.count)]
+				let results = await withTaskGroup(of: (URL, ASRepository?).self) { group in
+					for url in batch {
+						group.addTask {
+							await withCheckedContinuation { continuation in
+								dataService.fetch(from: url) { (result: RepositoryDataHandler) in
+									continuation.resume(returning: (url, try? result.get()))
 								}
 							}
 						}
 					}
+					var results: [URL: ASRepository] = [:]
+					for await (url, repository) in group {
+						if let repository { results[url] = repository }
+					}
+					return results
 				}
-				
-				await group.waitForAll()
+				repositories.merge(results, uniquingKeysWith: { _, latest in latest })
 			}
-			
-			let repositories = await collector.getAllRepositories()
-			
-			await MainActor.run {
-				Storage.shared.addSources(repos: repositories) { _ in
-					competion()
-				}
+			Storage.shared.addSources(repos: repositories) { error in
+				_isImporting = false
+				if let error {
+					UIAlertController.showAlertWithOk(title: .localized("Error"), message: error.localizedDescription)
+				} else { competion() }
 			}
 		}
 	}
 }
-

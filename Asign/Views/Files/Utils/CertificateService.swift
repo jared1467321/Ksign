@@ -81,26 +81,33 @@ final class CertificateService {
         }
     }
     
+    func findProvisionFileInBackground(near file: FileItem) async -> Result<FileItem, ImportError> {
+        (try? await BackgroundFileWork.perform { self.findProvisionFile(near: file) }) ?? .failure(.invalidFile)
+    }
+
     func importP12Certificate(p12File: FileItem, provisionFile: FileItem, password: String, completion: @escaping (ImportResult) -> Void) {
-        guard FR.checkPasswordForCertificate(
-            for: p12File.url,
-            with: password,
-            using: provisionFile.url
-        ) else {
-            completion(.failure(.invalidPassword))
-            return
-        }
+        // OpenSSL/password checks read the files and must not run in a button callback.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard FR.checkPasswordForCertificate(
+                for: p12File.url,
+                with: password,
+                using: provisionFile.url
+            ) else {
+                completion(.failure(.invalidPassword))
+                return
+            }
         
-        FR.handleCertificateFiles(
-            p12URL: p12File.url,
-            provisionURL: provisionFile.url,
-            p12Password: password,
-            certificateName: p12File.name.replacingOccurrences(of: ".p12", with: "")
-        ) { error in
-            if let error = error {
-                completion(.failure(.importFailed(error.localizedDescription)))
-            } else {
-                completion(.success("Certificate imported successfully"))
+            FR.handleCertificateFiles(
+                p12URL: p12File.url,
+                provisionURL: provisionFile.url,
+                p12Password: password,
+                certificateName: p12File.name.replacingOccurrences(of: ".p12", with: "")
+            ) { error in
+                if let error = error {
+                    completion(.failure(.importFailed(error.localizedDescription)))
+                } else {
+                    completion(.success("Certificate imported successfully"))
+                }
             }
         }
     }

@@ -105,7 +105,7 @@ struct DylibsView: View {
                     onCompletion: { _ in
                         selectedDylibs.removeAll()
                         if let temp = _archiveExportTemp {
-                            try? FileManager.default.removeItem(at: temp)
+                            ArchiveHandler.cleanup(workDir: temp)
                             _archiveExportTemp = nil
                         }
                     }
@@ -173,20 +173,21 @@ struct DylibsView: View {
             return
         }
 
-        guard let appPath = Storage.shared.getAppDirectory(for: app) else { return }
-        let bundle = Bundle(url: appPath)
-        let execPath = appPath.appendingPathComponent(bundle?.exec ?? "").relativePath
-        let allDylibs = Zsign.listDylibs(appExecutable: execPath).map { $0 as String }
-        let visibleDylibs = allDylibs.filter { $0.hasPrefix("@rpath") || $0.hasPrefix("@executable_path") }
-        hiddenDylibCount = allDylibs.count - visibleDylibs.count
-        
-        let fileManager = FileManager.default
-        let searchPaths = [
-            appPath,
-            appPath.appendingPathComponent("Frameworks")
-        ]
-        
+        let snapshot = SigningAppSnapshot(app)
         DispatchQueue.global(qos: .userInitiated).async {
+            guard let appPath     = Storage.shared.getAppDirectory(for: snapshot) else { return }
+            let bundle = Bundle(url: appPath)
+            let execPath = appPath.appendingPathComponent(bundle?.exec ?? "").relativePath
+            let allDylibs = Zsign.listDylibs(appExecutable: execPath).map { $0 as String }
+            let visibleDylibs = allDylibs.filter { $0.hasPrefix("@rpath") || $0.hasPrefix("@executable_path") }
+            let hiddenCount = allDylibs.count - visibleDylibs.count
+        
+            let fileManager = FileManager.default
+            let searchPaths = [
+                appPath,
+                appPath.appendingPathComponent("Frameworks")
+            ]
+        
             var collectedFiles: [URL] = []
             for path in searchPaths {
                 guard fileManager.fileExists(atPath: path.path) else { continue }
@@ -200,7 +201,7 @@ struct DylibsView: View {
             let sortedFiles = collectedFiles.sorted { $0.lastPathComponent < $1.lastPathComponent }
             DispatchQueue.main.async {
                 self.dylibFiles = sortedFiles
-                self.hiddenDylibCount = hiddenDylibCount
+                self.hiddenDylibCount = hiddenCount
             }
         }
     }

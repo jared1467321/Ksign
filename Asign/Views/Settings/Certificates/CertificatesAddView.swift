@@ -29,12 +29,13 @@ struct CertificatesAddView: View {
 	@State private var _isPasswordAlertPresenting = false
 	@State private var _errorMessage: String = ""
 	@State private var _isErrorPresenting = false
+	@State private var _isSaving = false
 	
 	var saveButtonDisabled: Bool {
 		if _isFromAsign {
-			return _p12Data == nil || _provisionData == nil
+			return _isSaving || _p12Data == nil || _provisionData == nil
 		} else {
-			return _p12URL == nil || _provisionURL == nil
+			return _isSaving || _p12URL == nil || _provisionURL == nil
 		}
 	}
 	
@@ -136,22 +137,29 @@ extension CertificatesAddView {
 // MARK: - Extension: View (import)
 extension CertificatesAddView {
 	private func _saveCertificate() {
-        guard
-            let p12URL = _p12URL,
-            let provisionURL = _provisionURL,
-            FR.checkPasswordForCertificate(for: p12URL, with: _p12Password, using: provisionURL)
-        else {
-            _isPasswordAlertPresenting = true
-            return
-        }
-        
-        FR.handleCertificateFiles(
-            p12URL: p12URL,
-            provisionURL: provisionURL,
-            p12Password: _p12Password,
-            certificateName: _certificateName
-        ) { _ in
-            dismiss()
+        guard !_isSaving, let p12URL = _p12URL, let provisionURL = _provisionURL else { return }
+        _isSaving = true
+        let password = _p12Password
+        let name = _certificateName
+        Task { @MainActor in
+            let valid = (try? await BackgroundFileWork.perform {
+                FR.checkPasswordForCertificate(for: p12URL, with: password, using: provisionURL)
+            }) ?? false
+            guard valid else {
+                _isSaving = false
+                _isPasswordAlertPresenting = true
+                return
+            }
+            FR.handleCertificateFiles(p12URL: p12URL, provisionURL: provisionURL,
+                                      p12Password: password, certificateName: name) { error in
+                Task { @MainActor in
+                    _isSaving = false
+                    if let error {
+                        _errorMessage = error.localizedDescription
+                        _isErrorPresenting = true
+                    } else { dismiss() }
+                }
+            }
         }
 	}
 }

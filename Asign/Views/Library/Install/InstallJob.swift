@@ -319,9 +319,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	// canonical library state and must never be removed as install scratch data.
 	private var _usesCanonicalArchive = false
 
-	// Throws rather than `try!`-ing the way the view did: `ServerInstaller`
-	// starts a Vapor server in its initialiser, and a port collision took the
-	// whole app down. Now the session logs it and skips that one app.
+	// Server construction is cheap. Its asynchronous worker starts listening
+	// only when the package and (for batches) the shared manifest are ready.
 	init(app: AppInfoPresentable) throws {
 		self.app = app
 
@@ -340,25 +339,19 @@ final class InstallJob: ObservableObject, Identifiable {
 		self.viewModel = viewModel
 	}
 
-	// Idempotent. Throws if the server can't be stood up, which the caller
-	// turns into a normal `.broken` failure so the slot is freed properly.
-	private func _ensureInstaller() throws {
+	// Idempotent; actual server startup is deferred to the prompt worker.
+	private func _ensureInstaller() {
 		guard _installationMethod == 0, installer == nil else { return }
-		// Local (server 0) installs are served by the group's host, not each app,
-		// so build without a server — the host stands one up when it fires and
-		// serves everyone. External (server 1) still serves its own payload for
-		// palera.in to fetch, so it starts serving now.
-		let serves = _serverMethod != 0
+		// The host starts listening on its worker when the prompt is ready.
 		let jobID = id
 		let method = _installationMethod
 		let bundleID = app.identifier
 		let statusModel = viewModel
 		let tracking = ServerInstallTracking()
 
-		installer = try ServerInstaller(
-			app: app,
+		installer = ServerInstaller(
+			app: SigningAppSnapshot(app),
 			viewModel: viewModel,
-			startsServer: serves,
 			installTracking: tracking,
 			statusReporter: { status in
 				BulkInstallLiveActivityReporter.shared.updateStatus(jobID: jobID, status: status)
@@ -490,12 +483,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			self._holdsSlot = true
 			self.phase = .running
 
-			do {
-				try self._ensureInstaller()
-			} catch {
-				self.viewModel.status = .broken(error)
-				return
-			}
+			self._ensureInstaller()
 
 			self._install()
 		}
@@ -551,6 +539,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// simply sitting idle at `.sendingManifest` waiting for a payload request
 	// that will never come. Nothing is broken, so nothing needs rebuilding.
 	func retry() {
+		_promptTask?.cancel()
 		_statusEpoch.advance()
 		// A manual retry always re-prompts this one app on its own — the shared
 		// group prompt has already happened, so fold it back to a solo install.
@@ -606,12 +595,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			self._holdsSlot = true
 			self.phase = .running
 
-			do {
-				try self._ensureInstaller()
-			} catch {
-				self.viewModel.status = .broken(error)
-				return
-			}
+			self._ensureInstaller()
 
 			self._resume()
 		}
@@ -636,6 +620,7 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Drops a batched app back into the ready pool so the session can fold it
 	// into a fresh manifest with whatever else is waiting or still building.
 	func rejoinPool() {
+		_promptTask?.cancel()
 		_statusEpoch.advance()
 		// Shed any role from the manifest it was just in. A demoted host also
 		// stops serving — a fresh host will serve the regrouped manifest.
@@ -683,6 +668,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	// Replaces the view's `.onDisappear`. Only called when the session is
 	// actually tearing the job down — *not* when the drawer collapses.
 	func cancel() {
+		_promptTask?.cancel()
+		installer?.shutDown()
 		_statusEpoch.cancel()
 		_retryAfterPackaging = false
 		_packagingAttempt?.cancel()
@@ -752,6 +739,7 @@ final class InstallJob: ObservableObject, Identifiable {
 
 		switch newStatus {
 		case .completed, .broken:
+			_promptTask?.cancel()
 			if case .broken = newStatus, _packagingTask != nil {
 				// An external installer failure may arrive before packaging ends.
 				// Its worker must not subsequently resurrect the job as .ready.
@@ -795,29 +783,44 @@ final class InstallJob: ObservableObject, Identifiable {
 
 	// Fires the actual install prompt for the current server method. Both the
 	// initial `.ready` transition and a manual retry come through here.
+	private var _promptTask: Task<Void, Never>?
+
 	private func _triggerReadyAction() {
-		if _serverMethod == 0 {
-			// This app (the host, or a solo retry) serves the prompt, so its
-			// server has to be up before the link opens. Members never reach here.
-			do {
-				try installer?.startServing()
-			} catch {
-				viewModel.status = .broken(error)
-				return
-			}
-			if let link = installer?.iTunesLink, let url = URL(string: link) {
-				// Route through the coordinator instead of opening directly.
-				// If many apps fire itms-services opens at the same instant
-				// iOS drops some, and those apps never get an install prompt.
-				InstallPromptCoordinator.shared.enqueue {
-					UIApplication.shared.open(url)
+		_promptTask?.cancel()
+		guard let installer else { return }
+		let epoch = _statusEpoch.current
+		_promptTask = Task { @MainActor [weak self] in
+			guard let self else { return }
+			if self._serverMethod == 0 || self._serverMethod == 1 {
+				// This app (the host, or a solo retry) serves the prompt, so its
+				// server has to be up before the link opens. Members never reach here.
+				do {
+					try await installer.startServing()
+					try Task.checkCancellation()
+					guard !self.isTerminal, self._statusEpoch.matches(epoch) else { return }
+				} catch is CancellationError {
+					return
+				} catch {
+					self.viewModel.status = .broken(error)
+					return
 				}
 			}
-		} else if _serverMethod == 1 {
-			// Presented by the drawer, not by the row: a row can be scrolled
-			// out of sight or collapsed behind the lip, and a sheet presented
-			// from a view that isn't visible never appears.
-			InstallSession.shared.presentWebview(for: self)
+			if self._serverMethod == 0 {
+				if let url = URL(string: installer.iTunesLink) {
+					// Route through the coordinator instead of opening directly.
+					// If many apps fire itms-services opens at the same instant
+					// iOS drops some, and those apps never get an install prompt.
+					InstallPromptCoordinator.shared.enqueue { [weak self] in
+						guard let self, !self.isTerminal, self._statusEpoch.matches(epoch) else { return }
+						UIApplication.shared.open(url)
+					}
+				}
+			} else if self._serverMethod == 1 {
+				// Presented by the drawer, not by the row: a row can be scrolled
+				// out of sight or collapsed behind the lip, and a sheet presented
+				// from a view that isn't visible never appears.
+				InstallSession.shared.presentWebview(for: self)
+			}
 		}
 	}
 
@@ -830,7 +833,7 @@ final class InstallJob: ObservableObject, Identifiable {
 			_packagingTask?.cancel()
 			return
 		}
-		let app = self.app
+		let app = SigningAppSnapshot(self.app)
 		let viewModel = self.viewModel
 		let method = _installationMethod
 		let installer = self.installer

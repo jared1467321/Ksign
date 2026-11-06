@@ -114,31 +114,40 @@ final class BulkExportManager: ObservableObject {
 			do {
 				let fileName = _uniqueFileName(for: app, used: &usedNames)
 
-				if let archiveURL = Storage.shared.getArchiveURL(for: app) {
-					// Archive-backed records are already IPAs. Stage only a named
-					// clone/copy for the document picker; never rebuild Payload.
-					let workDir = FileManager.default.temporaryDirectory
-						.appendingPathComponent("FeatherBulkExport_\(UUID().uuidString)", isDirectory: true)
-					try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-					let dest = workDir.appendingPathComponent(fileName)
-					do {
-						try FileManager.default.cloneItem(at: archiveURL, to: dest)
-					} catch {
-						try FileManager.default.copyItem(at: archiveURL, to: dest)
-					}
-					exportURLs.append(dest)
-					_workDirs.append(workDir)
-				} else {
-					let handler = ArchiveHandler(app: app, viewModel: viewModel)
-					try await handler.move()
-					let packageUrl = try await handler.archive()
-					let dest = handler.workDir.appendingPathComponent(fileName)
-					try? FileManager.default.removeItem(at: dest)
-					try FileManager.default.moveItem(at: packageUrl, to: dest)
+				let snapshot = SigningAppSnapshot(app)
+				let staged = try await Task.detached(priority: .userInitiated) { () -> (URL, URL) in
+					if let archiveURL = Storage.shared.getArchiveURL(for: snapshot) {
+						// Archive-backed records are already IPAs. Stage only a named
+						// clone/copy for the document picker; never rebuild Payload.
+						let workDir = FileManager.default.temporaryDirectory
+							.appendingPathComponent("FeatherBulkExport_\(UUID().uuidString)", isDirectory: true)
+						do {
+							try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+							let dest = workDir.appendingPathComponent(fileName)
+							try FileManager.default.cloneItem(at: archiveURL, to: dest)
+							return (dest, workDir)
+						} catch {
+							ArchiveHandler.cleanup(workDir: workDir)
+							throw error
+						}
+					} else {
+						let handler = ArchiveHandler(app: snapshot, viewModel: viewModel)
+						do {
+							try await handler.move()
+							let packageUrl = try await handler.archive()
+							let dest = handler.workDir.appendingPathComponent(fileName)
+							try? FileManager.default.removeItem(at: dest)
+							try FileManager.default.moveItem(at: packageUrl, to: dest)
 
-					exportURLs.append(dest)
-					_workDirs.append(handler.workDir)
-				}
+							return (dest, handler.workDir)
+						} catch {
+							handler.cleanup()
+							throw error
+						}
+					}
+				}.value
+				exportURLs.append(staged.0)
+				_workDirs.append(staged.1)
 			} catch {
 				_failures.append(app.name ?? .localized("Unknown"))
 			}

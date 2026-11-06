@@ -89,6 +89,9 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
     @FocusState private var intervalFocused: Bool
     @State private var exportError: String?
     @State private var showExporter = false
+    @State private var preparingExport = false
+    @State private var exportURL: URL?
+    @State private var isVisible = false
 
     private struct AdvanceSchedule: Equatable {
         let isRunning: Bool
@@ -151,14 +154,18 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
                     Button("Save") {
                         navigation.pause()
                         guard let currentReportURL else { return }
-                        do {
-                            try ThemeReportBridge.shared.persistCurrentTheme(to: [currentReportURL])
-                            showExporter = true
-                        } catch {
-                            exportError = error.localizedDescription
+                        preparingExport = true
+                        Task { @MainActor in
+                            defer { preparingExport = false }
+                            do {
+                                try await ThemeReportBridge.shared.persistCurrentTheme(to: [currentReportURL])
+                                guard isVisible else { return }
+                                exportURL = currentReportURL
+                                showExporter = true
+                            } catch { if isVisible { exportError = error.localizedDescription } }
                         }
                     }
-                    .disabled(currentReportURL == nil)
+                    .disabled(currentReportURL == nil || preparingExport)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -167,6 +174,7 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
             }
         }
         .onAppear {
+            isVisible = true
             if !Self.isValidInterval(intervalSeconds) { intervalSeconds = 3 }
             intervalText = intervalSeconds.formatted(
                 .number.grouping(.never).precision(.fractionLength(0...9))
@@ -207,9 +215,9 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
             Text(exportError ?? "")
         }
         .sheet(isPresented: $showExporter) {
-            if let currentReportURL {
+            if let exportURL {
                 FileExporterRepresentableView(
-                    urlsToExport: [currentReportURL],
+                    urlsToExport: [exportURL],
                     asCopy: true,
                     useLastLocation: false,
                     onCompletion: { _ in showExporter = false }
@@ -217,9 +225,15 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
             }
         }
         .onDisappear {
+            isVisible = false
             navigation.pause()
             // Saving exports a copy; the generated reports remain temporary.
-            Set(reports.map(\.url)).forEach { try? FileManager.default.removeItem(at: $0) }
+            let urls = Set(reports.map(\.url))
+            Task {
+                try? await BackgroundFileWork.perform {
+                    urls.forEach { try? FileManager.default.removeItem(at: $0) }
+                }
+            }
         }
     }
 

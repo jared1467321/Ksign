@@ -19,10 +19,8 @@ extension Storage {
 		expiration: Date,
 		completion: @escaping (Error?) -> Void
 	) {
-		// Same fix as `addImported` — see the note there. `FR.handleCertificateFiles`
-		// runs `CertificateFileHandler` in a detached task.
-		context.perform {
-			let new = CertificatePair(context: self.context)
+		insertLibraryRecord({ worker in
+			let new = CertificatePair(context: worker)
 			new.uuid = uuid
 			new.date = Date()
 			new.password = password
@@ -30,10 +28,8 @@ extension Storage {
 			new.expiration = expiration
 			new.nickname = nickname
 			
-			self.saveContext()
-			UIImpactFeedbackGenerator(style: .light).impactOccurred()
-			completion(nil)
-		}
+			return new
+		}, completion: completion)
 	}
     
     func revokagedCertificate(for cert: CertificatePair) {
@@ -53,26 +49,36 @@ extension Storage {
         }
     }
     
-    func getProvisionFileDecoded(for cert: CertificatePair) -> Certificate? {
-        guard let url = getFile(.provision, from: cert) else {
-            return nil
+    @MainActor
+    func getProvisionFileDecoded(for cert: CertificatePair) async -> Certificate? {
+        // A profile may be stored as a Core Data blob. Fault and decode it on
+        // a private context too; no managed objects cross between queues.
+        let id = cert.objectID
+        guard !id.isTemporaryID else { return nil }
+        let worker = container.newBackgroundContext()
+        return await worker.perform {
+            guard let pair = try? worker.existingObject(with: id) as? CertificatePair else { return nil }
+            let embedded = pair.provisionData
+            if let embedded, !embedded.isEmpty { return CertificateReader.parseData(embedded) }
+            guard let uuid = pair.uuid else { return nil }
+            let directory = FileManager.default.certificates(uuid)
+            let url = FileManager.default.getPath(in: directory, for: FileRequest.provision.rawValue)
+            return CertificateReader(url).decoded
         }
-        
-        let read = CertificateReader(url)
-        return read.decoded
     }
     
 	func deleteCertificate(for cert: CertificatePair) {
-		do {
-			if cert.p12Data == nil && cert.provisionData == nil {
-				if let url = getUuidDirectory(for: cert) {
-					try FileManager.default.removeItem(at: url)
+		let uuid = cert.p12Data == nil && cert.provisionData == nil ? cert.uuid : nil
+		Task { @MainActor in
+			do {
+				if let uuid {
+					try await BackgroundFileWork.perform {
+						try FileManager.default.removeItem(at: FileManager.default.certificates(uuid))
+					}
 				}
-			}
-			context.delete(cert)
-			saveContext()
-		} catch {
-			print(error)
+				context.delete(cert)
+				saveContext()
+			} catch { print(error) }
 		}
 	}
 		

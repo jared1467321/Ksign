@@ -13,7 +13,7 @@ import UIKit
 
 // MARK: - Extension: View (Enil)
 extension SourceAppsView {
-    enum SortOption: String, CaseIterable {
+    enum SortOption: String, CaseIterable, Sendable {
         case `default` = "default"
         case name
         case date

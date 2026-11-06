@@ -52,10 +52,17 @@ Adaptive text keeps its existing map resolution, colors and animation cadence;
 the ink worker prepares and compares visible color strips, and stationary labels
 retain their geometry cache across unrelated progress updates.
 
+The follow-up [threading audit](THREADING_AUDIT.md) also moves catalog search and
+grouping, local installation server startup/shutdown, certificate profile reads,
+backup database/file work, bulk export copies, text editing I/O, and report
+export preparation onto workers. UI updates and Core Data object access retain
+their owning actor/context.
+
 Run `python3 .github/scripts/check_ui_workers.py --swiftc /path/to/swiftc` on
 Linux with Swift 6 to check real local HTTP range transfers, pause/resume,
 cancellation, interrupted-transfer retries, background progress and UI snapshot
-merging. It also checks unchanged ink-sample reuse and exact color-strip bytes.
+merging. It also checks unchanged ink-sample reuse, exact color-strip bytes,
+10,000-row catalog processing, and the server lifecycle with blocked main.
 An iOS build and on-device Instruments measurements are still needed to validate
 UIKit/Core Data integration and actual frame timing.
 

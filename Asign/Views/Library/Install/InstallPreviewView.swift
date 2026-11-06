@@ -29,6 +29,7 @@ struct InstallPreviewView: View {
 	@State private var _archiveWorkDir: URL?
 	@State private var _usesCanonicalArchive = false
 	@State private var _ownsBackgroundTask = false
+	@State private var _installTask: Task<Void, Never>?
 	private let _initialInstallationMethod: Int
 	
 	var app: AppInfoPresentable
@@ -46,10 +47,9 @@ struct InstallPreviewView: View {
 		let bundleID = app.identifier
 		let tracking = ServerInstallTracking()
 		self._installer = StateObject(
-			wrappedValue: try! ServerInstaller(
-				app: app,
+			wrappedValue: ServerInstaller(
+				app: SigningAppSnapshot(app),
 				viewModel: viewModel,
-				startsServer: method == 0 && !isSharing,
 				installTracking: tracking,
 				statusReporter: { status in
 					SingleInstallLiveActivityReporter.shared.handleServerStatus(
@@ -116,6 +116,8 @@ struct InstallPreviewView: View {
 			_install()
 		}
 		.onDisappear {
+			_installTask?.cancel()
+			installer.shutDown()
 			_activityCancellables.removeAll()
 			if _ownsBackgroundTask {
 				SingleInstallLiveActivityReporter.shared.end()
@@ -189,14 +191,21 @@ struct InstallPreviewView: View {
             return
         }
 
-		Task.detached {
+		let snapshot = SigningAppSnapshot(app)
+		let server = installer
+		let sharing = isSharing
+		_installTask = Task.detached {
+			var stagedWorkDir: URL?
 			do {
-				if let archiveURL = Storage.shared.getArchiveURL(for: app) {
+				if !sharing { try await server.startServing() }
+				try Task.checkCancellation()
+				if let archiveURL = Storage.shared.getArchiveURL(for: snapshot) {
 					SingleInstallLiveActivityReporter.shared.updatePackage(1)
 
 					if await !isSharing {
 						let tracking = await installer.installTracking
 						tracking.prepare(packageURL: archiveURL)
+						try Task.checkCancellation()
 						SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
 						await MainActor.run {
 							_usesCanonicalArchive = true
@@ -210,7 +219,7 @@ struct InstallPreviewView: View {
 							UIActivityViewController.show(activityItems: [archiveURL])
 						}
 					} else {
-						let package = try Self._copyArchiveBackedExport(archiveURL, name: app.name, version: app.version)
+						let package = try Self._copyArchiveBackedExport(archiveURL, name: snapshot.name, version: snapshot.version)
 						await MainActor.run {
 							UIApplication.open(FileManager.default.archives.toSharedDocumentsURL()!)
 							dismiss()
@@ -222,15 +231,17 @@ struct InstallPreviewView: View {
 
 				// Legacy filesystem-backed records retain the packaging/export path.
 				let handler = ArchiveHandler(
-					app: app,
+					app: snapshot,
 					viewModel: viewModel,
 					progressReporter: { progress in
 						SingleInstallLiveActivityReporter.shared.updatePackage(progress)
 					}
 				)
+				stagedWorkDir = handler.workDir
 				try await handler.move()
 				let workDir = handler.workDir
 				let packageUrl = try await handler.archive()
+				try Task.checkCancellation()
 
 				await MainActor.run {
 					_archiveWorkDir = workDir
@@ -240,6 +251,7 @@ struct InstallPreviewView: View {
 				if await !isSharing {
 					let tracking = await installer.installTracking
 					tracking.prepare(packageURL: packageUrl)
+					try Task.checkCancellation()
                     SingleInstallLiveActivityReporter.shared.updateStatus(.ready)
                     await MainActor.run {
                         installer.packageUrl = packageUrl
@@ -257,6 +269,9 @@ struct InstallPreviewView: View {
 						}
 					}
 				}
+			} catch is CancellationError {
+				if let stagedWorkDir { ArchiveHandler.cleanup(workDir: stagedWorkDir) }
+				server.shutDown()
 			} catch {
 				SingleInstallLiveActivityReporter.shared.updateStatus(.broken(error))
 				await MainActor.run {

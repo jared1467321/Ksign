@@ -27,6 +27,7 @@ struct SigningView: View {
 	@State private var _isSigning = false
 	@State private var _selectedPhoto: PhotosPickerItem? = nil
 	@State var appIcon: UIImage?
+	@State private var _certificateAppID: String?
 	
 	var signAndInstall: Bool = false
 	
@@ -40,18 +41,6 @@ struct SigningView: View {
 	private func _selectedCert() -> CertificatePair? {
 		guard certificates.indices.contains(_temporaryCertificate) else { return nil }
 		return certificates[_temporaryCertificate]
-	}
-	
-	private func _getCertAppID() -> String? {
-		guard
-			let cert = _selectedCert(),
-			let decoded = Storage.shared.getProvisionFileDecoded(for: cert),
-			let entitlements = decoded.Entitlements,
-			let appID = entitlements["application-identifier"]?.value as? String
-		else {
-			return nil
-		}
-		return appID.split(separator: ".").dropFirst().joined(separator: ".")
 	}
 	
 	var app: AppInfoPresentable
@@ -115,7 +104,11 @@ struct SigningView: View {
 					allowedContentTypes:  [.image],
 					onDocumentsPicked: { urls in
 						guard let selectedFileURL = urls.first else { return }
-						self.appIcon = UIImage.fromFile(selectedFileURL)?.resizeToSquare()
+						Task { @MainActor in
+							appIcon = try? await BackgroundFileWork.perform {
+								UIImage.fromFile(selectedFileURL)?.resizeToSquare()
+							}
+						}
 					}
 				)
 			}
@@ -128,13 +121,23 @@ struct SigningView: View {
 				guard let newValue else { return }
 				
 				Task {
-					if let data = try? await newValue.loadTransferable(type: Data.self),
-					   let image = UIImage(data: data)?.resizeToSquare() {
+					if let data = try? await newValue.loadTransferable(type: Data.self) {
+						let image = try? await BackgroundFileWork.perform { UIImage(data: data)?.resizeToSquare() }
+						guard _selectedPhoto == newValue else { return }
 						appIcon = image
 					}
 				}
 			}
 			.animation(.smooth, value: _isSigning)
+		}
+		.task(id: _selectedCert()?.uuid) {
+			_certificateAppID = nil
+			guard let cert = _selectedCert() else { return }
+			let decoded = await Storage.shared.getProvisionFileDecoded(for: cert)
+			guard !Task.isCancelled else { return }
+			if let appID = decoded?.Entitlements?["application-identifier"]?.value as? String {
+				_certificateAppID = appID.split(separator: ".").dropFirst().joined(separator: ".")
+			}
 		}
 		.onAppear {
 			// ppq protection
@@ -213,7 +216,7 @@ extension SigningView {
 				SigningPropertiesView(
 					title: .localized("Identifier"),
 					initialValue: _temporaryOptions.appIdentifier ?? (app.identifier ?? ""),
-					certAppId: _getCertAppID(),
+					certAppId: _certificateAppID,
 					bindingValue: $_temporaryOptions.appIdentifier
 				)
 			}

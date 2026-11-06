@@ -104,7 +104,9 @@ struct FRAppIconView: View {
 			_loadedKey = nil
 		}
 
-		guard let url = Storage.shared.getIconURL(for: _app) else { return }
+		let snapshot = SigningAppSnapshot(_app)
+		guard let url = try? await BackgroundFileWork.perform({ Storage.shared.getIconURL(for: snapshot) }) else { return }
+		guard !Task.isCancelled else { return }
 		let decoded = await AppIconLoader.shared.icon(forKey: key, path: url.path)
 
 		// The view may have been reused while we were waiting; don't apply a

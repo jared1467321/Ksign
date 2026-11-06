@@ -8,8 +8,8 @@ extension SigningPreflight {
     static func source(for app: AppInfoPresentable, options: Options? = nil) -> Source {
         Source(name: app.name ?? "Unknown App", recordedIdentifier: app.identifier,
                customIdentifier: options?.appIdentifier,
-               archiveURL: Storage.shared.getArchiveURL(for: app),
-               appDirectory: Storage.shared.getAppDirectory(for: app))
+               archiveURL: nil, appDirectory: nil,
+               libraryDirectory: Storage.shared.getUuidDirectory(for: app))
     }
 }
 
@@ -19,10 +19,9 @@ enum SigningPreflightCoordinator {
                        onContinue: @escaping (SigningPreflight.Report) -> Void,
                        onCancel: @escaping () -> Void) {
         Task {
-            let candidates = await Task.detached(priority: .userInitiated) {
-                sources.map(SigningPreflight.candidate)
+            let report = await Task.detached(priority: .userInitiated) {
+                SigningPreflight.evaluate(sources.map(SigningPreflight.candidate), isInstalled: UIApplication.isAppInstalled)
             }.value
-            let report = SigningPreflight.evaluate(candidates, isInstalled: UIApplication.isAppInstalled)
             guard !report.installed.isEmpty else { onContinue(report); return }
             var sections: [String] = []
             if !report.installed.isEmpty {
@@ -68,9 +67,10 @@ enum SigningPreflightCoordinator {
                 continue
             }
             do {
-                let packageURL = Storage.shared.getArchiveURL(for: app)
-                let appDirectory = Storage.shared.getAppDirectory(for: app)
+                let snapshot = SigningAppSnapshot(app)
                 let preflight = try await Task.detached(priority: .userInitiated) {
+                    let packageURL = Storage.shared.getArchiveURL(for: snapshot)
+                    let appDirectory = packageURL == nil ? Storage.shared.getAppDirectory(for: snapshot) : nil
                     if let packageURL { return try DeviceInstallPreflight.inspect(packageURL) }
                     if let appDirectory { return try DeviceInstallPreflight.inspect(appDirectory: appDirectory) }
                     throw ArchiveBackedAppError.rootAppNotFound
