@@ -13,9 +13,14 @@ final class InstalledAppsModel: ObservableObject {
     @Published private(set) var uninstallCompleted = 0
     @Published private(set) var uninstallTotal = 0
     @Published private(set) var uninstallCurrentAppName: String?
+    @Published private(set) var uninstallActiveCount = 0
     @Published private(set) var uninstallStopRequested = false
     @Published private(set) var uninstallSummary: String?
     private var loadTask: Task<Void, Never>?
+    private var uninstallBatch: IDeviceUninstallBatch?
+    private var uninstallActiveIDs: Set<String> = []
+    private var uninstallFinishedIDs: Set<String> = []
+    private var uninstallRemovedCount = 0
 
     func load() {
         guard !isLoading, !isUninstalling else { return }
@@ -90,12 +95,18 @@ final class InstalledAppsModel: ObservableObject {
         uninstallCompleted = 0
         uninstallTotal = eligible.count
         uninstallCurrentAppName = nil
+        uninstallActiveCount = 0
+        uninstallActiveIDs = []
+        uninstallFinishedIDs = []
+        uninstallRemovedCount = 0
         uninstallStatuses = Dictionary(uniqueKeysWithValues: eligible.map { ($0.id, "Waiting to uninstall…") })
         uninstallSummary = nil
         error = nil
+        let batch = IDeviceUninstallBatch(apps: eligible)
+        uninstallBatch = batch
 
         // The library owns this model, so a tab change never detaches the batch
-        // or loses its progress. Keep the connection until the current app ends.
+        // or loses progress. Retain the connection until all active apps finish.
         Task {
             let manager = DeviceInstallationManager.shared
             let workflow = UUID()
@@ -103,41 +114,31 @@ final class InstalledAppsModel: ObservableObject {
             manager.retainWorkflow(workflow)
             let background = BackgroundTaskManager.shared
             background.claim(.uninstalling)
-            var removedCount = 0
-            var succeeded = true
             defer {
-                for app in eligible.dropFirst(uninstallCompleted) {
+                // Completions can arrive out of selection order. Drain the
+                // recorded results before ignoring late progress deliveries.
+                for (id, result) in batch.results {
+                    applyUninstallEvent(.finished(id, result), batch: batch)
+                }
+                for app in eligible where !uninstallFinishedIDs.contains(app.id) {
                     uninstallStatuses[app.id] = "Not started"
                 }
                 uninstallSummary = (uninstallStopRequested ? "Stopped. " : "") +
-                    "Uninstalled \(removedCount) of \(eligible.count) apps."
+                    "Uninstalled \(uninstallRemovedCount) of \(eligible.count) apps."
                 uninstallCurrentAppName = nil
+                uninstallActiveCount = 0
+                uninstallActiveIDs = []
+                uninstallBatch = nil
                 manager.releaseWorkflow(workflow)
-                background.release(.uninstalling, success: succeeded && !uninstallStopRequested)
+                background.release(.uninstalling, success: uninstallRemovedCount == eligible.count && !uninstallStopRequested)
                 isUninstalling = false
             }
-            for app in eligible {
-                guard !uninstallStopRequested else { break }
-                uninstallCurrentAppName = app.name
-                uninstallStatuses[app.id] = "Checking installed app…"
-                background.report(.uninstalling, completed: uninstallCompleted, total: eligible.count,
-                                  fraction: nil, detail: "Checking installed app", currentItem: app.name)
-                do {
-                    let request = try await Task.detached(priority: .utility) {
-                        try IDeviceUninstallRequest(installedApp: app)
-                    }.value
-                    uninstallStatuses[app.id] = "Uninstalling…"
-                    background.report(.uninstalling, detail: "Uninstalling \(app.name)")
-                    let removed = try await manager.uninstall(request)
-                    uninstallStatuses[app.id] = removed ? "Uninstalled" : "Already uninstalled"
-                    remove(app.id)
-                    removedCount += 1
-                } catch {
-                    succeeded = false
-                    uninstallStatuses[app.id] = error.localizedDescription
+            do {
+                try await manager.uninstall(batch) { [weak self] event in
+                    Task { @MainActor in self?.applyUninstallEvent(event, batch: batch) }
                 }
-                uninstallCompleted += 1
-                background.report(.uninstalling, completed: uninstallCompleted, total: eligible.count)
+            } catch {
+                self.error = error.localizedDescription
             }
         }
         return true
@@ -146,6 +147,36 @@ final class InstalledAppsModel: ObservableObject {
     func stopUninstalling() {
         guard isUninstalling else { return }
         uninstallStopRequested = true
+        uninstallBatch?.stop()
+    }
+
+    private func applyUninstallEvent(_ event: IDeviceUninstallEvent, batch: IDeviceUninstallBatch) {
+        guard uninstallBatch === batch else { return }
+        switch event {
+        case .started(let id):
+            guard !uninstallFinishedIDs.contains(id) else { return }
+            uninstallActiveIDs.insert(id)
+            uninstallStatuses[id] = "Uninstalling…"
+        case .finished(let id, let result):
+            guard uninstallFinishedIDs.insert(id).inserted else { return }
+            uninstallActiveIDs.remove(id)
+            switch result {
+            case .success(let removed):
+                uninstallStatuses[id] = removed ? "Uninstalled" : "Already uninstalled"
+                remove(id)
+                uninstallRemovedCount += 1
+            case .failure(let error):
+                uninstallStatuses[id] = error.localizedDescription
+            }
+            uninstallCompleted = uninstallFinishedIDs.count
+        }
+        uninstallActiveCount = uninstallActiveIDs.count
+        uninstallCurrentAppName = uninstallActiveIDs.count == 1
+            ? apps.first(where: { uninstallActiveIDs.contains($0.id) })?.name : nil
+        let detail = uninstallActiveCount == 1
+            ? "Uninstalling \(uninstallCurrentAppName ?? "app")" : "Uninstalling \(uninstallActiveCount) apps"
+        BackgroundTaskManager.shared.report(.uninstalling, completed: uninstallCompleted, total: uninstallTotal,
+                                             fraction: nil, detail: detail, currentItem: uninstallCurrentAppName)
     }
 
     private func remove(_ bundleIdentifier: String) {

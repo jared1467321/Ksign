@@ -165,15 +165,11 @@ final class DeviceInstallationManager: ObservableObject {
         return apps
     }
 
-    /// Hold the preparation queue until removal completes. Previously admitted
-    /// installs drain first; no new install can reserve the connection meanwhile.
-    func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {
-        guard request.bundleIdentifier != Bundle.main.bundleIdentifier else {
-            throw IDeviceInstallSkip(reason: "Asign cannot uninstall itself.")
-        }
-        try UninstallBlacklist.shared.checkRemovalAllowed(for: request.bundleIdentifier)
+    /// Reserve the connection for the entire rolling batch. Existing installs
+    /// drain first; new installs wait until every removal stream has closed.
+    func uninstall(_ batch: IDeviceUninstallBatch,
+                   onEvent: @escaping @Sendable (IDeviceUninstallEvent) -> Void) async throws {
         let selectedMode = mode
-        var removed = false
         try await enqueue {
             while !self.activeInstallations.isEmpty {
                 try await Task.sleep(nanoseconds: 100_000_000)
@@ -185,16 +181,23 @@ final class DeviceInstallationManager: ObservableObject {
             }
             try await self.prepare(selectedMode)
             do {
-                try UninstallBlacklist.shared.checkRemovalAllowed(for: request.bundleIdentifier)
-                removed = try await InstallationProxy(viewModel: InstallerStatusViewModel()).uninstall(request)
+                try await InstallationProxy(viewModel: InstallerStatusViewModel()).uninstall(batch,
+                    checkRemovalAllowed: { try UninstallBlacklist.checkSavedRemovalAllowed(for: $0) },
+                    onEvent: onEvent)
             } catch {
                 if !(error is CancellationError), !(error is IDeviceInstallSkip),
                    !(error is IDeviceInstallationRejection) { self.needsConnectionRecovery = true }
                 // Never replay an uninstall after an ambiguous transport error.
                 throw error
             }
+            // Recover only after the entire batch drains. One failed stream
+            // must not replace the tunnel underneath other active removals.
+            for result in batch.results.values {
+                if case .failure(let error) = result,
+                   !(error is CancellationError), !(error is IDeviceInstallSkip),
+                   !(error is IDeviceInstallationRejection) { self.needsConnectionRecovery = true }
+            }
         }
-        return removed
     }
 
     func resetPairing() async {

@@ -202,13 +202,21 @@ source trees from the chunk-size experiment.
   If required metadata or persistence is unavailable, the app stays unlisted.
   Receipts live in Application Support separately from the library, with atomic
   writes serialized across install workers. Corrupt tracking files fail closed.
-  The installation queue must finish or be cancelled first. Removal runs
-  sequentially, waits for iOS completion, verifies absence, deletes the receipt,
-  updates the list,
-  and shows a result per app. **Stop After Current App** leaves the remaining
-  apps untouched. Connection errors never automatically replay a removal command.
-  Already absent apps also lose their receipts. Failed/cancelled removals keep
-  theirs for retry. A successful inventory refresh prunes absent/replaced copies
+  The installation queue must finish or be cancelled first. Removal keeps up to
+  five apps in flight on one prepared tunnel. The device protocol takes one
+  bundle ID per command; each worker retains its installer client on the same
+  native thread and takes the next selected app as soon as its previous app
+  finishes. Each removal waits for iOS completion, verifies absence, deletes the
+  receipt, updates the list, and shows a result per app. New installations wait
+  for the entire removal batch to drain. **Stop After Active Removals** leaves
+  unstarted apps untouched and waits for active removals to finish. Blacklist
+  settings are rechecked immediately before each command. A broken stream is
+  discarded; later apps can open a new stream on the retained tunnel. Connection
+  errors never automatically replay a removal command or replace the tunnel
+  underneath active peers. Already absent apps also lose their receipts.
+  Failed/unstarted removals keep theirs for retry; a confirmed removal still
+  clears its receipt if cancellation arrives after its command was sent.
+  A successful inventory refresh prunes absent/replaced copies
   without pruning newer receipts created after the query began. Missing metadata
   hides a copy without throwing away its receipt.
 - **Forget Built-in Pairing** removes Asign's saved credentials. Removing iOS's
@@ -278,6 +286,16 @@ Force quitting or replacing Asign during self-update can prevent completion
 cleanup from running and still requires a manual reconnect.
 
 ## Device validation
+
+Run `python3 .github/scripts/check_device_uninstall.py --swiftc /path/to/swiftc`
+for the removal regression checks. These compile the production batch, native
+worker, receipt checks, connection manager and observable model against platform
+substitutes. They cover five overlapping commands, immediate slot refill,
+client/thread reuse, stopping/cancellation, ambiguous connection failure without
+replay, rejection/absence verification, copy binding, blacklist checks and
+out-of-order progress. They do not measure actual iOS throughput. On a device,
+verify a batch larger than five apps, a rejected removal, stop/drain, both
+connection modes and a later installation before release.
 
 An iOS Xcode build and device testing are still required. Verify first-run consent/PIN, relaunch and
 automatic reconnect, a multi-app install, cancellation during setup/upload,

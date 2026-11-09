@@ -5,7 +5,7 @@ import IDeviceSwift
 @MainActor
 final class UninstallBlacklist: ObservableObject {
     static let shared = UninstallBlacklist()
-    private static let storageKey = "Ksign.uninstallBlacklist"
+    private nonisolated static let storageKey = "Ksign.uninstallBlacklist"
 
     // Bundle identifiers keep protection stable across app updates and reloads.
     @Published private(set) var entries: [String: String]
@@ -46,10 +46,12 @@ final class UninstallBlacklist: ObservableObject {
         if entries != saved { entries = saved }
     }
 
-    func checkRemovalAllowed(for bundleIdentifier: String) throws {
-        // Read the saved setting again after any connection/queue waits.
-        reload()
-        guard !contains(bundleIdentifier) else {
+    // Native removal workers recheck immediately before sending each command.
+    // UserDefaults supports concurrent reads; observable state stays on main.
+    nonisolated static func checkSavedRemovalAllowed(for bundleIdentifier: String,
+                                                    defaults: UserDefaults = .standard) throws {
+        let saved = defaults.dictionary(forKey: storageKey) as? [String: String] ?? [:]
+        guard saved[bundleIdentifier] == nil else {
             throw IDeviceInstallSkip(reason: "This app is on the uninstall blacklist. Remove it in Settings → Blacklisted Apps before uninstalling.")
         }
     }

@@ -193,21 +193,90 @@ public final class InstallationProxy: Identifiable, ObservableObject {
             return try await IDeviceInstallationWorker.performInstallation { [self] in
                 try checkCancellation()
                 return try withDeviceClient { client in
-                    let installed = try lookup(request.bundleIdentifier, client: client)
-                    guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else {
-                        try request.didRemove()
-                        return false
-                    }
-                    try checkCancellation()
-                    try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
-                    guard try lookup(request.bundleIdentifier, client: client) == nil else {
-                        throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
-                    }
-                    try request.didRemove()
-                    return true
+                    try uninstall(request, client: client)
                 }
             }
         } onCancel: { [cancellation] in cancellation.cancel() }
+    }
+
+    /// InstallationProxy accepts one bundle ID per command. Keep up to five
+    /// commands in flight on independent streams of the same prepared tunnel.
+    /// Each worker reuses its client and creating thread for subsequent apps.
+    public func uninstall(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
+                          checkRemovalAllowed: @escaping @Sendable (String) throws -> Void,
+                          onEvent: @escaping @Sendable (IDeviceUninstallEvent) -> Void) async throws {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<min(batch.count, max(1, min(concurrency, 5))) {
+                    group.addTask { [self] in
+                        try await IDeviceInstallationWorker.performInstallation {
+                            self.uninstallWorker(batch, checkRemovalAllowed: checkRemovalAllowed, onEvent: onEvent)
+                        }
+                    }
+                }
+                try await group.waitForAll()
+            }
+        } onCancel: { [cancellation] in
+            batch.stop()
+            cancellation.cancel()
+        }
+    }
+
+    private func uninstallWorker(_ batch: IDeviceUninstallBatch,
+                                 checkRemovalAllowed: (String) throws -> Void,
+                                 onEvent: (IDeviceUninstallEvent) -> Void) {
+        func finish(_ id: String, _ result: Result<Bool, Error>) {
+            batch.record(id, result: result)
+            onEvent(.finished(id, result))
+        }
+        while let first = batch.next() {
+            var current: IDeviceInstalledApp? = first
+            do {
+                try withDeviceClient { client in
+                    while let app = current {
+                        onEvent(.started(app.id))
+                        do {
+                            try checkCancellation()
+                            let request = try IDeviceUninstallRequest(installedApp: app, registry: batch.registry)
+                            let removed = try uninstall(request, client: client) {
+                                try checkRemovalAllowed(app.id)
+                            }
+                            finish(app.id, .success(removed))
+                        } catch {
+                            finish(app.id, .failure(error))
+                            current = nil
+                            // A completed rejection leaves the stream usable.
+                            // Discard a broken stream; never replay its command.
+                            if !(error is IDeviceInstallSkip), !(error is IDeviceInstallationRejection),
+                               !(error is CancellationError) { throw error }
+                        }
+                        current = batch.next()
+                    }
+                }
+            } catch {
+                // Connection creation can fail before this app was attempted.
+                // The next app may open a fresh stream on the retained tunnel.
+                if let app = current { finish(app.id, .failure(error)) }
+            }
+        }
+    }
+
+    private func uninstall(_ request: IDeviceUninstallRequest, client: OpaquePointer?,
+                           checkRemovalAllowed: () throws -> Void = {}) throws -> Bool {
+        let installed = try lookup(request.bundleIdentifier, client: client)
+        guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else {
+            try request.didRemove()
+            return false
+        }
+        try checkCancellation()
+        try checkRemovalAllowed()
+        try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
+        guard try lookup(request.bundleIdentifier, client: client) == nil else {
+            throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
+        }
+        try request.didRemove()
+        return true
     }
 
     // Each proxy is one attempt. Cancellation waits for any native call already

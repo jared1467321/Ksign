@@ -67,12 +67,12 @@ struct InstalledAppsView: View {
             if model.isUninstalling {
                 NBSection("Uninstalling", secondary: "\(model.uninstallCompleted)/\(model.uninstallTotal)") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(model.uninstallStopRequested ? "Finishing current app…" : "Uninstalling \(model.uninstallCurrentAppName ?? "apps")…")
+                        Text(model.uninstallStopRequested ? "Finishing active removals…" : uninstallActivity)
                             .font(.callout).nbThemeForeground(.text)
                         ProgressView(value: Double(model.uninstallCompleted), total: Double(model.uninstallTotal))
                             .nbThemeTint(.accent)
                     }
-                    Button("Stop After Current App") { model.stopUninstalling() }
+                    Button("Stop After Active Removals") { model.stopUninstalling() }
                         .disabled(model.uninstallStopRequested)
                 }
             } else if let summary = model.uninstallSummary {
@@ -154,6 +154,12 @@ struct InstalledAppsView: View {
         .onChange(of: model.apps.map(\.id)) { ids in
             selectedIDs.formIntersection(ids)
         }
+    }
+
+    private var uninstallActivity: String {
+        if let name = model.uninstallCurrentAppName { return "Uninstalling \(name)…" }
+        if model.uninstallActiveCount > 0 { return "Uninstalling \(model.uninstallActiveCount) apps…" }
+        return "Preparing removals…"
     }
 
     private func presentRemoval(_ apps: [IDeviceInstalledApp]) {

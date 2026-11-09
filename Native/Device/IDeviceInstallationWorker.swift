@@ -7,9 +7,10 @@ final class IDeviceInstallationWorker {
     private let condition = NSCondition()
     private var operations: [() -> Void] = []
 
-    // Admission is bounded by InstallQueueCoordinator. Each attempt owns its
-    // clients and runs their native lifetime on one finite-lived thread, while
-    // retaining the shared tunnel. The shared worker handles connection setup.
+    // Admission is bounded by InstallQueueCoordinator or the removal batch.
+    // Each install attempt/removal slot owns clients on one finite-lived
+    // thread while retaining the tunnel. Removal slots reuse their clients
+    // across apps. The shared worker handles connection setup.
     static func performInstallation<T>(_ operation: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             let thread = Thread {
