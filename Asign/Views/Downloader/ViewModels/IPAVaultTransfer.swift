@@ -500,6 +500,18 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
     private var completedIPAVaultActivityItemIDs: Set<String> = []
     private var ipavaultCurrentActivityItemID: String?
     private var ipavaultBackgroundTaskSnapshot: IPAVaultBackgroundTaskSnapshot?
+    private var ipavaultBackgroundProgressWorkItem: DispatchWorkItem?
+
+    // Byte callbacks only mark system progress dirty. Computing the whole batch
+    // belongs to one bounded update, including while the app is backgrounded.
+    private func scheduleIPAVaultBackgroundProgress() {
+        guard ipavaultBackgroundProgressWorkItem == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.publishIPAVaultBackgroundTaskState()
+        }
+        ipavaultBackgroundProgressWorkItem = work
+        queue.asyncAfter(deadline: .now() + ipavaultPresentationInterval, execute: work)
+    }
 
     private var ipavaultTransfersRootURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -749,6 +761,10 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     private func publishIPAVaultBackgroundTaskState() {
         dispatchPrecondition(condition: .onQueue(queue))
+        // Lifecycle changes call this directly and must supersede delayed byte
+        // progress, particularly before releasing the system task on completion.
+        ipavaultBackgroundProgressWorkItem?.cancel()
+        ipavaultBackgroundProgressWorkItem = nil
         let total = ipavaultActivityItemIDs.count
         guard total > 0 else { return }
 
@@ -766,6 +782,10 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         } else {
             detail = "Downloading from IPA Vault"
         }
+        // Queued/paused items may not have a transport snapshot. Index their
+        // fallback once instead of searching the full list for each batch item.
+        let publishedProgress = Dictionary(uniqueKeysWithValues:
+            downloadItems.map { ($0.id.uuidString, $0.progress) })
         let aggregateFraction = min(
             1,
             max(
@@ -777,8 +797,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
                     if let transportProgress = ipavaultLatestProgressByItemID[itemID]?.progress {
                         return partial + min(1, max(0, transportProgress))
                     }
-                    let publishedProgress = downloadItems.first(where: { $0.id.uuidString == itemID })?.progress ?? 0
-                    return partial + min(1, max(0, publishedProgress))
+                    return partial + min(1, max(0, publishedProgress[itemID] ?? 0))
                 } / Double(total)
             )
         )
@@ -1300,7 +1319,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     private func updateIPAVaultProgress(for job: IPAVaultJob) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard downloadItems.contains(where: { $0.id.uuidString == job.itemID }) else { return }
+        guard ipavaultJobs[job.itemID] === job else { return }
 
         let uncommittedInFlight = job.tasks.keys.reduce(Int64(0)) { partial, taskID in
             guard let metadata = ipavaultTaskMetadata[taskID] else { return partial }
@@ -1317,7 +1336,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
             bytesDownloaded: downloaded,
             progress: progress
         )
-        publishIPAVaultBackgroundTaskState()
+        scheduleIPAVaultBackgroundProgress()
     }
 
     private func commitIPAVaultBytes(_ metadata: IPAVaultTaskMetadata, job: IPAVaultJob, through absoluteEnd: Int64) {

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -59,6 +60,19 @@ class Server(BaseHTTPRequestHandler):
 STUBS = r'''
 import Foundation
 import FoundationNetworking
+final class TransferWorkCounts {
+    static let lock = NSLock()
+    static var callbacks = 0
+    static var calculations = 0
+    static func callback() { lock.lock(); callbacks += 1; lock.unlock() }
+    static func calculation() { lock.lock(); calculations += 1; lock.unlock() }
+    static func check() {
+        lock.lock(); defer { lock.unlock() }
+        require(callbacks > 100, "insufficient transfer callbacks for batching regression")
+        require(calculations * 2 < callbacks, "whole-batch calculation still follows byte-callback cadence")
+        print("PASS: bounded batch accounting: \(callbacks) callbacks, \(calculations) calculations")
+    }
+}
 @propertyWrapper struct Published<Value> {
     var wrappedValue: Value
     init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
@@ -446,6 +460,7 @@ final class TransferCheck: @unchecked Sendable {
             print("PASS: " + mode + " transfer with blocked main thread")
         }
         try facadeChecks(base, payload: payload)
+        TransferWorkCounts.check()
     }
 }
 '''
@@ -462,7 +477,14 @@ def main():
             work = Path(work)
             (work / 'expected').write_bytes(PAYLOAD)
             engine = (ROOT / 'Asign/Views/Downloader/ViewModels/IPAVaultTransfer.swift').read_text()
-            engine = engine.replace('import Darwin', 'import Glibc\nimport FoundationNetworking').replace('Darwin.', 'Glibc.')
+            if sys.platform != 'darwin':
+                engine = engine.replace('import Darwin', 'import Glibc\nimport FoundationNetworking').replace('Darwin.', 'Glibc.')
+            # Instrument the real methods in the test copy, without adding counters
+            # or locks to the shipping transport's hot path.
+            engine = engine.replace('private func publishIPAVaultBackgroundTaskState() {',
+                'private func publishIPAVaultBackgroundTaskState() {\n        TransferWorkCounts.calculation()')
+            engine = engine.replace('private func updateIPAVaultProgress(for job: IPAVaultJob) {',
+                'private func updateIPAVaultProgress(for job: IPAVaultJob) {\n        TransferWorkCounts.callback()')
             engine = engine.replace('        config.waitsForConnectivity = true\n', '')
             model = (ROOT / 'Asign/Views/Downloader/Models/DownloadItem.swift').read_text().replace('import SwiftUI', 'import Foundation')
             (work / 'Transfer.swift').write_text(engine)
@@ -497,6 +519,9 @@ def main():
             download = (ROOT / 'Asign/Backend/Observable/DownloadManager.swift').read_text()
             download = download[download.index('class Download:'):download.index('class DownloadManager:')]
             (work / 'Download.swift').write_text('import Foundation\nimport FoundationNetworking\n' + download)
+            if sys.platform == 'darwin':
+                for generated in work.glob('*.swift'):
+                    generated.write_text('import CoreGraphics\n' + generated.read_text().replace('import FoundationNetworking', ''))
             subprocess.run([args.swiftc, '-swift-version', '5', '-o', str(work / 'checks'),
                 str(ROOT / 'Asign/Utilities/LatestValueDelivery.swift'),
                 str(ROOT / 'Asign/Utilities/BackgroundFileWork.swift'),

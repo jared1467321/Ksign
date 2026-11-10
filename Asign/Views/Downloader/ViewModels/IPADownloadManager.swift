@@ -59,10 +59,13 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
         let next = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.id, $0) })
         let removed = Set(lastVaultItems.keys).subtracting(next.keys)
         var items = downloadItems.filter { !removed.contains($0.id) }
+        let indices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
+        var additions: [DownloadItem] = []
         for item in snapshot.items.reversed() where lastVaultItems[item.id] != item {
-            if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = item }
-            else if lastVaultItems[item.id] == nil { items.insert(item, at: 0) }
+            if let index = indices[item.id] { items[index] = item }
+            else if lastVaultItems[item.id] == nil { additions.append(item) }
         }
+        items.insert(contentsOf: additions.reversed(), at: 0)
         lastVaultItems = next
         if items != downloadItems { downloadItems = items }
         let adaptive = snapshot.adaptive
