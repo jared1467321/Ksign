@@ -603,7 +603,7 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		ZFile::WriteFile("./.zsign_debug/Requirements.slot.new", strRequirementsSlot);
 		ZFile::WriteFile("./.zsign_debug/Entitlements.slot.new", strEntitlementsSlot);
 		ZFile::WriteFile("./.zsign_debug/Entitlements.der.slot.new", strDerEntitlementsSlot);
-		ZFile::WriteFile("./.zsign_debug/Entitlements.plist.new", strEntitlementsSlot.data() + 8, strEntitlementsSlot.size() - 8);
+		ZFile::WriteFile("./.zsign_debug/Entitlements.plist.new", strEntitlementsSlot.empty() ? string() : strEntitlementsSlot.substr(8));
 		ZFile::WriteFile("./.zsign_debug/CodeDirectory_SHA1.slot.new", strCodeDirectorySlot);
 		ZFile::WriteFile("./.zsign_debug/CodeDirectory_SHA256.slot.new", strAltnateCodeDirectorySlot);
 		ZFile::WriteFile("./.zsign_debug/CMSSignature.slot.new", strCMSSignatureSlot);

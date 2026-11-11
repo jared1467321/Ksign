@@ -385,9 +385,9 @@ const ZSignAsset::EntitlementBlobs& ZSignAsset::PreparedEntitlements(bool execut
     if (blobs.ready && blobs.source == source) return blobs;
     blobs = EntitlementBlobs();
     blobs.source = source;
-    const string empty = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
-    ZSign::SlotBuildEntitlements(executable ? source : empty, blobs.xml.data);
-    ZSign::SlotBuildDerEntitlements(executable ? source : "", blobs.der.data);
+    // iOS treats the presence of an entitlement slot on a library as a violation.
+    ZSign::SlotBuildEntitlements(source, blobs.xml.data);
+    ZSign::SlotBuildDerEntitlements(source, blobs.der.data);
     HashPreparedBlob(blobs.xml); HashPreparedBlob(blobs.der);
     blobs.ready = true;
     return blobs;
