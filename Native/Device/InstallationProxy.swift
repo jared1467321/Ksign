@@ -48,13 +48,13 @@ final class IDeviceInstallProgress {
     private var deliveryQueued = false
     private var finished = false
 
-    func submit(upload: Double? = nil, install: Double? = nil, allowsDelivery: Bool = true) -> Bool {
+    func submit(upload: Double? = nil, install: Double? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard !finished else { return false }
         if let upload { self.upload = upload }
         if let install { self.install = install }
-        guard allowsDelivery, !deliveryQueued else { return false }
+        guard !deliveryQueued else { return false }
         deliveryQueued = true
         return true
     }
@@ -83,6 +83,8 @@ final class IDeviceInstallPresentation {
     private let lock = NSLock()
     private var active = false
     private var deliveries: [UUID: () -> Void] = [:]
+    private var pending: Set<UUID> = []
+    private var scheduled = false
     private var observers: [NSObjectProtocol] = []
 
     var isActive: Bool {
@@ -115,9 +117,22 @@ final class IDeviceInstallPresentation {
         return id
     }
 
+    func request(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard deliveries[id] != nil else { return }
+        pending.insert(id)
+        guard active, !scheduled else { return }
+        scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.flush(scheduled: true)
+        }
+    }
+
     func remove(_ id: UUID) {
         lock.lock()
         deliveries.removeValue(forKey: id)
+        pending.remove(id)
         lock.unlock()
     }
 
@@ -125,9 +140,18 @@ final class IDeviceInstallPresentation {
         lock.lock()
         let resuming = value && !active
         active = value
-        let pending = resuming ? Array(deliveries.values) : []
         lock.unlock()
-        for delivery in pending { delivery() }
+        if resuming { flush() }
+    }
+
+    private func flush(scheduled: Bool = false) {
+        lock.lock()
+        if scheduled { self.scheduled = false }
+        guard active, !pending.isEmpty else { lock.unlock(); return }
+        let callbacks = pending.compactMap { deliveries[$0] }
+        pending.removeAll(keepingCapacity: true)
+        lock.unlock()
+        for callback in callbacks { callback() }
     }
 }
 
@@ -287,7 +311,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
         self.isCurrent = isCurrent
         installObserver = viewModel.nativeInstallObserver
         presentationID = IDeviceInstallPresentation.shared.observe { [weak self] in
-            self?.flushProgress()
+            self?.flushProgress(scheduled: true)
         }
         update { $0.uploadMetrics = nil }
         try await withTaskCancellationHandler {
@@ -324,11 +348,8 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     private func updateProgress(upload: Double? = nil, install: Double? = nil) {
         guard !cancellation.isCancelled, isCurrent() else { return }
         if let install { installObserver?(.progress(install)) }
-        guard progress.submit(upload: upload, install: install,
-                              allowsDelivery: IDeviceInstallPresentation.shared.isActive) else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
-            flushProgress(scheduled: true)
-        }
+        guard let presentationID, progress.submit(upload: upload, install: install) else { return }
+        IDeviceInstallPresentation.shared.request(presentationID)
     }
 
     // Main queue only. Flush final values before publishing a phase/terminal

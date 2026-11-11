@@ -1,6 +1,52 @@
 import SwiftUI
 import UIKit
 
+// One ancestor traversal per display tick, shared by all native glyphs. No
+// persistent visibility cache: hiding/clipping/alpha changes take effect on the
+// next tick, even if the glyph itself has not moved.
+@MainActor
+private final class NBAuroraChromeGeometry {
+    struct Ancestors {
+        let clip: CGRect
+        let opacity: CGFloat
+        let visible: Bool
+    }
+    private var ancestors: [ObjectIdentifier: Ancestors] = [:]
+    func beginFrame() { ancestors.removeAll(keepingCapacity: true) }
+    func context(of view: UIView, in window: UIWindow) -> Ancestors {
+        let id = ObjectIdentifier(view)
+        if let cached = ancestors[id] { return cached }
+        let parent = view.superview.map { context(of: $0, in: window) }
+            ?? Ancestors(clip: window.bounds, opacity: 1, visible: true)
+        let opacity = parent.opacity * view.alpha
+        let clip = view.clipsToBounds
+            ? parent.clip.intersection(view.convert(view.bounds, to: window)) : parent.clip
+        let result = Ancestors(clip: clip, opacity: opacity,
+                               visible: parent.visible && !view.isHidden && opacity > 0.02)
+        ancestors[id] = result
+        return result
+    }
+    func visibleFrame(of view: UIView, in window: UIWindow) -> CGRect {
+        guard view.window === window else { return .null }
+        let context = context(of: view, in: window)
+        return context.visible ? view.convert(view.bounds, to: window).intersection(context.clip) : .null
+    }
+}
+
+private struct NBAuroraChromeCoordinates: Equatable {
+    let window: ObjectIdentifier
+    let origin: CGPoint
+    let x: CGPoint
+    let y: CGPoint
+    @MainActor init(anchor: UIView, window: UIWindow) {
+        self.window = ObjectIdentifier(window)
+        origin = anchor.convert(.zero, to: window)
+        x = anchor.convert(CGPoint(x: 1, y: 0), to: window)
+        y = anchor.convert(CGPoint(x: 0, y: 1), to: window)
+    }
+    var axisAligned: Bool { x.y == origin.y && y.x == origin.x }
+}
+
 struct NBAuroraNativeGlyph: Identifiable, Equatable {
     let source: NBAuroraChromeSource
     let image: UIImage
@@ -49,6 +95,26 @@ final class NBAuroraChromeSource {
     private var fingerprint: Fingerprint?
     private var image: UIImage?
     private var lastCapture: CFTimeInterval = -.infinity
+    private var placementKey: PlacementKey?
+    private var placement = CGRect.zero
+    private struct PlacementKey: Equatable {
+        let windowFrame: CGRect
+        let coordinates: NBAuroraChromeCoordinates
+    }
+
+    fileprivate func frame(in anchor: UIView, window: UIWindow,
+                           coordinates: NBAuroraChromeCoordinates) -> CGRect {
+        guard let view else { return .zero }
+        // With rotated coordinate axes, converting an intermediate bounding
+        // rectangle can enlarge it. Retain the direct UIKit conversion there.
+        guard coordinates.axisAligned else { return view.convert(view.bounds, to: anchor) }
+        let key = PlacementKey(windowFrame: view.convert(view.bounds, to: window), coordinates: coordinates)
+        if key != placementKey {
+            placement = anchor.convert(key.windowFrame, from: window)
+            placementKey = key
+        }
+        return placement
+    }
     private static let placeholderMarker = NSAttributedString.Key("NimbleKit.auroraHiddenPlaceholder")
 
     init(view: UIView, role: NBThemeRole, elementID: String?) {
@@ -240,6 +306,7 @@ final class NBAuroraChromeObserver: ObservableObject {
     private var link: CADisplayLink?
     private var displayTarget: NBAuroraChromeDisplayTarget?
     private var lastScan: CFTimeInterval = -.infinity
+    private let geometry = NBAuroraChromeGeometry()
     private var isPresented = false
     private var isEnabled = false
 
@@ -296,6 +363,8 @@ final class NBAuroraChromeObserver: ObservableObject {
     fileprivate func update(at time: CFTimeInterval) {
         guard isPresented, isEnabled,
               let anchor, let window = anchor.window else { stop(); return }
+        geometry.beginFrame()
+        let coordinates = NBAuroraChromeCoordinates(anchor: anchor, window: window)
         // Discover/recycle views four times per second. Track only the known
         // glyph geometry between scans, including native title/tab animations.
         // Complementary colors themselves follow the compositor, not this link.
@@ -306,15 +375,10 @@ final class NBAuroraChromeObserver: ObservableObject {
         var next: [NBAuroraNativeGlyph] = []
         for source in sources.values {
             guard let view = source.view else { continue }
-            let visible = NBThemeInspectorRegistry.visibleFrame(of: view, in: window)
+            let visible = geometry.visibleFrame(of: view, in: window)
             guard !visible.isNull, visible.width > 0, visible.height > 0,
                   let image = source.glyphImage() else { source.restore(); continue }
-            var opacity: CGFloat = 1
-            var parent = view.superview
-            while let current = parent {
-                opacity *= current.alpha
-                parent = current.superview
-            }
+            let opacity = view.superview.map { geometry.context(of: $0, in: window).opacity } ?? 1
             let role: NBThemeRole
             if let field = view as? UISearchTextField {
                 role = (field.text ?? "").isEmpty ? .searchPlaceholder : .searchText
@@ -322,7 +386,7 @@ final class NBAuroraChromeObserver: ObservableObject {
                 role = source.role
             }
             next.append(NBAuroraNativeGlyph(
-                source: source, image: image, frame: view.convert(view.bounds, to: anchor),
+                source: source, image: image, frame: source.frame(in: anchor, window: window, coordinates: coordinates),
                 visibleFrame: anchor.convert(visible, from: window), ancestorOpacity: Double(opacity),
                 role: role, elementID: source.elementID
             ))
@@ -339,7 +403,7 @@ final class NBAuroraChromeObserver: ObservableObject {
         var found: Set<ObjectIdentifier> = []
 
         func add(_ view: UIView, role: NBThemeRole, elementID: String? = nil) {
-            let visible = NBThemeInspectorRegistry.visibleFrame(of: view, in: window)
+            let visible = geometry.visibleFrame(of: view, in: window)
             guard !visible.isNull, visible.width > 0, visible.height > 0 else { return }
             if let label = view as? UILabel,
                (label.text ?? "").isEmpty && (label.attributedText?.length ?? 0) == 0 { return }

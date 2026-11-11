@@ -31,6 +31,7 @@ struct InstallationView: View {
                     .frame(maxWidth: 680)
                     .frame(maxWidth: .infinity)
                 }
+                .nbThemeCanvas()
             } else {
                 NBList(.localized("Installation")) {
                     Section { methodPicker }
@@ -38,7 +39,6 @@ struct InstallationView: View {
                 }
             }
         }
-        .nbThemeCanvas()
         .onReceive(session.isActivePublisher) { isSessionActive = $0 }
         .navigationTitle(.localized("Installation"))
         .navigationBarTitleDisplayMode(.inline)

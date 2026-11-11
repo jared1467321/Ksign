@@ -204,14 +204,12 @@ private final class CompletedDownloadsModel: ObservableObject {
     private var subscriptions: Set<AnyCancellable> = []
 
     init(downloadManager: IPADownloadManager, libraryManager: DownloadManager) {
-        downloadManager.$downloadItems
-            .map { $0.filter(\.isFinished) }
-            .removeDuplicates()
+        downloadManager.presentation.$finishedItems
             .sink { [weak self] in self?.items = $0 }
             .store(in: &subscriptions)
 
         Publishers.CombineLatest(
-            downloadManager.$downloadItems.map { !$0.isEmpty }.removeDuplicates(),
+            downloadManager.presentation.$hasItems,
             libraryManager.$downloads.map { !$0.isEmpty }.removeDuplicates()
         )
         .map { $0.0 || $0.1 }
@@ -221,35 +219,35 @@ private final class CompletedDownloadsModel: ObservableObject {
     }
 }
 
-// Live updates stay inside this section instead of invalidating the finished list.
-private struct DownloadTransferSection: View {
-    let inspectorSampleDownloadStatus: Bool
-    @ObservedObject var downloadManager: IPADownloadManager
-    @ObservedObject var libraryManager: DownloadManager
+private struct ActiveDownloadRow: View {
+    @ObservedObject var row: ActiveDownloadState
     @Binding var shareItems: [Any]
     let importIpaToLibrary: (DownloadItem) -> Void
     let exportToFiles: (DownloadItem) -> Void
     let cryptCheck: (DownloadItem) -> Void
     let pauseResumeDownload: (DownloadItem) -> Void
     let deleteItem: (DownloadItem) -> Void
-
-    private var hasActiveIPAVaultDownloads: Bool {
-        downloadManager.vaultControls.state.hasDownloads
+    var body: some View {
+        DownloadItemRow(item: row.item, shareItems: $shareItems, isSelected: false,
+                        onToggleSelection: {}, selectable: false,
+                        importIpaToLibrary: importIpaToLibrary, exportToFiles: exportToFiles,
+                        cryptCheck: cryptCheck, pauseResumeDownload: pauseResumeDownload,
+                        deleteItem: deleteItem)
     }
+}
 
-    private var ipaVaultBatchControl: some View {
-        IPAVaultDownloadMenu(downloadManager: downloadManager)
-    }
-
+private struct IPAVaultStatusRow: View {
+    @ObservedObject var model: IPAVaultStatusModel
+    var isSample = false
     private var ipavaultLiveThroughputText: String {
-        guard downloadManager.ipavaultAdaptiveSpeedBPS > 0 else {
+        guard model.state.speedBPS > 0 else {
             return "Measuring…"
         }
-        return String(format: "%.1f MB/s", downloadManager.ipavaultAdaptiveSpeedBPS / 1_000_000)
+        return String(format: "%.1f MB/s", model.state.speedBPS / 1_000_000)
     }
 
     private var ipavaultActiveStreamsText: String {
-        let count = downloadManager.ipavaultAdaptiveStreamCount
+        let count = model.state.streamCount
         return "\(count) stream\(count == 1 ? "" : "s")"
     }
 
@@ -260,9 +258,9 @@ private struct DownloadTransferSection: View {
             Label("IPA Vault", systemImage: "externaldrive.badge.wifi")
                 .fontWeight(.semibold)
             LabeledContent("Live throughput", value: speed)
-            LabeledContent("Batch tuning", value: isSample ? "Optimized" : downloadManager.ipavaultAdaptiveStatus)
-            LabeledContent("Target concurrent files", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveConcurrentCount)")
-            LabeledContent("Target streams / file", value: isSample ? "2" : "\(downloadManager.ipavaultAdaptiveStreamsPerFile)")
+            LabeledContent("Batch tuning", value: isSample ? "Optimized" : model.state.status)
+            LabeledContent("Target concurrent files", value: isSample ? "2" : "\(model.state.concurrentCount)")
+            LabeledContent("Target streams / file", value: isSample ? "2" : "\(model.state.streamsPerFile)")
             LabeledContent("Active streams (all jobs)", value: streams)
         }
         .font(.caption)
@@ -273,10 +271,60 @@ private struct DownloadTransferSection: View {
     }
 
     var body: some View {
+        ipaVaultStatusRow(speed: isSample ? "12.4 MB/s" : ipavaultLiveThroughputText,
+                          streams: isSample ? "4 streams" : ipavaultActiveStreamsText,
+                          isSample: isSample)
+    }
+}
+
+// Live updates stay inside this section instead of invalidating the finished list.
+private struct DownloadTransferSection: View {
+    let inspectorSampleDownloadStatus: Bool
+    let downloadManager: IPADownloadManager
+    @State private var activeRows: [ActiveDownloadState]
+    @ObservedObject private var vaultControls: IPAVaultDownloadControls
+    @ObservedObject var libraryManager: DownloadManager
+    @Binding var shareItems: [Any]
+    let importIpaToLibrary: (DownloadItem) -> Void
+    let exportToFiles: (DownloadItem) -> Void
+    let cryptCheck: (DownloadItem) -> Void
+    let pauseResumeDownload: (DownloadItem) -> Void
+    let deleteItem: (DownloadItem) -> Void
+
+
+    init(inspectorSampleDownloadStatus: Bool, downloadManager: IPADownloadManager,
+         libraryManager: DownloadManager, shareItems: Binding<[Any]>,
+         importIpaToLibrary: @escaping (DownloadItem) -> Void,
+         exportToFiles: @escaping (DownloadItem) -> Void,
+         cryptCheck: @escaping (DownloadItem) -> Void,
+         pauseResumeDownload: @escaping (DownloadItem) -> Void,
+         deleteItem: @escaping (DownloadItem) -> Void) {
+        self.inspectorSampleDownloadStatus = inspectorSampleDownloadStatus
+        self.downloadManager = downloadManager
+        self.libraryManager = libraryManager
+        self._shareItems = shareItems
+        self.importIpaToLibrary = importIpaToLibrary
+        self.exportToFiles = exportToFiles
+        self.cryptCheck = cryptCheck
+        self.pauseResumeDownload = pauseResumeDownload
+        self.deleteItem = deleteItem
+        _activeRows = State(initialValue: downloadManager.presentation.activeRows)
+        _vaultControls = ObservedObject(wrappedValue: downloadManager.vaultControls)
+    }
+
+    private var hasActiveIPAVaultDownloads: Bool {
+        vaultControls.state.hasDownloads
+    }
+
+    private var ipaVaultBatchControl: some View {
+        IPAVaultDownloadMenu(downloadManager: downloadManager)
+    }
+
+    var body: some View {
         Group {
             if inspectorSampleDownloadStatus && !hasActiveIPAVaultDownloads {
                 NBSection("Downloading", secondary: "Sample") {
-                    ipaVaultStatusRow(speed: "12.4 MB/s", streams: "4 streams", isSample: true)
+                    IPAVaultStatusRow(model: downloadManager.vaultStatus, isSample: true)
                     HStack(spacing: 12) {
                         Image(systemName: "arrow.down.document")
                             .nbThemeForeground(.accent)
@@ -317,8 +365,7 @@ private struct DownloadTransferSection: View {
                 NBSection(.localized("Importing")) {
                     // Keep live batch statistics visible while completed files import.
                     if hasActiveIPAVaultDownloads {
-                        ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
-                                          streams: ipavaultActiveStreamsText)
+                        IPAVaultStatusRow(model: downloadManager.vaultStatus)
                         ipaVaultBatchControl
                     }
                     HStack(spacing: 12) {
@@ -330,24 +377,20 @@ private struct DownloadTransferSection: View {
                     }
                     .nbThemeTextRow()
                 }
-            } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !downloadManager.activeItems.isEmpty {
-                NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + downloadManager.activeItems.count).description) {
+            } else if hasActiveIPAVaultDownloads || !libraryManager.downloads.isEmpty || !activeRows.isEmpty {
+                NBSection(.localized("Downloading"), secondary: (libraryManager.downloads.count + activeRows.count).description) {
                     if hasActiveIPAVaultDownloads {
-                        ipaVaultStatusRow(speed: ipavaultLiveThroughputText,
-                                          streams: ipavaultActiveStreamsText)
+                        IPAVaultStatusRow(model: downloadManager.vaultStatus)
                         ipaVaultBatchControl
                     }
 
                     ForEach(libraryManager.downloads) { download in
                         AppStoreDownloadItemRow(download: download)
                     }
-                    ForEach(downloadManager.activeItems) { item in
-                        DownloadItemRow(
-                            item: item,
+                    ForEach(activeRows) { row in
+                        ActiveDownloadRow(
+                            row: row,
                             shareItems: $shareItems,
-                            isSelected: false,
-                            onToggleSelection: {},
-                            selectable: false,
                             importIpaToLibrary: { item in importIpaToLibrary(item) },
                             exportToFiles: { item in exportToFiles(item) },
                             cryptCheck: { item in cryptCheck(item) },
@@ -358,6 +401,7 @@ private struct DownloadTransferSection: View {
                 }
             }
         }
+        .onReceive(downloadManager.presentation.$activeRows) { activeRows = $0 }
         .onChange(of: libraryManager.downloads.count) { _ in
             // Importing adds/removes entries in `downloads` too. Don't let
             // that rebuild and reorder this list — it only needs to refresh

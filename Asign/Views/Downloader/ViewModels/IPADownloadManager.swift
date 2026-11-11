@@ -12,17 +12,76 @@ final class IPAVaultDownloadControls: ObservableObject {
     }
 }
 
+// List membership and each row's progress have independent observation scopes.
+final class ActiveDownloadState: ObservableObject, Identifiable {
+    let id: UUID
+    @Published private(set) var item: DownloadItem
+
+    init(_ item: DownloadItem) {
+        id = item.id
+        self.item = item
+    }
+
+    func apply(_ item: DownloadItem) {
+        if self.item != item { self.item = item }
+    }
+}
+
+final class DownloadItemsPresentation {
+    @Published private(set) var hasItems = false
+    @Published private(set) var activeRows: [ActiveDownloadState] = []
+    @Published private(set) var finishedItems: [DownloadItem] = []
+    private(set) var items: [DownloadItem] = []
+    private var indices: [UUID: Int] = [:]
+    private var activeByID: [UUID: ActiveDownloadState] = [:]
+
+    func replaceItems(_ items: [DownloadItem]) {
+        self.items = items
+        indices = Dictionary(uniqueKeysWithValues: items.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+
+        var active: [ActiveDownloadState] = []
+        var finished: [DownloadItem] = []
+        for item in items {
+            if item.isFinished {
+                finished.append(item)
+            } else {
+                let row = activeByID[item.id] ?? ActiveDownloadState(item)
+                row.apply(item)
+                active.append(row)
+            }
+        }
+        activeByID = Dictionary(uniqueKeysWithValues: active.map { ($0.id, $0) })
+        if !active.elementsEqual(activeRows, by: { $0 === $1 }) { activeRows = active }
+        if finished != finishedItems { finishedItems = finished }
+        let hasItems = !items.isEmpty
+        if hasItems != self.hasItems { self.hasItems = hasItems }
+    }
+
+    func updateProgress(_ item: DownloadItem) {
+        guard !item.isFinished, let row = activeByID[item.id], let index = indices[item.id],
+              items[index] != item else { return }
+        items[index] = item
+        row.apply(item)
+    }
+}
+
+final class IPAVaultStatusModel: ObservableObject {
+    @Published private(set) var state = IPAVaultTransfer.AdaptivePresentation()
+
+    func apply(_ state: IPAVaultTransfer.AdaptivePresentation) {
+        if self.state != state { self.state = state }
+    }
+}
+
 // UI rows are main-queue owned; URLSession bookkeeping is protected by taskLock.
 final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable {
-    @Published var downloadItems: [DownloadItem] = []
-    var activeItems: [DownloadItem] { downloadItems.filter { !$0.isFinished } }
-    var finishedItems: [DownloadItem] { downloadItems.filter { $0.isFinished } }
+    let presentation = DownloadItemsPresentation()
+    var downloadItems: [DownloadItem] { presentation.items }
+    var finishedItems: [DownloadItem] { presentation.finishedItems }
     let vaultControls = IPAVaultDownloadControls()
-    @Published private(set) var ipavaultAdaptiveConcurrentCount = 0
-    @Published private(set) var ipavaultAdaptiveStreamsPerFile = 2
-    @Published private(set) var ipavaultAdaptiveStatus = "Idle"
-    @Published private(set) var ipavaultAdaptiveStreamCount = 0
-    @Published private(set) var ipavaultAdaptiveSpeedBPS: Double = 0
+    let vaultStatus = IPAVaultStatusModel()
 
     private var vault: IPAVaultTransfer!
     private var vaultDelivery: LatestValueDelivery<IPAVaultTransfer.Presentation>!
@@ -37,7 +96,7 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
 
     override init() {
         super.init()
-        vaultDelivery = LatestValueDelivery(interval: 0) { [weak self] in self?.applyVault($0) }
+        vaultDelivery = LatestValueDelivery(interval: 0, merge: { $0.merging($1) }) { [weak self] in self?.applyVault($0) }
         let delivery = vaultDelivery!
         vault = IPAVaultTransfer { delivery.submit($0) }
         setupURLSession()
@@ -56,24 +115,26 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
 
     private func applyVault(_ snapshot: IPAVaultTransfer.Presentation) {
         vaultControls.apply(snapshot.controls)
-        let next = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.id, $0) })
-        let removed = Set(lastVaultItems.keys).subtracting(next.keys)
-        var items = downloadItems.filter { !removed.contains($0.id) }
-        let indices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
-        var additions: [DownloadItem] = []
-        for item in snapshot.items.reversed() where lastVaultItems[item.id] != item {
-            if let index = indices[item.id] { items[index] = item }
-            else if lastVaultItems[item.id] == nil { additions.append(item) }
+        vaultStatus.apply(snapshot.adaptive)
+        if let vaultItems = snapshot.items {
+            let next = Dictionary(uniqueKeysWithValues: vaultItems.map { ($0.id, $0) })
+            let removed = Set(lastVaultItems.keys).subtracting(next.keys)
+            var items = downloadItems.filter { !removed.contains($0.id) }
+            let indices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
+            var additions: [DownloadItem] = []
+            for item in vaultItems.reversed() where lastVaultItems[item.id] != item {
+                if let index = indices[item.id] { items[index] = item }
+                else if lastVaultItems[item.id] == nil { additions.append(item) }
+            }
+            items.insert(contentsOf: additions.reversed(), at: 0)
+            lastVaultItems = next
+            if items != downloadItems { presentation.replaceItems(items) }
         }
-        items.insert(contentsOf: additions.reversed(), at: 0)
-        lastVaultItems = next
-        if items != downloadItems { downloadItems = items }
-        let adaptive = snapshot.adaptive
-        if ipavaultAdaptiveConcurrentCount != adaptive.concurrentCount { ipavaultAdaptiveConcurrentCount = adaptive.concurrentCount }
-        if ipavaultAdaptiveStreamsPerFile != adaptive.streamsPerFile { ipavaultAdaptiveStreamsPerFile = adaptive.streamsPerFile }
-        if ipavaultAdaptiveStatus != adaptive.status { ipavaultAdaptiveStatus = adaptive.status }
-        if ipavaultAdaptiveStreamCount != adaptive.streamCount { ipavaultAdaptiveStreamCount = adaptive.streamCount }
-        if ipavaultAdaptiveSpeedBPS != adaptive.speedBPS { ipavaultAdaptiveSpeedBPS = adaptive.speedBPS }
+        for (id, item) in snapshot.progress {
+            guard lastVaultItems[id]?.isFinished == false else { continue }
+            lastVaultItems[id] = item
+            presentation.updateProgress(item)
+        }
     }
 
     func enqueueIPAVaultDownloads(_ files: [(url: URL, filename: String, size: Int64)]) {
@@ -102,7 +163,7 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
     func loadDownloadedIPAs() {
         let generation = UUID()
         listingGeneration = generation
-        let observed = downloadItems.filter(\.isFinished)
+        let observed = finishedItems
         filesQueue.async { [weak self] in
             let directory = URL.documentsDirectory.appendingPathComponent("Downloads")
             do {
@@ -119,19 +180,24 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
                     let absent = Set(observed.filter { !paths.contains($0.localPath) }.map(\.id))
                     var items = self.downloadItems.filter { !absent.contains($0.id) }
                     for id in absent { self.vault.forgetFinishedDownload(id) }
+                    var indexByPath: [URL: Int] = [:]
+                    for (index, item) in items.enumerated() where indexByPath[item.localPath] == nil {
+                        indexByPath[item.localPath] = index
+                    }
                     for file in files {
-                        if let index = items.firstIndex(where: { $0.localPath == file.url }) {
+                        if let index = indexByPath[file.url] {
                             if items[index].isFinished {
                                 items[index].totalBytes = file.size
                                 items[index].bytesDownloaded = file.size
                             }
                         } else {
+                            indexByPath[file.url] = items.count
                             items.append(DownloadItem(title: file.url.lastPathComponent, url: file.url,
                                 localPath: file.url, isFinished: true, progress: 1,
                                 totalBytes: file.size, bytesDownloaded: file.size))
                         }
                     }
-                    if items != self.downloadItems { self.downloadItems = items }
+                    if items != self.downloadItems { self.presentation.replaceItems(items) }
                 }
             } catch { print("Failed to load downloaded IPAs: \(error)") }
         }
@@ -147,16 +213,14 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
                                     isFinished: false, progress: 0, totalBytes: 0, bytesDownloaded: 0)
             let task = self.urlSession.downloadTask(with: url)
             let delivery = ForegroundValueDelivery<DownloadItem> { [weak self] update in
-                guard let self, let index = self.downloadItems.firstIndex(where: { $0.id == update.id }),
-                      !self.downloadItems[index].isFinished else { return }
-                if self.downloadItems[index] != update { self.downloadItems[index] = update }
+                self?.presentation.updateProgress(update)
             }
             self.taskLock.lock()
             self.activeDownloads[task.taskIdentifier] = item
             self.ordinaryProgress[task.taskIdentifier] = delivery
             self.taskLock.unlock()
             DispatchQueue.main.async { [weak self] in
-                self?.downloadItems.insert(item, at: 0)
+                if let self { self.presentation.replaceItems([item] + self.downloadItems) }
                 task.resume()
             }
         }
@@ -169,7 +233,7 @@ final class IPADownloadManager: NSObject, ObservableObject, @unchecked Sendable 
                 try FileManager.default.removeItem(at: item.localPath)
                 DispatchQueue.main.async { [weak self] in
                     self?.listingGeneration = UUID()
-                    self?.downloadItems.removeAll { $0.id == item.id }
+                    self?.removeItem(item.id)
                     self?.vault.forgetFinishedDownload(item.id)
                 }
             } catch {
@@ -285,7 +349,9 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
             let completed = item
             DispatchQueue.main.async { [weak self] in
                 guard let self, let index = self.downloadItems.firstIndex(where: { $0.id == completed.id }) else { return }
-                self.downloadItems[index] = completed
+                var items = self.downloadItems
+                items[index] = completed
+                self.presentation.replaceItems(items)
             }
         } catch {
             print("Error saving downloaded file: \(error)")
@@ -302,6 +368,11 @@ extension IPADownloadManager: URLSessionDownloadDelegate {
     }
 
     private func removeOrdinaryItem(_ id: UUID) {
-        DispatchQueue.main.async { [weak self] in self?.downloadItems.removeAll { $0.id == id } }
+        DispatchQueue.main.async { [weak self] in self?.removeItem(id) }
+    }
+
+    private func removeItem(_ id: UUID) {
+        let items = downloadItems.filter { $0.id != id }
+        if items.count != downloadItems.count { presentation.replaceItems(items) }
     }
 }

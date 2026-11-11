@@ -22,7 +22,15 @@ final class InstallSession: ObservableObject {
 	// Only jobs still worth showing. Completed ones are removed shortly after
 	// they finish so the drawer shows what's *left*; failed ones stay put so
 	// a failure doesn't quietly vanish.
-	@Published private(set) var jobs: [InstallJob] = []
+	@Published private(set) var jobs: [InstallJob] = [] {
+		didSet { _deviceAdmission = nil }
+	}
+	private struct DeviceAdmission {
+		var firstQueuedID: UUID?
+		var unfinishedCount = 0
+		var selfUpdateRunning = false
+	}
+	private var _deviceAdmission: DeviceAdmission?
 
 	// Foreground drawer counters. Live Activity progress is intentionally
 	// independent: its reporter owns stable job IDs and advances directly from
@@ -30,18 +38,19 @@ final class InstallSession: ObservableObject {
 	@Published private(set) var completedCount = 0
 	@Published private(set) var skippedCount = 0
 	@Published private(set) var totalCount = 0
-	@Published private(set) var aggregateProgress: Double = 0
+	private let foregroundProgress = CurrentValueSubject<Double, Never>(0)
+	var aggregateProgress: Double { foregroundProgress.value }
+	private(set) lazy var aggregateProgressPublisher = foregroundProgress.eraseToAnyPublisher()
 	@Published private(set) var nativeInstallLimit = NativeInstallLimit.savedValue
 	private var _isNativeInstallSession = false
 
 	private struct ForegroundSnapshot: Equatable {
-		let progress: Double
 		let running: Int
 		let waiting: Int
 		let hasWork: Bool
 		let hasGroup: Bool
 	}
-	private var _foregroundSnapshot: ForegroundSnapshot?
+	@Published private var _foregroundSnapshot: ForegroundSnapshot?
 
 	// Queued icons are static. Register their count once, then sample only jobs
 	// that have left the queue. Phase transitions move jobs between these sets;
@@ -189,6 +198,7 @@ final class InstallSession: ObservableObject {
 	// callbacks from removed jobs; they must not re-enter foreground tracking.
 	func jobDidChangePhase(_ job: InstallJob) {
 		guard _trackedJobs[job.id] === job else { return }
+		if job.isDeviceInstall { _deviceAdmission = nil }
 		_unfreezeProgress(for: job)
 		if job.phase == .queued {
 			_sampledJobs.removeValue(forKey: job.id)
@@ -253,7 +263,7 @@ final class InstallSession: ObservableObject {
 			completedCount = 0
 			skippedCount = 0
 			totalCount = 0
-			aggregateProgress = 0
+			if aggregateProgress != 0 { foregroundProgress.send(0) }
 
 			let method = UserDefaults.standard.integer(forKey: "Feather.installationMethod")
 			let server = UserDefaults.standard.integer(forKey: "Feather.serverMethod")
@@ -278,37 +288,50 @@ final class InstallSession: ObservableObject {
 		let orderedApps = isDeviceInstall
 			? apps.filter { $0.identifier != Bundle.main.bundleIdentifier } + apps.filter { $0.identifier == Bundle.main.bundleIdentifier }
 			: apps
+		var existingByApp: [String?: InstallJob] = [:]
+		for job in jobs { existingByApp[job.app.uuid] = job }
+		var addedJobs: [InstallJob] = []
+		var removedIDs: Set<UUID> = []
+		var nextTotal = totalCount
+		var nextSkipped = skippedCount
 		for app in orderedApps {
 			// A failed row for this app would otherwise block re-installing it
 			// entirely — `start` would see it as a duplicate and skip, so the
 			// Install button would silently do nothing. Clear it out first.
-			if let stale = jobs.firstIndex(where: { $0.app.uuid == app.uuid && ($0.phase == .failed || $0.phase == .skipped) }) {
-				let staleJob = jobs[stale]
-				if _skippedJobIDs.remove(staleJob.id) != nil { skippedCount -= 1 }
+			if let staleJob = existingByApp[app.uuid], staleJob.phase == .failed || staleJob.phase == .skipped {
+				if _skippedJobIDs.remove(staleJob.id) != nil { nextSkipped -= 1 }
 				staleJob.cancel()
-				BulkInstallLiveActivityReporter.shared.remove(staleJob.id)
+				removedIDs.insert(staleJob.id)
 				_untrackJob(staleJob)
-				jobs.remove(at: stale)
-				totalCount = max(0, totalCount - 1)
+				existingByApp.removeValue(forKey: app.uuid)
+				nextTotal = max(0, nextTotal - 1)
 			}
 
 			// Don't queue the same app twice if it's already going.
-			if jobs.contains(where: { $0.app.uuid == app.uuid }) { continue }
+			if existingByApp[app.uuid] != nil { continue }
 
 			do {
 				let job = try InstallJob(app: app)
 				_trackJob(job)
-				jobs.append(job)
-				BulkInstallLiveActivityReporter.shared.register(job.id, name: app.name)
-				totalCount += 1
-				// Batched jobs are released to build a group at a time (see
-				// `_admitBatchJobs`), so only a manifest's worth of servers is ever
-				// alive at once. Non-batched installs start right away.
-				if !_willBatch { job.start() }
+				existingByApp[app.uuid] = job
+				addedJobs.append(job)
+				nextTotal += 1
+
 			} catch {
 				Logger.misc.error("Couldn't start install for \(app.identifier ?? "?"): \(error.localizedDescription)")
 			}
 		}
+
+		// Publish membership once and register the complete selection before any
+		// job starts. Self-update admission must see every app ahead of it.
+		if !addedJobs.isEmpty || !removedIDs.isEmpty {
+			BulkInstallLiveActivityReporter.shared.register(
+				addedJobs.map { (id: $0.id, name: $0.app.name) }, removing: Array(removedIDs))
+			jobs = jobs.filter { !removedIDs.contains($0.id) } + addedJobs
+			if totalCount != nextTotal { totalCount = nextTotal }
+			if skippedCount != nextSkipped { skippedCount = nextSkipped }
+		}
+		if !_willBatch { for job in addedJobs { job.start() } }
 
 		if _willBatch { _admitBatchJobs() }
 
@@ -336,19 +359,30 @@ final class InstallSession: ObservableObject {
 	// device jobs so queued apps enter in selection order without waiting for
 	// earlier running apps. Asign's own update remains exclusive and last.
 	func mayStartDeviceJob(_ id: UUID) -> Bool {
-		guard let index = jobs.firstIndex(where: { $0.id == id }) else { return false }
-		let job = jobs[index]
+		guard let job = _trackedJobs[id] else { return false }
 		guard job.isDeviceInstall else { return true }
-		let unfinished: (InstallJob) -> Bool = { candidate in
-			candidate.isDeviceInstall && candidate.id != id &&
-				!candidate.isTerminal
+
+		let admission: DeviceAdmission
+		if let cached = _deviceAdmission {
+			admission = cached
+		} else {
+			var current = DeviceAdmission()
+			for candidate in jobs where candidate.isDeviceInstall && !candidate.isTerminal {
+				current.unfinishedCount += 1
+				if candidate.isSelfUpdate {
+					current.selfUpdateRunning = current.selfUpdateRunning || candidate.phase == .running
+				} else if current.firstQueuedID == nil, candidate.phase == .queued {
+					current.firstQueuedID = candidate.id
+				}
+			}
+			_deviceAdmission = current
+			admission = current
 		}
 		if job.isSelfUpdate {
-			return !jobs.contains(where: unfinished) && InstallQueueCoordinator.shared.activeCount == 0
+			return admission.unfinishedCount == 1 && InstallQueueCoordinator.shared.activeCount == 0
 				&& !InstallQueueCoordinator.shared.hasDeviceWorkInProgress
 		}
-		if jobs.contains(where: { $0.isSelfUpdate && $0.phase == .running }) { return false }
-		return !jobs.prefix(index).contains { !$0.isSelfUpdate && $0.phase == .queued && unfinished($0) }
+		return !admission.selfUpdateRunning && admission.firstQueuedID == id
 	}
 
 	func jobDidFinish(_ job: InstallJob) {
@@ -755,13 +789,10 @@ final class InstallSession: ObservableObject {
 		// running contribute whatever they've managed so far.
 		let finished = Double(max(0, totalCount - jobs.count))
 		let progress = totalCount > 0 ? min(1.0, (finished + inFlight) / Double(totalCount)) : 0
-		let snapshot = ForegroundSnapshot(progress: progress, running: running,
+		let snapshot = ForegroundSnapshot(running: running,
 			waiting: waiting, hasWork: hasWork, hasGroup: hasGroup)
-		guard snapshot != _foregroundSnapshot else { return }
-		_foregroundSnapshot = snapshot
-		// Reassigning the same @Published value still invalidates every session
-		// observer. Publish only when visible progress/counters/control state changed.
-		aggregateProgress = progress
+		if snapshot != _foregroundSnapshot { _foregroundSnapshot = snapshot }
+		if progress != aggregateProgress { foregroundProgress.send(progress) }
 	}
 
 	// MARK: - Webview (server method 1)
@@ -836,11 +867,21 @@ final class BulkInstallLiveActivityReporter {
 	private var _currentJobID: UUID?
 	private var _currentSelectionProgressSequence = 0
 	private var _lastDisplayedName: String?
+	private var _numericPublish: DispatchWorkItem?
+
+	private func _scheduleNumericPublish() {
+		guard _numericPublish == nil else { return }
+		let work = DispatchWorkItem { [weak self] in self?._publish() }
+		_numericPublish = work
+		_queue.asyncAfter(deadline: .now() + 0.2, execute: work)
+	}
 
 	private init() { }
 
 	func reset() {
 		_queue.sync {
+			self._numericPublish?.cancel()
+			self._numericPublish = nil
 			self._jobs.removeAll()
 			self._paused = false
 			self._active = true
@@ -855,11 +896,19 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	func register(_ id: UUID, name: String?) {
+		register([(id: id, name: name)])
+	}
+
+	func register(_ entries: [(id: UUID, name: String?)], removing removedIDs: [UUID] = []) {
 		_queue.sync {
 			self._active = true
-			if self._jobs[id] == nil {
+			for id in removedIDs { self._jobs.removeValue(forKey: id) }
+			if let current = self._currentJobID, removedIDs.contains(current) {
+				self._handoffCurrentJob()
+			}
+			for entry in entries where self._jobs[entry.id] == nil {
 				self._sequence += 1
-				self._jobs[id] = _Job(name: name, sequence: self._sequence)
+				self._jobs[entry.id] = _Job(name: entry.name, sequence: self._sequence)
 			}
 			self._publish()
 		}
@@ -928,7 +977,8 @@ final class BulkInstallLiveActivityReporter {
 		if madeGenuineProgress {
 			self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastPackageProgressSequence)
 		}
-		self._publish()
+		if job.stage != before.stage { self._publish() }
+		else { self._scheduleNumericPublish() }
 	}
 
 	func updateInstall(jobID: UUID, progress: Double, isCurrent: @escaping () -> Bool = { true }) {
@@ -960,7 +1010,8 @@ final class BulkInstallLiveActivityReporter {
 			if madeGenuineProgress {
 				self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastInstallProgressSequence)
 			}
-			self._publish()
+			if job.stage != before.stage { self._publish() }
+			else { self._scheduleNumericPublish() }
 		}
 	}
 
@@ -1063,6 +1114,9 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	private func _publish(forceTerminal: Bool = false) {
+		// An immediate phase/terminal snapshot supersedes any delayed numeric one.
+		_numericPublish?.cancel()
+		_numericPublish = nil
 		guard _active, !_jobs.isEmpty else { return }
 
 		let values = Array(_jobs.values)

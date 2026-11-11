@@ -58,11 +58,13 @@ struct InstallDrawerView: View {
 						.nbThemeStroke(.textSecondary, opacity: 0.25, lineWidth: 3)
                         .nbThemePaintLayer(0)
 
-					Circle()
-						.trim(from: 0, to: max(0.02, session.aggregateProgress))
-						.nbThemeStroke(.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-						.rotationEffect(.degrees(-90))
-                        .nbThemePaintLayer(1)
+					InstallAggregateProgress { progress in
+						Circle()
+							.trim(from: 0, to: max(0.02, progress))
+							.nbThemeStroke(.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+							.rotationEffect(.degrees(-90))
+							.nbThemePaintLayer(1)
+					}
 				}
                 .nbThemePaintGroup()
 				.frame(width: 18, height: 18)
@@ -138,9 +140,11 @@ struct InstallDrawerSheet: View {
 				}
 
 				HStack(spacing: 10) {
-					ProgressView(value: session.aggregateProgress)
-					.nbThemeTint(.accent)
-						.progressViewStyle(.linear)
+					InstallAggregateProgress { progress in
+						ProgressView(value: progress)
+							.nbThemeTint(.accent)
+							.progressViewStyle(.linear)
+					}
 
 					// Installing right now over apps still on the drawer, not
 					// finished over batch size. The bar beside it still
@@ -339,4 +343,15 @@ private struct InstallDrawerApps: View, Equatable {
 		}
 		.nbThemeTextViewport()
 	}
+}
+
+// Progress leaves the sheet host, controls, and scroll contents alone.
+private struct InstallAggregateProgress<Content: View>: View {
+    @State private var progress = InstallSession.shared.aggregateProgress
+    @ViewBuilder var content: (Double) -> Content
+
+    var body: some View {
+        content(progress)
+            .onReceive(InstallSession.shared.aggregateProgressPublisher) { progress = $0 }
+    }
 }

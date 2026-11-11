@@ -146,9 +146,9 @@ final class NBAuroraTextAnchorView: UIView {
         attachment = nil
     }
 
-    func sample(at time: CFTimeInterval) {
+    func sample(at time: CFTimeInterval, clipping: NBAuroraTextClipping) {
         guard canTrack else { suspend(); return }
-        let bounds = inkBounds(at: time)
+        let bounds = inkBounds(at: time, clipping: clipping)
         attachment?.receive(bounds: bounds, rows: cachedInkRows, reduceMotion: reduceMotion)
     }
 
@@ -164,7 +164,7 @@ final class NBAuroraTextAnchorView: UIView {
         lastVisibilityCheck = -.infinity
     }
 
-    private func inkBounds(at time: CFTimeInterval) -> CGRect? {
+    private func inkBounds(at time: CFTimeInterval, clipping: NBAuroraTextClipping) -> CGRect? {
         guard let window, NBAuroraTextVisibility.usable(bounds),
               NBAuroraTextVisibility.usable(window.bounds) else {
             invalidateGeometry()
@@ -184,30 +184,61 @@ final class NBAuroraTextAnchorView: UIView {
         }
         lastGeometry = geometry
         lastVisibilityCheck = time
-        cachedInkBounds = visibleInkBounds(frame: frame, window: window)
+        cachedInkBounds = visibleInkBounds(frame: frame, window: window, clipping: clipping)
         cachedInkRows = NBAuroraInkRows(frame: frame, window: window.bounds)
         return cachedInkBounds
     }
 
-    private func visibleInkBounds(frame: CGRect, window: UIWindow) -> CGRect? {
-        var visible = frame.intersection(window.bounds)
-        guard NBAuroraTextVisibility.usable(visible) else { return nil }
-        var ancestor: UIView? = self
-        while let view = ancestor {
-            guard !view.isHidden, view.alpha > 0.01 else { return nil }
-            if view.clipsToBounds {
-                visible = visible.intersection(view.convert(view.bounds, to: window))
-            }
-            guard NBAuroraTextVisibility.usable(visible) else { return nil }
-            if view === window { break }
-            ancestor = view.superview
-        }
+    private func visibleInkBounds(frame: CGRect, window: UIWindow,
+                                  clipping: NBAuroraTextClipping) -> CGRect? {
+        guard !isHidden, alpha > 0.01,
+              NBAuroraTextVisibility.usable(frame.intersection(window.bounds)),
+              let clip = clipping.visibleClip(of: superview, in: window),
+              NBAuroraTextVisibility.usable(frame.intersection(clip)) else { return nil }
         // Selection scales affect the window frame but not the shader's local
         // coordinates. Use both sizes so the ink stays aligned under scaling.
         let sx = frame.width / bounds.width, sy = frame.height / bounds.height
         return CGRect(x: (window.bounds.minX - frame.minX) / sx,
                       y: (window.bounds.minY - frame.minY) / sy,
                       width: window.bounds.width / sx, height: window.bounds.height / sy)
+    }
+}
+
+// Shared only within a geometry tick. A new tick can see ancestor scrolling,
+// clipping, or visibility changes even if the view identities stay the same.
+@MainActor
+final class NBAuroraTextClipping {
+    private enum Visibility {
+        case hidden
+        case visible(CGRect)
+    }
+
+    private var ancestors: [ObjectIdentifier: Visibility] = [:]
+
+    func beginFrame() { ancestors.removeAll(keepingCapacity: true) }
+
+    func visibleClip(of view: UIView?, in window: UIWindow) -> CGRect? {
+        guard let view else { return window.bounds }
+        let key = ObjectIdentifier(view)
+        if let cached = ancestors[key] {
+            if case .visible(let clip) = cached { return clip }
+            return nil
+        }
+
+        guard !view.isHidden, view.alpha > 0.01,
+              let inherited = view === window ? window.bounds : visibleClip(of: view.superview, in: window) else {
+            ancestors[key] = .hidden
+            return nil
+        }
+        let clip = view.clipsToBounds && view !== window
+            ? inherited.intersection(view.convert(view.bounds, to: window))
+            : inherited
+        guard NBAuroraTextVisibility.usable(clip) else {
+            ancestors[key] = .hidden
+            return nil
+        }
+        ancestors[key] = .visible(clip)
+        return clip
     }
 }
 
@@ -220,6 +251,7 @@ final class NBAuroraTextLayoutClock {
         weak var attachment: NBAuroraTextAttachment?
     }
     private var anchors: [ObjectIdentifier: WeakAnchor] = [:]
+    private let clipping = NBAuroraTextClipping()
     private var displayLink: CADisplayLink?
     private var active = true
 
@@ -247,6 +279,7 @@ final class NBAuroraTextLayoutClock {
 
     fileprivate func tick(at time: CFTimeInterval) {
         guard active else { return }
+        clipping.beginFrame()
         for (key, entry) in anchors {
             guard let view = entry.value else {
                 entry.attachment?.receive(bounds: nil, reduceMotion: entry.attachment?.lease.reduceMotion ?? false)
@@ -258,7 +291,7 @@ final class NBAuroraTextLayoutClock {
                 anchors.removeValue(forKey: key)
                 continue
             }
-            view.sample(at: time)
+            view.sample(at: time, clipping: clipping)
         }
         if anchors.isEmpty { stop() }
     }

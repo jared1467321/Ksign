@@ -5,6 +5,7 @@
 //  Created by samara on 23.04.2025.
 //
 
+import Combine
 import SwiftUI
 import IDeviceSwift
 import NimbleExtensions
@@ -14,7 +15,7 @@ struct InstallProgressView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	
 	var app: AppInfoPresentable
-	@ObservedObject var viewModel: InstallerStatusViewModel
+	let viewModel: InstallerStatusViewModel
 
 	// How far along the pipeline this app is, for the dot only. Three states
 	// rather than the old on/off flag, because "being worked on" covers two
@@ -69,16 +70,7 @@ struct InstallProgressView: View {
 			InstallStaticAppIcon(app: app)
 				.equatable()
 				.frame(width: 54, height: 54)
-				.mask(
-					ZStack {
-						Circle().strokeBorder(.white, lineWidth: 4.5)
-						PieShape(progress: viewModel.overallProgress)
-							// Finish between 0.2s samples; animate only the path.
-							.animation(.linear(duration: 0.15), value: viewModel.overallProgress)
-							.scaleEffect(viewModel.isCompleted ? 2.2 : 1)
-							.animation(.smooth, value: viewModel.isCompleted)
-					}
-				)
+				.mask(InstallIconProgressMask(viewModel: viewModel))
 		}
 	}
 	
@@ -104,6 +96,47 @@ struct InstallProgressView: View {
 			set { progress = newValue }
 		}
 	}
+}
+
+// Only the mask subscribes to progress. Artwork and the activity dot keep
+// their own identities through every numeric update.
+private struct InstallIconProgressMask: View {
+    private struct Snapshot: Equatable {
+        let progress: Double
+        let completed: Bool
+    }
+
+    private let snapshots: AnyPublisher<Snapshot, Never>
+    @State private var snapshot: Snapshot
+
+    init(viewModel: InstallerStatusViewModel) {
+        _snapshot = State(initialValue: Snapshot(progress: viewModel.overallProgress,
+                                                  completed: viewModel.isCompleted))
+        let isNative = viewModel.isIDevice
+        snapshots = Publishers.CombineLatest4(viewModel.$packageProgress, viewModel.$uploadProgress,
+                                  viewModel.$installProgress, viewModel.$status)
+            .map { package, upload, install, status in
+                let completed: Bool
+                if case .completed = status { completed = true } else { completed = false }
+                let progress = isNative ? (install + upload + package) / 3 : (install + package) / 2
+                return Snapshot(progress: progress, completed: completed)
+            }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(.white, lineWidth: 4.5)
+            InstallProgressView.PieShape(progress: snapshot.progress)
+                .animation(.linear(duration: 0.15), value: snapshot.progress)
+                .scaleEffect(snapshot.completed ? 2.2 : 1)
+                .animation(.smooth, value: snapshot.completed)
+        }
+        .onReceive(snapshots) { value in
+            if snapshot != value { snapshot = value }
+        }
+    }
 }
 
 // Progress changes neither the artwork nor its border. Keep the cached image,

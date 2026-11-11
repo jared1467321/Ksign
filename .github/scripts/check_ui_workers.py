@@ -426,8 +426,11 @@ final class TransferCheck: @unchecked Sendable {
 
     func receive(_ state: IPAVaultTransfer.Presentation) {
         require(!Thread.isMainThread, "transport ran on main")
-        last = state.items
-        guard let item = state.items.first else {
+        if let items = state.items { last = items }
+        for index in last.indices {
+            if let update = state.progress[last[index].id] { last[index] = update }
+        }
+        guard let item = last.first else {
             if acted && (mode == "cancel" || mode == "bad") { done.signal() }
             return
         }
@@ -444,7 +447,7 @@ final class TransferCheck: @unchecked Sendable {
             sawPaused = true
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.08) { self.transfer.resumeIPAVaultDownload(item) }
         }
-        let completed = state.items.filter(\.isFinished)
+        let completed = last.filter(\.isFinished)
         if completed.count == (mode == "concurrent" ? 2 : 1) {
             finished = completed
             done.signal()

@@ -1399,7 +1399,8 @@ final class InstallQueueCoordinator {
 
 	private func _admitWaitingJobs() {
 		_reclaimOrphans()
-		guard !_isPaused else { return }
+		guard !_isPaused, _holders.count < _effectiveMaxConcurrent,
+			  !_isNativeInstall || ProcessInfo.processInfo.systemUptime >= _nativeMemoryRetryAt else { return }
 		for token in _waiterOrder {
 			guard let waiter = _waiters[token] else { continue }
 			if waiter.cancellation.isCancelled {

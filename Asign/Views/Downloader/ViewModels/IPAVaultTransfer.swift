@@ -10,9 +10,19 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
     }
 
     struct Presentation {
-        let items: [DownloadItem]
+        let items: [DownloadItem]?
+        let progress: [UUID: DownloadItem]
         let adaptive: AdaptivePresentation
         let controls: Controls
+
+        func merging(_ next: Self) -> Self {
+            // A membership snapshot supersedes earlier deltas and includes
+            // progress as of its publication. Otherwise keep the last update per row.
+            guard next.items == nil else { return next }
+            var updates = progress
+            updates.merge(next.progress, uniquingKeysWith: { _, newest in newest })
+            return Self(items: items, progress: updates, adaptive: next.adaptive, controls: next.controls)
+        }
     }
     private let queue = DispatchQueue(label: "Asign.IPAVault.transport", qos: .utility)
     private lazy var delegateQueue: OperationQueue = {
@@ -22,8 +32,18 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         return result
     }()
     private var downloadItems: [DownloadItem] = [] {
-        didSet { publishPresentation() }
+        didSet {
+            guard !applyingPresentationProgress else { return }
+            presentationIndices = nil
+            presentationItemsChanged = true
+            publishPresentation()
+        }
     }
+    private var presentationIndices: [String: Int]?
+    private var applyingPresentationProgress = false
+    private var presentationItemsChanged = false
+    private var presentationControls = Controls()
+    private var presentationProgress: [UUID: DownloadItem] = [:]
     private let receive: (Presentation) -> Void
     private var presentationBatchDepth = 0
     private var presentationPending = false
@@ -49,8 +69,15 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         }
         // Only section visibility needs presentation state. Menu commands use
         // authoritative transport state when invoked, never UI enablement flags.
-        let controls = Controls(hasDownloads: downloadItems.contains { !$0.isFinished })
-        receive(Presentation(items: downloadItems, adaptive: ipavaultLatestAdaptivePresentation, controls: controls))
+        let items = presentationItemsChanged ? downloadItems : nil
+        if presentationItemsChanged {
+            presentationControls = Controls(hasDownloads: downloadItems.contains { !$0.isFinished })
+        }
+        let progress = presentationItemsChanged ? [:] : presentationProgress
+        presentationItemsChanged = false
+        presentationProgress.removeAll(keepingCapacity: true)
+        receive(Presentation(items: items, progress: progress,
+                             adaptive: ipavaultLatestAdaptivePresentation, controls: presentationControls))
     }
 
     private func withPresentationBatch(_ work: () -> Void) {
@@ -599,30 +626,33 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         let dirtyIDs = ipavaultDirtyPresentationItemIDs
         ipavaultDirtyPresentationItemIDs.removeAll(keepingCapacity: true)
 
-        var updatedItems = downloadItems
-        var didChange = false
-
+        let indices = downloadItemIndices()
+        applyingPresentationProgress = true
         for itemID in dirtyIDs {
             guard let snapshot = ipavaultLatestProgressByItemID[itemID],
-                  let index = updatedItems.firstIndex(where: { $0.id.uuidString == itemID }),
-                  !updatedItems[index].isFinished else { continue }
+                  let index = indices[itemID], !downloadItems[index].isFinished else { continue }
 
-            if updatedItems[index].totalBytes != snapshot.totalBytes ||
-                updatedItems[index].bytesDownloaded != snapshot.bytesDownloaded ||
-                updatedItems[index].progress != snapshot.progress {
-                updatedItems[index].totalBytes = snapshot.totalBytes
-                updatedItems[index].bytesDownloaded = snapshot.bytesDownloaded
-                updatedItems[index].progress = snapshot.progress
-                didChange = true
-            }
+            var item = downloadItems[index]
+            guard item.totalBytes != snapshot.totalBytes || item.bytesDownloaded != snapshot.bytesDownloaded ||
+                    item.progress != snapshot.progress else { continue }
+            item.totalBytes = snapshot.totalBytes
+            item.bytesDownloaded = snapshot.bytesDownloaded
+            item.progress = snapshot.progress
+            downloadItems[index] = item
+            presentationProgress[item.id] = item
         }
-
+        applyingPresentationProgress = false
         ipavaultLastPresentationFlushAt = ProcessInfo.processInfo.systemUptime
-        if didChange {
-            // One array assignment means one ObservableObject invalidation for the
-            // whole IPA Vault batch instead of one invalidation per network chunk.
-            downloadItems = updatedItems
-        }
+        if !presentationProgress.isEmpty { publishPresentation() }
+    }
+
+    private func downloadItemIndices() -> [String: Int] {
+        if let presentationIndices { return presentationIndices }
+        let indices = Dictionary(uniqueKeysWithValues: downloadItems.enumerated().map {
+            ($0.element.id.uuidString, $0.offset)
+        })
+        presentationIndices = indices
+        return indices
     }
 
     private func clearIPAVaultPresentationProgress(for itemID: String) {
@@ -784,8 +814,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
         }
         // Queued/paused items may not have a transport snapshot. Index their
         // fallback once instead of searching the full list for each batch item.
-        let publishedProgress = Dictionary(uniqueKeysWithValues:
-            downloadItems.map { ($0.id.uuidString, $0.progress) })
+        let indices = downloadItemIndices()
         let aggregateFraction = min(
             1,
             max(
@@ -797,7 +826,8 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
                     if let transportProgress = ipavaultLatestProgressByItemID[itemID]?.progress {
                         return partial + min(1, max(0, transportProgress))
                     }
-                    return partial + min(1, max(0, publishedProgress[itemID] ?? 0))
+                    let published = indices[itemID].map { downloadItems[$0].progress } ?? 0
+                    return partial + min(1, max(0, published))
                 } / Double(total)
             )
         )
@@ -813,7 +843,7 @@ final class IPAVaultTransfer: NSObject, URLSessionDataDelegate, @unchecked Senda
 
         let currentItemID = stickyIPAVaultActivityItemID()
         let currentItem = currentItemID.flatMap { itemID in
-            downloadItems.first(where: { $0.id.uuidString == itemID })?.title
+            indices[itemID].map { downloadItems[$0].title }
         }
 
         let snapshot = IPAVaultBackgroundTaskSnapshot(

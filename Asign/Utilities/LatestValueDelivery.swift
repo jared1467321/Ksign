@@ -6,6 +6,7 @@ final class LatestValueDelivery<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private let queue: DispatchQueue
     private let interval: TimeInterval
+    private let merge: ((Value, Value) -> Value)?
     private let receive: (Value) -> Void
     private var pending: Value?
     private var scheduled = false
@@ -13,15 +14,20 @@ final class LatestValueDelivery<Value>: @unchecked Sendable {
     private var active = true
 
     init(interval: TimeInterval = 0.2, queue: DispatchQueue = .main,
-         receive: @escaping (Value) -> Void) {
+         merge: ((Value, Value) -> Value)? = nil, receive: @escaping (Value) -> Void) {
         self.interval = interval
         self.queue = queue
+        self.merge = merge
         self.receive = receive
     }
 
     func submit(_ value: Value, immediately: Bool = false) {
         lock.lock()
-        pending = value
+        if let pending, let merge {
+            self.pending = merge(pending, value)
+        } else {
+            pending = value
+        }
         if active && (!scheduled || immediately) {
             scheduleLocked(after: immediately ? 0 : interval)
         }
