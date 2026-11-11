@@ -54,10 +54,10 @@ struct InstallPreviewView: View {
 				statusReporter: { status in
 					SingleInstallLiveActivityReporter.shared.handleServerStatus(
 						status,
-						bundleID: bundleID,
+						bundleID: tracking.bundleIdentifier ?? bundleID,
 						viewModel: viewModel,
 						isServerInstall: method == 0,
-						onInstalled: { tracking.confirm() }
+						hasNewRegistration: { tracking.hasNewRegistration() }
 					)
 				}
 			)
@@ -420,7 +420,7 @@ final class SingleInstallLiveActivityReporter {
 		bundleID: String?,
 		viewModel: InstallerStatusViewModel,
 		isServerInstall: Bool,
-		onInstalled: @escaping () -> Void
+		hasNewRegistration: @escaping () -> Bool
 	) {
 		updateStatus(status)
 		guard isServerInstall else { return }
@@ -431,16 +431,17 @@ final class SingleInstallLiveActivityReporter {
 			ServerInstallProgressMonitor.shared.start(
 				id: _serverMonitorID,
 				bundleID: bundleID,
+				hasNewRegistration: hasNewRegistration,
 				onProgress: { progress in
 					SingleInstallLiveActivityReporter.shared.updateInstall(progress)
 					InstallProgressUIBridge.shared.submit(progress, to: viewModel)
 				},
 				onCompleted: {
-					onInstalled()
 					let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
 					SingleInstallLiveActivityReporter.shared.updateStatus(completed)
-					InstallProgressUIBridge.shared.submit(1, to: viewModel)
 					DispatchQueue.main.async {
+						guard !viewModel.isCompleted else { return }
+						viewModel.installProgress = 1
 						viewModel.status = completed
 					}
 				}
@@ -456,7 +457,7 @@ final class SingleInstallLiveActivityReporter {
 
 	func updateStatus(_ status: InstallerStatusViewModel.InstallerStatus) {
 		_queue.sync {
-			guard self._active else { return }
+			guard self._active, self._stage != .completed else { return }
 
 			let previous = self._stage
 			switch status {

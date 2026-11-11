@@ -48,6 +48,7 @@ final class InstalledAppsModel: ObservableObject {
                     try IDeviceManagedInstallRegistry.shared.snapshot()
                 }.value
                 let registry = IDeviceManagedInstallRegistry.shared
+                let inventoryStartedAt = Date()
                 let installed = try await manager.installedApps()
                 try Task.checkCancellation()
                 let dated = try await Task.detached(priority: .userInitiated) {
@@ -57,7 +58,7 @@ final class InstalledAppsModel: ObservableObject {
                         return app
                     }
                     return try registry.reconcile(dated, observed: observed,
-                        hostBundleIdentifier: Bundle.main.bundleIdentifier).sorted(by: IDeviceInstalledApp.newestFirst)
+                        hostBundleIdentifier: Bundle.main.bundleIdentifier, inventoryStartedAt: inventoryStartedAt).sorted(by: IDeviceInstalledApp.newestFirst)
                 }.value
                 try Task.checkCancellation()
                 apps = dated

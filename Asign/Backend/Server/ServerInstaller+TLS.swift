@@ -9,6 +9,7 @@
 
 import Foundation
 import NIOSSL
+import OSLog
 import NIOTLS
 import Vapor
 import SystemConfiguration.CaptiveNetwork
@@ -23,43 +24,45 @@ extension ServerInstaller {
 		return env
 	}()
 	
-	static func setupApp(port: Int) throws -> Application {
+	struct ServerConfiguration {
+		let host: String
+		let bindAddress: String
+		let tls: TLSConfiguration?
+		let usesOnDeviceCertificate: Bool
+	}
+
+	static func setupApp(port: Int, bindAddress: String, tls: TLSConfiguration? = nil) -> Application {
 		let app = Application(env)
-		var configured = false
-		defer { if !configured { app.shutdown() } }
 		app.threadPool = .init(numberOfThreads: 1)
-		
-		if ServerInstaller.getServerMethod() != 1 {
-			if let tls = try Self.tls() {
-				app.http.server.configuration.tlsConfiguration = tls
-			}
-		}
-		
-		app.http.server.configuration.hostname = Self.sni
+		app.http.server.configuration.tlsConfiguration = tls
 		app.http.server.configuration.tcpNoDelay = true
-		app.http.server.configuration.address = .hostname("0.0.0.0", port: port)
-		app.http.server.configuration.port = port
+		app.http.server.configuration.address = .hostname(bindAddress, port: port)
 		app.routes.defaultMaxBodySize = "128mb"
 		app.routes.caseInsensitive = false
-		
-		configured = true
 		return app
 	}
-	
-	// MARK: Files/IP
-	static var sni: String {
-		let localhost = "127.0.0.1"
-		
+
+	static func serverConfiguration() throws -> ServerConfiguration {
+		let loopback = LocalTLSIdentity.bindAddress
 		if getServerMethod() == 1 {
-			return !ServerInstaller.getIPFix()
-			? (getLocalAddress() ?? localhost)
-			: localhost
-		} else {
-			return readCommonName() ?? localhost
+			let host = getIPFix() ? loopback : (getLocalAddress() ?? loopback)
+			return .init(host: host, bindAddress: "0.0.0.0", tls: nil, usesOnDeviceCertificate: false)
 		}
-	}
-	
-	static func tls() throws -> TLSConfiguration? {
+
+		if LocalTLSIdentity.isSelected {
+			do {
+				let identity = try LocalTLSIdentity.load()
+				try identity.checkSystemTrust()
+				try LocalTLSIdentity.checkLoopbackResolution()
+				return try .init(
+					host: LocalTLSIdentity.host, bindAddress: loopback, tls: identity.configuration(), usesOnDeviceCertificate: true
+				)
+			} catch {
+				Logger.misc.error("On-device HTTPS setup failed: \(error.localizedDescription, privacy: .public)")
+				throw error
+			}
+		}
+
 		#if SERVER
 		if FR.isActiveSSLCertificateBlocked() {
 			throw NSError(
@@ -77,12 +80,14 @@ extension ServerInstaller {
 				let crt = getUrl("server", ext: "crt"),
 				let pem = getUrl("server", ext: "pem")
 			else {
-				return nil
+				throw ServerInstallerError.missingTLSIdentity
 			}
 
-			return try makeTLSConfiguration(
-				certificateURL: crt,
-				privateKeyURL: pem
+			return try .init(
+				host: readCommonName() ?? loopback,
+				bindAddress: "0.0.0.0",
+				tls: makeTLSConfiguration(certificateURL: crt, privateKeyURL: pem),
+				usesOnDeviceCertificate: false
 			)
 		}
 	}
@@ -124,21 +129,15 @@ extension ServerInstaller {
 		)
 	}
 	
-	static func readCommonName() -> String? {
-		withTLSIdentityLock {
-			guard let url = getUrl("commonName", ext: "txt") else {
-				return nil
-			}
+	// Call while holding tlsIdentityLock.
+	private static func readCommonName() -> String? {
+		guard let url = getUrl("commonName", ext: "txt"),
+		      let value = try? String(contentsOf: url, encoding: .utf8)
+			.trimmingCharacters(in: .whitespacesAndNewlines),
+		      !value.isEmpty
+		else { return nil }
 
-			guard let value = try? String(contentsOf: url, encoding: .utf8)
-				.trimmingCharacters(in: .whitespacesAndNewlines),
-				!value.isEmpty
-			else {
-				return nil
-			}
-
-			return value
-		}
+		return value
 	}
 }
 

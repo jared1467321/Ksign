@@ -11,6 +11,7 @@ import Foundation
 import Vapor
 import NIOSSL
 import NIOTLS
+import OSLog
 import SwiftUI
 import IDeviceSwift
 
@@ -97,38 +98,28 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 	private func _startServing() throws {
 		guard _server == nil else { return }
-		var started = false
-		defer {
-			if !started {
-				_server?.server.shutdown()
-				_server?.shutdown()
-				_server = nil
-			}
-		}
-		host = Self.sni
+		let configuration = try Self.serverConfiguration()
+		host = configuration.host
 
 		// The port is picked at random; a collision throws, so retry a few
 		// times with fresh ports before giving up on this app.
 		var lastError: Error?
-		self.port = Int.random(in: 4000...8000)
-		self._server = try Self.setupApp(port: port)
-
-		for attempt in 0..<6 {
-			if attempt > 0 {
-				_server?.shutdown()
-				_server = nil
-				self.port = Int.random(in: 4000...8000)
-				self._server = try Self.setupApp(port: port)
-			}
-
+		for _ in 0..<6 {
+			port = Int.random(in: 4000...8000)
+			let server = Self.setupApp(port: port, bindAddress: configuration.bindAddress, tls: configuration.tls)
+			_configureRoutes(on: server, logLocalManifest: configuration.usesOnDeviceCertificate)
 			do {
-				try _configureRoutes()
-				try _server?.server.start()
+				try server.server.start()
+				_server = server
 				_needsShutdown = true
-				started = true
+				if configuration.usesOnDeviceCertificate {
+					Logger.misc.info("On-device HTTPS passed iOS trust evaluation and is listening at \(self.host, privacy: .public):\(self.port, privacy: .public)")
+				}
 				return
 			} catch {
 				lastError = error
+				server.server.shutdown()
+				server.shutdown()
 			}
 		}
 
@@ -148,13 +139,21 @@ class ServerInstaller: Identifiable, ObservableObject {
 	// One "*" handler serves the host and every hosted member. Payloads and
 	// icons are keyed by app id, so a request can be routed to whichever app
 	// it's for, and that app's row is what gets updated.
-	private func _configureRoutes() throws {
-		_server?.get("*") { [weak self] req in
+	private func _configureRoutes(on server: Application, logLocalManifest: Bool) {
+		server.get("*") { [weak self] req async throws -> Response in
 			guard let self else { return Response(status: .badGateway) }
 			let path = req.url.path
+			let pool = req.application.threadPool
 
 			// The manifest and landing page belong to the host alone.
 			if path == self.plistEndpoint.path {
+				let trackers = ([self] + self.hostedInstallers).map(\.installTracking)
+				try? await pool.runIfActive {
+					for tracker in trackers { tracker.captureBaseline() }
+				}
+				if logLocalManifest {
+					Logger.misc.info("On-device HTTPS served an installation manifest")
+				}
 				self.report(.sendingManifest)
 				return Response(status: .ok, version: req.version, headers: [
 					"Content-Type": "text/xml",
@@ -162,6 +161,8 @@ class ServerInstaller: Identifiable, ObservableObject {
 			}
 
 			if path == "/install" {
+				let tracking = self.installTracking
+				_ = try? await pool.runIfActive { tracking.captureBaseline() }
 				var headers = HTTPHeaders()
 				headers.add(name: .contentType, value: "text/html")
 				return Response(status: .ok, headers: headers, body: .init(string: self.html))
@@ -175,11 +176,16 @@ class ServerInstaller: Identifiable, ObservableObject {
 						return Response(status: .notFound)
 					}
 
+					let tracking = target.installTracking
+					let observation = try? await pool.runIfActive { tracking.captureBaseline() }
 					target.report(.sendingPayload)
 
-					return req.fileio.streamFile(at: packageUrl.path) { result in
+					return try await req.fileio.asyncStreamFile(at: packageUrl.path) { result in
 						switch result {
 						case .success:
+							if let observation {
+								try? await pool.runIfActive { tracking.recordTransfer(observation) }
+							}
 							target.report(.installing)
 						case .failure(let error):
 							target.report(.broken(error))
@@ -221,6 +227,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 		_statusReporter?(newStatus)
 
 		DispatchQueue.main.async {
+			guard !self.viewModel.isCompleted else { return }
 			self.viewModel.status = newStatus
 		}
 	}
@@ -244,8 +251,14 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 enum ServerInstallerError: LocalizedError {
 	case couldNotStart
+	case missingTLSIdentity
 
 	var errorDescription: String? {
-		"Couldn't start a local server for this app. Try installing it again."
+		switch self {
+		case .couldNotStart:
+			return "Couldn't start a local server for this app. Try installing it again."
+		case .missingTLSIdentity:
+			return "No SSL certificate is available. Update SSL Certificates in Settings > Installation."
+		}
 	}
 }

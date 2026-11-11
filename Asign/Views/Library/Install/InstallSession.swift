@@ -970,35 +970,25 @@ final class BulkInstallLiveActivityReporter {
 		isCurrent: @escaping () -> Bool = { true }
 	) {
 		_queue.async {
-			guard isCurrent(), var job = self._jobs[jobID] else { return }
+			guard isCurrent(), var job = self._jobs[jobID], !job.isCompleted else { return }
 			let before = job
 
 			switch status {
 			case .none:
-				if !job.isCompleted {
-					job.stage = .packaging
-					job.fraction = min(1, max(job.fraction, job.packageProgress * 0.5))
-				}
+				job.stage = .packaging
+				job.fraction = min(1, max(job.fraction, job.packageProgress * 0.5))
 			case .ready:
-				if !job.isCompleted {
-					job.stage = .ready
-					job.fraction = max(job.fraction, 0.5)
-				}
+				job.stage = .ready
+				job.fraction = max(job.fraction, 0.5)
 			case .sendingManifest:
-				if !job.isCompleted {
-					job.stage = .sendingManifest
-					job.fraction = max(job.fraction, 0.5)
-				}
+				job.stage = .sendingManifest
+				job.fraction = max(job.fraction, 0.5)
 			case .sendingPayload:
-				if !job.isCompleted {
-					job.stage = .sendingPayload
-					job.fraction = max(job.fraction, 0.5)
-				}
+				job.stage = .sendingPayload
+				job.fraction = max(job.fraction, 0.5)
 			case .installing:
-				if !job.isCompleted {
-					job.stage = .installing
-					job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
-				}
+				job.stage = .installing
+				job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
 			case .completed(.success):
 				job.stage = .completed
 				job.fraction = 1

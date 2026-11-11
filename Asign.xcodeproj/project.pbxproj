@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A54000012F5D000000000001 /* X509 in Frameworks */ = {isa = PBXBuildFile; productRef = A54000022F5D000000000002 /* X509 */; };
 		3305BBAC2DB8944200660D45 /* Vapor in Frameworks */ = {isa = PBXBuildFile; productRef = 3305BBAB2DB8944200660D45 /* Vapor */; };
 		330F68FC2DBF7C8600D8C35D /* NimbleExtensions in Frameworks */ = {isa = PBXBuildFile; productRef = 330F68FB2DBF7C8600D8C35D /* NimbleExtensions */; };
 		330F68FE2DBF7C8600D8C35D /* NimbleViews in Frameworks */ = {isa = PBXBuildFile; productRef = 330F68FD2DBF7C8600D8C35D /* NimbleViews */; };
@@ -132,6 +133,7 @@
 				A51000012F5A000000000001 /* ASignArchiveKit in Frameworks */,
 				330F69032DC03DF500D8C35D /* NimbleViews in Frameworks */,
 				3305BBAC2DB8944200660D45 /* Vapor in Frameworks */,
+				A54000012F5D000000000001 /* X509 in Frameworks */,
 				3346F83B2DC6C6D100C7D508 /* NukeUI in Frameworks */,
 				336D43982DB7454A00206400 /* MobileCoreServices.framework in Frameworks */,
 				C451296C2E54F0DC00E94CC7 /* ZIPFoundation in Frameworks */,
@@ -229,6 +231,7 @@
 				A51000022F5A000000000002 /* ASignArchiveKit */,
 				33CF13382DB5ACFB0021D4C5 /* SWCompression */,
 				3305BBAB2DB8944200660D45 /* Vapor */,
+				A54000022F5D000000000002 /* X509 */,
 				330F68FB2DBF7C8600D8C35D /* NimbleExtensions */,
 				330F68FD2DBF7C8600D8C35D /* NimbleViews */,
 				330F69002DC03DF500D8C35D /* NimbleExtensions */,
@@ -312,6 +315,7 @@
 				A51000032F5A000000000003 /* XCLocalSwiftPackageReference "ASignArchiveKit" */,
 				33CF13372DB5ACFB0021D4C5 /* XCRemoteSwiftPackageReference "SWCompression" */,
 				3305BBAA2DB8944200660D45 /* XCRemoteSwiftPackageReference "vapor" */,
+				A54000032F5D000000000003 /* XCRemoteSwiftPackageReference "swift-certificates" */,
 				330F68FF2DC03DF400D8C35D /* XCLocalSwiftPackageReference "NimbleKit" */,
 				3346F8372DC6C68300C7D508 /* XCRemoteSwiftPackageReference "Nuke" */,
 				33693A062DC8BF5B00730215 /* XCLocalSwiftPackageReference "AltSourceKit" */,
@@ -873,6 +877,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		A54000032F5D000000000003 /* XCRemoteSwiftPackageReference "swift-certificates" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-certificates.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.10.0;
+			};
+		};
 		3305BBAA2DB8944200660D45 /* XCRemoteSwiftPackageReference "vapor" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/vapor/vapor";
@@ -924,6 +936,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A54000022F5D000000000002 /* X509 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A54000032F5D000000000003 /* XCRemoteSwiftPackageReference "swift-certificates" */;
+			productName = X509;
+		};
 		3305BBAB2DB8944200660D45 /* Vapor */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 3305BBAA2DB8944200660D45 /* XCRemoteSwiftPackageReference "vapor" */;

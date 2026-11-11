@@ -13,7 +13,9 @@ struct ServerView: View {
 	@AppStorage("Feather.ipFix") private var _ipFix: Bool = false
 	@AppStorage("Feather.serverMethod") private var _serverMethod: Int = 0
 	@AppStorage("Feather.batchGroupSize") private var _batchGroupSize: Int = 5
+	@AppStorage(LocalTLSIdentity.preferenceKey) private var _useOnDeviceCertificate = false
 	@State private var _isUpdatingCertificates = false
+	@State private var _isSettingUpCertificate = false
 
 	private let _serverMethods: [String] = [
 		.localized("Fully Local"),
@@ -50,6 +52,45 @@ struct ServerView: View {
 				.nbThemeForeground(.textSecondary)
 			}
 
+			if _serverMethod == 0 {
+				Section {
+					Toggle("Use On-Device Certificate", systemImage: "lock.shield", isOn: $_useOnDeviceCertificate)
+					if _useOnDeviceCertificate {
+						Button("Download Trust Profile", systemImage: "arrow.down.doc") {
+							_isSettingUpCertificate = true
+							Task {
+								defer { _isSettingUpCertificate = false }
+								do {
+									try await LocalTLSProfileDownload.open()
+								} catch {
+									_showLocalTLSResult(error.localizedDescription)
+								}
+							}
+						}
+						Button("Check Certificate Trust", systemImage: "checkmark.shield") {
+							_isSettingUpCertificate = true
+							Task {
+								defer { _isSettingUpCertificate = false }
+								do {
+									try await Task.detached(priority: .userInitiated) {
+										try LocalTLSIdentity.load().checkSystemTrust()
+									}.value
+									_showLocalTLSResult("iOS trusts the on-device certificate for \(LocalTLSIdentity.host).")
+								} catch {
+									_showLocalTLSResult(error.localizedDescription)
+								}
+							}
+						}
+					}
+				} footer: {
+					if _useOnDeviceCertificate {
+						Text(LocalTLSIdentity.trustInstructions)
+							.nbThemeForeground(.textSecondary)
+					}
+				}
+				.disabled(_isSettingUpCertificate)
+			}
+
 			Section {
 				Button(.localized("Update SSL Certificates"), systemImage: "arrow.down.doc") {
 					guard !_isUpdatingCertificates else { return }
@@ -74,7 +115,7 @@ struct ServerView: View {
 						}
 					}
 				}
-				.disabled(_isUpdatingCertificates)
+				.disabled(_isUpdatingCertificates || (_serverMethod == 0 && _useOnDeviceCertificate))
 			}
 		}
 		.onChange(of: _serverMethod) { _ in
@@ -83,5 +124,9 @@ struct ServerView: View {
 				message: .localized("These changes require a restart of the app")
 			)
 		}
+	}
+
+	private func _showLocalTLSResult(_ message: String) {
+		UIAlertController.showAlertWithOk(title: "On-Device Certificate", message: message)
 	}
 }

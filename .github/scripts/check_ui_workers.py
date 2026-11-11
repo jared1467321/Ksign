@@ -86,6 +86,23 @@ final class ServerInstallTracking {}
 final class InstallerStatusViewModel {
     enum InstallerStatus { case ready }
     var status = InstallerStatus.ready
+    var isCompleted: Bool { false }
+}
+
+struct LogMessage: ExpressibleByStringInterpolation {
+    init(stringLiteral value: String) {}
+    init(stringInterpolation: StringInterpolation) {}
+    struct StringInterpolation: StringInterpolationProtocol {
+        enum Privacy { case `public` }
+        init(literalCapacity: Int, interpolationCount: Int) {}
+        mutating func appendLiteral(_ value: String) {}
+        mutating func appendInterpolation<T>(_ value: T, privacy: Privacy) {}
+    }
+}
+enum Logger {
+    enum misc {
+        static func info(_ message: LogMessage) {}
+    }
 }
 // Platform substitutes: lifecycle methods below are the production implementation.
 final class Application {
@@ -117,11 +134,18 @@ final class Application {
     }
 }
 extension ServerInstaller {
-    static var sni: String {
-        require(!Thread.isMainThread, "host/TLS lookup ran on main")
-        return "localhost"
+    struct ServerConfiguration {
+        let host = "localhost"
+        let bindAddress = "127.0.0.1"
+        let tls: Bool? = nil
+        let usesOnDeviceCertificate = false
     }
-    static func setupApp(port: Int) throws -> Application {
+
+    static func serverConfiguration() throws -> ServerConfiguration {
+        require(!Thread.isMainThread, "host/TLS lookup ran on main")
+        return ServerConfiguration()
+    }
+    static func setupApp(port: Int, bindAddress: String, tls: Bool?) -> Application {
         require(!Thread.isMainThread, "Vapor/TLS setup ran on main")
         return Application()
     }
@@ -496,11 +520,11 @@ def main():
             projection = (ROOT / 'Asign/Views/Sources/Apps/SourceAppsProjection.swift').read_text().replace('import AltSourceKit', '')
             (work / 'Projection.swift').write_text(projection)
             lifecycle = (ROOT / 'Asign/Backend/Server/ServerInstaller.swift').read_text()
-            for module in ['Vapor', 'NIOSSL', 'NIOTLS', 'SwiftUI', 'IDeviceSwift']:
+            for module in ['Vapor', 'NIOSSL', 'NIOTLS', 'OSLog', 'SwiftUI', 'IDeviceSwift']:
                 lifecycle = lifecycle.replace('import ' + module, '')
-            start = lifecycle.index('\tprivate func _configureRoutes() throws {')
+            start = lifecycle.index('\tprivate func _configureRoutes(on server: Application, logLocalManifest: Bool) {')
             end = lifecycle.index('\n\tprivate func _shutdownServer()', start)
-            lifecycle = lifecycle[:start] + '\tprivate func _configureRoutes() throws {}\n' + lifecycle[end:]
+            lifecycle = lifecycle[:start] + '\tprivate func _configureRoutes(on server: Application, logLocalManifest: Bool) {}\n' + lifecycle[end:]
             (work / 'ServerLifecycle.swift').write_text(lifecycle)
             facade = (ROOT / 'Asign/Views/Downloader/ViewModels/IPADownloadManager.swift').read_text()
             for module in ['SwiftUI', 'UIKit', 'WebKit']:

@@ -81,6 +81,11 @@ extension UIApplication {
     /// - Parameter identifier: Bundle identifier
     /// - Returns: True when the app is installed
     nonisolated static public func isAppInstalled(_ identifier: String) -> Bool {
+        installedAppPresence(identifier) == true
+    }
+
+    /// Nil when LaunchServices cannot answer the installed-state query.
+    nonisolated static public func installedAppPresence(_ identifier: String) -> Bool? {
         let classNameBase64 = "TFNBcHBsaWNhdGlvbldvcmtzcGFjZQ==" // LSApplicationWorkspace
         let defaultSelectorBase64 = "ZGVmYXVsdFdvcmtzcGFjZQ=="   // defaultWorkspace
         let installedSelectorBase64 = "YXBwbGljYXRpb25Jc0luc3RhbGxlZDo=" // applicationIsInstalled:
@@ -91,11 +96,13 @@ extension UIApplication {
             let installedSelector = String(data: Data(base64Encoded: installedSelectorBase64)!, encoding: .utf8),
             let workspaceClass = NSClassFromString(className) as? NSObject.Type,
             let workspace = workspaceClass.perform(NSSelectorFromString(defaultSelector))?.takeUnretainedValue()
-        else { return false }
+        else { return nil }
 
         let selector = NSSelectorFromString(installedSelector)
-        guard workspace.responds(to: selector) else { return false }
+        guard workspace.responds(to: selector) else { return nil }
 
-        return workspace.perform(selector, with: identifier) != nil
+        typealias IsInstalled = @convention(c) (AnyObject, Selector, NSString) -> Bool
+        let isInstalled = unsafeBitCast(workspace.method(for: selector), to: IsInstalled.self)
+        return isInstalled(workspace, selector, identifier as NSString)
     }
 }

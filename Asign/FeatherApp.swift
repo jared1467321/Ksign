@@ -174,8 +174,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         Task.detached(priority: .utility) { Self._addDefaultCertificates() }
 
 #if SERVER
-        // fallback just in case xd
-        _downloadSSLCertificates()
+        if !LocalTLSIdentity.isSelected {
+            _downloadSSLCertificates()
+        }
 #endif
         return true
     }

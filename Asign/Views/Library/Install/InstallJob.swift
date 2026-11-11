@@ -137,7 +137,8 @@ final class InstallProgressUIBridge {
 		_lock.lock()
 		var entry = _pending[key] ?? Pending()
 		entry.latest = { [weak viewModel] in
-			viewModel?.installProgress = value
+			guard let viewModel, !viewModel.isCompleted else { return }
+			viewModel.installProgress = value
 		}
 
 		if _isAppActive && !entry.deliveryQueued {
@@ -347,6 +348,7 @@ final class InstallJob: ObservableObject, Identifiable {
 		let method = _installationMethod
 		let bundleID = app.identifier
 		let statusModel = viewModel
+		let statusEpoch = _statusEpoch
 		let tracking = ServerInstallTracking()
 
 		installer = ServerInstaller(
@@ -363,26 +365,31 @@ final class InstallJob: ObservableObject, Identifiable {
 
 				switch status {
 				case .installing:
-					guard let bundleID else { return }
+					guard let bundleID = tracking.bundleIdentifier ?? bundleID,
+					      let epoch = statusEpoch.current else { return }
 					ServerInstallProgressMonitor.shared.start(
 						id: jobID,
 						bundleID: bundleID,
+						hasNewRegistration: { tracking.hasNewRegistration() },
 						onProgress: { progress in
+							guard statusEpoch.matches(epoch) else { return }
 							BulkInstallLiveActivityReporter.shared.updateInstall(
 								jobID: jobID,
-								progress: progress
+								progress: progress,
+								isCurrent: { statusEpoch.matches(epoch) }
 							)
 							InstallProgressUIBridge.shared.submit(progress, to: statusModel)
 						},
 						onCompleted: {
-							tracking.confirm()
 							let completed = InstallerStatusViewModel.InstallerStatus.completed(.success(()))
 							BulkInstallLiveActivityReporter.shared.updateStatus(
 								jobID: jobID,
-								status: completed
+								status: completed,
+								isCurrent: { statusEpoch.matches(epoch) }
 							)
-							InstallProgressUIBridge.shared.submit(1, to: statusModel)
 							DispatchQueue.main.async {
+								guard statusEpoch.matches(epoch), !statusModel.isCompleted else { return }
+								statusModel.installProgress = 1
 								statusModel.status = completed
 							}
 						}
@@ -1025,6 +1032,7 @@ final class ServerInstallProgressMonitor {
 	func start(
 		id: UUID,
 		bundleID: String,
+		hasNewRegistration: @escaping () -> Bool,
 		onProgress: @escaping (Double) -> Void,
 		onCompleted: @escaping () -> Void
 	) {
@@ -1034,8 +1042,10 @@ final class ServerInstallProgressMonitor {
 			let generation = UUID()
 			let task = Task.detached(priority: .userInitiated) { [weak self] in
 				var hasStarted = false
+				var reportedProgress = 0.0
 				let startedAt = Date()
 				let wasInstalledAtStart = UIApplication.isAppInstalled(bundleID)
+				var nextRegistrationCheck = startedAt
 
 				while !Task.isCancelled {
 					let rawProgress = UIApplication.installProgress(for: bundleID)
@@ -1044,11 +1054,14 @@ final class ServerInstallProgressMonitor {
 						hasStarted = true
 					}
 
-					let progress = hasStarted
-						? Self._normalize(rawProgress ?? 0)
-						: 0
-					onProgress(progress)
-
+					let now = Date()
+					var finishedByRegistration = false
+					if (rawProgress == nil || rawProgress == 1), now >= nextRegistrationCheck {
+						nextRegistrationCheck = now.addingTimeInterval(0.5)
+						finishedByRegistration = hasNewRegistration()
+					}
+					// LaunchServices removes the progress object when the install
+					// finishes. The installed-app inventory is verified separately.
 					let finishedByEdge = hasStarted && rawProgress == nil
 					let finishedByPresence = !wasInstalledAtStart
 						&& !hasStarted
@@ -1056,13 +1069,20 @@ final class ServerInstallProgressMonitor {
 						&& Date().timeIntervalSince(startedAt) > 8
 						&& UIApplication.isAppInstalled(bundleID)
 
-					if finishedByEdge || finishedByPresence {
-						onProgress(1)
+					guard !Task.isCancelled else { break }
+					if finishedByRegistration || finishedByEdge || finishedByPresence {
 						onCompleted()
 						self?._remove(id: id, generation: generation)
 						return
 					}
 
+					if let rawProgress {
+						let progress = Self._normalize(rawProgress)
+						if progress > reportedProgress {
+							reportedProgress = progress
+							onProgress(progress)
+						}
+					}
 					try? await Task.sleep(nanoseconds: 100_000_000)
 				}
 

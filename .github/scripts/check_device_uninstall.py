@@ -210,6 +210,70 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
 @main struct Tests {
     @MainActor static func main() async throws {
         let device = MockDevice.shared
+        do {
+            let file = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("server-receipts.json")
+            let started = Date(timeIntervalSince1970: 1_700_000_000)
+            let served = started.addingTimeInterval(4)
+            let query = served.addingTimeInterval(10)
+            let bundle = "test.server"
+            let identity = "TEAM.test.server"
+            let previous = "/var/apps/old"
+            let oldDate = started.addingTimeInterval(-100)
+            let observation = IDeviceServerInstallObservation(bundleIdentifier: bundle,
+                applicationIdentifier: identity, version: "2", startedAt: started,
+                previousRegistrationDate: oldDate, previousPath: previous, wasAbsent: false)
+            struct LegacyRegistry: Encodable {
+                let version = 1
+                let records: [IDeviceManagedInstall]
+            }
+            let nativeReceipt = IDeviceManagedInstall(token: UUID(), bundleIdentifier: "test.native",
+                applicationIdentifier: "TEAM.test.native", installationPath: "/apps/native",
+                registrationDate: nil, installedAt: oldDate)
+            try JSONEncoder().encode(LegacyRegistry(records: [nativeReceipt])).write(to: file)
+            let before = IDeviceManagedInstallRegistry(fileURL: file)
+            try before.recordServerTransfer(observation, servedAt: served, hostBundleIdentifier: nil)
+            require(try before.snapshot() == [nativeReceipt],
+                "serving a file granted uninstall access or changed an existing native receipt")
+
+            func app(identity: String = identity, version: String = "2", path: String,
+                     date: Date? = nil) -> IDeviceInstalledApp {
+                var app = IDeviceInstalledApp(bundleIdentifier: bundle, name: "Server App", version: version,
+                    applicationIdentifier: identity, installationPath: path, applicationType: "User", isRemovable: true)
+                app.registrationDate = date
+                return app
+            }
+
+            let registry = IDeviceManagedInstallRegistry(fileURL: file)
+            let updated = app(path: "/private/var/apps/new")
+            func load(_ app: IDeviceInstalledApp, at date: Date = query) throws -> [IDeviceInstalledApp] {
+                try registry.reconcile([app], observed: registry.snapshot(), hostBundleIdentifier: nil, inventoryStartedAt: date)
+            }
+            require(try load(updated, at: started).isEmpty, "inventory predating the transfer consumed its evidence")
+            require(try load(app(path: "/private/var/apps/old", date: oldDate)).isEmpty, "an unchanged preexisting copy was adopted")
+            require(try load(app(identity: "OTHER.test.server", path: "/apps/new")).isEmpty, "another signing identity was adopted")
+            require(try load(app(version: "3", path: "/apps/new")).isEmpty, "a different version was adopted")
+            require(observation.sawNewCopy(path: updated.installationPath, registrationDate: oldDate,
+                servedAt: served, now: query), "a changed path with a stable registration date was missed")
+            require(try load(updated).map(\.id) == [bundle], "a new copy from the persisted transfer was hidden")
+            let request = try IDeviceUninstallRequest(installedApp: updated, hostBundleIdentifier: nil, registry: registry)
+            require(try request.validate(updated, hostBundleIdentifier: nil), "a verified server install could not be uninstalled")
+            do {
+                _ = try request.validate(app(path: "/apps/replacement"), hostBundleIdentifier: nil)
+                fatalError("a replacement copy was authorized for uninstall")
+            } catch is IDeviceInstallSkip {}
+
+            let fresh = IDeviceServerInstallObservation(bundleIdentifier: bundle,
+                applicationIdentifier: identity, version: "2", startedAt: started,
+                previousRegistrationDate: nil, previousPath: nil, wasAbsent: true)
+            require(fresh.sawNewCopy(path: "/apps/new", registrationDate: nil, servedAt: served, now: query),
+                "a fresh installation without a device date was missed")
+            require(!fresh.sawNewCopy(path: "/apps/new", registrationDate: nil, servedAt: served,
+                now: served.addingTimeInterval(3601)), "a path-only observation was accepted outside the attribution window")
+            require(fresh.sawNewCopy(path: "/apps/new", registrationDate: query, servedAt: served,
+                now: served.addingTimeInterval(3601)), "a dated installation could not be confirmed later")
+        }
+        print("PASS server transfers survive restart and authorize only matching new device copies")
+
         // Five requests overlap, app 5 starts when app 3 finishes while app 0
         // is still waiting, and each slot reuses the same thread/client.
         do {
