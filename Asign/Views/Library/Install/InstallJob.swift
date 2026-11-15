@@ -355,6 +355,9 @@ final class InstallJob: ObservableObject, Identifiable {
 			app: SigningAppSnapshot(app),
 			viewModel: viewModel,
 			installTracking: tracking,
+			payloadProgressReporter: { progress in
+				BulkInstallLiveActivityReporter.shared.updatePayload(jobID: jobID, progress: progress)
+			},
 			statusReporter: { status in
 				BulkInstallLiveActivityReporter.shared.updateStatus(jobID: jobID, status: status)
 
@@ -415,16 +418,13 @@ final class InstallJob: ObservableObject, Identifiable {
 		// the job even when no install view is currently being rendered.
 		let liveActivityJobID = id
 		let statusEpoch = _statusEpoch
-		let nativeInstall = isDeviceInstall
 		viewModel.$status
 			.sink { status in
-				// Native worker events deliver these phases before their progress.
+				// The workers deliver these phases before their progress.
 				// A delayed main-queue echo must not move ActivityKit backwards.
-				if nativeInstall {
-					switch status {
-					case .sendingPayload, .installing: return
-					default: break
-					}
+				switch status {
+				case .sendingManifest, .sendingPayload, .installing: return
+				default: break
 				}
 				let epoch = statusEpoch.current
 				BulkInstallLiveActivityReporter.shared.updateStatus(
@@ -438,18 +438,6 @@ final class InstallJob: ObservableObject, Identifiable {
 		// Packaging reports directly from its attempt. Echoing delayed UI progress
 		// back into that reporter could replace a newer worker value with an old
 		// one, and would lose the attempt's cancellation guard.
-
-		if !isDeviceInstall {
-			viewModel.$installProgress
-				.removeDuplicates()
-				.sink { progress in
-					BulkInstallLiveActivityReporter.shared.updateInstall(
-						jobID: liveActivityJobID,
-						progress: progress
-					)
-				}
-				.store(in: &_cancellables)
-		}
 
 		// UI state and queue coordination still belong on MainActor.
 		viewModel.$status
@@ -548,6 +536,10 @@ final class InstallJob: ObservableObject, Identifiable {
 	func retry() {
 		_promptTask?.cancel()
 		_statusEpoch.advance()
+		if let installer {
+			installer.resetPayloadTransfer()
+			BulkInstallLiveActivityReporter.shared.resetServerAttempt(jobID: id)
+		}
 		// A manual retry always re-prompts this one app on its own — the shared
 		// group prompt has already happened, so fold it back to a solo install.
 		if batchRole == .host { installer?.setHosted([]) }
@@ -629,6 +621,8 @@ final class InstallJob: ObservableObject, Identifiable {
 	func rejoinPool() {
 		_promptTask?.cancel()
 		_statusEpoch.advance()
+		installer?.resetPayloadTransfer()
+		BulkInstallLiveActivityReporter.shared.resetServerAttempt(jobID: id)
 		// Shed any role from the manifest it was just in. A demoted host also
 		// stops serving — a fresh host will serve the regrouped manifest.
 		if batchRole == .host {
@@ -1054,20 +1048,21 @@ final class ServerInstallProgressMonitor {
 						hasStarted = true
 					}
 
-					let now = Date()
-					var finishedByRegistration = false
-					if (rawProgress == nil || rawProgress == 1), now >= nextRegistrationCheck {
-						nextRegistrationCheck = now.addingTimeInterval(0.5)
-						finishedByRegistration = hasNewRegistration()
-					}
 					// LaunchServices removes the progress object when the install
 					// finishes. The installed-app inventory is verified separately.
+					let now = Date()
 					let finishedByEdge = hasStarted && rawProgress == nil
 					let finishedByPresence = !wasInstalledAtStart
 						&& !hasStarted
 						&& rawProgress == nil
-						&& Date().timeIntervalSince(startedAt) > 8
+						&& now.timeIntervalSince(startedAt) > 8
 						&& UIApplication.isAppInstalled(bundleID)
+					var finishedByRegistration = false
+					if (rawProgress == nil || rawProgress == 1),
+					   now >= nextRegistrationCheck || finishedByEdge || finishedByPresence {
+						nextRegistrationCheck = now.addingTimeInterval(0.5)
+						finishedByRegistration = hasNewRegistration()
+					}
 
 					guard !Task.isCancelled else { break }
 					if finishedByRegistration || finishedByEdge || finishedByPresence {

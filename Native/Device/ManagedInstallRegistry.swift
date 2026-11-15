@@ -69,7 +69,7 @@ public struct IDeviceServerInstallObservation: Codable, Equatable, Sendable {
         return wasAbsent
     }
 
-    private static func canonical(_ path: String) -> String {
+    fileprivate static func canonical(_ path: String) -> String {
         path.hasPrefix("/private/var/") ? String(path.dropFirst("/private".count)) : path
     }
 }
@@ -90,6 +90,18 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
     private struct ServerTransfer: Codable, Equatable {
         let observation: IDeviceServerInstallObservation
         let servedAt: Date
+        var registeredCopy: RegisteredCopy? = nil
+    }
+    private struct RegisteredCopy: Codable, Equatable {
+        let path: String?
+        let date: Date?
+
+        func matches(_ app: IDeviceInstalledApp) -> Bool {
+            if let path {
+                return app.installationPath.map(IDeviceServerInstallObservation.canonical) == path
+            }
+            return date != nil && date == app.registrationDate
+        }
     }
     private let fileURL: URL
     private let lock = NSLock()
@@ -146,13 +158,26 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
         try checkReadable()
         guard !records.contains(where: {
             $0.bundleIdentifier == observation.bundleIdentifier && $0.installedAt >= observation.startedAt
-        }), !serverTransfers.contains(where: {
-            $0.observation.bundleIdentifier == observation.bundleIdentifier &&
-                $0.observation.startedAt >= observation.startedAt
-        }) else { return }
-        let pending = serverTransfers.filter {
-            $0.observation.bundleIdentifier != observation.bundleIdentifier && !Self.isStale($0, at: servedAt)
-        } + [ServerTransfer(observation: observation, servedAt: servedAt)]
+        }), !serverTransfers.contains(where: { $0.observation == observation }) else { return }
+        let pending = serverTransfers.filter { !Self.isStale($0, at: servedAt) }
+            + [ServerTransfer(observation: observation, servedAt: servedAt)]
+        try save(records, serverTransfers: pending)
+    }
+
+    /// Keep evidence seen during installation so a later inventory can verify
+    /// the same copy, even when iOS supplies a path but no registration date.
+    public func recordServerRegistration(_ observation: IDeviceServerInstallObservation,
+                                         path: String?, registrationDate: Date?, observedAt: Date = Date()) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try checkReadable()
+        guard let index = serverTransfers.firstIndex(where: { $0.observation == observation }),
+              serverTransfers[index].registeredCopy == nil,
+              observation.sawNewCopy(path: path, registrationDate: registrationDate,
+                  servedAt: serverTransfers[index].servedAt, now: observedAt) else { return }
+        let path = path.flatMap { $0.isEmpty ? nil : IDeviceServerInstallObservation.canonical($0) }
+        var pending = serverTransfers
+        pending[index].registeredCopy = RegisteredCopy(path: path, date: registrationDate)
         try save(records, serverTransfers: pending)
     }
 
@@ -178,16 +203,19 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
             guard app.id != hostBundleIdentifier, app.applicationType != "System", app.isRemovable != false else { return false }
             return !record.wasReplaced(by: app)
         }
-        let pending = serverTransfers.filter { transfer in
+        var verifiedBundles = Set<String>()
+        let pending = serverTransfers.sorted { $0.observation.startedAt > $1.observation.startedAt }.filter { transfer in
             guard transfer.servedAt <= inventoryStartedAt else { return true }
             guard !Self.isStale(transfer, at: inventoryStartedAt) else { return false }
             let observation = transfer.observation
+            guard !verifiedBundles.contains(observation.bundleIdentifier) else { return false }
             guard let app = current[observation.bundleIdentifier],
                   app.removalRestriction(hostBundleIdentifier: hostBundleIdentifier) == nil,
                   app.applicationIdentifier == observation.applicationIdentifier,
                   observation.version == nil || app.version == observation.version,
-                  observation.sawNewCopy(path: app.installationPath, registrationDate: app.registrationDate,
-                      servedAt: transfer.servedAt, now: inventoryStartedAt) else { return true }
+                  transfer.registeredCopy?.matches(app) ?? observation.sawNewCopy(
+                    path: app.installationPath, registrationDate: app.registrationDate,
+                    servedAt: transfer.servedAt, now: inventoryStartedAt) else { return true }
             let path = app.installationPath.flatMap { $0.isEmpty ? nil : $0 }
             guard path != nil || app.registrationDate != nil else { return true }
             guard !records.contains(where: {
@@ -196,7 +224,9 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
             retained.removeAll { $0.bundleIdentifier == app.id }
             retained.append(IDeviceManagedInstall(token: UUID(), bundleIdentifier: app.id,
                 applicationIdentifier: observation.applicationIdentifier, installationPath: path,
-                registrationDate: app.registrationDate, installedAt: app.registrationDate ?? transfer.servedAt))
+                registrationDate: app.registrationDate,
+                installedAt: max(app.registrationDate ?? transfer.servedAt, observation.startedAt)))
+            verifiedBundles.insert(app.id)
             return false
         }
         if retained != records || pending != serverTransfers { try save(retained, serverTransfers: pending) }
@@ -215,7 +245,7 @@ public final class IDeviceManagedInstallRegistry: @unchecked Sendable {
     }
 
     private static func isStale(_ transfer: ServerTransfer, at date: Date) -> Bool {
-        date.timeIntervalSince(transfer.servedAt) > 7 * 24 * 3600
+        transfer.registeredCopy == nil && date.timeIntervalSince(transfer.servedAt) > 7 * 24 * 3600
     }
 
     private func checkReadable() throws {

@@ -51,6 +51,7 @@ struct InstallPreviewView: View {
 				app: SigningAppSnapshot(app),
 				viewModel: viewModel,
 				installTracking: tracking,
+				payloadProgressReporter: { SingleInstallLiveActivityReporter.shared.updatePayload($0) },
 				statusReporter: { status in
 					SingleInstallLiveActivityReporter.shared.handleServerStatus(
 						status,
@@ -109,8 +110,9 @@ struct InstallPreviewView: View {
 				dismiss()
 				return
 			}
-			SingleInstallLiveActivityReporter.shared.begin(name: app.name)
-			BackgroundTaskManager.shared.claim(.singleInstall)
+			let isServerInstall = !isSharing && _initialInstallationMethod == 0
+			SingleInstallLiveActivityReporter.shared.begin(name: app.name, isServerInstall: isServerInstall)
+			BackgroundTaskManager.shared.claim(.singleInstall, measuredProgressOnly: isServerInstall)
 			_ownsBackgroundTask = true
 			_startLiveActivityBridge()
 			_install()
@@ -129,25 +131,18 @@ struct InstallPreviewView: View {
 		}
 	}
 	
-	// These Combine subscriptions are owned by the install, not by a SwiftUI
-	// rendering pass. They receive idevice progress as well as server-method
-	// progress and forward only primitive values to the background-safe mirror.
+	// The server and archive workers report progress directly. Forward the
+	// remaining view-model transitions for the lifetime of this install.
 	private func _startLiveActivityBridge() {
 		_activityCancellables.removeAll()
 
 		viewModel.$status
 			.sink { status in
+				switch status {
+				case .sendingManifest, .sendingPayload, .installing: return
+				default: break
+				}
 				SingleInstallLiveActivityReporter.shared.updateStatus(status)
-			}
-			.store(in: &_activityCancellables)
-
-		// ArchiveHandler sends coalesced packaging progress directly. Do not echo
-		// potentially delayed UI values back over newer worker measurements.
-
-		viewModel.$installProgress
-			.removeDuplicates()
-			.sink { progress in
-				SingleInstallLiveActivityReporter.shared.updateInstall(progress)
 			}
 			.store(in: &_activityCancellables)
 	}
@@ -350,11 +345,12 @@ final class SingleInstallLiveActivityReporter {
 	private var _installProgress: Double = 0
 	private var _fraction: Double = 0
 	private var _currentItem: String?
+	private var _installStart: Double = 0.5
 	private let _serverMonitorID = UUID()
 
 	private init() { }
 
-	func begin(name: String?) {
+	func begin(name: String?, isServerInstall: Bool) {
 		_queue.sync {
 			self._active = true
 			self._stage = .packaging
@@ -362,6 +358,7 @@ final class SingleInstallLiveActivityReporter {
 			self._installProgress = 0
 			self._fraction = 0
 			self._currentItem = name
+			self._installStart = isServerInstall ? ServerInstallProgress.payloadEnd : 0.5
 
 			BackgroundTaskManager.shared.clearReport(.singleInstall)
 			self._publish()
@@ -397,6 +394,16 @@ final class SingleInstallLiveActivityReporter {
 		self._publish()
 	}
 
+	func updatePayload(_ progress: Double) {
+		_queue.async {
+			guard self._active, self._stage == .sendingPayload else { return }
+			let fraction = ServerInstallProgress.payload(progress)
+			guard fraction > self._fraction else { return }
+			self._fraction = fraction
+			self._publish()
+		}
+	}
+
 	func updateInstall(_ progress: Double) {
 		_queue.async {
 			guard self._active, self._stage != .completed, self._stage != .failed else { return }
@@ -407,7 +414,7 @@ final class SingleInstallLiveActivityReporter {
 
 			self._installProgress = value
 			self._stage = .installing
-			let next = min(1, max(self._fraction, 0.5 + (value * 0.5)))
+			let next = min(1, max(self._fraction, self._installStart + value * (1 - self._installStart)))
 			let fractionChanged = next != self._fraction
 			self._fraction = next
 			guard stageChanged || fractionChanged else { return }
@@ -456,7 +463,7 @@ final class SingleInstallLiveActivityReporter {
 	}
 
 	func updateStatus(_ status: InstallerStatusViewModel.InstallerStatus) {
-		_queue.sync {
+		_queue.async {
 			guard self._active, self._stage != .completed else { return }
 
 			let previous = self._stage
@@ -475,7 +482,7 @@ final class SingleInstallLiveActivityReporter {
 				self._fraction = max(self._fraction, 0.5)
 			case .installing:
 				self._stage = .installing
-				self._fraction = min(1, max(self._fraction, 0.5 + (self._installProgress * 0.5)))
+				self._fraction = min(1, max(self._fraction, self._installStart + self._installProgress * (1 - self._installStart)))
 			case .completed:
 				self._stage = .completed
 				self._fraction = 1

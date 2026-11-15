@@ -274,6 +274,44 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
         }
         print("PASS server transfers survive restart and authorize only matching new device copies")
 
+        do {
+            let file = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("server-batches.json")
+            let started = Date(timeIntervalSince1970: 1_700_000_000)
+            let nextBatch = started.addingTimeInterval(8 * 24 * 3600)
+            let registry = IDeviceManagedInstallRegistry(fileURL: file)
+
+            func transfer(_ id: String, at time: Date, previousPath: String? = nil) throws -> IDeviceServerInstallObservation {
+                let observation = IDeviceServerInstallObservation(bundleIdentifier: id, applicationIdentifier: "TEAM.\(id)",
+                    version: "1", startedAt: time, previousRegistrationDate: nil, previousPath: previousPath,
+                    wasAbsent: previousPath == nil)
+                try registry.recordServerTransfer(observation, servedAt: time.addingTimeInterval(1), hostBundleIdentifier: nil)
+                return observation
+            }
+
+            func app(_ id: String, path: String? = nil) -> IDeviceInstalledApp {
+                IDeviceInstalledApp(bundleIdentifier: id, name: id, version: "1", applicationIdentifier: "TEAM.\(id)",
+                    installationPath: path ?? "/private/var/apps/\(id)", applicationType: "User", isRemovable: true)
+            }
+
+            let first = try transfer("first", at: started)
+            let retry = try transfer("retry", at: started)
+            let replaced = try transfer("replaced", at: started)
+            for observation in [first, retry, replaced] {
+                try registry.recordServerRegistration(observation, path: "/var/apps/\(observation.bundleIdentifier)",
+                    registrationDate: nil, observedAt: started.addingTimeInterval(2))
+            }
+            _ = try transfer("retry", at: nextBatch, previousPath: "/var/apps/retry")
+            _ = try transfer("second", at: nextBatch)
+            let restored = IDeviceManagedInstallRegistry(fileURL: file)
+            let apps = [app("first"), app("retry"), app("second"), app("replaced", path: "/var/apps/other-copy")]
+            let visible = try restored.reconcile(apps, observed: restored.snapshot(), hostBundleIdentifier: nil,
+                inventoryStartedAt: nextBatch.addingTimeInterval(5))
+            require(visible.map(\.id) == ["first", "retry", "second"],
+                "a later batch lost earlier installs or adopted a replacement copy")
+            require((try restored.snapshot()).count == 3, "a retried bundle produced duplicate receipts")
+        }
+        print("PASS server batches accumulate verified apps across restarts and unsuccessful retries")
+
         // Five requests overlap, app 5 starts when app 3 finishes while app 0
         // is still waiting, and each slot reuses the same thread/client.
         do {

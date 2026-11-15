@@ -92,7 +92,18 @@ final class ServerInstallTracking: @unchecked Sendable {
         guard let observation = transfer.0, let servedAt = transfer.1 else { return false }
         let bundle = observation.bundleIdentifier
         guard UIApplication.isAppInstalled(bundle) else { return false }
-        return observation.sawNewCopy(path: IDeviceInstalledAppDates.installationPath(for: bundle),
-            registrationDate: IDeviceInstalledAppDates.registrationDate(for: bundle), servedAt: servedAt)
+        let path = IDeviceInstalledAppDates.installationPath(for: bundle)
+        let date = IDeviceInstalledAppDates.registrationDate(for: bundle)
+        let now = Date()
+        guard observation.sawNewCopy(path: path, registrationDate: date, servedAt: servedAt, now: now) else {
+            return false
+        }
+        do {
+            try IDeviceManagedInstallRegistry.shared.recordServerRegistration(observation,
+                path: path, registrationDate: date, observedAt: now)
+        } catch {
+            NSLog("Asign couldn't save the server registration: %@", error.localizedDescription)
+        }
+        return true
     }
 }

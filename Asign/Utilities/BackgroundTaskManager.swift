@@ -8,6 +8,7 @@
 
 import BackgroundTasks
 import Foundation
+import OSLog
 import UIKit
 
 enum BackgroundTaskOwner: String {
@@ -84,8 +85,10 @@ final class BackgroundTaskManager: ObservableObject {
         }
     }
 
-    func claim(_ owner: Owner) {
-        if #available(iOS 26.0, *) { ContinuedBackgroundTaskManager.shared.claim(owner) }
+    func claim(_ owner: Owner, measuredProgressOnly: Bool = false) {
+        if #available(iOS 26.0, *) {
+            ContinuedBackgroundTaskManager.shared.claim(owner, measuredProgressOnly: measuredProgressOnly)
+        }
         else { changeOwnership(owner, claim: true) }
     }
     func release(_ owner: Owner, success: Bool = true) {
@@ -190,6 +193,7 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
         var identityClaimed = false
         var count = 0
         var success = true
+        var measuredProgressOnly = false
         var heartbeatToken: UUID?
         var lastMeaningfulProgressAt: Date?
         var report = Report()
@@ -274,11 +278,12 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
 
     // Identity ownership is useful for a batch/queue whose individual workers
     // can briefly drop to zero. Repeated claims from the same owner are idempotent.
-    func claim(_ owner: Owner) {
+    func claim(_ owner: Owner, measuredProgressOnly: Bool) {
         _lock.lock()
         var state = _workflowStates[owner] ?? WorkflowState()
         let wasClaimed = state.identityClaimed
         state.identityClaimed = true
+        state.measuredProgressOnly = state.measuredProgressOnly || measuredProgressOnly
         if !wasClaimed && state.count == 0 {
             state.success = true
         }
@@ -678,10 +683,12 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
             state.task = task
             state.requestOutstanding = false
             state.submissionToken = nil
-            let token = UUID()
-            state.heartbeatToken = token
-            state.lastMeaningfulProgressAt = Date()
-            heartbeatToken = token
+            if !state.measuredProgressOnly {
+                let token = UUID()
+                state.heartbeatToken = token
+                state.lastMeaningfulProgressAt = Date()
+                heartbeatToken = token
+            }
             report = state.report
             _workflowStates[owner] = state
         } else {
@@ -723,7 +730,7 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
         _lock.unlock()
 
         guard ownsTask else { return }
-        print("BGContinuedProcessingTask expired for workflow \(owner.rawValue)")
+        Logger.misc.notice("BGContinuedProcessingTask expired for workflow \(owner.rawValue, privacy: .public)")
         _completeTask(task, success: false)
         DispatchQueue.main.async { [weak self] in
             self?._recoverActiveTasks()
@@ -1032,14 +1039,15 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
         _taskProgressLock.lock()
         defer { _taskProgressLock.unlock() }
         guard !_completedTasks.contains(task) else { return }
-        task.updateTitle(presentation.title, subtitle: presentation.subtitle)
-        let previousUnits = task.progress.totalUnitCount == Self._fractionProgressUnits
-            ? task.progress.completedUnitCount
-            : 0
-        task.progress.totalUnitCount = Self._fractionProgressUnits
-        task.progress.completedUnitCount = allowComplete
-            ? targetUnits
-            : max(previousUnits, targetUnits)
+        if task.title != presentation.title || task.subtitle != presentation.subtitle {
+            task.updateTitle(presentation.title, subtitle: presentation.subtitle)
+        }
+        let progress = task.progress
+        let wasConfigured = progress.totalUnitCount == Self._fractionProgressUnits
+        let previousUnits = wasConfigured ? progress.completedUnitCount : 0
+        if !wasConfigured { progress.totalUnitCount = Self._fractionProgressUnits }
+        let units = allowComplete ? targetUnits : max(previousUnits, targetUnits)
+        if progress.completedUnitCount != units { progress.completedUnitCount = units }
     }
 
     private func _completeTask(_ task: BGContinuedProcessingTask, success: Bool) {
@@ -1078,6 +1086,7 @@ final class ContinuedBackgroundTaskManager: ObservableObject {
             if let state = self._workflowStates[owner],
                state.task === task,
                state.heartbeatToken == token,
+               !state.measuredProgressOnly,
                state.identityClaimed || state.count > 0 {
                 remainsActive = true
                 if let last = state.lastMeaningfulProgressAt {

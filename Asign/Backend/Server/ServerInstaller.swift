@@ -7,12 +7,14 @@
 //  ORIGINALLY LICENSED UNDER GPL-3.0, MODIFIED FOR USE FOR FEATHER
 //
 
+import Darwin
 import Foundation
 import Vapor
 import NIOSSL
 import NIOTLS
 import OSLog
 import SwiftUI
+import UIKit
 import IDeviceSwift
 
 // MARK: - Class
@@ -23,6 +25,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	private var _port = 0
 	private var _host = "127.0.0.1"
 	private var _packageUrl: URL?
+	private var _payloadTransfer = ServerPayloadTransfer()
 	private var _hostedInstallers: [ServerInstaller] = []
 	private(set) var port: Int {
 		get { withState { _port } }
@@ -36,7 +39,12 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 	var packageUrl: URL? {
 		get { withState { _packageUrl } }
-		set { withState { _packageUrl = newValue } }
+		set {
+			withState {
+				_packageUrl = newValue
+				_payloadTransfer = ServerPayloadTransfer()
+			}
+		}
 	}
 	let installTracking: ServerInstallTracking
 
@@ -50,6 +58,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	let viewModel: InstallerStatusViewModel
 	private var _server: Application?
 	private let _statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)?
+	private let _payloadProgressReporter: (@Sendable (Double) -> Void)?
 
 	private func withState<T>(_ body: () -> T) -> T {
 		stateLock.lock()
@@ -61,11 +70,13 @@ class ServerInstaller: Identifiable, ObservableObject {
 		app: AppInfoPresentable,
 		viewModel: InstallerStatusViewModel,
 		installTracking: ServerInstallTracking = ServerInstallTracking(),
+		payloadProgressReporter: (@Sendable (Double) -> Void)? = nil,
 		statusReporter: ((InstallerStatusViewModel.InstallerStatus) -> Void)? = nil
 	) {
 		self.app = app
 		self.viewModel = viewModel
 		self.installTracking = installTracking
+		self._payloadProgressReporter = payloadProgressReporter
 		self._statusReporter = statusReporter
 	}
 
@@ -132,6 +143,10 @@ class ServerInstaller: Identifiable, ObservableObject {
 		withState { _hostedInstallers = installers }
 	}
 
+	func resetPayloadTransfer() {
+		withState { _payloadTransfer = ServerPayloadTransfer() }
+	}
+
 	func shutDown() {
 		Self.lifecycleQueue.async { self._shutdownServer() }
 	}
@@ -172,25 +187,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 			// this request is for, serve its file, and drive that app's status.
 			for target in [self] + self.hostedInstallers {
 				if path == "/\(target.id).ipa" {
-					guard let packageUrl = target.packageUrl else {
-						return Response(status: .notFound)
-					}
-
-					let tracking = target.installTracking
-					let observation = try? await pool.runIfActive { tracking.captureBaseline() }
-					target.report(.sendingPayload)
-
-					return try await req.fileio.asyncStreamFile(at: packageUrl.path) { result in
-						switch result {
-						case .success:
-							if let observation {
-								try? await pool.runIfActive { tracking.recordTransfer(observation) }
-							}
-							target.report(.installing)
-						case .failure(let error):
-							target.report(.broken(error))
-						}
-					}
+					return try await target._servePayload(req)
 				}
 
 				if path == "/\(target.id)-57.png" {
@@ -208,6 +205,89 @@ class ServerInstaller: Identifiable, ObservableObject {
 
 			return Response(status: .notFound)
 		}
+	}
+
+	private func _servePayload(_ request: Request) async throws -> Response {
+		let (packageURL, transfer) = withState { (_packageUrl, _payloadTransfer) }
+		guard let packageURL else { return Response(status: .notFound) }
+		let path = packageURL.path
+		// Reuse Vapor's conditional response and range handling. Replace its
+		// stream so we can count writes without buffering the IPA.
+		let response = try await request.fileio.asyncStreamFile(at: path)
+		guard response.status != .notModified else { return response }
+		let expectedBytes = response.body.count
+		let offset: Int
+		let totalBytes: Int
+		if case let .withinWithLimit(start, _, size)? = response.headers.contentRange?.range {
+			offset = start
+			totalBytes = size
+		} else {
+			offset = 0
+			totalBytes = expectedBytes
+		}
+		guard expectedBytes > 0, offset >= 0, offset < totalBytes, expectedBytes <= totalBytes - offset else {
+			throw Abort(.rangeNotSatisfiable)
+		}
+		response.headers.replaceOrAdd(name: .acceptRanges, value: "bytes")
+
+		let pool = request.application.threadPool
+		let tracking = installTracking
+		let pacer = ServerPayloadPacer.shared
+		let observation = try? await pool.runIfActive { tracking.captureBaseline() }
+		if transfer.begin(), withState({ _payloadTransfer === transfer }) { report(.sendingPayload) }
+
+		response.body = .init(asyncStream: { writer in
+			var sent = 0
+			var reported = 0
+			var nextSample = DispatchTime.now()
+			func reportWrittenBytes() {
+				guard sent > reported else { return }
+				let progress = transfer.record((offset + reported)..<(offset + sent), totalBytes: totalBytes)
+				reported = sent
+				if let progress, self.withState({ self._payloadTransfer === transfer }) {
+					self._payloadProgressReporter?(progress)
+				}
+			}
+
+			do {
+				let chunks = try await request.fileio.readFile(at: path, chunkSize: ServerPayloadBudget.chunkSize,
+					offset: Int64(offset), byteCount: expectedBytes)
+				do {
+					for try await chunk in chunks {
+						guard chunk.readableBytes <= expectedBytes - sent else {
+							throw ServerInstallerError.incompletePayload
+						}
+						try await pacer.waitToWrite(chunk.readableBytes)
+						try await writer.writeBuffer(chunk)
+						sent += chunk.readableBytes
+						let now = DispatchTime.now()
+						if now >= nextSample {
+							reportWrittenBytes()
+							nextSample = now + .seconds(1)
+						}
+					}
+				} catch {
+					try? await chunks.closeHandle()
+					throw error
+				}
+				reportWrittenBytes()
+				guard sent == expectedBytes else { throw ServerInstallerError.incompletePayload }
+				try await writer.write(.end)
+				Logger.misc.notice("Install IPA \(self.id.uuidString, privacy: .public) streamed \(sent, privacy: .public)/\(expectedBytes, privacy: .public) bytes at offset \(offset, privacy: .public)")
+				guard transfer.finish(totalBytes: totalBytes),
+				      self.withState({ self._payloadTransfer === transfer }) else { return }
+				if let observation {
+					try? await pool.runIfActive { tracking.recordTransfer(observation) }
+				}
+				if self.withState({ self._payloadTransfer === transfer }) { self.report(.installing) }
+			} catch {
+				reportWrittenBytes()
+				Logger.misc.error("Install IPA \(self.id.uuidString, privacy: .public) stream failed after \(sent, privacy: .public)/\(expectedBytes, privacy: .public) bytes at offset \(offset, privacy: .public): \(error.localizedDescription, privacy: .public)")
+				try? await writer.write(.error(error))
+				if self.withState({ self._payloadTransfer === transfer }) { self.report(.broken(error)) }
+			}
+		}, count: expectedBytes, byteBufferAllocator: request.byteBufferAllocator)
+		return response
 	}
 
 	private func _shutdownServer() {
@@ -249,9 +329,171 @@ class ServerInstaller: Identifiable, ObservableObject {
 	}
 }
 
+enum ServerInstallProgress {
+	static let payloadEnd = 0.85
+
+	static func payload(_ progress: Double) -> Double {
+		0.5 + (payloadEnd - 0.5) * progress
+	}
+}
+
+/// All background responses spend the same process CPU budget. The iPhone
+/// allowed 48 CPU seconds per minute in the failed run. A full burst plus
+/// one minute of refill gives 45 CPU seconds, with room for in-flight writes.
+private struct ServerPayloadBudget {
+	static let chunkSize = 512 * 1024
+	private static let second: UInt64 = 1_000_000_000
+	private static let sampleInterval: UInt64 = 20_000_000
+	private static let refillRate = 0.70
+	private static let burst = 3.0
+	private static let recoveryCredit = 0.02
+	private var credit = Self.burst
+	private var lastSample: (time: UInt64, cpuSeconds: Double)?
+	private var pauseUntil: UInt64 = 0
+	private var nextFallbackWrite: UInt64 = 0
+
+	mutating func delay(now: UInt64, readCPU: () -> Double?) -> UInt64? {
+		if let lastSample, now - lastSample.time < Self.sampleInterval {
+			return max(now, pauseUntil) - now
+		}
+		guard let cpuSeconds = readCPU() else { return nil }
+		if let lastSample {
+			let elapsed = Double(now - lastSample.time) / Double(Self.second)
+			let spent = max(0, cpuSeconds - lastSample.cpuSeconds)
+			credit = min(Self.burst, credit + elapsed * Self.refillRate - spent)
+		}
+		lastSample = (now, cpuSeconds)
+		guard credit <= 0 else {
+			pauseUntil = 0
+			return 0
+		}
+		let recovery = (Self.recoveryCredit - credit) / Self.refillRate
+		let delay = UInt64((recovery * Double(Self.second)).rounded(.up))
+		pauseUntil = now + delay
+		return delay
+	}
+
+	/// Used only when process CPU accounting is temporarily unavailable.
+	mutating func reserveFallback(_ bytes: Int, now: UInt64) -> UInt64 {
+		let start = max(now, nextFallbackWrite)
+		nextFallbackWrite = start + UInt64(bytes) * Self.second / UInt64(16 * 1024 * 1024)
+		return start - now
+	}
+
+	mutating func suspendSampling() {
+		lastSample = nil
+		pauseUntil = 0
+		nextFallbackWrite = 0
+	}
+}
+
+private final class ServerPayloadPacer: @unchecked Sendable {
+	static let shared = ServerPayloadPacer()
+	private let lock = NSLock()
+	private var budget = ServerPayloadBudget()
+	private var isActive = false
+	private var announced = false
+
+	private init() {
+		let center = NotificationCenter.default
+		_ = center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: nil) { [weak self] _ in
+			self?.setActive(false)
+		}
+		_ = center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
+			self?.setActive(true)
+		}
+		Task { @MainActor [weak self] in
+			self?.setActive(UIApplication.shared.applicationState == .active)
+		}
+	}
+
+	private func setActive(_ active: Bool) {
+		lock.lock()
+		defer { lock.unlock() }
+		isActive = active
+		if active {
+			budget.suspendSampling()
+			announced = false
+		}
+	}
+
+	func waitToWrite(_ bytes: Int) async throws {
+		try Task.checkCancellation()
+		while true {
+			let decision = nextWrite(bytes)
+			if decision.announce {
+				Logger.misc.notice("Server install adaptive CPU pacing active")
+			}
+			guard decision.delay > 0 else { return }
+			try await Task.sleep(nanoseconds: decision.delay)
+			if decision.reserved { return }
+		}
+	}
+
+	private func nextWrite(_ bytes: Int) -> (delay: UInt64, reserved: Bool, announce: Bool) {
+		lock.lock()
+		defer { lock.unlock() }
+		guard !isActive else { return (0, false, false) }
+		let announce = !announced
+		announced = true
+		let now = DispatchTime.now().uptimeNanoseconds
+		if let delay = budget.delay(now: now, readCPU: Self.processCPUTime) {
+			// Check for a foreground transition even when the CPU pause is long.
+			return (min(delay, 200_000_000), false, announce)
+		}
+		return (budget.reserveFallback(bytes, now: now), true, announce)
+	}
+
+	private static func processCPUTime() -> Double? {
+		var usage = rusage()
+		guard getrusage(RUSAGE_SELF, &usage) == 0 else { return nil }
+		let seconds = Double(usage.ru_utime.tv_sec) + Double(usage.ru_stime.tv_sec)
+		let microseconds = Double(usage.ru_utime.tv_usec) + Double(usage.ru_stime.tv_usec)
+		return seconds + microseconds / 1_000_000
+	}
+}
+
+private final class ServerPayloadTransfer: @unchecked Sendable {
+	private let lock = NSLock()
+	private var written = IndexSet()
+	private var lastReportedCount = 0
+	private var nextReport = DispatchTime(uptimeNanoseconds: 0)
+	private var started = false
+	private var finished = false
+
+	func begin() -> Bool {
+		lock.lock()
+		defer { lock.unlock() }
+		guard !started else { return false }
+		started = true
+		return true
+	}
+
+	func record(_ bytes: Range<Int>, totalBytes: Int, now: DispatchTime = .now()) -> Double? {
+		lock.lock()
+		defer { lock.unlock() }
+		guard !finished else { return nil }
+		written.insert(integersIn: bytes)
+		let count = written.count
+		guard now >= nextReport, count > lastReportedCount else { return nil }
+		lastReportedCount = count
+		nextReport = now + .seconds(1)
+		return Double(count) / Double(totalBytes)
+	}
+
+	func finish(totalBytes: Int) -> Bool {
+		lock.lock()
+		defer { lock.unlock() }
+		guard !finished, written.count == totalBytes else { return false }
+		finished = true
+		return true
+	}
+}
+
 enum ServerInstallerError: LocalizedError {
 	case couldNotStart
 	case missingTLSIdentity
+	case incompletePayload
 
 	var errorDescription: String? {
 		switch self {
@@ -259,6 +501,8 @@ enum ServerInstallerError: LocalizedError {
 			return "Couldn't start a local server for this app. Try installing it again."
 		case .missingTLSIdentity:
 			return "No SSL certificate is available. Update SSL Certificates in Settings > Installation."
+		case .incompletePayload:
+			return "The IPA stream ended before all requested bytes were sent."
 		}
 	}
 }

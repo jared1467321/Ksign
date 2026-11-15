@@ -326,7 +326,8 @@ final class InstallSession: ObservableObject {
 		// job starts. Self-update admission must see every app ahead of it.
 		if !addedJobs.isEmpty || !removedIDs.isEmpty {
 			BulkInstallLiveActivityReporter.shared.register(
-				addedJobs.map { (id: $0.id, name: $0.app.name) }, removing: Array(removedIDs))
+				addedJobs.map { (id: $0.id, name: $0.app.name, isServerInstall: !$0.isDeviceInstall) },
+				removing: Array(removedIDs))
 			jobs = jobs.filter { !removedIDs.contains($0.id) } + addedJobs
 			if totalCount != nextTotal { totalCount = nextTotal }
 			if skippedCount != nextSkipped { skippedCount = nextSkipped }
@@ -347,7 +348,7 @@ final class InstallSession: ObservableObject {
 		// No local flag guards this any more: the manager tracks claims by
 		// owner, so `start(apps:)` running again for apps added to a batch
 		// already in flight is a no-op rather than a second claim to balance.
-		BackgroundTaskManager.shared.claim(.bulkInstalls)
+		BackgroundTaskManager.shared.claim(.bulkInstalls, measuredProgressOnly: !isDeviceInstall)
 
 		isDrawerPresented = true
 		_startTicking()
@@ -480,7 +481,7 @@ final class InstallSession: ObservableObject {
 		guard jobs.contains(where: { $0 === job }), job.phase != .completed else { return }
 		if _skippedJobIDs.remove(job.id) != nil { skippedCount -= 1 }
 		isFinished = false
-		BackgroundTaskManager.shared.claim(.bulkInstalls)
+		BackgroundTaskManager.shared.claim(.bulkInstalls, measuredProgressOnly: !job.isDeviceInstall)
 		_startTicking()
 		if job.isDeviceInstall {
 			DeviceInstallationManager.shared.clearSetupFailure()
@@ -833,6 +834,7 @@ final class BulkInstallLiveActivityReporter {
 
 	private struct _Job {
 		var name: String?
+		var isServerInstall: Bool
 		var stage: _Stage = .queued
 		var packageProgress: Double = 0
 		var installProgress: Double = 0
@@ -845,6 +847,7 @@ final class BulkInstallLiveActivityReporter {
 		var isFailed: Bool { stage == .failed }
 		var isSkipped: Bool { stage == .skipped }
 		var isTerminal: Bool { isCompleted || isFailed || isSkipped }
+		var installStart: Double { isServerInstall ? ServerInstallProgress.payloadEnd : 0.5 }
 	}
 
 	private let _queue = DispatchQueue(
@@ -896,10 +899,10 @@ final class BulkInstallLiveActivityReporter {
 	}
 
 	func register(_ id: UUID, name: String?) {
-		register([(id: id, name: name)])
+		register([(id: id, name: name, isServerInstall: false)])
 	}
 
-	func register(_ entries: [(id: UUID, name: String?)], removing removedIDs: [UUID] = []) {
+	func register(_ entries: [(id: UUID, name: String?, isServerInstall: Bool)], removing removedIDs: [UUID] = []) {
 		_queue.sync {
 			self._active = true
 			for id in removedIDs { self._jobs.removeValue(forKey: id) }
@@ -908,7 +911,7 @@ final class BulkInstallLiveActivityReporter {
 			}
 			for entry in entries where self._jobs[entry.id] == nil {
 				self._sequence += 1
-				self._jobs[entry.id] = _Job(name: entry.name, sequence: self._sequence)
+				self._jobs[entry.id] = _Job(name: entry.name, isServerInstall: entry.isServerInstall, sequence: self._sequence)
 			}
 			self._publish()
 		}
@@ -981,6 +984,31 @@ final class BulkInstallLiveActivityReporter {
 		else { self._scheduleNumericPublish() }
 	}
 
+	func updatePayload(jobID: UUID, progress: Double) {
+		_queue.async {
+			guard var job = self._jobs[jobID], job.stage == .sendingPayload else { return }
+			let fraction = ServerInstallProgress.payload(progress)
+			guard fraction > job.fraction else { return }
+			job.fraction = fraction
+			self._progressSequence += 1
+			job.lastInstallProgressSequence = self._progressSequence
+			self._jobs[jobID] = job
+			self._claimCurrentJobIfNeeded(jobID, progressSequence: job.lastInstallProgressSequence)
+			self._scheduleNumericPublish()
+		}
+	}
+
+	func resetServerAttempt(jobID: UUID) {
+		_queue.async {
+			guard var job = self._jobs[jobID] else { return }
+			job.stage = .packaging
+			job.installProgress = 0
+			job.fraction = job.packageProgress * 0.5
+			self._jobs[jobID] = job
+			self._publish()
+		}
+	}
+
 	func updateInstall(jobID: UUID, progress: Double, isCurrent: @escaping () -> Bool = { true }) {
 		_queue.async {
 			guard isCurrent() else { return }
@@ -998,7 +1026,7 @@ final class BulkInstallLiveActivityReporter {
 			let before = job
 			job.installProgress = value
 			job.stage = .installing
-			job.fraction = min(1, max(job.fraction, 0.5 + (value * 0.5)))
+			job.fraction = min(1, max(job.fraction, job.installStart + value * (1 - job.installStart)))
 
 			let madeGenuineProgress = job.fraction > before.fraction
 			if madeGenuineProgress {
@@ -1039,7 +1067,7 @@ final class BulkInstallLiveActivityReporter {
 				job.fraction = max(job.fraction, 0.5)
 			case .installing:
 				job.stage = .installing
-				job.fraction = min(1, max(job.fraction, 0.5 + (job.installProgress * 0.5)))
+				job.fraction = min(1, max(job.fraction, job.installStart + job.installProgress * (1 - job.installStart)))
 			case .completed(.success):
 				job.stage = .completed
 				job.fraction = 1
@@ -1135,6 +1163,8 @@ final class BulkInstallLiveActivityReporter {
 			detail = "Paused"
 		} else if allTerminal || forceTerminal {
 			detail = failed > 0 ? "Error" : (skipped > 0 ? "Finished with Skips" : "Completed")
+		} else if values.contains(where: { $0.isServerInstall && $0.stage == .sendingPayload }) {
+			detail = "Sending Payload"
 		} else {
 			detail = "Installing"
 		}

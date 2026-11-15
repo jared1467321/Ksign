@@ -36,7 +36,7 @@ REPORTER_CHECKS = r'''let r = BulkInstallLiveActivityReporter.shared
 let system = BackgroundTaskManager.shared
 r.reset()
 let ids = (0..<100).map { _ in UUID() }
-r.register(ids.map { (id: $0, name: "App") })
+r.register(ids.map { (id: $0, name: "App", isServerInstall: false) })
 precondition(system.reports.count == 1 && system.reports.last?.total == 100)
 for id in ids { r.updateStatus(jobID: id, status: .installing) }
 r.testBarrier()
@@ -56,7 +56,7 @@ Thread.sleep(forTimeInterval: 0.3); r.testBarrier()
 precondition(system.reports.count == terminalCount)
 print("PASS: immediate completions, exact totals, no delayed report after terminal state")
 r.reset(); let a = UUID(), b = UUID(), c = UUID()
-r.register([(id:a,name:"a"),(id:b,name:"b"),(id:c,name:"c")])
+r.register([(id:a,name:"a",isServerInstall:false),(id:b,name:"b",isServerInstall:false),(id:c,name:"c",isServerInstall:false)])
 r.updatePackage(jobID:a,progress:0.5); r.testBarrier()
 precondition(system.reports.last?.fraction == 0.25/3)
 r.updateInstall(jobID:a, progress:0.3); r.testBarrier()
@@ -77,6 +77,82 @@ r.reset(); r.register(b,name:"new")
 Thread.sleep(forTimeInterval:0.3); r.testBarrier()
 precondition(system.reports.count == 1 && system.reports.last?.fraction == 0)
 print("PASS: stale-generation rejection, pause flush, reset cancels pending progress")
+
+let gib = 1024 * 1024 * 1024
+private let transfer = ServerPayloadTransfer()
+let t = DispatchTime(uptimeNanoseconds: 10_000_000_000)
+precondition(transfer.begin() && !transfer.begin())
+precondition(transfer.record(gib..<(2 * gib), totalBytes: 4 * gib, now: t) == 0.25)
+precondition(transfer.record(0..<(2 * gib), totalBytes: 4 * gib, now: t) == nil)
+precondition(transfer.record(gib..<(3 * gib), totalBytes: 4 * gib, now: t + .seconds(1)) == 0.75)
+precondition(transfer.record(gib..<(3 * gib), totalBytes: 4 * gib, now: t + .seconds(2)) == nil)
+precondition(!transfer.finish(totalBytes: 4 * gib))
+precondition(transfer.record((3 * gib)..<(4 * gib), totalBytes: 4 * gib, now: t + .seconds(2)) == 1)
+precondition(transfer.finish(totalBytes: 4 * gib) && !transfer.finish(totalBytes: 4 * gib))
+print("PASS: 4 GiB transfer counts distinct ranges, throttles updates and completes once")
+
+func verifyAdaptiveBudget() {
+    let tickNanos: UInt64 = 20_000_000
+    let tickSeconds = 0.020
+    let ticksPerMinute = 3_000
+    var budget = ServerPayloadBudget()
+    var samples = [0.0]
+    var paused = 0
+    var firstPause: Int?
+    for tick in 0..<(2 * ticksPerMinute) {
+        let now = UInt64(tick) * tickNanos
+        let cpu = samples.last!
+        let delay = budget.delay(now: now) { cpu }!
+        // A concurrent request uses the same decision without resampling CPU.
+        precondition(budget.delay(now: now, readCPU: { fatalError("duplicate sample") }) == delay)
+        if delay > 0 {
+            paused += 1
+            if firstPause == nil { firstPause = tick }
+        }
+        samples.append(cpu + (delay == 0 ? 0.91 : 0.06) * tickSeconds)
+        if tick + 1 >= ticksPerMinute {
+            let lastMinute = samples[tick + 1] - samples[tick + 1 - ticksPerMinute]
+            precondition(lastMinute < 45.2, "process CPU used too much of its 60-second budget")
+        }
+    }
+    precondition((700...750).contains(firstPause ?? 0), "the measured burst was capped too early or too late")
+    precondition(paused > 0 && paused < ticksPerMinute, "the CPU gate did not resume writes")
+
+    var lightLoad = ServerPayloadBudget()
+    for tick in 0..<ticksPerMinute {
+        precondition(lightLoad.delay(now: UInt64(tick) * tickNanos) {
+            Double(tick) * tickSeconds * 0.25
+        } == 0, "CPU headroom should allow unrestricted writes")
+    }
+
+    var fallback = ServerPayloadBudget()
+    precondition(fallback.delay(now: 0, readCPU: { nil }) == nil)
+    precondition(fallback.reserveFallback(ServerPayloadBudget.chunkSize, now: 0) == 0)
+    precondition(fallback.reserveFallback(ServerPayloadBudget.chunkSize, now: 0) == 31_250_000)
+}
+verifyAdaptiveBudget()
+print("PASS: shared adaptive governor allows full speed with headroom and stays below the measured CPU limit under load")
+
+r.reset()
+r.register([(id: a, name: "Server App", isServerInstall: true)])
+r.updateStatus(jobID: a, status: .sendingPayload); r.testBarrier()
+precondition(system.reports.last?.fraction == 0.5)
+let beforePayload = system.reports.count
+for step in 1...100 { r.updatePayload(jobID: a, progress: Double(step) / 100) }
+r.testBarrier()
+Thread.sleep(forTimeInterval: 0.3); r.testBarrier()
+precondition(system.reports.count == beforePayload + 1 && system.reports.last?.fraction == 0.85)
+r.updateStatus(jobID: a, status: .installing); r.testBarrier()
+r.updateInstall(jobID: a, progress: 0.5)
+Thread.sleep(forTimeInterval: 0.3); r.testBarrier()
+precondition(abs((system.reports.last?.fraction ?? 0) - 0.925) < 0.000_001)
+r.updateStatus(jobID: a, status: .broken(Failure()))
+r.resetServerAttempt(jobID: a)
+r.updateStatus(jobID: a, status: .sendingPayload)
+r.updatePayload(jobID: a, progress: 0.5); r.testBarrier()
+Thread.sleep(forTimeInterval: 0.3); r.testBarrier()
+precondition(system.reports.last?.fraction == ServerInstallProgress.payload(0.5))
+print("PASS: server payload progress is coalesced, hands off to installation and resets on retry")
 '''
 
 SELECTION_PREFIX = r'''struct TestApp {
@@ -273,7 +349,12 @@ def main():
                    source.index('\n\t// Foreground drawer counters')]
     admission = source[source.index('\tfunc mayStartDeviceJob'):
                        source.index('\n\tfunc jobDidFinish')]
-    fixture = (PREFIX + reporter + REPORTER_CHECKS + SELECTION_PREFIX
+    server = (ROOT / 'Asign/Backend/Server/ServerInstaller.swift').read_text()
+    payload_progress = (server[server.index('enum ServerInstallProgress'):
+                               server.index('private final class ServerPayloadPacer')]
+                        + server[server.index('private final class ServerPayloadTransfer'):
+                                 server.index('enum ServerInstallerError')])
+    fixture = (PREFIX + payload_progress + reporter + REPORTER_CHECKS + SELECTION_PREFIX
                + source[start:end] + '\n}\n}\n' + SELECTION_CHECKS
                + ADMISSION_PREFIX + cache + '\n' + admission + '\n}\n' + ADMISSION_CHECKS)
     env = dict(os.environ)
@@ -294,7 +375,8 @@ def main():
             path = Path(directory) / (name + '.swift')
             binary = Path(directory) / name
             path.write_text(contents)
-            subprocess.run([swift, '-swift-version', '5', '-sdk', sdk, str(path), '-o', str(binary)], env=env, check=True)
+            subprocess.run([swift, '-swift-version', '5', '-sdk', sdk, '-module-cache-path',
+                            str(Path(directory) / 'ModuleCache'), str(path), '-o', str(binary)], env=env, check=True)
             subprocess.run([str(binary)], check=True)
 
 if __name__ == '__main__':
