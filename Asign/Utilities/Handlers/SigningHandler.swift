@@ -67,7 +67,7 @@ final class SigningHandler: NSObject {
 	private let _uniqueWorkDir: URL
     var memoryCheckpoint: ((String) async throws -> Void)?
     var credentials: SigningCredentials?
-    var onPatchingFailure: ((String) -> Void)?
+    private(set) var patchingFailure: String?
 	// the options struct is not gonna decode these so
 	// we're just going to do this. If appicon is not
 	// specified, we're not going to modify the app
@@ -92,7 +92,7 @@ final class SigningHandler: NSObject {
 	func copy(archiveApp suppliedArchiveApp: ArchiveBackedApp? = nil) async throws {
 		try _workspace.create()
 
-		if let archiveURL = Storage.shared.getArchiveURL(for: _app) {
+		if let archiveURL = suppliedArchiveApp?.archiveURL ?? Storage.shared.getArchiveURL(for: _app) {
 			let archiveApp = try suppliedArchiveApp ?? ArchiveBackedApp(archiveURL: archiveURL)
             _archiveApp = archiveApp
 			_archiveSourceURL = archiveURL
@@ -270,10 +270,10 @@ final class SigningHandler: NSObject {
                 cloudEntitlementPolicy.merge(patchPolicy) { original, _ in original }
             }
             catch let error as IPAPatcher.RecoveryFailure {
-                onPatchingFailure?(error.localizedDescription)
+                patchingFailure = error.localizedDescription
                 throw error
             }
-            catch { onPatchingFailure?(error.localizedDescription) }
+            catch { patchingFailure = error.localizedDescription }
         }
 		
 		if !_options.onlyModify {

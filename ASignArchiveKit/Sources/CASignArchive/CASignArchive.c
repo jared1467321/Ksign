@@ -2377,6 +2377,8 @@ int32_t asign_archive_index_rebuild(
         err = reader_close;
     if (err == MZ_OK && writer_close != MZ_OK)
         err = writer_close;
+    if (err == MZ_OK)
+        err = asign_archive_index_validate(index);
     if (err == MZ_OK && progress_cb != NULL)
         progress_cb(1.0, userdata);
     return err;

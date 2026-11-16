@@ -13,12 +13,12 @@ final class Storage: ObservableObject {
 	static let shared = Storage()
 	let container: NSPersistentContainer
 	let sourceWriteContext: NSManagedObjectContext
+	private let libraryWriteContext: NSManagedObjectContext
 	
 	private let _name: String = "Feather"
 	
 	init(inMemory: Bool = false) {
 		container = NSPersistentContainer(name: _name)
-		sourceWriteContext = container.newBackgroundContext()
 		
 		if inMemory {
 			container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
@@ -30,6 +30,8 @@ final class Storage: ObservableObject {
 			}
 		})
 		
+		sourceWriteContext = container.newBackgroundContext()
+		libraryWriteContext = container.newBackgroundContext()
 		container.viewContext.automaticallyMergesChangesFromParent = true
 	}
 	
@@ -37,11 +39,13 @@ final class Storage: ObservableObject {
 		container.viewContext
 	}
 
-    /// Workers save library records on a private context. Merge only permanent
-    /// IDs into the view context before delivering completion to the UI.
+    /// Serialize library inserts because signing with the same certificate
+    /// also updates that certificate's inverse relationship.
     func insertLibraryRecord(_ create: @escaping (NSManagedObjectContext) throws -> NSManagedObject,
                              completion: @escaping (Error?) -> Void) {
-        container.performBackgroundTask { worker in
+        let worker = libraryWriteContext
+        worker.perform {
+            defer { worker.reset() }
             do {
                 let record = try create(worker)
                 try worker.save()
@@ -53,7 +57,6 @@ final class Storage: ObservableObject {
                     completion(nil)
                 }
             } catch {
-                worker.rollback()
                 self.context.perform { completion(error) }
             }
         }

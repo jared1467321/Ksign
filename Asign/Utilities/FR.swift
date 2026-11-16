@@ -14,6 +14,7 @@ import ZsignC
 import NimbleJSON
 import AltSourceKit
 import IDeviceSwift
+import ASignArchiveKit
 
 enum FR {
 	static func handlePackageFile(
@@ -138,71 +139,86 @@ enum FR {
             let (source, credentials) = await MainActor.run {
                 (SigningAppSnapshot(app), SigningCredentials(certificate))
             }
-			let handler = SigningHandler(app: source, options: options, packages: context.packages, signingSession: context.session)
-            let patchingID = handler.signedAppID
-            handler.onPatchingFailure = { reason in
-                context.patchingReport.record(id: patchingID, name: source.name ?? "Unknown", reason: reason)
-            }
-            handler.credentials = credentials
             let memory = ArchiveMemoryCoordinator.shared
-            let signingID = UUID(uuidString: handler.signedAppID) ?? UUID()
-            var lease: ArchiveMemoryCoordinator.Lease?
-			if !options.onlyModify {
-				handler.appCertificate = certificate
-			}
-			handler.appIcon = icon
+            let archiveURL = Storage.shared.getArchiveURL(for: source)
+            let sourceURL = archiveURL ?? Storage.shared.getAppDirectory(for: source)
+            let sourcePath = sourceURL?.resolvingSymlinksInPath().standardizedFileURL.path
+            let jobID = UUID()
+            var reviewedArchive = suppliedArchiveApp
+            var canRetry = true
+            let result: Result<String, Error>
 
-			do {
-                let sourceURL = Storage.shared.getArchiveURL(for: source) ?? Storage.shared.getAppDirectory(for: source)
-                let admitted = try await memory.acquire(job: signingID, attempt: signingID,
-                    workload: suppliedArchiveApp?.signingMemoryWorkload ?? ArchiveWorkload(complete: false, operation: .signing),
-                    source: sourceURL?.resolvingSymlinksInPath().standardizedFileURL.path)
-                lease = admitted
-                handler.memoryCheckpoint = { stage in try await memory.signingCheckpoint(admitted, stage) }
-                let archiveApp = try Storage.shared.getArchiveURL(for: source).map { url in
-                    if let suppliedArchiveApp, suppliedArchiveApp.archiveURL.standardizedFileURL == url.standardizedFileURL {
-                        try suppliedArchiveApp.archiveIndex.validate()
-                        return suppliedArchiveApp
+            while true {
+                let handler = SigningHandler(app: source, options: options, packages: context.packages, signingSession: context.session)
+                handler.credentials = credentials
+                handler.appCertificate = options.onlyModify ? nil : certificate
+                handler.appIcon = icon
+                let attemptID = UUID(uuidString: handler.signedAppID) ?? UUID()
+                var lease: ArchiveMemoryCoordinator.Lease?
+
+                do {
+                    let admitted = try await memory.acquire(job: jobID, attempt: attemptID,
+                        workload: reviewedArchive?.signingMemoryWorkload ?? ArchiveWorkload(complete: false, operation: .signing),
+                        source: sourcePath)
+                    lease = admitted
+                    handler.memoryCheckpoint = { stage in try await memory.signingCheckpoint(admitted, stage) }
+                    let archiveApp = try archiveURL.map { url in
+                        if let reviewedArchive, reviewedArchive.archiveURL.standardizedFileURL == url.standardizedFileURL {
+                            try reviewedArchive.archiveIndex.validate()
+                            return reviewedArchive
+                        }
+                        return try ArchiveBackedApp(archiveURL: url)
                     }
-                    return try ArchiveBackedApp(archiveURL: url)
+                    try await memory.signingCheckpoint(admitted, "before materialization", workload: archiveApp?.signingMemoryWorkload)
+                    try await handler.copy(archiveApp: archiveApp)
+                    try await handler.modify(finish: false)
+                    try await handler.move()
+                    try await memory.signingCheckpoint(admitted, "before database publication")
+                    try await handler.addToDatabase()
+
+                    // Source cleanup precedes both callbacks, even in background.
+                    if options.removeApp {
+                        let directory = await MainActor.run {
+                            app.isSigned ? nil : Storage.shared.getUuidDirectory(for: app)
+                        }
+                        if let directory { try? FileManager.default.removeItem(at: directory) }
+                        await MainActor.run {
+                            if !app.isSigned { Storage.shared.deleteApp(for: app, removingFiles: false) }
+                        }
+                    }
+
+                    try? await handler.clean()
+                    memory.finish(admitted, succeeded: true)
+                    result = .success(handler.signedAppID)
+                } catch {
+                    try? await handler.clean()
+                    if let lease { memory.finish(lease, succeeded: false) }
+                    if canRetry, archiveURL != nil, !Task.isCancelled,
+                       (error as? ASignArchiveError)?.sourceChanged == true {
+                        print("[\(attemptID)] Source IPA changed during signing; retrying with a fresh archive index")
+                        canRetry = false
+                        reviewedArchive = nil
+                        continue
+                    }
+                    result = .failure(error)
                 }
-                try await memory.signingCheckpoint(admitted, "before materialization", workload: archiveApp?.signingMemoryWorkload)
-                try await handler.copy(archiveApp: archiveApp)
-                try await handler.modify(finish: false)
-                try await handler.move()
-                try await memory.signingCheckpoint(admitted, "before database publication")
-                try await handler.addToDatabase()
-
-                // Source cleanup is part of the operation, before either
-                // completion callback. UI delivery can be delayed in background.
-                if options.removeApp {
-                    let directory = await MainActor.run {
-                        app.isSigned ? nil : Storage.shared.getUuidDirectory(for: app)
-                    }
-                    if let directory { try? FileManager.default.removeItem(at: directory) }
-                    await MainActor.run {
-                        if !app.isSigned { Storage.shared.deleteApp(for: app, removingFiles: false) }
-                    }
+                if let reason = handler.patchingFailure {
+                    context.patchingReport.record(id: handler.signedAppID, name: source.name ?? "Unknown", reason: reason)
                 }
+                break
+            }
 
-				try? await handler.clean()
-                memory.finish(admitted, succeeded: true)
-                lease = nil
-
-				await TempMaintenance.shared.endOperation()
-
+            await TempMaintenance.shared.endOperation()
+            switch result {
+            case .success(let signedID):
 				// Batch count reporting happens before the UI callback so it cannot
 				// be delayed until the app returns to the foreground.
 				backgroundSucceeded = true
-                let signedID = handler.signedAppID
 				backgroundCompletion?(nil, signedID)
 				DispatchQueue.main.async {
 					completion(nil, signedID)
 				}
-			} catch {
-				try? await handler.clean()
-                if let lease { memory.finish(lease, succeeded: false) }
-				await TempMaintenance.shared.endOperation()
+            case .failure(let error):
 				if error is IDeviceInstallSkip { backgroundSucceeded = true }
 				backgroundCompletion?(error, nil)
 				DispatchQueue.main.async {

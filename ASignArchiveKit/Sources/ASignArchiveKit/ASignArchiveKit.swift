@@ -27,14 +27,18 @@ public enum ASignArchiveError: LocalizedError, Sendable {
     case overlayRebuildFailed(code: Int32)
     case layoutValidationFailed(code: Int32, entry: String)
 
-    public var errorDescription: String? {
-        let code: Int32
+    private var status: Int32 {
         switch self {
         case .extractionFailed(let status), .creationFailed(let status),
              .materializationFailed(let status), .entryAccessFailed(let status),
-             .overlayRebuildFailed(let status), .layoutValidationFailed(let status, _): code = status
+             .overlayRebuildFailed(let status), .layoutValidationFailed(let status, _): return status
         }
-        if code == ASIGN_ARCHIVE_SOURCE_CHANGED {
+    }
+
+    public var sourceChanged: Bool { status == ASIGN_ARCHIVE_SOURCE_CHANGED }
+
+    public var errorDescription: String? {
+        if sourceChanged {
             return "The source IPA changed while it was being read. Please try again once the file has finished downloading or copying."
         }
         switch self {
