@@ -6,7 +6,7 @@
 //
 
 import SwiftUI
-import NimbleViews
+import NimbleExtensions
 
 enum TabEnum: String, CaseIterable, Hashable {
     case files
@@ -47,7 +47,7 @@ enum TabEnum: String, CaseIterable, Hashable {
 		case .sources: SourcesView()
 		case .library: LibraryView()
 		case .settings: SettingsView()
-		case .certificates: NBNavigationView(.localized("Certificates")) { CertificatesView() }
+		case .certificates: NavigationStack { CertificatesView().nbThemeCanvas() }
 		case .appstore: AppstoreView()
         case .downloader: DownloaderView()
 		}

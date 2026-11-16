@@ -27,6 +27,7 @@ struct ScreenshotPreviewView: View {
         NavigationStack {
             _imageScrollView()
                 .nbThemeCanvas()
+                .nbNavigationAccessoryToolbar(placement: .principal)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         if #available(iOS 26.0, *) {

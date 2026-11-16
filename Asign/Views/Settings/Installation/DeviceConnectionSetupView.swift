@@ -8,7 +8,6 @@ struct DeviceConnectionSettingsView: View {
     @ObservedObject private var manager = DeviceInstallationManager.shared
     private let session = InstallSession.shared
     @State private var isSessionActive = InstallSession.shared.isActive
-    @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var confirmReset = false
     @State private var showsGuide = false
@@ -41,17 +40,6 @@ struct DeviceConnectionSettingsView: View {
                         .connectionCard()
                 }
                 actions
-                if reconnect.pendingShortcutName != nil {
-                    Button {
-                        Task { await reconnect.runPendingShortcut() }
-                    } label: {
-                        Label("Reconnect VPN now", systemImage: "arrow.triangle.2.circlepath")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!manager.canReconnectVPN || isSessionActive)
-                }
                 DeviceUploadPerformanceView()
                 connectionStatus
             } else {
@@ -370,7 +358,7 @@ private struct VPNReconnectPreferencesView: View {
             Section {
                 Toggle("Reconnect after installation", isOn: $enabled)
             } footer: {
-                Text("Asign offers to reconnect your VPN after all device work ends and its local VPN disconnects. If installation finishes in the background, tap the reconnect notification.")
+                Text("After device work ends, tap Reconnect VPN in the top toolbar or tap the reconnect notification.")
             }
             if enabled {
                 Section {
@@ -391,22 +379,18 @@ private struct VPNReconnectPreferencesView: View {
                 Section {
                     if presentation == VPNReconnectPresentation.shareSheet.rawValue {
                         Text("In your shortcut's details, enable Show in Share Sheet and allow Text input. Select it from Asign's share sheet to reconnect. Remove Open App actions to stay in Asign.")
-                        Text("If you dismiss the sheet, tap the Reconnect VPN reminder to open it again.")
+                        Text("Tap Reconnect VPN in the top toolbar to open the share sheet.")
                     } else {
-                        Text("Asign opens Shortcuts automatically. Add Open App → Asign as the shortcut's last action to return here.")
+                        Text("Tap Reconnect VPN in the top toolbar to open Shortcuts. Add Open App → Asign as the shortcut's last action to return here.")
                     }
                 } header: {
                     Text("How to reconnect")
                 }
                 Section {
                     Button(presentation == VPNReconnectPresentation.shareSheet.rawValue ? "Test Share Sheet" : "Test Reconnect Shortcut") {
-                        Task { await manager.testVPNReconnectShortcut() }
+                        Task { await manager.runVPNReconnectShortcut() }
                     }
                     .disabled(!canTest)
-                    if reconnect.pendingShortcutName != nil {
-                        Button("Reconnect VPN") { Task { await reconnect.runPendingShortcut() } }
-                            .disabled(!manager.canReconnectVPN || isSessionActive)
-                    }
                     if let notice = reconnect.notice {
                         Text(notice).font(.footnote).nbThemeForeground(.textSecondary)
                     }

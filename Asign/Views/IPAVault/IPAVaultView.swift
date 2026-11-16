@@ -364,6 +364,7 @@ struct IPAVaultView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .nbThemeCanvas(adaptsText: false)
             .navigationTitle("IPA Vault")
+            .nbNavigationAccessoryToolbar()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {

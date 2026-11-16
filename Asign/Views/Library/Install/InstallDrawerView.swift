@@ -100,6 +100,7 @@ struct InstallDrawerView: View {
 // experiment — a titled card of app icons — because that's what looked right.
 struct InstallDrawerSheet: View {
 	@ObservedObject private var session = InstallSession.shared
+	@AppStorage(VPNReconnectCoordinator.enabledKey) private var vpnReconnectEnabled = false
 
 	var body: some View {
 		VStack(spacing: 0) {
@@ -110,6 +111,12 @@ struct InstallDrawerSheet: View {
 						.nbThemeForeground(.heading)
 
 					Spacer(minLength: 0)
+
+				if vpnReconnectEnabled {
+					VPNReconnectButton()
+						.buttonStyle(.bordered)
+						.buttonBorderShape(.capsule)
+				}
 
 					// Hidden once nothing is running — there'd be nothing left
 					// to pause.
@@ -333,8 +340,6 @@ private struct NativeInstallLimitControl: View {
 private struct InstallDrawerApps: View, Equatable {
 	var body: some View {
 		ScrollView {
-			VPNReconnectBannerView()
-				.padding(.horizontal, 20)
 			DeviceConnectionSetupView()
 				.padding(.horizontal, 20)
 				.padding(.bottom, 12)

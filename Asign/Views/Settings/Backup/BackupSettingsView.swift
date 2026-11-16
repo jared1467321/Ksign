@@ -34,6 +34,7 @@ struct BackupSettingsView: View {
             statusSections
         }
         .navigationTitle("Backup & Restore")
+        .nbNavigationAccessoryToolbar()
         .fileImporter(isPresented: $importing, allowedContentTypes: [.asignBackup, .data], allowsMultipleSelection: false) { result in
             switch result {
             case .success(let urls):

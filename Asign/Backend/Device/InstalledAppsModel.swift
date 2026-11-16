@@ -34,7 +34,7 @@ final class InstalledAppsModel: ObservableObject {
             let manager = DeviceInstallationManager.shared
             let workflow = UUID()
             manager.clearSetupFailure()
-            manager.retainWorkflow(workflow, requiresVPNChoice: true)
+            manager.retainWorkflow(workflow)
             BackgroundTaskManager.shared.claim(.installedApps)
             var succeeded = false
             defer {

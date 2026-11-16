@@ -32,6 +32,7 @@ struct InstallationView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .nbThemeCanvas()
+                .nbNavigationAccessoryToolbar()
             } else {
                 NBList(.localized("Installation")) {
                     Section { methodPicker }

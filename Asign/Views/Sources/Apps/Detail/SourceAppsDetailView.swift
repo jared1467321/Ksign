@@ -91,6 +91,7 @@ struct SourceAppsDetailView: View {
                             NavigationLink(
                                 destination: VersionHistoryView(app: app, versions: versions)
                                     .navigationTitle(.localized("Version History"))
+                                    .nbNavigationAccessoryToolbar()
                                     .navigationBarTitleDisplayMode(.large)
                             ) {
                                 Text(.localized("Version History"))
@@ -190,6 +191,7 @@ struct SourceAppsDetailView: View {
 		.flexibleHeaderScrollView()
 		.nbThemeCanvas()
 		.shouldSetInset()
+		.nbNavigationAccessoryToolbar()
 		.toolbar {
 			NBToolbarButton(
 				systemImage: "square.and.arrow.up",

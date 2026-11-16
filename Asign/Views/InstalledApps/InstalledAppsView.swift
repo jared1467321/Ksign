@@ -5,7 +5,6 @@ import NimbleExtensions
 
 struct InstalledAppsView: View {
     @ObservedObject var model: InstalledAppsModel
-    @ObservedObject private var reconnect = VPNReconnectCoordinator.shared
     @ObservedObject private var blacklist = UninstallBlacklist.shared
     @State private var searchText = ""
     @State private var isEditing = false
@@ -34,11 +33,6 @@ struct InstalledAppsView: View {
 
     var body: some View {
         NBListAdaptable(rendersAurora: false, adaptsContainerText: false) {
-            if reconnect.pendingShortcutName != nil {
-                NBSection("Reconnect VPN") {
-                    VPNReconnectBannerView()
-                }
-            }
             NBSection("On This Device") {
                 Button {
                     if model.isLoading {

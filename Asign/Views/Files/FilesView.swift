@@ -83,6 +83,7 @@ struct FilesView: View {
         ZStack {
             contentView
                 .navigationTitle(navigationTitle)
+                .nbNavigationAccessoryToolbar(placement: isRootView ? .principal : .topBarTrailing)
                 .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
                 .refreshable {
                     if isRootView {

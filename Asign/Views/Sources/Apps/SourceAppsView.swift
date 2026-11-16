@@ -93,6 +93,7 @@ struct SourceAppsView: View {
         }
         .nbThemeCanvas()
         .navigationTitle(_navigationTitle)
+        .nbNavigationAccessoryToolbar()
         .searchable(text: $_searchText, placement: .platform())
         .toolbarTitleMenu {
             if

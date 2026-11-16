@@ -46,6 +46,7 @@ struct LogsView: View {
 					if let id = _lastId { proxy.scrollTo(id, anchor: .bottom) }
 				}
 			}
+			.nbNavigationAccessoryToolbar(placement: .principal)
 			.toolbar {
 				ToolbarItemGroup(placement: .navigationBarTrailing) {
 					Button { exportLogs() } label: { Image(systemName: "square.and.arrow.up") }

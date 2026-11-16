@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import NimbleExtensions
 import WebKit
 
 struct WebViewSheet: View {
@@ -24,6 +25,7 @@ struct WebViewSheet: View {
                 
             }
             .navigationTitle("Web Browser")
+            .nbNavigationAccessoryToolbar()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {

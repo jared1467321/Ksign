@@ -302,6 +302,7 @@ extension SigningView {
 				}
 				.nbThemeCanvas()
 				.navigationTitle(.localized("Properties"))
+				.nbNavigationAccessoryToolbar()
 			} label: {
 				Text(String.localized("Properties"))
 					.nbThemeForeground(.text)

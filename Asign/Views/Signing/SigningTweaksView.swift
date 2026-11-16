@@ -123,6 +123,7 @@ struct SigningTweaksView: View {
 			}
 		}
 		.navigationTitle(.localized("Tweaks"))
+		.nbNavigationAccessoryToolbar()
 		.listStyle(.plain)
 		.toolbar {
 			NBToolbarButton(

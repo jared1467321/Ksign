@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import NimbleExtensions
 import NimbleViews
 
 struct CryptCheckReport {
@@ -142,6 +143,7 @@ struct CryptCheckBatchReportView<ReportContent: View>: View {
                 .tabViewStyle(.page(indexDisplayMode: reports.count > 1 ? .automatic : .never))
             }
             .navigationTitle(navigationTitle)
+            .nbNavigationAccessoryToolbar()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {

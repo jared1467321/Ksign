@@ -6,12 +6,13 @@ import UserNotifications
 #endif
 
 enum VPNReconnectPresentation: String, CaseIterable, Identifiable {
-    case shareSheet, automatic
+    case shareSheet
+    case openShortcuts = "automatic"
     var id: String { rawValue }
     var title: String {
         switch self {
         case .shareSheet: return "Share Sheet"
-        case .automatic: return "Open Shortcuts Automatically"
+        case .openShortcuts: return "Open Shortcuts"
         }
     }
 }
@@ -34,7 +35,6 @@ final class VPNReconnectCoordinator: ObservableObject {
     private var requestID: String?
     private var tappedRequestID: String?
     private var deviceWorkActive = false
-    private var userChoiceRequested = false
     private var openingShortcut = false
     private var shareSheetRequestID: String?
     private let defaults: UserDefaults
@@ -82,26 +82,21 @@ final class VPNReconnectCoordinator: ObservableObject {
         return components.url
     }
 
-    func beginDeviceWork(requiresUserChoice: Bool = false) {
+    func beginDeviceWork() {
         deviceWorkActive = true
-        // Inventory refreshes leave the existing reconnect reminder available
-        // without presenting a sheet or opening Shortcuts automatically.
-        userChoiceRequested = userChoiceRequested || requiresUserChoice
         clearPendingRequest()
         notice = nil
     }
 
     func deviceWorkFinished(restoreVPN: Bool) async {
         deviceWorkActive = false
-        let requiresChoice = userChoiceRequested
-        userChoiceRequested = false
         guard restoreVPN else { return }
-        await requestReconnect(automaticallyPresent: !requiresChoice)
+        await requestReconnect(openNow: false)
     }
 
-    func testShortcut() async {
-        guard !deviceWorkActive else { return }
-        await requestReconnect()
+    func runConfiguredShortcut() async {
+        guard !deviceWorkActive, shareSheetRequestID == nil else { return }
+        await requestReconnect(openNow: true)
     }
 
     func disable() {
@@ -109,7 +104,7 @@ final class VPNReconnectCoordinator: ObservableObject {
         notice = nil
     }
 
-    private func requestReconnect(automaticallyPresent: Bool = true) async {
+    private func requestReconnect(openNow: Bool) async {
         guard defaults.bool(forKey: Self.enabledKey), !deviceWorkActive, !openingShortcut else { return }
         let name = (defaults.string(forKey: Self.shortcutNameKey) ?? Self.defaultShortcutName)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,8 +119,8 @@ final class VPNReconnectCoordinator: ObservableObject {
         defaults.set(name, forKey: Self.pendingNameKey)
         defaults.set(id, forKey: Self.pendingIDKey)
         if isForeground() {
-            if automaticallyPresent { await runPendingShortcut() }
-            else { notice = "Tap Reconnect VPN when you want to run \(name)." }
+            if openNow { await runPendingShortcut() }
+            else { notice = "Tap Reconnect VPN in the toolbar when you want to run \(name)." }
         } else {
             notice = "Tap the reconnect notification, or return to Asign and tap Reconnect VPN."
             let delivered = await notify(name, id)

@@ -24,6 +24,7 @@ struct FeatherApp: App {
     @AppStorage("Feather.glossySurfaces") private var glossySurfaces = true
     @AppStorage("Feather.auroraBackground") private var auroraBackground = true
     @AppStorage("Feather.userInterfaceStyle") private var userInterfaceStyle = 0
+    @AppStorage(VPNReconnectCoordinator.enabledKey) private var vpnReconnectEnabled = false
     @StateObject var extractManager = ExtractManager.shared
 	// LogsView observes log batches; capture does not need scene-wide updates.
 	private let logsManager = LogsManager.shared
@@ -41,8 +42,15 @@ struct FeatherApp: App {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     DownloadHeaderView(downloadManager: downloadManager)
                         .transition(.move(edge: .top).combined(with: .opacity))
-                    VPNReconnectBannerView()
                     VariedTabbarView()
+                        .nbNavigationAccessory(
+                            HStack(spacing: 12) {
+                                if vpnReconnectEnabled {
+                                    VPNReconnectButton()
+                                }
+                                InstallationMethodMenu()
+                            }
+                        )
                         .environment(\.managedObjectContext, storage.context)
                         .onOpenURL(perform: _handleURL)
                         .transition(.move(edge: .top).combined(with: .opacity))

@@ -100,6 +100,7 @@ struct BackgroundAudioLogView: View {
 			}
 			.nbThemeCanvas()
 			.navigationTitle("Keep-Alive")
+			.nbNavigationAccessoryToolbar()
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
 				ToolbarItem(placement: .navigationBarLeading) {

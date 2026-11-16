@@ -1,6 +1,19 @@
 import SwiftUI
 
+private struct NBNavigationAccessoryKey: EnvironmentKey {
+    static var defaultValue: AnyView? { nil }
+}
+
 public extension View {
+    /// Supplies an optional app-wide control to themed navigation bars.
+    func nbNavigationAccessory<Accessory: View>(_ accessory: Accessory?) -> some View {
+        environment(\.nbNavigationAccessory, accessory.map { AnyView($0) })
+    }
+
+    func nbNavigationAccessoryToolbar(placement: ToolbarItemPlacement = .topBarTrailing) -> some View {
+        modifier(NBNavigationAccessoryModifier(placement: placement))
+    }
+
     /// Keep the title and its glass in one layout so padding stays symmetric
     /// even when UIKit changes the toolbar's vertical alignment.
     func nbThemeNavigationTitle(
@@ -8,6 +21,28 @@ public extension View {
         displayMode: NavigationBarItem.TitleDisplayMode = .inline
     ) -> some View {
         modifier(NBThemeNavigationTitleModifier(title: title, displayMode: displayMode))
+    }
+}
+
+private extension EnvironmentValues {
+    var nbNavigationAccessory: AnyView? {
+        get { self[NBNavigationAccessoryKey.self] }
+        set { self[NBNavigationAccessoryKey.self] = newValue }
+    }
+}
+
+private struct NBNavigationAccessoryModifier: ViewModifier {
+    @Environment(\.nbNavigationAccessory) private var accessory
+    let placement: ToolbarItemPlacement
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if let accessory {
+                ToolbarItem(placement: placement) {
+                    accessory
+                }
+            }
+        }
     }
 }
 
@@ -44,5 +79,6 @@ private struct NBThemeNavigationTitleModifier: ViewModifier {
                     }
                 }
             }
+            .nbNavigationAccessoryToolbar(placement: displayMode == .inline ? .topBarTrailing : .principal)
     }
 }

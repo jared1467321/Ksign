@@ -28,6 +28,7 @@ struct TextEditorView: View {
                 .font(.system(size: 12, design: .monospaced))
                 .disabled(_isLoading)
                 .navigationTitle(fileURL.lastPathComponent).navigationBarTitleDisplayMode(.inline)
+                .nbNavigationAccessoryToolbar()
                 .toolbar { 
                     ToolbarItem(placement: .cancellationAction) {
                         Button(String(localized: "Cancel")) { dismiss() }

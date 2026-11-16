@@ -45,6 +45,7 @@ struct CertificatesView: View {
 			}
 		}
 		.navigationTitle(.localized("Certificates"))
+		.nbNavigationAccessoryToolbar()
 		.navigationBarTitleDisplayMode(.inline)
         .nbThemeOverlay {
             if certificates.isEmpty {
