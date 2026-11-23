@@ -10,7 +10,12 @@ public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
     public let applicationType: String?
     public let isRemovable: Bool?
     public var registrationDate: Date?
+    public internal(set) var trackingRestriction: String? = nil
     public var id: String { bundleIdentifier }
+
+    private enum CodingKeys: String, CodingKey {
+        case bundleIdentifier, name, version, applicationIdentifier, installationPath, applicationType, isRemovable, registrationDate
+    }
 
     /// Newest device registration first, unknown dates last. Stable ties keep
     /// the list from jumping when dates are unavailable or shared by a batch.
@@ -36,6 +41,6 @@ public struct IDeviceInstalledApp: Decodable, Identifiable, Sendable {
             bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
             return "The installed app's bundle identifier is invalid. Refresh the installed-app list."
         }
-        return nil
+        return trackingRestriction
     }
 }

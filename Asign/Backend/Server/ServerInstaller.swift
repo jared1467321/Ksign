@@ -144,6 +144,7 @@ class ServerInstaller: Identifiable, ObservableObject {
 	}
 
 	func resetPayloadTransfer() {
+		installTracking.resetBaseline()
 		withState { _payloadTransfer = ServerPayloadTransfer() }
 	}
 
@@ -176,8 +177,6 @@ class ServerInstaller: Identifiable, ObservableObject {
 			}
 
 			if path == "/install" {
-				let tracking = self.installTracking
-				_ = try? await pool.runIfActive { tracking.captureBaseline() }
 				var headers = HTTPHeaders()
 				headers.add(name: .contentType, value: "text/html")
 				return Response(status: .ok, headers: headers, body: .init(string: self.html))
@@ -233,7 +232,11 @@ class ServerInstaller: Identifiable, ObservableObject {
 		let pool = request.application.threadPool
 		let tracking = installTracking
 		let pacer = ServerPayloadPacer.shared
-		let observation = try? await pool.runIfActive { tracking.captureBaseline() }
+		let observation = try await pool.runIfActive {
+			let observation = tracking.captureBaseline()
+			if let observation { try tracking.recordOffer(observation) }
+			return observation
+		}
 		if transfer.begin(), withState({ _payloadTransfer === transfer }) { report(.sendingPayload) }
 
 		response.body = .init(asyncStream: { writer in
@@ -272,14 +275,13 @@ class ServerInstaller: Identifiable, ObservableObject {
 				}
 				reportWrittenBytes()
 				guard sent == expectedBytes else { throw ServerInstallerError.incompletePayload }
+				// A new UI attempt or server shutdown cannot discard completed coverage.
+				let completed = try transfer.finish(totalBytes: totalBytes) {
+					if let observation { try tracking.recordTransfer(observation) }
+				}
 				try await writer.write(.end)
 				Logger.misc.notice("Install IPA \(self.id.uuidString, privacy: .public) streamed \(sent, privacy: .public)/\(expectedBytes, privacy: .public) bytes at offset \(offset, privacy: .public)")
-				guard transfer.finish(totalBytes: totalBytes),
-				      self.withState({ self._payloadTransfer === transfer }) else { return }
-				if let observation {
-					try? await pool.runIfActive { tracking.recordTransfer(observation) }
-				}
-				if self.withState({ self._payloadTransfer === transfer }) { self.report(.installing) }
+				if completed, self.withState({ self._payloadTransfer === transfer }) { self.report(.installing) }
 			} catch {
 				reportWrittenBytes()
 				Logger.misc.error("Install IPA \(self.id.uuidString, privacy: .public) stream failed after \(sent, privacy: .public)/\(expectedBytes, privacy: .public) bytes at offset \(offset, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -481,10 +483,11 @@ private final class ServerPayloadTransfer: @unchecked Sendable {
 		return Double(count) / Double(totalBytes)
 	}
 
-	func finish(totalBytes: Int) -> Bool {
+	func finish(totalBytes: Int, persist: () throws -> Void) rethrows -> Bool {
 		lock.lock()
 		defer { lock.unlock() }
 		guard !finished, written.count == totalBytes else { return false }
+		try persist()
 		finished = true
 		return true
 	}

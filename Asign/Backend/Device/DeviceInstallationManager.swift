@@ -1,6 +1,8 @@
 import Combine
 import Foundation
 import IDeviceSwift
+import NimbleExtensions
+import UIKit
 
 enum DeviceConnectionMode: String, CaseIterable, Identifiable {
     case builtIn, manual
@@ -138,9 +140,10 @@ final class DeviceInstallationManager: ObservableObject {
         }
     }
 
-    func installedApps() async throws -> [IDeviceInstalledApp] {
+    func installedApps(checkingMissing tracked: Set<String>) async throws
+        -> (apps: [IDeviceInstalledApp], missing: Set<String>) {
         let selectedMode = mode
-        var apps: [IDeviceInstalledApp] = []
+        var inventory: (apps: [IDeviceInstalledApp], missing: Set<String>) = ([], [])
         try await enqueue {
             while self.exclusiveInstallation != nil ||
                 (!self.activeInstallations.isEmpty &&
@@ -154,7 +157,8 @@ final class DeviceInstallationManager: ObservableObject {
             }
             try await self.prepare(selectedMode)
             do {
-                apps = try await InstallationProxy(viewModel: InstallerStatusViewModel()).installedApps()
+                inventory = try await InstallationProxy(viewModel: InstallerStatusViewModel())
+                    .installedApps(checkingMissing: tracked)
             } catch {
                 if !(error is CancellationError), !(error is IDeviceInstallationRejection) {
                     self.needsConnectionRecovery = true
@@ -162,7 +166,7 @@ final class DeviceInstallationManager: ObservableObject {
                 throw error
             }
         }
-        return apps
+        return inventory
     }
 
     /// Reserve the connection for the entire rolling batch. Existing installs
@@ -183,6 +187,7 @@ final class DeviceInstallationManager: ObservableObject {
             do {
                 try await InstallationProxy(viewModel: InstallerStatusViewModel()).uninstall(batch,
                     checkRemovalAllowed: { try UninstallBlacklist.checkSavedRemovalAllowed(for: $0) },
+                    localPresence: { UIApplication.installedAppPresence($0) },
                     onEvent: onEvent)
             } catch {
                 if !(error is CancellationError), !(error is IDeviceInstallSkip),

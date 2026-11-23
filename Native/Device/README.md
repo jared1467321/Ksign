@@ -161,9 +161,8 @@ source trees from the chunk-size experiment.
   Signed Apps; the original bottom tabs, including App Store, remain available.
   Choose **Load Installed Apps** or
   **Refresh** to query iOS over the selected iDevice connection (Built-in or
-  Manual). It shows only installed copies verified against Asign's persistent
-  install receipts, regardless of whether their IPA or library record is kept.
-  App Store apps, system apps, and apps installed elsewhere are excluded.
+  Manual). The list uses Asign's persistent install receipts even if the IPA
+  or library record is gone. Uninstall is available for verified installed copies.
   iOS's inventory does not identify the original installer, so existing apps
   cannot be adopted from the inventory, signing history, or saved library files.
   Apps installed before this tracking was added must be installed through Asign
@@ -195,13 +194,14 @@ source trees from the chunk-size experiment.
   and again immediately before removal. Unknown identities are ineligible.
   Native installs save a receipt after iOS confirms completion, using the reported
   signing identity and bundle installation path (or registration date if the path
-  is unavailable). Server installs inspect the final signed IPA before prompting;
-  they require a new local OS registration after progress completion and bind the
-  receipt to that date and the IPA's signing identity. Signing/exporting an IPA,
-  accepting a prompt, or an unchanged/unknown registration does not grant ownership.
-  If required metadata or persistence is unavailable, the app stays unlisted.
-  Receipts live in Application Support separately from the library, with atomic
-  writes serialized across install workers. Corrupt tracking files fail closed.
+  is unavailable). Server installs save an offer before sending IPA bytes and
+  save completed transfer evidence before closing the response. To create a
+  receipt, a refresh must verify a new device copy against that evidence and the
+  IPA's signing identity. Receipts live in Application Support separately from
+  the library. Each writer locks the registry, reads the latest file and replaces
+  it atomically. Existing entries with inconclusive device metadata stay visible
+  with removal disabled. When inventory omits an entry, refresh requires both a
+  targeted device lookup and a local iOS check to confirm absence before clearing it.
   The installation queue must finish or be cancelled first. Removal keeps up to
   five apps in flight on one prepared tunnel. The device protocol takes one
   bundle ID per command; each worker retains its installer client on the same
@@ -216,9 +216,7 @@ source trees from the chunk-size experiment.
   underneath active peers. Already absent apps also lose their receipts.
   Failed/unstarted removals keep theirs for retry; a confirmed removal still
   clears its receipt if cancellation arrives after its command was sent.
-  A successful inventory refresh prunes absent/replaced copies
-  without pruning newer receipts created after the query began. Missing metadata
-  hides a copy without throwing away its receipt.
+  A refresh can clear only receipts that existed when its device query began.
 - **Forget Built-in Pairing** removes Asign's saved credentials. Removing iOS's
   trust entry separately requires Developer settings.
 - If the device handshake fails, Built-in Connection refreshes and restarts

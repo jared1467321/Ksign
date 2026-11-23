@@ -38,10 +38,16 @@ public struct IDeviceInstallationRejection: LocalizedError {
     let message: String
     public var errorDescription: String? { message }
 }
+struct IDeviceSwiftError: Error { let message: String }
 public struct IDeviceInstallPreflight {}
 final class InstallerStatusViewModel {}
 enum IDeviceInstalledAppDates {
     static func registrationDate(for id: String) -> Date? { nil }
+}
+enum UIApplication {
+    static func installedAppPresence(_ id: String) -> Bool? {
+        MockDevice.shared.read { $0.localPresence[id] }
+    }
 }
 struct DeviceSetupError: LocalizedError {
     let message: String
@@ -72,7 +78,7 @@ enum DevicePairingStore {
     static let shared = VPNReconnectCoordinator()
     func beginDeviceWork(requiresUserChoice: Bool = false) {}
     func deviceWorkFinished(restoreVPN: Bool) async {}
-    func testShortcut() async {}
+    func runConfiguredShortcut() async {}
 }
 @MainActor final class HeartbeatManager {
     static let shared = HeartbeatManager()
@@ -105,6 +111,9 @@ final class MockDevice: @unchecked Sendable {
     static let shared = MockDevice()
     let lock = NSLock()
     var apps: [String: IDeviceInstalledApp] = [:]
+    var omittedFromInventory: Set<String> = []
+    var omittedFromLookup: Set<String> = []
+    var localPresence: [String: Bool] = [:]
     var commands: [(id: String, client: Int)] = []
     var gates: [String: DispatchSemaphore] = [:]
     var behavior: [String: Behavior] = [:]
@@ -121,6 +130,7 @@ final class MockDevice: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         require(active == 0 && opened == closed, "previous batch leaked clients")
         self.apps = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
+        omittedFromInventory = []; omittedFromLookup = []; localPresence = [:]
         commands = []; gates = [:]; self.behavior = behavior
         blocked = true; active = 0; peak = 0; opened = 0; closed = 0; installStarted = false
     }
@@ -161,7 +171,7 @@ public final class InstallationProxy {
     private func lookup(_ id: String, client pointer: OpaquePointer?) throws -> IDeviceInstalledApp? {
         let client = Unmanaged<Client>.fromOpaque(UnsafeRawPointer(pointer!)).takeUnretainedValue()
         require(Thread.current === client.thread, "lookup moved native client threads")
-        return MockDevice.shared.read { $0.apps[id] }
+        return MockDevice.shared.read { $0.omittedFromLookup.contains(id) ? nil : $0.apps[id] }
     }
     private func withDeviceClient<T>(_ body: (OpaquePointer?) throws -> T) throws -> T {
         let id = MockDevice.shared.read { $0.opened += 1; return $0.opened }
@@ -175,7 +185,15 @@ public final class InstallationProxy {
         try checkCancellation()
         return try body(OpaquePointer(pointer))
     }
-    func installedApps() async throws -> [IDeviceInstalledApp] { MockDevice.shared.read { Array($0.apps.values) } }
+    private func ksign_installation_list(_ client: OpaquePointer?, _ output: inout UnsafeMutablePointer<CChar>?) -> Error? {
+        let apps = MockDevice.shared.read { device in
+            device.apps.values.filter { !device.omittedFromInventory.contains($0.id) }
+        }
+        let encoded = try! JSONEncoder().encode(apps)
+        output = strdup(String(decoding: encoded, as: UTF8.self))
+        return nil
+    }
+    private func ksign_pairing_string_free(_ output: UnsafeMutablePointer<CChar>?) { free(output) }
     func validate(_ preflight: IDeviceInstallPreflight) async throws {}
     func install(at url: URL, suspend: Bool, preflight: IDeviceInstallPreflight?, isCurrent: @escaping () -> Bool) async throws {
         MockDevice.shared.read { $0.installStarted = true }
@@ -204,7 +222,10 @@ func waitUntil(_ message: String, _ body: () async -> Bool) async throws {
 }
 func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
          check: @escaping @Sendable (String) throws -> Void = { _ in }) -> Task<Void, Error> {
-    Task { try await InstallationProxy().uninstall(batch, concurrency: concurrency, checkRemovalAllowed: check, onEvent: { _ in }) }
+    Task {
+        try await InstallationProxy().uninstall(batch, concurrency: concurrency, checkRemovalAllowed: check,
+            localPresence: { id in MockDevice.shared.read { $0.apps[id] != nil } }, onEvent: { _ in })
+    }
 }
 
 @main struct Tests {
@@ -231,9 +252,7 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
                 registrationDate: nil, installedAt: oldDate)
             try JSONEncoder().encode(LegacyRegistry(records: [nativeReceipt])).write(to: file)
             let before = IDeviceManagedInstallRegistry(fileURL: file)
-            try before.recordServerTransfer(observation, servedAt: served, hostBundleIdentifier: nil)
-            require(try before.snapshot() == [nativeReceipt],
-                "serving a file granted uninstall access or changed an existing native receipt")
+            try before.recordServerOffer(observation, hostBundleIdentifier: nil)
 
             func app(identity: String = identity, version: String = "2", path: String,
                      date: Date? = nil) -> IDeviceInstalledApp {
@@ -248,13 +267,22 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
             func load(_ app: IDeviceInstalledApp, at date: Date = query) throws -> [IDeviceInstalledApp] {
                 try registry.reconcile([app], observed: registry.snapshot(), hostBundleIdentifier: nil, inventoryStartedAt: date)
             }
-            require(try load(updated, at: started).isEmpty, "inventory predating the transfer consumed its evidence")
-            require(try load(app(path: "/private/var/apps/old", date: oldDate)).isEmpty, "an unchanged preexisting copy was adopted")
-            require(try load(app(identity: "OTHER.test.server", path: "/apps/new")).isEmpty, "another signing identity was adopted")
-            require(try load(app(version: "3", path: "/apps/new")).isEmpty, "a different version was adopted")
+            require(try load(updated).map(\.id) == [nativeReceipt.bundleIdentifier], "an interrupted offer authorized uninstall")
+            try registry.recordServerTransfer(observation, servedAt: served, hostBundleIdentifier: nil)
+            require(try before.snapshot() == [nativeReceipt], "a transfer changed an existing native receipt")
+            require(try !load(updated, at: started).contains { $0.id == bundle }, "inventory predating the transfer consumed its evidence")
+            require(try !load(app(path: "/private/var/apps/old", date: oldDate)).contains { $0.id == bundle }, "an unchanged preexisting copy was adopted")
+            require(try !load(app(identity: "OTHER.test.server", path: "/apps/new")).contains { $0.id == bundle }, "another signing identity was adopted")
+            require(try !load(app(version: "3", path: "/apps/new")).contains { $0.id == bundle }, "a different version was adopted")
             require(observation.sawNewCopy(path: updated.installationPath, registrationDate: oldDate,
                 servedAt: served, now: query), "a changed path with a stable registration date was missed")
-            require(try load(updated).map(\.id) == [bundle], "a new copy from the persisted transfer was hidden")
+            require(try Set(load(updated).map(\.id)) == [nativeReceipt.bundleIdentifier, bundle],
+                "a new copy from the persisted transfer was hidden")
+            let canonical = try load(app(path: "/var/apps/new")).first { $0.id == bundle }
+            require(canonical?.trackingRestriction == nil, "a path alias invalidated a receipt")
+            let omitted = try registry.reconcile([], observed: registry.snapshot(), hostBundleIdentifier: nil)
+            require(omitted.contains { $0.id == bundle && $0.name == updated.name && $0.trackingRestriction != nil },
+                "an incomplete inventory hid a verified server install")
             let request = try IDeviceUninstallRequest(installedApp: updated, hostBundleIdentifier: nil, registry: registry)
             require(try request.validate(updated, hostBundleIdentifier: nil), "a verified server install could not be uninstalled")
             do {
@@ -296,21 +324,96 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
             let first = try transfer("first", at: started)
             let retry = try transfer("retry", at: started)
             let replaced = try transfer("replaced", at: started)
+            _ = try transfer("dated", at: started)
             for observation in [first, retry, replaced] {
                 try registry.recordServerRegistration(observation, path: "/var/apps/\(observation.bundleIdentifier)",
                     registrationDate: nil, observedAt: started.addingTimeInterval(2))
             }
+            // Native and server batches share the same file, including across relaunches.
+            let nativeFirst = app("native-first")
+            let nativeSecond = app("native-second")
+            try IDeviceManagedInstallRegistry(fileURL: file).recordConfirmedInstall(nativeFirst, hostBundleIdentifier: nil)
             _ = try transfer("retry", at: nextBatch, previousPath: "/var/apps/retry")
             _ = try transfer("second", at: nextBatch)
+            try IDeviceManagedInstallRegistry(fileURL: file).recordConfirmedInstall(nativeSecond, hostBundleIdentifier: nil)
             let restored = IDeviceManagedInstallRegistry(fileURL: file)
-            let apps = [app("first"), app("retry"), app("second"), app("replaced", path: "/var/apps/other-copy")]
+            var dated = app("dated")
+            dated.registrationDate = started.addingTimeInterval(4)
+            let apps = [app("first"), app("retry"), app("second"), dated, nativeFirst, nativeSecond,
+                app("replaced", path: "/var/apps/other-copy")]
             let visible = try restored.reconcile(apps, observed: restored.snapshot(), hostBundleIdentifier: nil,
                 inventoryStartedAt: nextBatch.addingTimeInterval(5))
-            require(visible.map(\.id) == ["first", "retry", "second"],
-                "a later batch lost earlier installs or adopted a replacement copy")
-            require((try restored.snapshot()).count == 3, "a retried bundle produced duplicate receipts")
+            require(Set(visible.map(\.id)) == ["first", "retry", "second", "dated", nativeFirst.id, nativeSecond.id],
+                "alternating install methods lost earlier receipts or adopted a replacement copy")
+            require(visible.allSatisfy { $0.trackingRestriction == nil }, "mixed installs could not be verified")
+            require((try restored.snapshot()).count == 6, "a retried bundle produced duplicate receipts")
         }
-        print("PASS server batches accumulate verified apps across restarts and unsuccessful retries")
+        print("PASS alternating native and server batches preserve verified apps across restarts and retries")
+
+        do {
+            let directory = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("parallel", isDirectory: true)
+            let file = directory.appendingPathComponent("receipts.json")
+            let registry = IDeviceManagedInstallRegistry(fileURL: file)
+            let apps = (0..<32).map { index in
+                IDeviceInstalledApp(bundleIdentifier: "parallel.\(index)", name: "App \(index)", version: "1",
+                    applicationIdentifier: "TEAM.parallel.\(index)", installationPath: "/apps/\(index)",
+                    applicationType: "User", isRemovable: true)
+            }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for app in apps {
+                    group.addTask {
+                        try IDeviceManagedInstallRegistry(fileURL: file).recordConfirmedInstall(app, hostBundleIdentifier: nil)
+                    }
+                }
+                try await group.waitForAll()
+            }
+            let prior = try registry.snapshot()
+            require(Set(prior.map(\.bundleIdentifier)) == Set(apps.map(\.id)), "concurrent writers lost a receipt")
+
+            let old = prior.first { $0.bundleIdentifier == apps[0].id }!
+            let reinstalled = IDeviceInstalledApp(bundleIdentifier: apps[0].id, name: "Reinstalled", version: "2",
+                applicationIdentifier: apps[0].applicationIdentifier, installationPath: "/apps/reinstalled",
+                applicationType: "User", isRemovable: true)
+            try registry.recordConfirmedInstall(reinstalled, hostBundleIdentifier: nil)
+            require(try !registry.remove(old), "a stale uninstall cleared a newer receipt")
+            let partial = try registry.reconcile([], observed: prior, verifiedAbsent: [apps[0].id, apps[1].id],
+                hostBundleIdentifier: nil)
+            require(partial.count == 31 && partial.contains { $0.id == apps[0].id && $0.name == reinstalled.name }
+                && partial.allSatisfy { $0.trackingRestriction != nil },
+                "a stale refresh removed a reinstall, or an incomplete inventory removed another app")
+
+            let replacement = IDeviceInstalledApp(bundleIdentifier: apps[2].id, name: "Replacement", version: "2",
+                applicationIdentifier: "OTHER.parallel.2", installationPath: "/other/replacement",
+                applicationType: "User", isRemovable: true)
+            let view = try registry.reconcile([replacement], observed: registry.snapshot(), hostBundleIdentifier: nil)
+            require(view.first { $0.id == replacement.id }?.trackingRestriction != nil,
+                "a replacement disappeared or became eligible for uninstall")
+
+            let saved = try Data(contentsOf: file)
+            do {
+                let files = FileManager.default
+                try files.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+                defer { try? files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+                if !files.isWritableFile(atPath: directory.path) {
+                    do {
+                        try registry.recordConfirmedInstall(apps[1], hostBundleIdentifier: nil)
+                        fatalError("an unwritable directory accepted an atomic save")
+                    } catch is IDeviceInstallSkip {}
+                    require(try Data(contentsOf: file) == saved, "a failed save changed the previously committed registry")
+                    print("PASS failed atomic save preserves the committed file")
+                }
+            }
+            let corrupt = Data("incomplete JSON".utf8)
+            try corrupt.write(to: file, options: .atomic)
+            do {
+                try registry.recordConfirmedInstall(apps[1], hostBundleIdentifier: nil)
+                fatalError("a corrupt registry was overwritten")
+            } catch is IDeviceInstallSkip {}
+            require(try Data(contentsOf: file) == corrupt, "a failed transaction changed the existing file")
+            try saved.write(to: file, options: .atomic)
+            require(try registry.snapshot().count == 31, "a recovered registry still failed or lost receipts")
+        }
+        print("PASS concurrent transactions, stale snapshots, unverified copies and recovery from read failures")
 
         // Five requests overlap, app 5 starts when app 3 finishes while app 0
         // is still waiting, and each slot reuses the same thread/client.
@@ -355,11 +458,12 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
         print("PASS transport failure discards stream without replay or receipt loss")
 
         do {
-            let (apps, registry) = try fixture(5)
+            let (apps, registry) = try fixture(6)
             device.reset(apps, behavior: [apps[0].id: .reject, apps[1].id: .stillInstalled])
             device.read { $0.apps[apps[2].id] = nil }
             // A changed installed copy must fail validation before any command.
             device.read {
+                $0.omittedFromLookup.insert(apps[5].id)
                 $0.apps[apps[3].id] = IDeviceInstalledApp(bundleIdentifier: apps[3].id, name: "Replacement", version: "2",
                     applicationIdentifier: "OTHER.test", installationPath: "/new-copy", applicationType: "User", isRemovable: true)
             }
@@ -372,7 +476,7 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
                 try UninstallBlacklist.checkSavedRemovalAllowed(for: id, defaults: UserDefaults(suiteName: suite)!)
             }).value
             require(device.read { $0.commands.map(\.id) == [apps[0].id, apps[1].id] && $0.opened == 1 }, "validation/blacklist sent a command or rejection discarded usable stream")
-            require((try registry.snapshot()).count == 4, "failed removals lost receipts or absent app retained one")
+            require((try registry.snapshot()).count == 5, "failed removals lost receipts or absent app retained one")
             guard case .success(false) = batch.results[apps[2].id] else { fatalError("absent app not recognized") }
         }
         print("PASS rejection, absence verification, already absent, copy binding and final blacklist check")
@@ -434,6 +538,29 @@ func run(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
             try await waitUntil("model did not release connection") { manager.canReconnectVPN }
         }
         print("PASS model progress, out-of-order stop results and cleanup")
+
+        do {
+            let (apps, registry) = try fixture(4, registry: .shared)
+            device.read {
+                $0.apps[apps[1].id] = nil
+                $0.omittedFromInventory = [apps[0].id, apps[2].id, apps[3].id]
+                $0.omittedFromLookup = [apps[0].id, apps[3].id]
+                $0.localPresence = [apps[0].id: true, apps[1].id: false]
+            }
+            let model = InstalledAppsModel()
+            model.load()
+            try await waitUntil("model did not finish incomplete inventory") { !model.isLoading }
+            require(model.apps.first { $0.id == apps[0].id }?.trackingRestriction != nil,
+                "an installed app skipped by both remote queries disappeared")
+            require(!model.apps.contains { $0.id == apps[1].id }, "a corroborated absence did not clear its record")
+            require(model.apps.contains { $0.id == apps[2].id && $0.trackingRestriction == nil },
+                "targeted lookup did not recover a copy omitted from inventory")
+            require(model.apps.first { $0.id == apps[3].id }?.trackingRestriction != nil,
+                "an unavailable local presence answer cleared a receipt")
+            require(try !registry.snapshot().contains { $0.bundleIdentifier == apps[1].id },
+                "the absent record survived on disk")
+        }
+        print("PASS refresh uses targeted lookup and independent local absence before pruning")
     }
 }
 '''
@@ -449,7 +576,7 @@ def main():
         directory = Path(tmp)
         native = ROOT / 'Native/Device'
         proxy = (native / 'InstallationProxy.swift').read_text()
-        methods = proxy[proxy.index('    public func uninstall(_ request:'):proxy.index('    // Each proxy is one attempt.')]
+        methods = proxy[proxy.index('    public func installedApps()'):proxy.index('    // Each proxy is one attempt.')]
         registry = (native / 'ManagedInstallRegistry.swift').read_text()
         # Substitute only the platform's persistent shared-storage location.
         start = registry.index('    public static let shared =')
@@ -459,10 +586,12 @@ def main():
         sources = [STUBS + methods + '\n}\n', registry]
         sources += [(native / name).read_text() for name in (
             'InstalledApps.swift', 'UninstallRequest.swift', 'IDeviceInstallationWorker.swift')]
+        sources.append('extension IDeviceInstalledApp: Encodable {}')
         sources += [(ROOT / 'Asign/Backend/Device' / name).read_text() for name in (
             'DeviceUninstallSelection.swift', 'UninstallBlacklist.swift', 'DeviceInstallationManager.swift', 'InstalledAppsModel.swift')]
         source = '\n'.join(sources) + TESTS
-        source = source.replace('import Combine\n', '').replace('import IDeviceSwift\n', '')
+        for module in ('Combine', 'IDeviceSwift', 'NimbleExtensions', 'UIKit'):
+            source = source.replace(f'import {module}\n', '')
         harness = directory / 'Harness.swift'
         harness.write_text(source)
         executable = directory / 'checks'

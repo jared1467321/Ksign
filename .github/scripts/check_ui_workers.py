@@ -82,7 +82,9 @@ public struct Color: Decodable, Hashable, Sendable {}
 enum SourceAppsView { enum SortOption: Sendable { case `default`, name, date } }
 protocol AppInfoPresentable {}
 struct ServerTestApp: AppInfoPresentable {}
-final class ServerInstallTracking {}
+final class ServerInstallTracking {
+    func resetBaseline() {}
+}
 final class InstallerStatusViewModel {
     enum InstallerStatus { case ready }
     var status = InstallerStatus.ready
@@ -102,6 +104,7 @@ struct LogMessage: ExpressibleByStringInterpolation {
 enum Logger {
     enum misc {
         static func info(_ message: LogMessage) {}
+        static func notice(_ message: LogMessage) {}
     }
 }
 // Platform substitutes: lifecycle methods below are the production implementation.
@@ -523,7 +526,7 @@ def main():
             projection = (ROOT / 'Asign/Views/Sources/Apps/SourceAppsProjection.swift').read_text().replace('import AltSourceKit', '')
             (work / 'Projection.swift').write_text(projection)
             lifecycle = (ROOT / 'Asign/Backend/Server/ServerInstaller.swift').read_text()
-            for module in ['Vapor', 'NIOSSL', 'NIOTLS', 'OSLog', 'SwiftUI', 'IDeviceSwift']:
+            for module in ['Vapor', 'NIOSSL', 'NIOTLS', 'OSLog', 'SwiftUI', 'UIKit', 'IDeviceSwift']:
                 lifecycle = lifecycle.replace('import ' + module, '')
             start = lifecycle.index('\tprivate func _configureRoutes(on server: Application, logLocalManifest: Bool) {')
             end = lifecycle.index('\n\tprivate func _shutdownServer()', start)

@@ -1,6 +1,8 @@
 import Combine
 import Foundation
 import IDeviceSwift
+import NimbleExtensions
+import UIKit
 
 @MainActor
 final class InstalledAppsModel: ObservableObject {
@@ -44,20 +46,28 @@ final class InstalledAppsModel: ObservableObject {
                 loadTask = nil
             }
             do {
-                let observed = try await Task.detached(priority: .utility) {
-                    try IDeviceManagedInstallRegistry.shared.snapshot()
-                }.value
                 let registry = IDeviceManagedInstallRegistry.shared
+                let snapshot = try await Task.detached(priority: .utility) {
+                    try registry.inventorySnapshot()
+                }.value
+                try Task.checkCancellation()
+                if !hasLoaded {
+                    apps = snapshot.records.map(\.unverifiedApp).sorted(by: IDeviceInstalledApp.newestFirst)
+                }
                 let inventoryStartedAt = Date()
-                let installed = try await manager.installedApps()
+                let inventory = try await manager.installedApps(checkingMissing: snapshot.bundleIdentifiers)
                 try Task.checkCancellation()
                 let dated = try await Task.detached(priority: .userInitiated) {
-                    let dated = installed.map { app in
+                    let dated = inventory.apps.map { app in
                         var app = app
-                        app.registrationDate = IDeviceInstalledAppDates.registrationDate(for: app.id)
+                        app.registrationDate = IDeviceInstalledAppDates.registrationDate(for: app.id) ?? app.registrationDate
                         return app
                     }
-                    return try registry.reconcile(dated, observed: observed,
+                    let verifiedAbsent = Set(inventory.missing.filter {
+                        UIApplication.installedAppPresence($0) == false
+                    })
+                    return try registry.reconcile(dated, observed: snapshot.records,
+                        verifiedAbsent: verifiedAbsent,
                         hostBundleIdentifier: Bundle.main.bundleIdentifier, inventoryStartedAt: inventoryStartedAt).sorted(by: IDeviceInstalledApp.newestFirst)
                 }.value
                 try Task.checkCancellation()

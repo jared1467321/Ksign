@@ -190,6 +190,13 @@ public final class InstallationProxy: Identifiable, ObservableObject {
 
     /// Read installed user apps from iOS, without consulting the local library.
     public func installedApps() async throws -> [IDeviceInstalledApp] {
+        try await installedApps(checkingMissing: []).apps
+    }
+
+    /// A filtered inventory reply cannot establish absence. Recheck omitted
+    /// receipts by bundle ID using the unfiltered InstallationProxy lookup.
+    public func installedApps(checkingMissing tracked: Set<String>) async throws
+        -> (apps: [IDeviceInstalledApp], missing: Set<String>) {
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await IDeviceInstallationWorker.performInstallation { [self] in
@@ -202,8 +209,19 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                     guard let output else {
                         throw IDeviceSwiftError(message: "iOS did not return an installed-app list. Refresh to try again.")
                     }
-                    return try JSONDecoder().decode([IDeviceInstalledApp].self,
+                    var apps = try JSONDecoder().decode([IDeviceInstalledApp].self,
                         from: Data(String(cString: output).utf8))
+                    var missing = Set<String>()
+                    for id in tracked.subtracting(apps.map(\.id)).sorted() {
+                        try checkCancellation()
+                        if let app = try lookup(id, client: client) {
+                            apps.append(app)
+                        } else {
+                            missing.insert(id)
+                        }
+                    }
+                    try checkCancellation()
+                    return (apps, missing)
                 }
             }
         } onCancel: { [cancellation] in cancellation.cancel() }
@@ -211,13 +229,14 @@ public final class InstallationProxy: Identifiable, ObservableObject {
 
     /// Returns false when already absent. Once the command is sent, await its
     /// result even if cancelled: removal may already have committed on device.
-    public func uninstall(_ request: IDeviceUninstallRequest) async throws -> Bool {
+    public func uninstall(_ request: IDeviceUninstallRequest,
+                          localPresence: @escaping @Sendable (String) -> Bool? = { _ in nil }) async throws -> Bool {
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await IDeviceInstallationWorker.performInstallation { [self] in
                 try checkCancellation()
                 return try withDeviceClient { client in
-                    try uninstall(request, client: client)
+                    try uninstall(request, client: client, localPresence: localPresence)
                 }
             }
         } onCancel: { [cancellation] in cancellation.cancel() }
@@ -228,6 +247,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     /// Each worker reuses its client and creating thread for subsequent apps.
     public func uninstall(_ batch: IDeviceUninstallBatch, concurrency: Int = 5,
                           checkRemovalAllowed: @escaping @Sendable (String) throws -> Void,
+                          localPresence: @escaping @Sendable (String) -> Bool? = { _ in nil },
                           onEvent: @escaping @Sendable (IDeviceUninstallEvent) -> Void) async throws {
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
@@ -235,7 +255,8 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                 for _ in 0..<min(batch.count, max(1, min(concurrency, 5))) {
                     group.addTask { [self] in
                         try await IDeviceInstallationWorker.performInstallation {
-                            self.uninstallWorker(batch, checkRemovalAllowed: checkRemovalAllowed, onEvent: onEvent)
+                            self.uninstallWorker(batch, checkRemovalAllowed: checkRemovalAllowed,
+                                localPresence: localPresence, onEvent: onEvent)
                         }
                     }
                 }
@@ -249,6 +270,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
 
     private func uninstallWorker(_ batch: IDeviceUninstallBatch,
                                  checkRemovalAllowed: (String) throws -> Void,
+                                 localPresence: (String) -> Bool?,
                                  onEvent: (IDeviceUninstallEvent) -> Void) {
         func finish(_ id: String, _ result: Result<Bool, Error>) {
             batch.record(id, result: result)
@@ -263,7 +285,7 @@ public final class InstallationProxy: Identifiable, ObservableObject {
                         do {
                             try checkCancellation()
                             let request = try IDeviceUninstallRequest(installedApp: app, registry: batch.registry)
-                            let removed = try uninstall(request, client: client) {
+                            let removed = try uninstall(request, client: client, localPresence: localPresence) {
                                 try checkRemovalAllowed(app.id)
                             }
                             finish(app.id, .success(removed))
@@ -287,16 +309,21 @@ public final class InstallationProxy: Identifiable, ObservableObject {
     }
 
     private func uninstall(_ request: IDeviceUninstallRequest, client: OpaquePointer?,
+                           localPresence: (String) -> Bool?,
                            checkRemovalAllowed: () throws -> Void = {}) throws -> Bool {
         let installed = try lookup(request.bundleIdentifier, client: client)
         guard try request.validate(installed, hostBundleIdentifier: Bundle.main.bundleIdentifier) else {
+            guard localPresence(request.bundleIdentifier) == false else {
+                throw IDeviceInstallSkip(reason: "iOS couldn't confirm this app is absent. Refresh Installed Apps to try again.")
+            }
             try request.didRemove()
             return false
         }
         try checkCancellation()
         try checkRemovalAllowed()
         try check(installation_proxy_uninstall(client, request.bundleIdentifier, nil))
-        guard try lookup(request.bundleIdentifier, client: client) == nil else {
+        guard try lookup(request.bundleIdentifier, client: client) == nil,
+              localPresence(request.bundleIdentifier) != true else {
             throw IDeviceInstallationRejection(message: "iOS reported completion, but the app is still installed. Check the Home Screen before trying again.")
         }
         try request.didRemove()

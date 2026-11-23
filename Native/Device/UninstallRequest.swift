@@ -80,7 +80,8 @@ public struct IDeviceUninstallRequest: Sendable {
         if let reason = installed.removalRestriction(hostBundleIdentifier: hostBundleIdentifier) {
             throw IDeviceInstallSkip(reason: reason)
         }
-        guard try registry.snapshot().contains(managedInstall), managedInstall.matches(installed) else {
+        guard try registry.snapshot().contains(where: { $0.token == managedInstall.token }),
+              managedInstall.matches(installed) else {
             throw IDeviceInstallSkip(reason: "The selected app changed or could not be verified. Refresh Installed Apps and review it again before uninstalling.")
         }
         return true
@@ -89,9 +90,12 @@ public struct IDeviceUninstallRequest: Sendable {
     /// Called only after the device confirms absence. A newer receipt for the
     /// same bundle ID must not be deleted by a stale removal completion.
     func didRemove() throws {
-        do { try registry.remove(managedInstall) }
-        catch {
+        let cleared: Bool
+        do { cleared = try registry.remove(managedInstall) } catch {
             throw IDeviceInstallSkip(reason: "The app is uninstalled, but its tracking record couldn't be saved. Refresh Installed Apps to clear it. \(error.localizedDescription)")
+        }
+        guard cleared else {
+            throw IDeviceInstallSkip(reason: "A newer install was recorded during removal. Refresh Installed Apps to review it.")
         }
     }
 }

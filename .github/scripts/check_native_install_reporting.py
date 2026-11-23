@@ -86,9 +86,16 @@ precondition(transfer.record(gib..<(2 * gib), totalBytes: 4 * gib, now: t) == 0.
 precondition(transfer.record(0..<(2 * gib), totalBytes: 4 * gib, now: t) == nil)
 precondition(transfer.record(gib..<(3 * gib), totalBytes: 4 * gib, now: t + .seconds(1)) == 0.75)
 precondition(transfer.record(gib..<(3 * gib), totalBytes: 4 * gib, now: t + .seconds(2)) == nil)
-precondition(!transfer.finish(totalBytes: 4 * gib))
+precondition(!transfer.finish(totalBytes: 4 * gib) { fatalError("incomplete payload was persisted") })
 precondition(transfer.record((3 * gib)..<(4 * gib), totalBytes: 4 * gib, now: t + .seconds(2)) == 1)
-precondition(transfer.finish(totalBytes: 4 * gib) && !transfer.finish(totalBytes: 4 * gib))
+enum ReceiptWriteFailure: Error { case unavailable }
+do {
+    _ = try transfer.finish(totalBytes: 4 * gib) { throw ReceiptWriteFailure.unavailable }
+    fatalError("failed receipt save was swallowed")
+} catch ReceiptWriteFailure.unavailable {}
+var committed = 0
+precondition(transfer.finish(totalBytes: 4 * gib) { committed += 1 })
+precondition(!transfer.finish(totalBytes: 4 * gib) { committed += 1 } && committed == 1)
 print("PASS: 4 GiB transfer counts distinct ranges, throttles updates and completes once")
 
 func verifyAdaptiveBudget() {

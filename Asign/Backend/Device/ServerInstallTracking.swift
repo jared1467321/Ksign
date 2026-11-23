@@ -14,6 +14,7 @@ final class ServerInstallTracking: @unchecked Sendable {
     private let lock = NSLock()
     private var candidate: Candidate?
     private var observation: IDeviceServerInstallObservation?
+    private var offeredObservation: IDeviceServerInstallObservation?
     private var servedAt: Date?
 
     var bundleIdentifier: String? {
@@ -28,6 +29,7 @@ final class ServerInstallTracking: @unchecked Sendable {
         defer { lock.unlock() }
         candidate = nil
         observation = nil
+        offeredObservation = nil
         servedAt = nil
         do {
             let archive = try ArchiveBackedApp(archiveURL: packageURL)
@@ -53,12 +55,19 @@ final class ServerInstallTracking: @unchecked Sendable {
         }
     }
 
+    func resetBaseline() {
+        lock.lock()
+        defer { lock.unlock() }
+        observation = nil
+        offeredObservation = nil
+        servedAt = nil
+    }
+
     @discardableResult
     func captureBaseline() -> IDeviceServerInstallObservation? {
         lock.lock()
         defer { lock.unlock() }
-        if let observation, servedAt.map({ Date().timeIntervalSince($0) < 3600 }) ?? true { return observation }
-        servedAt = nil
+        if let observation { return observation }
         guard let candidate else { return nil }
 
         let bundle = candidate.bundleIdentifier
@@ -72,16 +81,30 @@ final class ServerInstallTracking: @unchecked Sendable {
         return observation
     }
 
-    func recordTransfer(_ observation: IDeviceServerInstallObservation) {
-        let now = Date()
+    func recordOffer(_ observation: IDeviceServerInstallObservation) throws {
         lock.lock()
-        if self.observation == observation, servedAt == nil { servedAt = now }
+        defer { lock.unlock() }
+        guard offeredObservation != observation else { return }
+        try IDeviceManagedInstallRegistry.shared.recordServerOffer(observation)
+        if self.observation == observation { offeredObservation = observation }
+    }
+
+    func recordTransfer(_ observation: IDeviceServerInstallObservation) throws {
+        let now = Date()
+        try IDeviceManagedInstallRegistry.shared.recordServerTransfer(observation, servedAt: now)
+        lock.lock()
+        if self.observation == observation { servedAt = now }
         lock.unlock()
 
-        do {
-            try IDeviceManagedInstallRegistry.shared.recordServerTransfer(observation, servedAt: now)
-        } catch {
-            NSLog("Asign couldn't record the server transfer: %@", error.localizedDescription)
+        // Progress can end before LaunchServices publishes the new copy.
+        // Keep watching this transfer even if its row goes away or is retried.
+        Task.detached(priority: .utility) { [self] in
+            for _ in 0..<60 {
+                if observeRegistration(observation, servedAt: now) { return }
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch { return }
+            }
         }
     }
 
@@ -90,8 +113,12 @@ final class ServerInstallTracking: @unchecked Sendable {
         let transfer = (observation, servedAt)
         lock.unlock()
         guard let observation = transfer.0, let servedAt = transfer.1 else { return false }
+        return observeRegistration(observation, servedAt: servedAt)
+    }
+
+    private func observeRegistration(_ observation: IDeviceServerInstallObservation, servedAt: Date) -> Bool {
         let bundle = observation.bundleIdentifier
-        guard UIApplication.isAppInstalled(bundle) else { return false }
+        guard UIApplication.installedAppPresence(bundle) != false else { return false }
         let path = IDeviceInstalledAppDates.installationPath(for: bundle)
         let date = IDeviceInstalledAppDates.registrationDate(for: bundle)
         let now = Date()
@@ -103,6 +130,7 @@ final class ServerInstallTracking: @unchecked Sendable {
                 path: path, registrationDate: date, observedAt: now)
         } catch {
             NSLog("Asign couldn't save the server registration: %@", error.localizedDescription)
+            return false
         }
         return true
     }
