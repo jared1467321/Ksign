@@ -12,7 +12,7 @@ TMP = $(if $(DERIVED_DATA),$(DERIVED_DATA),$(TMPDIR)/$(NAME))
 STAGE = $(TMP)/stage
 APP = $(TMP)/Build/Products/Release-$(PLATFORM)
 
-.PHONY: all clean deps native patch-native cached $(SCHEMES)
+.PHONY: all clean deps native patch-native cached custom $(SCHEMES)
 
 all: $(SCHEMES)
 
@@ -39,6 +39,11 @@ $(SCHEMES): native deps
 cached: DERIVED_DATA ?= $(CURDIR)/.build/xcode-release
 cached: IPA_OUTPUT ?= packages/$(BUNDLE_ID)
 cached: PACKAGE_FLAGS := -disableAutomaticPackageResolution -skipPackageUpdates
+
+# This is the editable default for the changed bundle ID.
+# To override it for one build, run make custom BUNDLE_ID=your.other.id.
+custom: BUNDLE_ID = com.moe.kanan
+custom: cached
 
 $(SCHEMES) cached:
 	xcodebuild \
