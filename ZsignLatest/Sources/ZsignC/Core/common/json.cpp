@@ -3683,6 +3683,7 @@ void jpwriter::_xml_escape(string& str)
 {
 	_string_replace(str, "&", "&amp;");
 	_string_replace(str, "<", "&lt;");
+	_string_replace(str, "\r", "&#13;");
 	//_string_replace(str, ">", "&gt;");	//optional
 	//_string_replace(str, "'", "&apos;");	//optional
 	//_string_replace(str, "\"", "&quot;");	//optional

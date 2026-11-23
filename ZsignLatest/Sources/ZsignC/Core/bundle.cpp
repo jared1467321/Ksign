@@ -759,6 +759,7 @@ static void AppendResourceXML(string& out, const string& text)
     for (char c : text) {
         if (c == '&') out += "&amp;";
         else if (c == '<') out += "&lt;";
+        else if (c == '\r') out += "&#13;"; // XML parsers normalize literal CR to LF.
         else out += c;
     }
 }

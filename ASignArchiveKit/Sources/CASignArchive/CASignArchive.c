@@ -806,7 +806,7 @@ static int32_t asign_entry_index_build(void *reader, asign_entry_index *index, v
             break;
         if (info == NULL || info->filename == NULL || info->uncompressed_size < 0 ||
             !asign_relative_path_is_safe(info->filename) ||
-            strchr(info->filename, '\n') != NULL || strchr(info->filename, '\r') != NULL) {
+            strchr(info->filename, '\n') != NULL) {
             err = MZ_FORMAT_ERROR;
             break;
         }
@@ -2077,7 +2077,8 @@ static int asign_deleted_path_matches(const char *relative, const char *deleted_
     while (*line != '\0') {
         const char *end = strchr(line, '\n');
         size_t length = end != NULL ? (size_t)(end - line) : strlen(line);
-        while (length > 0 && (line[length - 1] == '/' || line[length - 1] == '\r'))
+        // The list uses LF separators. A CR belongs to the filename (e.g. Icon\r).
+        while (length > 0 && line[length - 1] == '/')
             length--;
         if (length > 0 && strncmp(relative, line, length) == 0 &&
             (relative[length] == '\0' || relative[length] == '/')) {

@@ -40,9 +40,13 @@ if mode == "rebuild" {
     try ASignArchive.rebuildWithOverlay(from: source,
         at: output.appendingPathComponent("rebuilt.ipa"), rootAppPath: archive.rootAppPath,
         overlayAppURL: sparse, index: archive.archiveIndex)
+} else if mode == "delete-icon" {
+    try ASignArchive.rebuildWithOverlay(from: source,
+        at: output.appendingPathComponent("without-carriage-return-icon.ipa"), rootAppPath: archive.rootAppPath,
+        overlayAppURL: sparse, deletedPaths: ["Icon\r"], index: archive.archiveIndex)
 } else {
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-    for path in archive.paths() where path.contains("\\") && !path.hasSuffix("/") {
+    for path in archive.paths() where (path.contains("\\") || path.contains("\r")) && !path.hasSuffix("/") {
         guard let data = try archive.data(relativePath: path) else { fatalError(path) }
         let extracted = output.appendingPathComponent("selected/" + path)
         let didExtract = try archive.extract(relativePath: path, to: extracted)
@@ -168,9 +172,9 @@ def check_ipa(work, ipa, label, full=False):
                        and i.filename.endswith(".app/Info.plist"))
         root = roots[0]
         info = plistlib.loads(archive.read(root + "/Info.plist"))
-        special = [i for i in archive.infolist()
-                   if i.filename.startswith(root + "/") and "\\" in i.filename and not i.is_dir()]
-        assert special, "The regression IPA must contain a literal backslash filename"
+        special = [i for i in archive.infolist() if i.filename.startswith(root + "/")
+                   and any(character in i.filename for character in "\\\r") and not i.is_dir()]
+        assert special, "The regression IPA must contain a literal backslash or carriage return in a filename"
         run([work / "import-check", ipa, output, "full" if full else "prepare"])
         for entry in special:
             relative = entry.filename[len(root) + 1:]
@@ -235,7 +239,14 @@ def main():
             archive.writestr(root + r"/MagazineNumber_01_\!.png", b"literal backslash")
             archive.writestr(root + "/MagazineNumber_01_/!.png", b"different resource")
             archive.writestr(root + "/folder\\/tail\\", b"trailing literal backslashes")
+            archive.writestr(root + "/Icon\r", b"carriage return in filename")
+            archive.writestr(root + "/Icon", b"different icon resource")
         check_ipa(work, fixture, "fixture", full=True)
+        run([work / "import-check", fixture, work / "fixture", "delete-icon"])
+        with zipfile.ZipFile(work / "fixture/without-carriage-return-icon.ipa") as rebuilt:
+            assert root + "/Icon\r" not in rebuilt.namelist()
+            assert rebuilt.read(root + "/Icon") == b"different icon resource"
+        print("PASS deletion matches the exact carriage-return filename", flush=True)
         # Traversal and absolute paths must still fail the actual import path.
         for number, unsafe in enumerate(["../escape", "/absolute", r"\absolute", root + "/../escape"]):
             invalid = work / f"invalid-{number}.ipa"
